@@ -1,0 +1,1364 @@
+"""VLP-16 專用觀測管線 — 純函數、GPU 向量化
+
+VLP16 訓練使用的函數:
+    lidar_vlp16_to_2d_bins: VLP-16 16ch×360 點雲 → 72-bin 2D 最小距離 — 72D (×3帧=216D)
+    topk_obstacles_body_frame: 最近 K 個障礙物的 body-frame 特徵 — 50D (10×5)
+    robot_heading_normalized: 朝向 → (sin θ, cos θ) — 2D
+    robot_position_local: 歸一化位置 (x/8, y/8) — 2D
+    discrete_applied_action: 上一步離散動作歸一化 — 2D
+
+lidar_vlp16_to_2d_bins 詳細說明:
+    輸入: VLP-16 原始射線 [num_envs, 16×360, 3] hit_points_w
+    處理:
+        1. 投影到 2D (忽略 Z)
+        2. 計算距離 + 方位角
+        3. 分成 72 個 5° bins，每 bin 取 min 距離
+        4. 歸一化 → [0, 1] (距離/max_distance)
+    輸出: [num_envs, 72]
+    感測器噪聲 (域隨機化):
+        - displacement_std=0.02: 距離高斯雜訊 ±2cm
+        - hole_rate=0.005: 射線丟失 0.5%
+        - distractor_rate=0.002: 幽靈點 0.2%
+
+topk_obstacles_body_frame 詳細說明:
+    輸入: 場景中所有障礙物的世界座標位置和速度
+    處理:
+        1. 轉換到機器人 body frame
+        2. 按距離排序取 Top-K
+        3. Line-of-Sight 遮擋檢查 (使用 wall_layout.check_los_batch)
+        4. 被遮擋的障礙物特徵歸零
+    輸出: [num_envs, K×5] — (dx, dy, vx, vy, size) per obstacle
+"""
+
+from __future__ import annotations
+
+import math
+import torch
+from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.managers import SceneEntityCfg
+
+
+# ====================================================================
+# 觀測函數一：VLP-16 LiDAR 16×360 → N Bins
+# ====================================================================
+
+def lidar_vlp16_to_2d_bins(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    num_channels: int = 16,
+    num_horizontal: int = 360,
+    num_bins: int = 72,
+    r_max: float = 20.0,
+    r_robot: float = 0.3,
+    # Point cloud corruption (Sim-to-Real domain randomization)
+    displacement_std: float = 0.0,
+    hole_rate: float = 0.0,
+    distractor_rate: float = 0.0,
+    distractor_range: tuple[float, float] = (0.2, 2.0),
+) -> torch.Tensor:
+    """VLP-16 LiDAR 3D 點雲降維至 2D N-bin 距離向量。
+
+    物理層：RayCaster 以 16 條垂直線 × 360 個水平採樣，
+            發射 5760 條 3D 射線，精準捕捉微小障礙物。
+
+    演算法層：透過向量化前處理，壓縮為 N 個角度區間。
+    支援點雲級 Sim-to-Real corruption，於 min pooling 前注入。
+
+    處理流程::
+
+        ray_hits_w [N, 5760, 3]
+          │
+          ├── 投影至 2D 水平面，計算距離 → [N, 5760]
+          │
+          ├── Step 1: Clipping (inf/NaN/> r_max → r_max)
+          │
+          ├── Step 1.5: Point Cloud Corruption (Sim-to-Real)
+          │     (a) Random Displacement: N(0, σ²) per ray
+          │     (b) Strategic Holes: random rays → r_max
+          │     (c) Distractors: random close-range false readings
+          │
+          ├── Step 2: Min Pooling
+          │     view → [N, 16, num_bins, rays_per_bin]
+          │     min(dim=3) → [N, 16, num_bins]  (rays_per_bin 取最近)
+          │     min(dim=1) → [N, num_bins]       (16 channels 取最近)
+          │
+          ├── Step 3: Safe Margin (− r_robot, clamp ≥ 0)
+          │
+          └── Step 4: Normalization (÷ r_max → [0, 1])
+
+    Args:
+        env:              Isaac Lab 環境實例
+        sensor_cfg:       RayCaster 感測器的 SceneEntityCfg 參照
+        num_channels:     垂直通道數 (VLP-16 = 16)
+        num_horizontal:   每通道水平採樣數 (360° / 1° = 360)
+        num_bins:         最終輸出的角度區間數 (預設 72 = 5° 解析度)
+        r_max:            最大探測距離 (m)
+        r_robot:          車體半徑 (m)
+        displacement_std: 個別射線距離高斯雜訊標準差 (m)，0=關閉
+        hole_rate:        射線隨機遺失機率 (→ r_max)，0=關閉
+        distractor_rate:  虛假近距離讀數機率，0=關閉
+        distractor_range: 虛假讀數距離範圍 (min_m, max_m)
+
+    Returns:
+        [num_envs, num_bins] 正規化距離張量，數值範圍 [0, 1]
+    """
+    # ----------------------------------------------------------
+    # 從 Isaac Lab Scene 取得 RayCaster 感測器資料
+    # ----------------------------------------------------------
+    sensor = env.scene.sensors[sensor_cfg.name]
+    sensor_pos = sensor.data.pos_w          # [N, 3] 感測器世界座標
+    hit_points = sensor.data.ray_hits_w     # [N, total_rays, 3] 射線命中點
+
+    N = sensor_pos.shape[0]                 # num_envs
+    device = sensor_pos.device
+
+    # ----------------------------------------------------------
+    # 投影至 2D 水平面：計算每條射線的水平距離
+    # ----------------------------------------------------------
+    # 只取 XY 座標（捨棄 Z），計算 2D 歐式距離
+    sensor_xy = sensor_pos[:, :2].unsqueeze(1)  # [N, 1, 2]
+    hits_xy = hit_points[:, :, :2]               # [N, total_rays, 2]
+    dist_2d = torch.norm(hits_xy - sensor_xy, dim=-1)  # [N, total_rays]
+
+    # ==========================================================
+    # Step 1: Clipping
+    #   inf / NaN / 超過 r_max → 截斷為 r_max
+    # ==========================================================
+    dist_2d = torch.where(
+        torch.isfinite(dist_2d),
+        dist_2d,
+        torch.tensor(r_max, device=device, dtype=dist_2d.dtype),
+    )
+    dist_2d = torch.clamp(dist_2d, max=r_max)
+
+    # ==========================================================
+    # Step 1.5: Point Cloud Corruption (Sim-to-Real)
+    #   在 min pooling 前對原始 [N, 5760] 點雲注入感測器雜訊
+    # ==========================================================
+
+    # (a) Random Displacement: 每條射線加入高斯雜訊，模擬量測不確定性
+    if displacement_std > 0:
+        noise = torch.randn_like(dist_2d) * displacement_std
+        dist_2d = torch.clamp(dist_2d + noise, min=0.0, max=r_max)
+
+    # (b) Strategic Holes: 隨機射線遺失 → r_max，模擬 LiDAR 漏點
+    if hole_rate > 0:
+        hole_mask = torch.rand_like(dist_2d) < hole_rate
+        dist_2d = torch.where(hole_mask, r_max, dist_2d)
+
+    # (c) Distractors: 虛假近距離讀數，模擬感測器缺陷/多路徑反射
+    if distractor_rate > 0:
+        distr_mask = torch.rand_like(dist_2d) < distractor_rate
+        min_r, max_r = distractor_range
+        distr_values = torch.rand_like(dist_2d) * (max_r - min_r) + min_r
+        dist_2d = torch.where(distr_mask, distr_values, dist_2d)
+
+    # ==========================================================
+    # Step 2: Min Pooling (16 × 360 → num_bins)
+    #
+    #   RayCaster 射線排列順序：
+    #     channel_0: h0, h1, ..., h359
+    #     channel_1: h0, h1, ..., h359
+    #     ...
+    #     channel_15: h0, h1, ..., h359
+    #
+    #   view 為 [N, 16, num_bins, rays_per_bin]：
+    #     dim=1: 16 個垂直通道
+    #     dim=2: num_bins 個角度區間
+    #     dim=3: 每 bin 內 rays_per_bin 條射線
+    # ==========================================================
+    rays_per_bin = num_horizontal // num_bins   # 360 / 72 = 5
+
+    x = dist_2d.view(N, num_channels, num_bins, rays_per_bin)
+    # [N, 16, num_bins, rays_per_bin]
+
+    # 水平 min (dim=3)：每 bin 內 rays_per_bin 條射線取最近距離
+    x = x.min(dim=3).values     # [N, 16, num_bins]
+
+    # 垂直 min (dim=1)：16 層取最近距離（最保守估計）
+    x = x.min(dim=1).values     # [N, num_bins]
+
+    # ==========================================================
+    # Step 3: Safe Margin（扣除車體半徑，保證非負）
+    # ==========================================================
+    x = torch.clamp(x - r_robot, min=0.0)
+
+    # ==========================================================
+    # Step 4: Normalization（除以 r_max，壓縮至 [0, 1]）
+    # ==========================================================
+    x = x / r_max
+
+    return x   # [N, num_bins]
+
+
+# ====================================================================
+# 觀測函數二：動態障礙物 Top-5 × 3D 極簡特徵
+# ====================================================================
+
+def topk_obstacles_simplified(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    top_k: int = 5,
+    max_obstacles: int = 10,
+    max_distance: float = 8.0,
+    noise_std: float = 0.02,
+    drop_rate: float = 0.05,
+) -> torch.Tensor:
+    """極簡化動態障礙物觀測：每物件僅 3 維 (dx, dy, r)。
+
+    完全捨棄 ORCA、goal-centric 座標系等過度工程化的特徵。
+    速度與加速度的推斷交給 Frame Stacking (history_length=3)。
+
+    處理流程::
+
+        Scene 中所有障礙物 Ground Truth
+          │
+          ├── 計算 Δx, Δy → 歐式距離排序
+          │
+          ├── Top-K = 5（不足補零）
+          │
+          ├── 構建 3 維特徵: [dx, dy, radius]
+          │
+          ├── Sim-to-Real 雜訊:
+          │     • 高斯位移 N(0, σ²) on dx, dy
+          │     • 5% 掉幀 → 整列歸零
+          │
+          └── Flatten → [N, 15]
+
+    Note:
+        障礙物索引的 for 迴圈 (max_obstacles ≤ 10) 是遍歷場景實體，
+        非遍歷環境。每次迭代內部是完全向量化的 [num_envs] 維度運算。
+
+    Args:
+        env:            Isaac Lab 環境實例
+        robot_cfg:      自車的 SceneEntityCfg 參照
+        top_k:          保留最近的 K 個障礙物
+        max_obstacles:  場景中的最大障礙物數量
+        max_distance:   超過此距離的障礙物視為不存在 (m)
+        noise_std:      dx, dy 高斯雜訊標準差 (m)，0 = 關閉
+        drop_rate:      隨機掉幀機率，0 = 關閉
+
+    Returns:
+        [num_envs, top_k * 3] = [num_envs, 15] 扁平化特徵張量
+    """
+    # ----------------------------------------------------------
+    # 從 Scene 取得自車位置
+    # ----------------------------------------------------------
+    robot = env.scene[robot_cfg.name]
+    robot_pos_xy = robot.data.root_pos_w[:, :2]   # [N, 2]
+    N = robot_pos_xy.shape[0]
+    device = robot_pos_xy.device
+    K = top_k
+
+    # ----------------------------------------------------------
+    # 收集所有障礙物的 XY 位置、可見性、半徑
+    # （遍歷障礙物索引，非遍歷環境 — 每次迭代內皆向量化）
+    # ----------------------------------------------------------
+    all_pos = torch.zeros(N, max_obstacles, 2, device=device)
+    all_radius = torch.full((N, max_obstacles), 0.3, device=device)
+    all_valid = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+    num_found = 0
+
+    for i in range(max_obstacles):
+        obs_name = f"obstacle_{i}"
+        if obs_name not in env.scene.keys():
+            continue
+
+        obs_entity = env.scene[obs_name]
+        pos_w = obs_entity.data.root_pos_w     # [N, 3] or [N, 7]
+
+        # 可見性判斷：Z > 0 表示可見（Z = -10 表示被隱藏）
+        visible = pos_w[:, 2] > 0.0            # [N]
+
+        all_pos[:, num_found, :] = pos_w[:, :2]
+        all_valid[:, num_found] = visible
+
+        # 取得半徑（優先使用環境快取，否則預設 0.3m）
+        if hasattr(env, "_obstacle_sizes") and env._obstacle_sizes is not None:
+            try:
+                all_radius[:, num_found] = env._obstacle_sizes[i]
+            except (IndexError, TypeError):
+                pass  # 保持預設值
+
+        num_found += 1
+
+    # ----------------------------------------------------------
+    # 邊界條件：場景中沒有任何障礙物
+    # ----------------------------------------------------------
+    if num_found == 0:
+        return torch.zeros(N, K * 3, device=device)
+
+    # 裁剪至實際找到的數量
+    pos = all_pos[:, :num_found, :]           # [N, F, 2]
+    radius = all_radius[:, :num_found]        # [N, F]
+    valid = all_valid[:, :num_found]          # [N, F]
+    F = num_found
+
+    # ==========================================================
+    # 計算相對位置 (dx, dy) 與歐式距離
+    # ==========================================================
+    delta = pos - robot_pos_xy.unsqueeze(1)    # [N, F, 2]
+    dx = delta[:, :, 0]                         # [N, F]
+    dy = delta[:, :, 1]                         # [N, F]
+    dist = torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)  # [N, F]
+
+    # 無效 / 超距 → 排序時排到最後
+    dist_for_sort = dist.clone()
+    dist_for_sort[~valid] = 1e6
+    dist_for_sort[dist > max_distance] = 1e6
+
+    # ==========================================================
+    # Top-K 選取（由近到遠）
+    # ==========================================================
+    if F >= K:
+        _, topk_idx = torch.topk(dist_for_sort, k=K, dim=1, largest=False)
+    else:
+        # 不足 K 個：排序後用首索引填充（稍後以 valid mask 覆寫）
+        _, sort_idx = torch.sort(dist_for_sort, dim=1)
+        pad_idx = sort_idx[:, :1].expand(-1, K - F)
+        topk_idx = torch.cat([sort_idx, pad_idx], dim=1)   # [N, K]
+
+    # ==========================================================
+    # Gather Top-K 特徵
+    # ==========================================================
+    topk_dx = torch.gather(dx, 1, topk_idx)         # [N, K]
+    topk_dy = torch.gather(dy, 1, topk_idx)         # [N, K]
+    topk_r = torch.gather(radius, 1, topk_idx)      # [N, K]
+    topk_valid = torch.gather(valid.long(), 1, topk_idx).bool()  # [N, K]
+
+    # 補齊的位置標記為無效
+    if F < K:
+        topk_valid = topk_valid.clone()
+        topk_valid[:, F:] = False
+
+    # 清零無效（Padding）位置的所有特徵
+    v = topk_valid.float()                           # [N, K]
+    topk_dx = topk_dx * v
+    topk_dy = topk_dy * v
+    topk_r = topk_r * v
+
+    # ==========================================================
+    # Sim-to-Real 雜訊注入
+    # ==========================================================
+    # (a) 高斯位移：模擬 MOT 追蹤器的估計誤差
+    if noise_std > 0:
+        noise_xy = torch.randn(N, K, 2, device=device) * noise_std
+        topk_dx = topk_dx + noise_xy[:, :, 0] * v
+        topk_dy = topk_dy + noise_xy[:, :, 1] * v
+
+    # (b) 隨機掉幀：5% 機率將整個物件特徵歸零
+    if drop_rate > 0:
+        drop_mask = (torch.rand(N, K, device=device) < drop_rate) & topk_valid
+        keep = (~drop_mask).float()                  # 1=保留, 0=掉幀
+        topk_dx = topk_dx * keep
+        topk_dy = topk_dy * keep
+        topk_r = topk_r * keep
+
+    # ==========================================================
+    # 組裝並扁平化：[N, K, 3] → [N, K*3]
+    # ==========================================================
+    features = torch.stack([topk_dx, topk_dy, topk_r], dim=2)  # [N, K, 3]
+    return features.reshape(N, -1)  # [N, 15]
+
+
+# ====================================================================
+# 觀測函數三：論文式 4D Ego-Centric 障礙物觀測 + LOS 遮擋
+# ====================================================================
+
+def topk_obstacles_ego_centric(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    top_k: int = 10,
+    max_obstacles: int = 10,
+    max_distance: float = 8.0,
+    v_max: float = 1.5,
+    wall_occlusion: bool = True,
+    speed_threshold: float = 0.01,
+) -> torch.Tensor:
+    """論文式 ego-centric 障礙物觀測 + 牆壁遮擋檢測。
+
+    每障礙物 4 維（論文 Eq. 3.11 / 3.15）::
+
+        ŝ_Δx = (obs_x - robot_x) / max_distance   歸一化相對位移 X (robot frame)
+        ŝ_Δy = (obs_y - robot_y) / max_distance   歸一化相對位移 Y (robot frame)
+        ŝ_v  = |rel_vel| / v_max                   歸一化相對速度大小
+        ŝ_θ  = atan2(rel_vy, rel_vx) / π          歸一化相對運動方向
+              （速度 < speed_threshold 時強制歸零）
+
+    座標系：
+        - 位置 (dx, dy) 旋轉至機器人航向座標系（與 LiDAR 一致）
+        - 速度 (vx, vy) 使用相對速度 (obs_vel - robot_vel) 並旋轉至機器人航向
+        - LOS 遮擋檢測使用局部座標系（扣除 env_origins）
+
+    處理流程::
+
+        Scene 中所有障礙物
+          │
+          ├── 1. 收集 pos/vel（世界座標）
+          ├── 2. 可見性掩碼: Z > 0
+          ├── 3. 轉換至局部座標系 → LOS 遮擋檢測
+          ├── 4. 計算相對位置 → 旋轉至 robot frame
+          ├── 5. 歐式距離排序 → Top-K 選取
+          ├── 6. 計算 4 維歸一化特徵（相對速度 + 航向旋轉）
+          ├── 7. 靜態障礙物 heading 歸零 + 無效位置清零
+          └── 8. Flatten → [N, top_k * 4]
+
+    Args:
+        env:              Isaac Lab 環境實例
+        robot_cfg:        自車的 SceneEntityCfg 參照
+        top_k:            保留最近的 K 個障礙物
+        max_obstacles:    場景中的最大障礙物數量
+        max_distance:     超過此距離的障礙物視為不存在 (m)
+        v_max:            速度歸一化的最大值 (m/s)
+        wall_occlusion:   是否啟用牆壁 LOS 遮擋檢測
+        speed_threshold:  低於此速度的障礙物 heading 強制歸零 (m/s)
+
+    Returns:
+        [num_envs, top_k * 4] 扁平化特徵張量（預設 [N, 40]）
+    """
+    from ..wall_layout import get_all_wall_tensors, check_los_batch
+
+    # ----------------------------------------------------------
+    # 從 Scene 取得自車位置、速度、航向
+    # ----------------------------------------------------------
+    robot = env.scene[robot_cfg.name]
+    robot_pos_xy = robot.data.root_pos_w[:, :2]     # [N, 2] 世界座標
+    robot_vel_xy = robot.data.root_lin_vel_w[:, :2]  # [N, 2] 世界速度
+    N = robot_pos_xy.shape[0]
+    device = robot_pos_xy.device
+    K = top_k
+
+    # 提取 yaw 角用於 ego-centric 旋轉
+    robot_quat = robot.data.root_quat_w              # [N, 4] (w, x, y, z)
+    w, x, y, z = robot_quat[:, 0], robot_quat[:, 1], robot_quat[:, 2], robot_quat[:, 3]
+    robot_yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))  # [N]
+    cos_yaw = torch.cos(robot_yaw)                   # [N]
+    sin_yaw = torch.sin(robot_yaw)                   # [N]
+
+    # 環境原點偏移（世界座標 → 局部座標）
+    env_origins = env.scene.env_origins[:, :2]        # [N, 2]
+
+    # ----------------------------------------------------------
+    # 1. 收集所有障礙物的 XY 位置、速度、可見性
+    # ----------------------------------------------------------
+    all_pos = torch.zeros(N, max_obstacles, 2, device=device)
+    all_vel = torch.zeros(N, max_obstacles, 2, device=device)
+    all_valid = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+    num_found = 0
+
+    for i in range(max_obstacles):
+        obs_name = f"obstacle_{i}"
+        if obs_name not in env.scene.keys():
+            continue
+
+        obs_entity = env.scene[obs_name]
+        pos_w = obs_entity.data.root_pos_w     # [N, 3] or [N, 7]
+
+        # 2. 可見性判斷：Z > 0 表示可見（Z = -10 表示被隱藏）
+        visible = pos_w[:, 2] > 0.0            # [N]
+
+        all_pos[:, num_found, :] = pos_w[:, :2]
+        all_valid[:, num_found] = visible
+
+        # 速度來源（按優先順序）
+        if hasattr(env, "_obstacle_velocities") and env._obstacle_velocities is not None:
+            try:
+                all_vel[:, num_found, :] = env._obstacle_velocities[:, i, :2]
+            except (IndexError, TypeError, RuntimeError):
+                try:
+                    all_vel[:, num_found, :] = obs_entity.data.root_lin_vel_w[:, :2]
+                except (AttributeError, IndexError):
+                    pass
+        else:
+            try:
+                all_vel[:, num_found, :] = obs_entity.data.root_lin_vel_w[:, :2]
+            except (AttributeError, IndexError):
+                pass  # 保持零速度（靜態障礙物）
+
+        num_found += 1
+
+    # ----------------------------------------------------------
+    # 邊界條件：場景中沒有任何障礙物
+    # ----------------------------------------------------------
+    if num_found == 0:
+        return torch.zeros(N, K * 4, device=device)
+
+    # 裁剪至實際找到的數量
+    pos = all_pos[:, :num_found, :]           # [N, F, 2] 世界座標
+    vel = all_vel[:, :num_found, :]           # [N, F, 2] 世界速度
+    valid = all_valid[:, :num_found]          # [N, F]
+    F = num_found
+
+    # ----------------------------------------------------------
+    # 3. 牆壁 LOS 遮擋檢測（局部座標系）
+    #    牆壁定義在局部座標系，需將世界座標扣除 env_origins
+    # ----------------------------------------------------------
+    if wall_occlusion:
+        robot_pos_local = robot_pos_xy - env_origins           # [N, 2]
+        pos_local = pos - env_origins.unsqueeze(1)             # [N, F, 2]
+        wall_centers, wall_sizes = get_all_wall_tensors(device)
+        los_visible = check_los_batch(robot_pos_local, pos_local, wall_centers, wall_sizes)
+        valid = valid & los_visible                            # [N, F]
+
+    # ----------------------------------------------------------
+    # 4. 計算世界座標相對位置，再旋轉至 robot frame
+    #    論文 Eq. 3.11: Δ = obs_pos - robot_pos
+    #    旋轉公式: dx_r =  Δx·cos(yaw) + Δy·sin(yaw)
+    #              dy_r = -Δx·sin(yaw) + Δy·cos(yaw)
+    # ----------------------------------------------------------
+    delta_w = pos - robot_pos_xy.unsqueeze(1)                  # [N, F, 2]
+    cos_y = cos_yaw.unsqueeze(1)                               # [N, 1]
+    sin_y = sin_yaw.unsqueeze(1)                               # [N, 1]
+
+    dx = delta_w[:, :, 0] * cos_y + delta_w[:, :, 1] * sin_y   # [N, F]
+    dy = -delta_w[:, :, 0] * sin_y + delta_w[:, :, 1] * cos_y  # [N, F]
+
+    dist = torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)               # [N, F]
+
+    # 無效 / 超距 → 排序時排到最後
+    dist_for_sort = dist.clone()
+    dist_for_sort[~valid] = 1e6
+    dist_for_sort[dist > max_distance] = 1e6
+
+    # ----------------------------------------------------------
+    # 5. Top-K 選取（由近到遠）
+    # ----------------------------------------------------------
+    if F >= K:
+        _, topk_idx = torch.topk(dist_for_sort, k=K, dim=1, largest=False)
+    else:
+        _, sort_idx = torch.sort(dist_for_sort, dim=1)
+        pad_idx = sort_idx[:, :1].expand(-1, K - F)
+        topk_idx = torch.cat([sort_idx, pad_idx], dim=1)      # [N, K]
+
+    # ----------------------------------------------------------
+    # 6. 計算 4 維歸一化特徵
+    #    相對速度 (obs_vel - robot_vel) 旋轉至 robot frame
+    # ----------------------------------------------------------
+    topk_dx = torch.gather(dx, 1, topk_idx)                    # [N, K]
+    topk_dy = torch.gather(dy, 1, topk_idx)                    # [N, K]
+
+    # 相對速度（世界座標）
+    rel_vel_w = vel - robot_vel_xy.unsqueeze(1)                # [N, F, 2]
+
+    # 旋轉至 robot frame
+    rel_vx_r = rel_vel_w[:, :, 0] * cos_y + rel_vel_w[:, :, 1] * sin_y   # [N, F]
+    rel_vy_r = -rel_vel_w[:, :, 0] * sin_y + rel_vel_w[:, :, 1] * cos_y  # [N, F]
+
+    topk_vx = torch.gather(rel_vx_r, 1, topk_idx)             # [N, K]
+    topk_vy = torch.gather(rel_vy_r, 1, topk_idx)             # [N, K]
+
+    topk_valid = torch.gather(valid.long(), 1, topk_idx).bool()  # [N, K]
+
+    # 補齊的位置標記為無效
+    if F < K:
+        topk_valid = topk_valid.clone()
+        topk_valid[:, F:] = False
+
+    # 超距離標記為無效
+    topk_dist = torch.gather(dist_for_sort, 1, topk_idx)
+    topk_valid = topk_valid & (topk_dist < max_distance)
+
+    # 歸一化
+    dx_norm = topk_dx / max_distance                                   # [-1, 1]
+    dy_norm = topk_dy / max_distance                                   # [-1, 1]
+    speed = torch.sqrt(topk_vx ** 2 + topk_vy ** 2 + 1e-8)            # [N, K]
+    speed_norm = speed / v_max                                         # [0, ~1]
+
+    # heading: 速度 < threshold 時強制歸零（靜態障礙物無方向）
+    raw_heading = torch.atan2(topk_vy, topk_vx) / torch.pi            # [-1, 1]
+    heading_norm = torch.where(
+        speed > speed_threshold,
+        raw_heading,
+        torch.zeros_like(raw_heading),
+    )
+
+    # ----------------------------------------------------------
+    # 7. 無效位置清零
+    # ----------------------------------------------------------
+    v = topk_valid.float()                                     # [N, K]
+    dx_norm = dx_norm * v
+    dy_norm = dy_norm * v
+    speed_norm = speed_norm * v
+    heading_norm = heading_norm * v
+
+    # ----------------------------------------------------------
+    # 8. 組裝並扁平化：[N, K, 4] → [N, K*4]
+    # ----------------------------------------------------------
+    features = torch.stack([dx_norm, dy_norm, speed_norm, heading_norm], dim=2)
+    return features.reshape(N, -1)  # [N, 40]
+
+
+# ====================================================================
+# 觀測函數四：論文式 Global Frame 7D 障礙物觀測
+# ====================================================================
+
+def topk_obstacles_global_frame(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    top_k: int = 10,
+    max_obstacles: int = 10,
+    max_distance: float = 8.0,
+    v_max: float = 1.5,
+    wall_occlusion: bool = True,
+    speed_threshold: float = 0.01,
+) -> torch.Tensor:
+    """論文式 Global Frame 障礙物觀測 + 牆壁遮擋檢測。
+
+    採用固定座標系（Global/Odom Frame），不旋轉至機器人航向。
+    機器人航向 θ 作為獨立觀測項輸入，讓 FC 神經網路自行學習
+    「全局差值 Δx,Δy」與「車頭航向 θ」之間的空間相對關係。
+
+    障礙物速度為絕對速度（不扣除機器人速度），與論文一致：
+    速度由物件自身的位置差分計算（模擬器中等效於 root_lin_vel_w）。
+
+    每障礙物 7 維::
+
+        s_Δx: 歸一化全局相對位移 X = (obs_x - robot_x) / max_distance
+        s_Δy: 歸一化全局相對位移 Y = (obs_y - robot_y) / max_distance
+        s_θ̄:  歸一化絕對航向 = atan2(abs_vy, abs_vx) / π
+        s_ρ:  障礙物類型 (0.0=靜態, 1.0=動態)
+        s_o:  障礙物狀態 (1.0=可見追蹤中, 0.0=遺失/填充)
+        s_r:  障礙物半徑 (m)
+        s_v̄:  歸一化絕對速度 = |v| / v_max
+
+    搭配獨立觀測項使用::
+
+        robot_heading_normalized:  θ/π ∈ [-1, 1]  (1D)
+        robot_position_local:     (px, py)/room   (2D)
+
+    Args:
+        env:              Isaac Lab 環境實例
+        robot_cfg:        自車的 SceneEntityCfg 參照
+        top_k:            保留最近的 K 個障礙物
+        max_obstacles:    場景中的最大障礙物數量
+        max_distance:     超過此距離的障礙物視為不存在 (m)
+        v_max:            速度歸一化的最大值 (m/s)
+        wall_occlusion:   是否啟用牆壁 LOS 遮擋檢測
+        speed_threshold:  低於此速度的障礙物視為靜態 (m/s)
+
+    Returns:
+        [num_envs, top_k * 7] 扁平化特徵張量（預設 [N, 70]）
+    """
+    from ..wall_layout import get_all_wall_tensors, check_los_batch
+
+    # ----------------------------------------------------------
+    # 從 Scene 取得自車位置
+    # ----------------------------------------------------------
+    robot = env.scene[robot_cfg.name]
+    robot_pos_xy = robot.data.root_pos_w[:, :2]     # [N, 2] 世界座標
+    N = robot_pos_xy.shape[0]
+    device = robot_pos_xy.device
+    K = top_k
+
+    # 環境原點偏移（世界座標 → 局部座標，LOS 檢測用）
+    env_origins = env.scene.env_origins[:, :2]        # [N, 2]
+
+    # ----------------------------------------------------------
+    # 1. 收集所有障礙物的 XY 位置、絕對速度、半徑、可見性
+    # ----------------------------------------------------------
+    all_pos = torch.zeros(N, max_obstacles, 2, device=device)
+    all_vel = torch.zeros(N, max_obstacles, 2, device=device)
+    all_radius = torch.full((N, max_obstacles), 0.3, device=device)
+    all_valid = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+    num_found = 0
+
+    for i in range(max_obstacles):
+        obs_name = f"obstacle_{i}"
+        if obs_name not in env.scene.keys():
+            continue
+
+        obs_entity = env.scene[obs_name]
+        pos_w = obs_entity.data.root_pos_w
+
+        # 2. 可見性判斷：Z > 0 表示可見（Z = -10 表示被隱藏）
+        visible = pos_w[:, 2] > 0.0
+
+        all_pos[:, num_found, :] = pos_w[:, :2]
+        all_valid[:, num_found] = visible
+
+        # 絕對速度（不扣除機器人速度）
+        if hasattr(env, "_obstacle_velocities") and env._obstacle_velocities is not None:
+            try:
+                all_vel[:, num_found, :] = env._obstacle_velocities[:, i, :2]
+            except (IndexError, TypeError, RuntimeError):
+                try:
+                    all_vel[:, num_found, :] = obs_entity.data.root_lin_vel_w[:, :2]
+                except (AttributeError, IndexError):
+                    pass
+        else:
+            try:
+                all_vel[:, num_found, :] = obs_entity.data.root_lin_vel_w[:, :2]
+            except (AttributeError, IndexError):
+                pass
+
+        # 半徑
+        if hasattr(env, "_obstacle_sizes") and env._obstacle_sizes is not None:
+            try:
+                all_radius[:, num_found] = env._obstacle_sizes[i]
+            except (IndexError, TypeError):
+                pass
+
+        num_found += 1
+
+    # ----------------------------------------------------------
+    # 邊界條件：場景中沒有任何障礙物
+    # ----------------------------------------------------------
+    if num_found == 0:
+        return torch.zeros(N, K * 7, device=device)
+
+    # 裁剪至實際找到的數量
+    pos = all_pos[:, :num_found, :]           # [N, F, 2] 世界座標
+    vel = all_vel[:, :num_found, :]           # [N, F, 2] 絕對速度
+    radius = all_radius[:, :num_found]        # [N, F]
+    valid = all_valid[:, :num_found]          # [N, F]
+    F = num_found
+
+    # ----------------------------------------------------------
+    # 3. 牆壁 LOS 遮擋檢測（局部座標系）
+    # ----------------------------------------------------------
+    if wall_occlusion:
+        robot_pos_local = robot_pos_xy - env_origins
+        pos_local = pos - env_origins.unsqueeze(1)
+        wall_centers, wall_sizes = get_all_wall_tensors(device)
+        los_visible = check_los_batch(robot_pos_local, pos_local, wall_centers, wall_sizes)
+        valid = valid & los_visible
+
+    # ----------------------------------------------------------
+    # 4. 全局座標相對位置（不旋轉）
+    # ----------------------------------------------------------
+    delta = pos - robot_pos_xy.unsqueeze(1)   # [N, F, 2]
+    dx = delta[:, :, 0]                        # [N, F]
+    dy = delta[:, :, 1]                        # [N, F]
+    dist = torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)
+
+    dist_for_sort = dist.clone()
+    dist_for_sort[~valid] = 1e6
+    dist_for_sort[dist > max_distance] = 1e6
+
+    # ----------------------------------------------------------
+    # 5. Top-K 選取（由近到遠）
+    # ----------------------------------------------------------
+    if F >= K:
+        _, topk_idx = torch.topk(dist_for_sort, k=K, dim=1, largest=False)
+    else:
+        _, sort_idx = torch.sort(dist_for_sort, dim=1)
+        pad_idx = sort_idx[:, :1].expand(-1, K - F)
+        topk_idx = torch.cat([sort_idx, pad_idx], dim=1)
+
+    # ----------------------------------------------------------
+    # 6. 計算 7 維特徵
+    # ----------------------------------------------------------
+    topk_dx = torch.gather(dx, 1, topk_idx)
+    topk_dy = torch.gather(dy, 1, topk_idx)
+    topk_vx = torch.gather(vel[:, :, 0], 1, topk_idx)
+    topk_vy = torch.gather(vel[:, :, 1], 1, topk_idx)
+    topk_r = torch.gather(radius, 1, topk_idx)
+    topk_valid = torch.gather(valid.long(), 1, topk_idx).bool()
+
+    if F < K:
+        topk_valid = topk_valid.clone()
+        topk_valid[:, F:] = False
+
+    topk_dist = torch.gather(dist_for_sort, 1, topk_idx)
+    topk_valid = topk_valid & (topk_dist < max_distance)
+
+    # s_Δx, s_Δy: 歸一化全局差值（clamp 保證 [-1, 1]）
+    dx_norm = (topk_dx / max_distance).clamp(-1.0, 1.0)
+    dy_norm = (topk_dy / max_distance).clamp(-1.0, 1.0)
+
+    # s_v̄: 絕對速度大小歸一化
+    speed = torch.sqrt(topk_vx ** 2 + topk_vy ** 2 + 1e-8)
+    speed_norm = speed / v_max
+
+    # s_θ̄: 絕對航向（靜態障礙物強制歸零）
+    raw_heading = torch.atan2(topk_vy, topk_vx) / torch.pi
+    heading_norm = torch.where(
+        speed > speed_threshold,
+        raw_heading,
+        torch.zeros_like(raw_heading),
+    )
+
+    # s_ρ: 障礙物類型（靜態=0, 動態=1）
+    obs_type = torch.where(
+        speed > speed_threshold,
+        torch.ones_like(speed),
+        torch.zeros_like(speed),
+    )
+
+    # s_o: 障礙物狀態（1.0=可見追蹤中, 0.0=遺失/填充）
+    obs_status = topk_valid.float()
+
+    # ----------------------------------------------------------
+    # 7. 無效位置清零（s_o 本身已為 0.0）
+    # ----------------------------------------------------------
+    v = topk_valid.float()
+    dx_norm = dx_norm * v
+    dy_norm = dy_norm * v
+    heading_norm = heading_norm * v
+    obs_type = obs_type * v
+    topk_r = topk_r * v
+    speed_norm = speed_norm * v
+
+    # ----------------------------------------------------------
+    # 8. 組裝並扁平化：[N, K, 7] → [N, K*7]
+    #    順序: [s_Δx, s_Δy, s_θ̄, s_ρ, s_o, s_r, s_v̄]
+    # ----------------------------------------------------------
+    features = torch.stack([
+        dx_norm,       # s_Δx
+        dy_norm,       # s_Δy
+        heading_norm,  # s_θ̄
+        obs_type,      # s_ρ
+        obs_status,    # s_o
+        topk_r,        # s_r
+        speed_norm,    # s_v̄
+    ], dim=2)
+    return features.reshape(N, -1)  # [N, 70]
+
+
+# ====================================================================
+# 觀測函數四-B：Body Frame 6D 障礙物觀測
+# ====================================================================
+
+def topk_obstacles_body_frame(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    top_k: int = 10,
+    max_obstacles: int = 10,
+    max_distance: float = 8.0,
+    v_max: float = 1.5,
+    wall_occlusion: bool = True,
+    speed_threshold: float = 0.01,
+) -> torch.Tensor:
+    """Body Frame 障礙物觀測 — 位置與速度皆轉至車體座標系。
+
+    所有位置、速度特徵以車體為原點、車頭為 +x 方向：
+    - 位置：世界座標差值 → 旋轉至 body frame
+    - 速度：扣除機器人自身速度後 → 旋轉至 body frame
+    - 半徑、動靜態標記不變
+    - s_o 有效位元：區分「真實障礙物」與「填充空位」
+
+    每障礙物 7 維::
+
+        p_x^body:  縱向距離 (+前方, -後方)，歸一化 / max_distance
+        p_y^body:  橫向距離 (+左側, -右側)，歸一化 / max_distance
+        v_x^body:  縱向相對速度 (-代表正在接近)，歸一化 / v_max
+        v_y^body:  橫向相對速度 (側向切入威脅)，歸一化 / v_max
+        r_j:       障礙物半徑 (m)
+        s_j:       動靜態標記 (0.0=靜態, 1.0=動態)
+        s_o:       有效位元 (1.0=可見追蹤中, 0.0=遺失/填充/遮擋)
+
+    s_o 的必要性（Body Frame 特有）::
+
+        在 Body Frame 中，[0,0,0,0,0,0] 既可能是「空位」也可能是
+        「障礙物在 (0,0) = 正在碰撞」。s_o 消除此歧義。
+
+        此外，permutation invariant MaxPool 會把 padding 的 0 值
+        蓋過合法的負值（如後方牆壁 p_x=-5），s_o 讓 NN 學會
+        在 s_o=0 時抑制該 slot 的貢獻。
+
+    座標轉換::
+
+        Body Frame 旋轉矩陣 (θ = robot yaw):
+          p_x^body =  cos(θ)·Δx + sin(θ)·Δy
+          p_y^body = -sin(θ)·Δx + cos(θ)·Δy
+
+        相對速度:
+          rel_vx = obs_vx - robot_vx
+          rel_vy = obs_vy - robot_vy
+          v_x^body =  cos(θ)·rel_vx + sin(θ)·rel_vy
+          v_y^body = -sin(θ)·rel_vx + cos(θ)·rel_vy
+
+    Args:
+        env:              Isaac Lab 環境實例
+        robot_cfg:        自車的 SceneEntityCfg 參照
+        top_k:            保留最近的 K 個障礙物
+        max_obstacles:    場景中的最大障礙物數量
+        max_distance:     超過此距離的障礙物視為不存在 (m)
+        v_max:            速度歸一化的最大值 (m/s)
+        wall_occlusion:   是否啟用牆壁 LOS 遮擋檢測
+        speed_threshold:  低於此速度的障礙物視為靜態 (m/s)
+
+    Returns:
+        [num_envs, top_k * 7] 扁平化特徵張量（預設 [N, 70]）
+    """
+    from ..wall_layout import get_all_wall_tensors, check_los_batch
+
+    # ----------------------------------------------------------
+    # 從 Scene 取得自車狀態
+    # ----------------------------------------------------------
+    robot = env.scene[robot_cfg.name]
+    robot_pos_xy = robot.data.root_pos_w[:, :2]     # [N, 2] 世界座標
+    robot_vel_xy = robot.data.root_lin_vel_w[:, :2]  # [N, 2] 世界座標速度
+    N = robot_pos_xy.shape[0]
+    device = robot_pos_xy.device
+    K = top_k
+
+    # 機器人航向 θ（yaw）
+    quat = robot.data.root_quat_w                    # [N, 4] (w, x, y, z)
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))  # [N]
+    cos_yaw = torch.cos(yaw)                          # [N]
+    sin_yaw = torch.sin(yaw)                          # [N]
+
+    # 環境原點偏移（LOS 檢測用）
+    env_origins = env.scene.env_origins[:, :2]        # [N, 2]
+
+    # ----------------------------------------------------------
+    # 1. 收集所有障礙物的 XY 位置、絕對速度、半徑、可見性
+    # ----------------------------------------------------------
+    all_pos = torch.zeros(N, max_obstacles, 2, device=device)
+    all_vel = torch.zeros(N, max_obstacles, 2, device=device)
+    all_radius = torch.full((N, max_obstacles), 0.3, device=device)
+    all_valid = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+    num_found = 0
+
+    for i in range(max_obstacles):
+        obs_name = f"obstacle_{i}"
+        if obs_name not in env.scene.keys():
+            continue
+
+        obs_entity = env.scene[obs_name]
+        pos_w = obs_entity.data.root_pos_w
+
+        # 可見性判斷：Z > 0 表示可見（Z = -10 表示被隱藏）
+        visible = pos_w[:, 2] > 0.0
+
+        # NaN protection: scene entity data may contain NaN after resets/collisions
+        pos_xy = torch.nan_to_num(pos_w[:, :2], nan=0.0)
+        all_pos[:, num_found, :] = pos_xy
+        all_valid[:, num_found] = visible & ~torch.isnan(pos_w[:, 0]) & ~torch.isnan(pos_w[:, 1])
+
+        # 絕對速度
+        if hasattr(env, "_obstacle_velocities") and env._obstacle_velocities is not None:
+            try:
+                vel_data = env._obstacle_velocities[:, i, :2]
+                all_vel[:, num_found, :] = torch.nan_to_num(vel_data, nan=0.0)
+            except (IndexError, TypeError, RuntimeError):
+                try:
+                    vel_data = obs_entity.data.root_lin_vel_w[:, :2]
+                    all_vel[:, num_found, :] = torch.nan_to_num(vel_data, nan=0.0)
+                except (AttributeError, IndexError):
+                    pass
+        else:
+            try:
+                vel_data = obs_entity.data.root_lin_vel_w[:, :2]
+                all_vel[:, num_found, :] = torch.nan_to_num(vel_data, nan=0.0)
+            except (AttributeError, IndexError):
+                pass
+
+        # 半徑
+        if hasattr(env, "_obstacle_sizes") and env._obstacle_sizes is not None:
+            try:
+                all_radius[:, num_found] = env._obstacle_sizes[i]
+            except (IndexError, TypeError):
+                pass
+
+        num_found += 1
+
+    # ----------------------------------------------------------
+    # 邊界條件：場景中沒有任何障礙物
+    # ----------------------------------------------------------
+    if num_found == 0:
+        return torch.zeros(N, K * 7, device=device)
+
+    # 裁剪至實際找到的數量
+    pos = all_pos[:, :num_found, :]           # [N, F, 2]
+    vel = all_vel[:, :num_found, :]           # [N, F, 2]
+    radius = all_radius[:, :num_found]        # [N, F]
+    valid = all_valid[:, :num_found]          # [N, F]
+    F = num_found
+
+    # ----------------------------------------------------------
+    # 2. 牆壁 LOS 遮擋檢測（局部座標系）
+    # ----------------------------------------------------------
+    if wall_occlusion:
+        robot_pos_local = robot_pos_xy - env_origins
+        pos_local = pos - env_origins.unsqueeze(1)
+        wall_centers, wall_sizes = get_all_wall_tensors(device)
+        los_visible = check_los_batch(robot_pos_local, pos_local, wall_centers, wall_sizes)
+        valid = valid & los_visible
+
+    # ----------------------------------------------------------
+    # 3. 世界座標相對位置（用於排序）
+    # ----------------------------------------------------------
+    delta = pos - robot_pos_xy.unsqueeze(1)   # [N, F, 2]
+    dx = delta[:, :, 0]                        # [N, F]
+    dy = delta[:, :, 1]                        # [N, F]
+    dist = torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)
+
+    dist_for_sort = dist.clone()
+    dist_for_sort[~valid] = 1e6
+    dist_for_sort[dist > max_distance] = 1e6
+
+    # ----------------------------------------------------------
+    # 4. Top-K 選取（由近到遠）
+    # ----------------------------------------------------------
+    if F >= K:
+        _, topk_idx = torch.topk(dist_for_sort, k=K, dim=1, largest=False)
+    else:
+        _, sort_idx = torch.sort(dist_for_sort, dim=1)
+        pad_idx = sort_idx[:, :1].expand(-1, K - F)
+        topk_idx = torch.cat([sort_idx, pad_idx], dim=1)
+
+    # ----------------------------------------------------------
+    # 5. Gather Top-K 的原始數據
+    # ----------------------------------------------------------
+    topk_dx = torch.gather(dx, 1, topk_idx)           # [N, K]
+    topk_dy = torch.gather(dy, 1, topk_idx)           # [N, K]
+    topk_vx = torch.gather(vel[:, :, 0], 1, topk_idx) # [N, K] 絕對速度
+    topk_vy = torch.gather(vel[:, :, 1], 1, topk_idx) # [N, K]
+    topk_r = torch.gather(radius, 1, topk_idx)        # [N, K]
+    topk_valid = torch.gather(valid.long(), 1, topk_idx).bool()
+
+    if F < K:
+        topk_valid = topk_valid.clone()
+        topk_valid[:, F:] = False
+
+    topk_dist = torch.gather(dist_for_sort, 1, topk_idx)
+    topk_valid = topk_valid & (topk_dist < max_distance)
+
+    # ----------------------------------------------------------
+    # 6. 旋轉至 Body Frame
+    # ----------------------------------------------------------
+    # 位置：世界差值 → body frame
+    cos_y = cos_yaw.unsqueeze(1)   # [N, 1]
+    sin_y = sin_yaw.unsqueeze(1)   # [N, 1]
+
+    px_body = cos_y * topk_dx + sin_y * topk_dy       # [N, K] 縱向 (+前)
+    py_body = -sin_y * topk_dx + cos_y * topk_dy      # [N, K] 橫向 (+左)
+
+    # 相對速度：扣除機器人速度 → body frame
+    rel_vx = topk_vx - robot_vel_xy[:, 0:1]           # [N, K] 世界相對 vx
+    rel_vy = topk_vy - robot_vel_xy[:, 1:2]           # [N, K] 世界相對 vy
+
+    vx_body = cos_y * rel_vx + sin_y * rel_vy         # [N, K] 縱向 (-接近)
+    vy_body = -sin_y * rel_vx + cos_y * rel_vy        # [N, K] 橫向 (切入)
+
+    # ----------------------------------------------------------
+    # 7. 歸一化
+    # ----------------------------------------------------------
+    px_norm = (px_body / max_distance).clamp(-1.0, 1.0)
+    py_norm = (py_body / max_distance).clamp(-1.0, 1.0)
+    vx_norm = (vx_body / v_max).clamp(-2.0, 2.0)
+    vy_norm = (vy_body / v_max).clamp(-2.0, 2.0)
+
+    # s_j: 動靜態標記（依據絕對速度判斷）
+    abs_speed = torch.sqrt(topk_vx ** 2 + topk_vy ** 2 + 1e-8)
+    type_flag = torch.where(
+        abs_speed > speed_threshold,
+        torch.ones_like(abs_speed),
+        torch.zeros_like(abs_speed),
+    )
+
+    # ----------------------------------------------------------
+    # 8. s_o 有效位元（不清零！這是給 NN 的遮罩信號）
+    #    s_o=1 → 真實障礙物，s_o=0 → 填充/遮擋/遺失
+    # ----------------------------------------------------------
+    obs_status = topk_valid.float()                   # [N, K]
+
+    # 無效 slot 的物理特徵清零（但 s_o 保留原值）
+    # 使用 torch.where 而非乘法，因為 NaN * 0 = NaN (IEEE 754)
+    valid_mask = obs_status.bool()
+    zero = torch.zeros_like(px_norm)
+    px_norm = torch.where(valid_mask, px_norm, zero)
+    py_norm = torch.where(valid_mask, py_norm, zero)
+    vx_norm = torch.where(valid_mask, vx_norm, zero)
+    vy_norm = torch.where(valid_mask, vy_norm, zero)
+    topk_r = torch.where(valid_mask, topk_r, zero)
+    type_flag = torch.where(valid_mask, type_flag, zero)
+
+    # ----------------------------------------------------------
+    # 9. 組裝並扁平化：[N, K, 7] → [N, K*7]
+    #    順序: [p_x^body, p_y^body, v_x^body, v_y^body, r_j, s_j, s_o]
+    # ----------------------------------------------------------
+    features = torch.stack([
+        px_norm,      # p_x^body (縱向距離)
+        py_norm,      # p_y^body (橫向距離)
+        vx_norm,      # v_x^body (縱向相對速度)
+        vy_norm,      # v_y^body (橫向相對速度)
+        topk_r,       # r_j      (半徑)
+        type_flag,    # s_j      (動靜態標記)
+        obs_status,   # s_o      (有效位元 — 不清零！)
+    ], dim=2)
+    # Final NaN safety net — any residual NaN gets zeroed
+    return torch.nan_to_num(features.reshape(N, -1), nan=0.0)  # [N, 70]
+
+
+def topk_obstacles_6d(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    top_k: int = 10,
+    max_obstacles: int = 10,
+    max_distance: float = 8.0,
+    v_max: float = 1.5,
+    wall_occlusion: bool = True,
+    speed_threshold: float = 0.01,
+) -> torch.Tensor:
+    """v2 動態障礙物觀測 — 每物件 6 維 (x, y, vx, vy, r, m)。
+
+    封裝 topk_obstacles_body_frame 並去掉 s_j (動靜態標記)，
+    保留 6 維特徵：
+
+        o_i = [x_i^robot, y_i^robot, vx_i^robot, vy_i^robot, r_i, m_i]
+
+    其中 m_i 為有效位元 (1=可見, 0=填充/遮擋)。
+    不可見的物件特徵全部為 0（m_i=0 時 x,y,vx,vy,r 也為 0）。
+
+    Args:
+        env:              Isaac Lab 環境實例
+        robot_cfg:        自車的 SceneEntityCfg 參照
+        top_k:            保留最近的 K 個障礙物
+        max_obstacles:    場景中的最大障礙物數量
+        max_distance:     最大觀測距離 (m)
+        v_max:            速度歸一化上限 (m/s)
+        wall_occlusion:   是否啟用牆壁 LOS 遮擋
+        speed_threshold:  靜態判定閾值 (m/s)
+
+    Returns:
+        [num_envs, top_k * 6] = [num_envs, 60] 扁平化特徵張量
+    """
+    # 取得 7D body-frame 特徵 [N, K*7]
+    feat_7d = topk_obstacles_body_frame(
+        env, robot_cfg, top_k, max_obstacles,
+        max_distance, v_max, wall_occlusion, speed_threshold,
+    )
+    N = feat_7d.shape[0]
+    K = top_k
+    feat = feat_7d.view(N, K, 7)  # [N, K, 7]
+
+    # 取出 6D：[px, py, vx, vy, r, s_o] — 跳過 index 5 (s_j 動靜態標記)
+    feat_6d = torch.cat([
+        feat[:, :, :5],   # px, py, vx, vy, r
+        feat[:, :, 6:7],  # s_o (有效位元 = mask m_i)
+    ], dim=2)  # [N, K, 6]
+
+    return feat_6d.reshape(N, K * 6)  # [N, 60]
+
+
+# ====================================================================
+# 觀測函數五：機器人航向角（Global Frame 必要輸入）
+# ====================================================================
+
+def robot_heading_normalized(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """機器人絕對航向角，歸一化至 [-1, 1]。
+
+    Global Frame 障礙物觀測的必要搭配項：
+    神經網路需要知道車頭朝向，才能理解全局差值 Δx,Δy 的空間意義。
+
+    Returns:
+        [num_envs, 1] 歸一化航向 θ/π ∈ [-1, 1]
+    """
+    robot = env.scene[asset_cfg.name]
+    quat = robot.data.root_quat_w              # [N, 4] (w, x, y, z)
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    return (yaw / torch.pi).unsqueeze(-1)      # [N, 1]
+
+
+# ====================================================================
+# 觀測函數六：機器人局部座標位置（Global Frame 必要輸入）
+# ====================================================================
+
+def robot_position_local(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    room_half_size: float = 8.0,
+) -> torch.Tensor:
+    """機器人在局部座標系中的位置，歸一化至 [-1, 1]。
+
+    扣除 env_origins 得到 16×16m 房間內的座標，
+    除以 room_half_size 歸一化。
+
+    Returns:
+        [num_envs, 2] 歸一化位置 (px, py) ∈ [-1, 1]
+    """
+    robot = env.scene[asset_cfg.name]
+    pos_w = robot.data.root_pos_w[:, :2]       # [N, 2]
+    env_origins = env.scene.env_origins[:, :2]  # [N, 2]
+    pos_local = pos_w - env_origins             # [N, 2]
+    return pos_local / room_half_size           # [N, 2]
+
+
+# ====================================================================
+# 觀測函數七：離散動作空間裁切後動作
+# ====================================================================
+
+def discrete_applied_action(
+    env: ManagerBasedRLEnv,
+    a_max: float = 0.2,
+    omega_max: float = math.pi / 15.0,
+) -> torch.Tensor:
+    """讀取離散動作空間的裁切後動作 [applied_a, applied_ω]。
+
+    從 ActionTerm.processed_actions 讀取（非 raw NN 輸出），
+    歸一化至約 [-1, 1] 範圍。
+
+    歸一化方式::
+
+        a_norm = applied_a / a_max        (a_max = 0.2 → max accel)
+        ω_norm = applied_ω / omega_max    (omega_max = π/15)
+
+    注意：加速度 -0.1 歸一化後為 -0.5，不完美對稱但保留物理意義。
+
+    Args:
+        env:       Isaac Lab 環境實例
+        a_max:     線加速度最大絕對值（用於歸一化）
+        omega_max: 角速度最大絕對值（用於歸一化）
+
+    Returns:
+        [num_envs, 2] — 歸一化後的 [a_norm, ω_norm]
+    """
+    term = list(env.action_manager._terms.values())[0]
+
+    # 優先讀取 applied_accelerations（離散動作空間專用）
+    # 若不存在（連續動作空間），則 fallback 到 processed_actions
+    if hasattr(term, "applied_accelerations"):
+        pa = term.applied_accelerations  # [N, 2] = [applied_a, ω]
+    else:
+        pa = term.processed_actions      # [N, 2] fallback
+
+    result = torch.zeros_like(pa)
+    result[:, 0] = pa[:, 0] / a_max          # [-0.1, 0.2] / 0.2 → [-0.5, 1.0]
+    result[:, 1] = pa[:, 1] / omega_max      # [-π/15, π/15] / (π/15) → [-1, 1]
+
+    return torch.nan_to_num(result, nan=0.0).clamp(-2.0, 2.0)
+
+
+def topk_obstacles_goal_centric(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    top_k: int = 5,
+    max_obstacles: int = 10,
+    max_distance: float = 8.0,
+) -> torch.Tensor:
+    """Top-K 障礙物觀測（Goal-Centric Frame，NavRL 風格）
+
+    選擇最近 K 個可見障礙物，在 goal-centric 座標系下計算相對位置和速度。
+    Goal-centric frame: 目標方向為 X 軸，垂直方向為 Y 軸。
+
+    每個障礙物 6 維: [rel_x_goal, rel_y_goal, distance, vel_x_goal, vel_y_goal, size]
+
+    Args:
+        env: 環境實例
+        robot_cfg: 機器人配置
+        top_k: 選取最近的 K 個障礙物
+        max_obstacles: 場景中最大障礙物數量
+        max_distance: 最大觀測距離（超過此距離視為不可見）
+
+    Returns:
+        [num_envs, top_k * 6] 障礙物觀測（30 維 for K=5）
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    num_envs = env.num_envs
+    device = env.device
+
+    # --- 收集所有障礙物位置、速度、大小（同一迴圈，索引一致） ---
+    all_pos = torch.zeros(num_envs, max_obstacles, 2, device=device)
+    all_z = torch.zeros(num_envs, max_obstacles, device=device)
+    all_vel = torch.zeros(num_envs, max_obstacles, 2, device=device)
+    all_size = torch.zeros(num_envs, max_obstacles, device=device)
+
+    vel_cache = getattr(env, "_obstacle_velocities", None)
+    sizes_raw = getattr(env, "_obstacle_sizes", None)
+    sizes_tensor = None
+    if sizes_raw is not None:
+        sizes_tensor = torch.as_tensor(sizes_raw, device=device, dtype=torch.float32)
+
+    num_found = 0
+    for i in range(max_obstacles):
+        obstacle_name = f"obstacle_{i}"
+        if obstacle_name not in env.scene.keys():
+            continue
+        obstacle = env.scene[obstacle_name]
+        pos_w = torch.nan_to_num(obstacle.data.root_pos_w, nan=0.0)
+        all_pos[:, num_found, :] = pos_w[:, :2]
+        all_z[:, num_found] = pos_w[:, 2]
+        if vel_cache is not None and num_found < vel_cache.shape[1]:
+            all_vel[:, num_found, :] = torch.nan_to_num(vel_cache[:, num_found, :], nan=0.0)
+        if sizes_tensor is not None and num_found < len(sizes_tensor):
+            all_size[:, num_found] = sizes_tensor[num_found]
+        num_found += 1
+
+    if num_found == 0:
+        return torch.zeros(num_envs, top_k * 6, device=device)
+
+    all_pos = all_pos[:, :num_found, :]
+    all_z = all_z[:, :num_found]
+    all_vel = all_vel[:, :num_found, :]
+    all_size = all_size[:, :num_found]
+
+    # --- 可見性判斷：Z > 0 表示可見（隱藏的在 Z = -10） ---
+    visible = all_z > 0.0
+
+    # --- 機器人位置和目標位置 ---
+    robot_pos_xy = robot.data.root_pos_w[:, :2]
+
+    try:
+        if hasattr(env, "_local_goal_world") and env._local_goal_world is not None:
+            goal_xy = env._local_goal_world[:, :2]
+        else:
+            goal_pos = env.command_manager.get_command("goal_command")
+            goal_xy = goal_pos[:, :2]
+    except (AttributeError, KeyError, IndexError):
+        robot_quat = robot.data.root_quat_w
+        w, x, y, z = robot_quat[:, 0], robot_quat[:, 1], robot_quat[:, 2], robot_quat[:, 3]
+        robot_yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+        goal_xy = robot_pos_xy + torch.stack(
+            [torch.cos(robot_yaw), torch.sin(robot_yaw)], dim=1
+        )
+
+    # --- 計算 goal-centric 座標系 ---
+    goal_dir = goal_xy - robot_pos_xy
+    goal_norm = torch.norm(goal_dir, dim=1, keepdim=True).clamp(min=1e-6)
+    x_axis = goal_dir / goal_norm
+    y_axis = torch.stack([-x_axis[:, 1], x_axis[:, 0]], dim=1)
+
+    # --- 計算障礙物相對位置 ---
+    rel_pos = all_pos - robot_pos_xy.unsqueeze(1)
+    distances = torch.norm(rel_pos, dim=2)
+
+    large_val = max_distance * 10.0
+    masked_distances = torch.where(
+        visible & (distances < max_distance),
+        distances,
+        torch.full_like(distances, large_val),
+    )
+
+    # --- 選取最近 K 個 ---
+    actual_k = min(top_k, num_found)
+    topk_distances, topk_indices = torch.topk(
+        masked_distances, k=actual_k, dim=1, largest=False
+    )
+    topk_valid = topk_distances < large_val  # [N, K]
+
+    # --- batch gather ---
+    idx2 = topk_indices.unsqueeze(2).expand(-1, -1, 2)
+    topk_rel_pos = torch.gather(rel_pos, 1, idx2)
+    topk_vel = torch.gather(all_vel, 1, idx2)
+    topk_size = torch.gather(all_size, 1, topk_indices)
+
+    # --- 投影到 goal-centric frame（向量化） ---
+    x_axis_exp = x_axis.unsqueeze(1)  # [N, 1, 2] — broadcasts to [N, K, 2]
+    y_axis_exp = y_axis.unsqueeze(1)
+
+    rel_x_goal = (topk_rel_pos * x_axis_exp).sum(dim=2)  # [N, K]
+    rel_y_goal = (topk_rel_pos * y_axis_exp).sum(dim=2)
+    vel_x_goal = (topk_vel * x_axis_exp).sum(dim=2)
+    vel_y_goal = (topk_vel * y_axis_exp).sum(dim=2)
+
+    # --- 組裝輸出（向量化，無 Python for-loop） ---
+    features = torch.stack(
+        [rel_x_goal, rel_y_goal, topk_distances, vel_x_goal, vel_y_goal, topk_size],
+        dim=2,
+    )  # [N, K, 6]
+    features = features * topk_valid.unsqueeze(2)  # 無效 slot 歸零
+
+    # 填充到 top_k（actual_k 可能 < top_k）
+    if actual_k < top_k:
+        pad = torch.zeros(num_envs, top_k - actual_k, 6, device=device)
+        features = torch.cat([features, pad], dim=1)
+
+    return torch.nan_to_num(features.reshape(num_envs, -1), nan=0.0)

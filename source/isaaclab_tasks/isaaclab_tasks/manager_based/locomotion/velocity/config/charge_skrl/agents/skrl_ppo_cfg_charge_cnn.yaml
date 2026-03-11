@@ -1,0 +1,138 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ==============================================================================
+# SKRL PPO 配置 — Multi-Branch CNN Feature Extractor
+# ==============================================================================
+#
+# 使用結構化多分支特徵萃取器，注入正確的歸納偏差：
+#   Branch 1: LiDAR Conv1d   — 空間局域性（相鄰射線掃描相鄰角度）
+#   Branch 2: Obstacle encoder — 排列不變性（Top-K 無序）
+#   Branch 3: Robot state MLP  — 低維向量
+#
+# ═══════════════════════════════════════════════════════════════════════════
+#                          觀測空間結構
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Per frame (111 dim):
+#   LiDAR (72)        → Conv1d branch → 32 dim
+#   State (9)         → MLP branch    → 16 dim
+#   Top-K Obs (30)    → Set encoder   → 32 dim
+#
+# Frame stacking (3 frames, flat):
+#   Actor:  111 × 3 = 333 dim → ActorFeatureExtractor → 80 dim
+#   Critic: 333 + 50 (privileged) = 383 dim → 80 + 32 = 112 dim
+#
+# ═══════════════════════════════════════════════════════════════════════════
+#                       參數量對比
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#   MLP [1024,512,256,128]:  ~750K params
+#   Multi-Branch CNN:         ~15K params (50x reduction)
+#
+# ==============================================================================
+
+seed: 42
+
+# ==============================================================================
+# 模型配置 — Multi-Branch CNN
+# ==============================================================================
+models:
+  separate: True  # Actor 和 Critic 使用分離的參數（AAC 架構）
+
+  # 策略網路 (Actor) — ChargePolicy with multi-branch extractor
+  policy:
+    class: charge_models.ChargePolicy
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: 0.0
+    # 架構參數
+    frame_dim: 111       # 每幀觀測維度
+    num_stack: 3         # 幀堆疊數量
+
+  # 價值網路 (Critic) — ChargeValue with multi-branch extractor + privileged info
+  value:
+    class: charge_models.ChargeValue
+    clip_actions: False
+    # 架構參數
+    frame_dim: 111       # 每幀觀測維度
+    num_stack: 3         # 幀堆疊數量
+    privileged_dim: 50   # 特權障礙物狀態維度 (10 obstacles × 5 features)
+
+# ==============================================================================
+# 經驗回放記憶體
+# ==============================================================================
+memory:
+  class: RandomMemory
+  memory_size: -1  # 自動（= rollouts）
+
+# ==============================================================================
+# PPO Agent 配置
+# ==============================================================================
+agent:
+  class: PPO
+
+  # 收集與更新
+  rollouts: 128
+  learning_epochs: 5
+  mini_batches: 4
+
+  # 折扣與 GAE
+  discount_factor: 0.99
+  lambda: 0.95
+
+  # 學習率（CNN 架構用較低學習率以穩定收斂）
+  learning_rate: !!float 1e-4
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.008
+
+  # 預處理器
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+  value_preprocessor: null
+  value_preprocessor_kwargs: null
+
+  # 預熱
+  random_timesteps: 0
+  learning_starts: 0
+
+  # 梯度裁剪
+  grad_norm_clip: 0.5
+
+  # PPO 裁剪
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: True
+
+  # 損失係數
+  entropy_loss_scale: 0.005
+  value_loss_scale: 1.0
+
+  # KL 散度
+  kl_threshold: 0.0
+
+  # 獎勵整形
+  rewards_shaper_scale: 1.0
+
+  # Bootstrap
+  time_limit_bootstrap: False
+
+  # 實驗
+  experiment:
+    directory: "charge_cnn"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+# ==============================================================================
+# 訓練器配置
+# ==============================================================================
+trainer:
+  class: SequentialTrainer
+  # 512 envs × 234375 timesteps ≈ 120M env-steps
+  timesteps: 234375
+  environment_info: log

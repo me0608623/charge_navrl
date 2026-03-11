@@ -1,0 +1,162 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ==============================================================================
+# SKRL PPO 配置 - Phase 0: 車輛動力學校準
+# ==============================================================================
+# 非對稱 Actor-Critic (AAC) 架構
+#   - Policy (Actor): 120 維觀測 (82 base + 30 topk + 8 ORCA)
+#   - Critic: 170 維觀測 (120 policy + 50 privileged obstacles_state)
+# 動作空間: Box(-1, 1, (2,)) - [前進速度, 旋轉速度]
+# 控制頻率: 5Hz (dt=0.2s, decimation=20, sim.dt=0.01)
+# ==============================================================================
+
+seed: 42
+
+# ==============================================================================
+# 模型配置 (Models) - AAC
+# ==============================================================================
+# SKRL 使用模型實例化工具來創建策略網路和價值網路
+# https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
+#
+# AAC 架構：
+#   - Actor 輸入: 120 維 (policy observations)
+#   - Critic 輸入: 170 維 (policy + privileged obstacles_state)
+#
+models:
+  separate: True  # Actor 和 Critic 使用分離的參數（AAC 架構）
+
+  # 策略網路 (Actor/GaussianPolicy) - 120 維輸入
+  policy:
+    class: GaussianMixin
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: 0.0
+    network:
+      - name: net
+        input: OBSERVATIONS  # Runtime 自動檢測為 120 維
+        layers: [1024, 512, 256, 128]
+        activations: elu
+    output: ACTIONS
+
+  # 價值網路 (Critic/DeterministicValue) - 170 維輸入
+  # 輸入 = policy 觀測 (120) + 特權障礙物狀態 (50)
+  # 注意：雖然配置寫 OBSERVATIONS，但實際訓練時會使用 shared_states
+  value:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: OBSERVATIONS  # 會在 runtime 被 shared_states 替換 (170 維)
+        layers: [1024, 512, 256, 128]
+        activations: elu
+    output: ONE
+
+# ==============================================================================
+# 經驗回放記憶體 (Memory)
+# ==============================================================================
+# https://skrl.readthedocs.io/en/latest/api/memories/random.html
+memory:
+  class: RandomMemory
+  memory_size: -1  # 自動確定（等於 agent:rollouts）
+
+# ==============================================================================
+# PPO Agent 配置
+# ==============================================================================
+# https://skrl.readthedocs.io/en/latest/api/agents/ppo.html
+agent:
+  class: PPO  # 使用標準 PPO (AAC 支援通過 shared_states 實現)
+
+  rollouts: 128  # 每次更新前收集的步數
+
+  learning_epochs: 5  # 每次更新的訓練輪數
+
+  mini_batches: 4  # 小批次數量
+
+  discount_factor: 0.99  # 折扣因子
+
+  lambda: 0.95  # GAE lambda 參數
+
+  learning_rate: !!float 2e-4  # 學習率
+
+  # 學習率調度器（SKRL 原生支持 KL Adaptive LR）
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.008  # KL 散度閾值（自適應調整學習率）
+
+  # 狀態預處理器（歸一化）
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+
+  # 價值預處理器
+  value_preprocessor: null
+  value_preprocessor_kwargs: null
+
+  # 隨機步數（預熱）
+  random_timesteps: 0
+  learning_starts: 0
+
+  grad_norm_clip: 0.5  # 梯度裁剪
+
+  ratio_clip: 0.2  # PPO clipping 參數
+
+  # 價值函數裁剪
+  value_clip: 0.2
+  clip_predicted_values: True
+
+  entropy_loss_scale: 0.005  # 熵係數（探索）
+
+  value_loss_scale: 1.0  # 價值損失係數
+
+  # KL 散度閾值（用於早停）
+  kl_threshold: 0.0
+
+  # 獎勵整形（可選）
+  rewards_shaper_scale: 1.0
+
+  # 時間限制啟動（是否對終止狀態 bootstrap）
+  time_limit_bootstrap: False
+
+  # 實驗配置
+  experiment:
+    directory: "charge_phase0"
+    experiment_name: ""
+    write_interval: auto  # 自動決定寫入間隔
+    checkpoint_interval: auto  # 自動決定檢查點間隔
+
+# ==============================================================================
+# 訓練器配置 (Trainer)
+# ==============================================================================
+# https://skrl.readthedocs.io/en/latest/api/trainers/sequential.html
+trainer:
+  class: SequentialTrainer
+
+  # 總步數計算（5Hz 控制，dt=0.2s）：
+  #   timesteps × num_envs = 總環境步數
+  #   - 512 envs: timesteps=234375 → 120M steps
+  #   - 每次更新收集: rollouts × num_envs = 128 × 512 = 65,536 步
+  #
+  # 5Hz 控制下，每個 episode 只有 100 步（20s/0.2s），
+  # 但環境步數不變——相同的 wall-clock 訓練時間。
+  timesteps: 234375  # 512 envs, 120M total env steps
+
+  # 環境資訊記錄
+  environment_info: log
+
+# ==============================================================================
+# 配置總結
+# ==============================================================================
+#
+# | 參數 | 值 | 說明 |
+# |------|-----------|------|
+# | 控制頻率 | 5Hz (dt=0.2s) | 真實世界部署匹配 |
+# | Actor 輸入 | 120 維 | 82 base + 30 topk + 8 ORCA |
+# | Critic 輸入 | 170 維 | 120 policy + 50 privileged |
+# | 總環境步數 | 120M | 匹配 NavRL |
+# | 並行環境 | 512 | RTX 5090 34GB VRAM |
+# | 網絡層 | [1024,512,256,128] | 4 層 ELU |
+# | 學習率 | 2e-4 | KL Adaptive 調度 |
+# | Episode 步數 | 100 | 20s / 0.2s |

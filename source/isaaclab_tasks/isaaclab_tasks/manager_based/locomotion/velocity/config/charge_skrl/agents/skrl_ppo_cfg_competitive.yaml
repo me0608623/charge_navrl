@@ -1,0 +1,132 @@
+# ==============================================================================
+# SKRL PPO 配置 - Competitive: 競爭式多 Agent 訓練 (離散動作空間)
+# ==============================================================================
+# 基於 Phase 0 配置，適配 500 envs（100 groups × 5 agents）
+#
+# 非對稱 Actor-Critic (AAC) 架構
+#   - Policy (Actor): 120 維觀測 → MultiCategorical 42 logits (21+21)
+#   - Critic: 170 維觀測 (120 policy + 50 privileged obstacles_state)
+# 動作空間: MultiDiscrete([21, 21]) - [線加速度索引, 角速度索引]
+# 控制頻率: 5Hz (dt=0.2s, decimation=20, sim.dt=0.01)
+#
+# Parameter Sharing: 5 個 agent 共用同一策略網路（SKRL 默認行為）
+# ==============================================================================
+
+seed: 42
+
+# ==============================================================================
+# 模型配置 (Models) - AAC with custom CNN architecture
+# ==============================================================================
+models:
+  separate: True  # Actor 和 Critic 使用分離的參數（AAC 架構）
+
+  # 策略網路 (Actor/MultiCategoricalPolicy) - 離散動作
+  policy:
+    class: "charge_models.ChargeDiscretePolicy"
+    unnormalized_log_prob: true
+    reduction: "sum"
+    frame_dim: 120       # 120-dim per frame (72 lidar + 10 state + 30 topk + 8 orca)
+    num_stack: 3
+    obs_start: 82        # topk_obstacles start at index 82
+
+  # 價值網路 (Critic/DeterministicValue) - 不變
+  value:
+    class: "charge_models.ChargeValue"
+    clip_actions: false
+    frame_dim: 120       # must match policy frame_dim
+    num_stack: 3
+    obs_start: 82        # must match policy obs_start
+    privileged_dim: 50
+
+# ==============================================================================
+# 經驗回放記憶體 (Memory)
+# ==============================================================================
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+# ==============================================================================
+# PPO Agent 配置
+# ==============================================================================
+agent:
+  class: PPO
+
+  rollouts: 128
+
+  learning_epochs: 5
+
+  mini_batches: 4
+
+  discount_factor: 0.99
+
+  lambda: 0.95
+
+  learning_rate: !!float 2e-4
+
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.008
+
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+
+  value_preprocessor: null
+  value_preprocessor_kwargs: null
+
+  random_timesteps: 0
+  learning_starts: 0
+
+  grad_norm_clip: 0.5
+
+  ratio_clip: 0.2
+
+  value_clip: 0.2
+  clip_predicted_values: True
+
+  # 離散動作需要更多探索（從 0.005 提高到 0.01）
+  entropy_loss_scale: 0.01
+
+  value_loss_scale: 1.0
+
+  kl_threshold: 0.0
+
+  rewards_shaper_scale: 1.0
+
+  time_limit_bootstrap: False
+
+  experiment:
+    directory: "charge_competitive"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+# ==============================================================================
+# 訓練器配置 (Trainer)
+# ==============================================================================
+# 總步數計算（5Hz 控制，dt=0.2s）：
+#   timesteps × num_envs = 總環境步數
+#   - 500 envs: timesteps=240000 → 120M steps
+#   - 每次更新收集: rollouts × num_envs = 128 × 500 = 64,000 步
+trainer:
+  class: SequentialTrainer
+  timesteps: 240000  # 500 envs, ~120M total env steps
+  environment_info: log
+
+# ==============================================================================
+# 配置總結
+# ==============================================================================
+#
+# | 參數 | 值 | 說明 |
+# |------|-----------|------|
+# | 控制頻率 | 5Hz (dt=0.2s) | 真實世界部署匹配 |
+# | Actor 輸入 | 120 維 | 82 base + 30 topk + 8 ORCA |
+# | Actor 輸出 | 42 logits | 21 accel + 21 omega |
+# | Critic 輸入 | 170 維 | 120 policy + 50 privileged |
+# | 動作空間 | MultiDiscrete([21,21]) | 441 組合 |
+# | 總環境步數 | ~120M | 匹配 Phase 0 |
+# | 並行環境 | 500 | 100 groups × 5 agents |
+# | 特徵萃取 | Multi-branch CNN | LiDAR Conv1d + PI Obs + State MLP |
+# | 學習率 | 2e-4 | KL Adaptive 調度 |
+# | Entropy 係數 | 0.01 | 離散需要更多探索 |
+# | Episode 步數 | 100 | 20s / 0.2s |
+# | 競爭組大小 | 5 | Parameter Sharing 天然成立 |

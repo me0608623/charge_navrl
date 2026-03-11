@@ -1,0 +1,119 @@
+# ==============================================================================
+# SKRL PPO 配置 - VLP-16 v2: 離散動作空間 + 139D 觀測
+# ==============================================================================
+# v2 baseline 架構
+#   - Policy (Actor): 139 維觀測 → VLP16DiscretePolicy → 361 logits
+#   - Critic: 139 維觀測（與 Policy 相同）→ VLP16Value → scalar
+# 動作空間: Discrete(361) — 19×19 中心對稱 + 動態加速度邊界
+# 控制頻率: 5Hz (dt=0.2s, decimation=20, sim.dt=0.01)
+# ==============================================================================
+
+seed: 42
+
+# ==============================================================================
+# 模型配置 — 使用自定義 VLP16 模型
+# ==============================================================================
+models:
+  separate: True
+
+  policy:
+    class: vlp16_models.VLP16DiscretePolicy
+    unnormalized_log_prob: True
+
+  value:
+    class: vlp16_models.VLP16Value
+    clip_actions: False
+
+# ==============================================================================
+# 經驗回放
+# ==============================================================================
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+# ==============================================================================
+# PPO Agent 配置
+# ==============================================================================
+agent:
+  class: PPO
+
+  rollouts: 128
+
+  learning_epochs: 8
+
+  mini_batches: 8
+
+  # 0.99→0.98: 縮小 value 量級，減少 Critic overshoot（+34→真值+15 問題）
+  discount_factor: 0.98
+
+  lambda: 0.95
+
+  # 3e-4→1e-4: 減緩 Critic 暴漲速度（grad_v 曾達 1434）
+  learning_rate: !!float 1e-4
+
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.016
+
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+
+  # Fix 4: 啟用 Value preprocessor 穩定 value estimation
+  # 防止 reward scale 變化導致 Critic 估值不穩定
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+
+  random_timesteps: 0
+  learning_starts: 0
+
+  grad_norm_clip: 1.0
+
+  ratio_clip: 0.2
+
+  value_clip: 0.2
+  # False→True: 限制 Critic 每次更新幅度，防止 v_pred 從 -8 暴漲到 +34
+  clip_predicted_values: True
+
+  # 361 離散動作 (19×19)：H_max = ln(361) ≈ 5.89
+  # 0.01 足夠驅動探索，避免 entropy 壓制 policy gradient
+  entropy_loss_scale: 0.01
+
+  # 1.0→0.5: 減緩 Critic 更新，避免 value gradient（峰值 1434）壓制 policy gradient
+  value_loss_scale: 0.5
+
+  kl_threshold: 0.0
+
+  rewards_shaper_scale: 1.0
+
+  time_limit_bootstrap: True
+
+  experiment:
+    directory: "charge_vlp16"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+# ==============================================================================
+# 訓練器配置
+# ==============================================================================
+trainer:
+  class: SequentialTrainer
+
+  # 256 envs × 234375 timesteps = 60M env steps
+  timesteps: 234375
+
+  environment_info: log
+
+# ==============================================================================
+# 配置總結
+# ==============================================================================
+#
+# | 參數 | 值 | 說明 |
+# |------|-----------|------|
+# | 控制頻率 | 5Hz (dt=0.2s) | 真實世界部署匹配 |
+# | Actor 輸入 | 139 維 | ego(4) + goal(2) + LiDAR(72) + obs(60) + time(1) |
+# | Critic 輸入 | 139 維 | 與 Policy 相同（v2 無特權資訊）|
+# | 動作空間 | Discrete(361) | 19×19 中心對稱離散動作 |
+# | Feature Extractor | VLP16FeatureExtractor | Conv1d(64D) + ObsMLP(32D) + StateMLP(32D) = 128D |
+# | 學習率 | 1e-4 | KL Adaptive 調度 |
+# | 熵係數 | 0.01 | 離散空間需更高探索 |
