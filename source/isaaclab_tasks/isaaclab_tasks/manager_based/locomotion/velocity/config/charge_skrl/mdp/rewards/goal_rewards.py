@@ -349,17 +349,15 @@ def reaching_goal(
     distance = torch.nan_to_num(distance, nan=100.0, posinf=100.0, neginf=0.0)
     distance = torch.clamp(distance, 0.0, 100.0)
 
-    # [診斷] 前 5 次呼叫印出（確認目標判定是否正常）
+    # 啟動診斷（僅前 5 步）
     if _reaching_diag_count < 5:
         _reaching_diag_count += 1
         reached = (distance < threshold).sum().item()
         print(
-            f"[診斷 到達目標 #{_reaching_diag_count}] "
-            f"判定閾值={threshold}, 車體半徑={body_radius}, "
-            f"env[0]距離={distance[0].item():.3f}, "
-            f"全局最近={distance.min().item():.3f}, "
-            f"平均距離={distance.mean().item():.3f}, "
-            f"到達數={reached}/{distance.shape[0]}",
+            f"[目標到達 #{_reaching_diag_count}] "
+            f"到達門檻={threshold:.2f}m 扣除半徑={body_radius:.2f}m | "
+            f"距離 — 第0環境={distance[0].item():.3f} 最近={distance.min().item():.3f} 平均={distance.mean().item():.3f} | "
+            f"已到達={reached}/{distance.shape[0]}環境",
             flush=True,
         )
 
@@ -500,17 +498,13 @@ def heading_to_goal(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.
     # cos(90°) = 0.0（側對）
     # cos(180°) = -1.0（背對）
 
-    # [診斷] 前 5 次呼叫印出（確認朝向獎勵計算是否正常）
+    # 啟動診斷（僅前 5 步）
     if _heading_diag_count < 5:
         _heading_diag_count += 1
         print(
-            f"[診斷 朝向目標 #{_heading_diag_count}] "
-            f"目標位置[0]={goal_pos_w[0].tolist()}, "
-            f"機器人位置[0]={robot_pos_w[0].tolist()}, "
-            f"目標距離[0]={goal_distance[0].item():.3f}, "
-            f"朝向餘弦[0]={heading_reward[0].item():.4f}, "
-            f"全局平均={heading_reward.mean().item():.4f}, "
-            f"使用局部目標={hasattr(env, '_local_goal_world')}",
+            f"[朝向獎勵 #{_heading_diag_count}] "
+            f"目標距離={goal_distance[0].item():.3f}m 朝向餘弦={heading_reward[0].item():.4f} | "
+            f"全環境平均={heading_reward.mean().item():.4f}",
             flush=True,
         )
 

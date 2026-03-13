@@ -1,7 +1,7 @@
 """
-VLP-16 v2 Network Models for Charge Navigation (SKRL).
+VLP-16 v3 Network Models for Charge Navigation (SKRL).
 
-v2 觀測空間 (139D Policy / 139D Critic) 三分支特徵萃取網路。
+v3 觀測空間 (139D Policy / 139D Critic) 三分支特徵萃取網路。
 單幀 observation，無 frame stacking。
 
 Architecture:
@@ -20,18 +20,19 @@ Architecture:
   [78:138] obs: Top-10 obstacles × 6D             60D
   [138]    time: remaining ratio                   1D
 
-動作空間: Discrete(361) = 19×19 中心對稱 + 動態加速度邊界
-  NN 輸出單一離散索引 action_index ∈ [0, 360]
-  經 divmod 拆為 accel_idx (0~18) × omega_idx (0~18)
+動作空間: MultiDiscrete([19, 19]) — 線加速度 × 角速度，獨立採樣
+  NN 輸出 38 個 logits（19+19），兩組獨立 Categorical
+  v3 變更：從 Discrete(361) 降維至 MultiDiscrete，解決維度詛咒
 """
 
 from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-from gymnasium.spaces import Discrete
+import numpy as np
+from gymnasium.spaces import MultiDiscrete
 
-from skrl.models.torch import Model, DeterministicMixin, CategoricalMixin
+from skrl.models.torch import Model, DeterministicMixin, MultiCategoricalMixin
 
 
 # ============================================================================
@@ -66,9 +67,9 @@ STATE_DIM = EGO_DIM + GOAL_DIM + TIME_DIM  # 7D (non-LiDAR, non-obstacle)
 POLICY_DIM = 139
 CRITIC_DIM = 139       # v2: symmetric critic (no privileged info yet)
 
-# Action space constants — 19×19 = 361 flat discrete
+# Action space constants — MultiDiscrete([19, 19])
 NUM_BINS = 19
-TOTAL_ACTIONS = NUM_BINS ** 2  # 361
+TOTAL_LOGITS = NUM_BINS * 2  # 38 (19 + 19, NOT 19² = 361)
 
 
 # ============================================================================
@@ -165,17 +166,22 @@ class VLP16FeatureExtractor(nn.Module):
 
 
 # ============================================================================
-# SKRL Discrete Policy (Actor) — Discrete(361) = 19×19
+# SKRL MultiDiscrete Policy (Actor) — MultiDiscrete([19, 19])
 # ============================================================================
 
-class VLP16DiscretePolicy(CategoricalMixin, Model):
-    """v2 Categorical policy for flat discrete action space.
+class VLP16DiscretePolicy(MultiCategoricalMixin, Model):
+    """v3 MultiCategorical policy — two independent categorical heads.
 
     Input:  139D flat observation
-    Output: 361-dim logits (19 accel × 19 omega, flat index)
+    Output: 38-dim logits (19 accel + 19 omega, independent)
+
+    v3 變更：Discrete(361) → MultiDiscrete([19, 19])
+      - 解決維度詛咒：38 logits vs 361 logits
+      - 兩組獨立 Categorical 分佈，各自採樣
+      - 最大熵 = ln(19) + ln(19) ≈ 5.89 ≈ ln(361)（不變）
 
     Architecture:
-      VLP16FeatureExtractor → 128D → Linear(128,128) → ReLU → Linear(128,361)
+      VLP16FeatureExtractor → 128D → Linear(128,128) → ReLU → Linear(128,38)
     """
 
     def __init__(
@@ -187,15 +193,15 @@ class VLP16DiscretePolicy(CategoricalMixin, Model):
         role: str = "",
         **kwargs,
     ):
-        discrete_action_space = Discrete(TOTAL_ACTIONS)
-        Model.__init__(self, observation_space, discrete_action_space, device)
-        CategoricalMixin.__init__(self, unnormalized_log_prob, role)
+        multi_discrete_space = MultiDiscrete(np.array([NUM_BINS, NUM_BINS]))
+        Model.__init__(self, observation_space, multi_discrete_space, device)
+        MultiCategoricalMixin.__init__(self, unnormalized_log_prob, reduction="sum", role=role)
 
         self.extractor = VLP16FeatureExtractor()
         self.head = nn.Sequential(
             nn.Linear(self.extractor.output_dim, 128),   # 128 → 128
             nn.ReLU(),
-            nn.Linear(128, TOTAL_ACTIONS),                # 128 → 361
+            nn.Linear(128, TOTAL_LOGITS),                 # 128 → 38 (19+19)
         )
 
     def compute(self, inputs, role=""):
@@ -282,5 +288,5 @@ __all__ = [
     "POLICY_DIM",
     "CRITIC_DIM",
     "NUM_BINS",
-    "TOTAL_ACTIONS",
+    "TOTAL_LOGITS",
 ]

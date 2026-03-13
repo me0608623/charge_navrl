@@ -3,30 +3,25 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-VLP-16 離散動作環境配置（SKRL 版本）
+VLP-16 v3 環境配置（SKRL 版本）— 突破 50% 成功率瓶頸
 
 核心架構：
 - Velodyne VLP-16 16 線 LiDAR（16ch x 360 horizontal, max 20m）
-- 離散動作：Discrete(361) = 19×19 中心對稱 + 動態加速度邊界
+- v3 動作：MultiDiscrete([19, 19]) — 兩組獨立 Categorical，解決維度詛咒
   v_max=1.0 m/s, a_max=0.5 m/s², ω_max=0.25π rad/s
-- v2 觀測設計 (139D):
+- 觀測設計 (139D):
   * Policy: 139D = ego(4) + goal(2) + static(72) + obs(60) + time(1)
   * Critic: 139D（與 Policy 相同，暫不加特權資訊）
 
 場景：16x16m 迷宮，6 面內部牆壁，10 個障礙物
 Episode: 45 秒，decimation=20（env dt = 0.2s）
 
-Fix 2: physics_explosion 終止條件
-Fix 3: velocity_too_low_penalty 獎勵
-
-獎勵設計（從 env.yaml 提取的精確值）：
-- reaching_goal: +250
-- collision_terminal: -25
-- potential_progress: +100
-- time_penalty: -0.5
-- acceleration_penalty: -0.25
-- angular_velocity_penalty: -0.25
-- velocity_too_low_penalty: -0.5 (Fix 3)
+v3 變更：
+- collision_terminal: -80 → -200（碰撞期望值大幅降低）
+- near_obstacle_penalty: 線性 → 指數型排斥力 -5.0（明確斥力梯度）
+- COLLISION_THRESHOLD: 0.7m → 0.45m（釋放窄道可行駛空間）
+- 動作空間：Discrete(361) → MultiDiscrete([19, 19])
+- γ: 0.98 → 0.995（有效視野 50→200 步）
 """
 
 import math
@@ -78,6 +73,7 @@ from ..mdp.rewards import (
 from ..mdp.rewards.potential_based_rewards import (
     potential_progress_reward,
     near_obstacle_penalty,
+    exponential_obstacle_penalty,
     collision_terminal_penalty,
     per_step_time_penalty,
     discrete_acceleration_squared_penalty,
@@ -112,8 +108,8 @@ from ..mdp.events.state import set_obstacle_metadata
 # ============================================================================
 ROBOT_BODY_RADIUS = 0.35  # 實際機器人半徑 [m]
 GOAL_REACH_THRESHOLD = ROBOT_BODY_RADIUS
-COLLISION_BUFFER = 0.35  # 安全裕量：防止物理穿透導致 Warp CUDA error [m]
-COLLISION_THRESHOLD = ROBOT_BODY_RADIUS + COLLISION_BUFFER  # 0.7m
+COLLISION_BUFFER = 0.10  # 安全裕量：縮減以釋放窄道可行駛空間 [m]
+COLLISION_THRESHOLD = round(ROBOT_BODY_RADIUS + COLLISION_BUFFER, 2)  # 0.45m
 MAX_OBSTACLES = 10
 
 
@@ -517,20 +513,25 @@ class ObservationsCfgVLP16:
 # ============================================================================
 @configclass
 class RewardsCfgVLP16:
-    """VLP-16 獎勵配置 — 安全導航版
+    """VLP-16 獎勵配置 — 安全導航 v3（強化避障）
 
-    ┌───────────────────────┬──────────┬────────────────────────┐
-    │ Term                  │ Weight   │ 類別                   │
-    ├───────────────────────┼──────────┼────────────────────────┤
-    │ reaching_goal         │ +250     │ 成功                   │
-    │ potential_progress    │ +60      │ 前進                   │
-    │ near_obstacle_penalty │ -1.0     │ 安全（連續近障礙懲罰） │
-    │ collision_terminal    │ -80      │ 安全（碰撞終止懲罰）   │
-    │ time_penalty          │ -0.3     │ 防呆                   │
-    │ velocity_too_low      │ -0.3     │ 防呆                   │
-    │ acceleration_penalty  │ -0.15    │ 平滑                   │
-    │ angular_vel_penalty   │ -0.15    │ 平滑                   │
-    └───────────────────────┴──────────┴────────────────────────┘
+    v3 變更（突破 50% 成功率瓶頸）：
+    - collision_terminal: -80 → -200（碰撞期望值大幅降低，迫使繞路）
+    - near_obstacle_penalty: 線性 → 指數型排斥力（靠近牆壁時感受明確斥力梯度）
+    - COLLISION_THRESHOLD: 0.7m → 0.45m（釋放窄道可行駛空間）
+
+    ┌───────────────────────────────┬──────────┬────────────────────────┐
+    │ Term                          │ Weight   │ 類別                   │
+    ├───────────────────────────────┼──────────┼────────────────────────┤
+    │ reaching_goal                 │ +250     │ 成功                   │
+    │ potential_progress            │ +60      │ 前進                   │
+    │ exponential_obstacle_penalty  │ -5.0     │ 安全（指數型排斥力）   │
+    │ collision_terminal            │ -200     │ 安全（碰撞終止懲罰）   │
+    │ time_penalty                  │ -0.3     │ 防呆                   │
+    │ velocity_too_low              │ -0.3     │ 防呆                   │
+    │ acceleration_penalty          │ -0.15    │ 平滑                   │
+    │ angular_vel_penalty           │ -0.15    │ 平滑                   │
+    └───────────────────────────────┴──────────┴────────────────────────┘
     """
 
     # 成功：到達目標
@@ -547,18 +548,18 @@ class RewardsCfgVLP16:
         weight=60.0,
     )
 
-    # 安全：連續近障礙懲罰（d_min < 1.2m 時線性增加）
+    # 安全：指數型排斥力（d_min < 1.0m 時指數增加，靠近時極大懲罰）
     near_obstacle_penalty = RewTerm(
-        func=near_obstacle_penalty,
-        params={"sensor_cfg": SceneEntityCfg("lidar"), "safe_distance": 1.2, "alpha": 4.0},
-        weight=-1.0,
+        func=exponential_obstacle_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "safe_distance": 1.0, "steepness": 6.0},
+        weight=-5.0,
     )
 
-    # 安全：碰撞終止懲罰（LiDAR）
+    # 安全：碰撞終止懲罰（LiDAR）— v3 加重至 -200
     collision_terminal = RewTerm(
         func=collision_terminal_penalty,
         params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
-        weight=-80.0,
+        weight=-200.0,
     )
 
     # 防呆：時間懲罰

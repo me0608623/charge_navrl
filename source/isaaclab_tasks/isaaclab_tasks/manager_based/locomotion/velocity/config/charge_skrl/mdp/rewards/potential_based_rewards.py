@@ -17,6 +17,7 @@ References:
 
 from __future__ import annotations
 
+import math
 import torch
 from typing import TYPE_CHECKING
 
@@ -142,6 +143,42 @@ def near_obstacle_penalty(
     return penalty
 
 
+def exponential_obstacle_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    safe_distance: float = 1.0,
+    steepness: float = 6.0,
+) -> torch.Tensor:
+    """Exponential repulsive penalty — strong gradient near obstacles.
+
+    Math:
+        d_min = min(LiDAR readings) per env
+        if d_min >= safe_distance:  penalty = 0
+        else:
+            x = (safe_distance - d_min) / safe_distance   ∈ [0, 1]
+            penalty = (exp(steepness * x) - 1) / (exp(steepness) - 1)
+
+    Properties:
+        - Exponential ramp: mild penalty at edge of safety zone, extreme near collision
+        - Returns [0, 1]: weight should be NEGATIVE (e.g., -5.0)
+        - steepness=6: at d_min=0 → penalty=1.0, at d_min=0.5*safe → penalty≈0.05
+        - Provides strong gradient signal for the agent to stay centered in corridors
+
+    Returns:
+        [num_envs] in [0, 1].
+    """
+    d_min = _get_lidar_min_distance(env, sensor_cfg)  # [num_envs]
+
+    # Normalized penetration into safety zone: 0 at edge, 1 at d_min=0
+    x = ((safe_distance - d_min) / safe_distance).clamp(0.0, 1.0)
+
+    # Exponential ramp normalized to [0, 1]
+    exp_norm = 1.0 / (math.exp(steepness) - 1.0)
+    penalty = (torch.exp(steepness * x) - 1.0) * exp_norm
+
+    return penalty
+
+
 def smooth_collision_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
@@ -197,18 +234,15 @@ def collision_terminal_penalty(
     global _collision_diag_count
     d_min = _get_lidar_min_distance(env, sensor_cfg)  # [num_envs]
 
-    # [診斷] 前 5 次呼叫印出（確認碰撞偵測是否正常）
+    # 啟動診斷（僅前 5 步）
     if _collision_diag_count < 5:
         _collision_diag_count += 1
         colliding = (d_min <= threshold).sum().item()
         print(
-            f"[診斷 碰撞判定 #{_collision_diag_count}] "
-            f"碰撞閾值={threshold}, "
-            f"env[0]最近距離={d_min[0].item():.3f}, "
-            f"全局最近={d_min.min().item():.3f}, "
-            f"平均最近={d_min.mean().item():.3f}, "
-            f"碰撞中={colliding}/{d_min.shape[0]}, "
-            f"感測器={sensor_cfg.name}",
+            f"[碰撞偵測 #{_collision_diag_count}] "
+            f"碰撞門檻={threshold:.2f}m | "
+            f"最近障礙物距離 — 第0環境={d_min[0].item():.3f} 最近={d_min.min().item():.3f} 平均={d_min.mean().item():.3f} | "
+            f"碰撞中={colliding}/{d_min.shape[0]}環境",
             flush=True,
         )
 
@@ -352,10 +386,13 @@ def velocity_too_low_penalty(
 
 __all__ = [
     "potential_progress_reward",
+    "near_obstacle_penalty",
+    "exponential_obstacle_penalty",
     "smooth_collision_penalty",
     "collision_terminal_penalty",
     "per_step_time_penalty",
     "acceleration_squared_penalty",
+    "discrete_acceleration_squared_penalty",
     "angular_velocity_squared_penalty",
     "velocity_too_low_penalty",
 ]

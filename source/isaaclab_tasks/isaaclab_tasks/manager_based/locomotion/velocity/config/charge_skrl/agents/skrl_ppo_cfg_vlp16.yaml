@@ -1,10 +1,10 @@
 # ==============================================================================
-# SKRL PPO 配置 - VLP-16 v2: 離散動作空間 + 139D 觀測
+# SKRL PPO 配置 - VLP-16 v3: MultiDiscrete 動作空間 + 139D 觀測
 # ==============================================================================
-# v2 baseline 架構
-#   - Policy (Actor): 139 維觀測 → VLP16DiscretePolicy → 361 logits
+# v3 架構（突破 50% 成功率瓶頸）
+#   - Policy (Actor): 139 維觀測 → VLP16DiscretePolicy → 38 logits (19+19)
 #   - Critic: 139 維觀測（與 Policy 相同）→ VLP16Value → scalar
-# 動作空間: Discrete(361) — 19×19 中心對稱 + 動態加速度邊界
+# 動作空間: MultiDiscrete([19, 19]) — 兩組獨立 Categorical
 # 控制頻率: 5Hz (dt=0.2s, decimation=20, sim.dt=0.01)
 # ==============================================================================
 
@@ -43,17 +43,24 @@ agent:
 
   mini_batches: 8
 
-  # 0.99→0.98: 縮小 value 量級，減少 Critic overshoot（+34→真值+15 問題）
-  discount_factor: 0.98
+  # v3: 0.98→0.995 — 有效視野 50→200 步，匹配 episode 長度 225 步
+  # 讓 Agent 看到繞路後的遠期目標獎勵，而非只看眼前的牆
+  discount_factor: 0.995
 
   lambda: 0.95
 
-  # 3e-4→1e-4: 減緩 Critic 暴漲速度（grad_v 曾達 1434）
+  # v4: 保守 KL Adaptive — LR 限制在 5e-5 ~ 3e-4
+  # v3 的 kl_threshold=0.016 + 預設 max_lr=1e-2 導致 LR 飆到 0.01（100× 初始值）
+  # 修正：kl_threshold 回到 skrl 預設 0.008，max_lr 壓到 3e-4
   learning_rate: !!float 1e-4
 
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.016
+    kl_threshold: 0.008
+    min_lr: !!float 5e-5
+    max_lr: !!float 3e-4
+    kl_factor: 2.0
+    lr_factor: 1.5
 
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
@@ -74,7 +81,7 @@ agent:
   # False→True: 限制 Critic 每次更新幅度，防止 v_pred 從 -8 暴漲到 +34
   clip_predicted_values: True
 
-  # 361 離散動作 (19×19)：H_max = ln(361) ≈ 5.89
+  # MultiDiscrete([19,19])：H_max = ln(19)+ln(19) ≈ 5.89
   # 0.01 足夠驅動探索，避免 entropy 壓制 policy gradient
   entropy_loss_scale: 0.01
 
@@ -113,7 +120,7 @@ trainer:
 # | 控制頻率 | 5Hz (dt=0.2s) | 真實世界部署匹配 |
 # | Actor 輸入 | 139 維 | ego(4) + goal(2) + LiDAR(72) + obs(60) + time(1) |
 # | Critic 輸入 | 139 維 | 與 Policy 相同（v2 無特權資訊）|
-# | 動作空間 | Discrete(361) | 19×19 中心對稱離散動作 |
+# | 動作空間 | MultiDiscrete([19,19]) | 兩組獨立 Categorical（v3）|
 # | Feature Extractor | VLP16FeatureExtractor | Conv1d(64D) + ObsMLP(32D) + StateMLP(32D) = 128D |
-# | 學習率 | 1e-4 | KL Adaptive 調度 |
+# | 學習率 | 1e-4 (5e-5~3e-4) | KL Adaptive 調度 (v4: 收緊範圍) |
 # | 熵係數 | 0.01 | 離散空間需更高探索 |

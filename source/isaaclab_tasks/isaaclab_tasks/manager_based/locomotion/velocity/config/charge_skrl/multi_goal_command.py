@@ -108,20 +108,56 @@ class MultiGoalCommand(GoalCommand):
         return {}
 
     def _resample_command(self, env_ids: Sequence[int]):
-        """為指定環境生成 num_goals 個新目標。"""
+        """為指定環境生成 num_goals 個新目標。
+
+        每個目標與已生成的所有其他目標之間距離 >= min_goal_spacing。
+        如果多次重試仍無法滿足，保留最後一次生成的位置。
+        """
         if len(env_ids) == 0:
             return
 
         if isinstance(env_ids, torch.Tensor):
-            env_ids_t = env_ids
+            all_env_ids = env_ids.detach().clone().to(device=self.device, dtype=torch.long)
         else:
-            env_ids_t = torch.tensor(env_ids, device=self.device, dtype=torch.long)
+            all_env_ids = torch.tensor(env_ids, device=self.device, dtype=torch.long)
+
+        min_spacing = self.cfg.min_goal_spacing
+        max_retries = 20
 
         for i in range(self.cfg.num_goals):
-            # 調用父類生成 1 個目標（會更新 self.goal_pos_w[env_ids]）
-            super()._resample_command(env_ids)
-            # 保存到多目標緩存
-            self.all_goals_pos_w[env_ids_t, i] = self.goal_pos_w[env_ids_t].clone()
+            # 第 0 個目標不需要檢查間距
+            if i == 0:
+                super()._resample_command(all_env_ids.tolist())
+                self.all_goals_pos_w[all_env_ids, i] = self.goal_pos_w[all_env_ids].clone()
+                continue
+
+            # 需要重試的 env 索引（從全部開始）
+            pending = all_env_ids.clone()
+
+            for _retry in range(max_retries):
+                if pending.numel() == 0:
+                    break
+
+                # 為 pending envs 生成候選目標
+                super()._resample_command(pending.tolist())
+
+                # 檢查候選目標與前 i 個目標的最小距離
+                candidate_xy = self.goal_pos_w[pending, :2]  # [P, 2]
+                prev_xy = self.all_goals_pos_w[pending, :i, :2]  # [P, i, 2]
+                dists = torch.norm(prev_xy - candidate_xy.unsqueeze(1), dim=2)  # [P, i]
+                ok_mask = (dists >= min_spacing).all(dim=1)  # [P]
+
+                # 保存合格的
+                ok_envs = pending[ok_mask]
+                if ok_envs.numel() > 0:
+                    self.all_goals_pos_w[ok_envs, i] = self.goal_pos_w[ok_envs].clone()
+
+                # 縮小 pending 到仍不合格的 env
+                pending = pending[~ok_mask]
+
+            # 超過重試次數：保留最後一次生成的位置（雖然間距不足）
+            if pending.numel() > 0:
+                self.all_goals_pos_w[pending, i] = self.goal_pos_w[pending].clone()
 
         # goal_pos_w 保留最後一個目標（不影響下游，因 command 屬性回傳最近目標）
 
@@ -167,8 +203,11 @@ class MultiGoalCommandCfg(GoalCommandCfg):
 
     Attributes:
         num_goals: 同時存在的目標數量（預設 10）
+        min_goal_spacing: 任意兩個目標之間的最小距離（米，預設 2.0）
     """
 
     class_type: type = MultiGoalCommand
 
     num_goals: int = 10
+
+    min_goal_spacing: float = 2.0

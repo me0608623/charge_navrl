@@ -7,36 +7,38 @@ Custom IsaacLab wrapper for Asymmetric Actor-Critic (AAC) architecture.
 
 This wrapper extends the standard IsaacLab wrapper to properly support:
 - shared_states (critic observations) for single-agent training
-- Optional frame stacking (disabled in v2 baseline: num_stack=1)
+- Optional frame stacking (current VLP16 config uses num_stack=1)
 
-v2 baseline (79D):
-- Policy: 79D single-frame observation
-- Critic: 79D (same as policy, no privileged info)
-- Reset Handling: Properly clears history ghost for reset environments
+Current VLP16 AC config (139D, symmetric):
+- Policy obs:  139D = ego(4) + goal(2) + LiDAR(72) + obstacles(60) + time(1)
+- Critic obs:  139D (same as policy, no privileged info)
+- privileged_dim = 0 (symmetric actor-critic)
+- num_stack = 1 (no frame stacking)
 """
 
 from typing import Any, Tuple
 
 import gymnasium
+import numpy as np
 import torch
-from gymnasium.spaces import Box
+from gymnasium.spaces import Box, MultiDiscrete
 
 from skrl.envs.wrappers.torch import Wrapper
 from skrl.utils.spaces.torch import flatten_tensorized_space, tensorize_space, unflatten_tensorized_space
 
 
 class AACIsaacLabWrapper(Wrapper):
-    """Isaac Lab environment wrapper for AAC (Asymmetric Actor-Critic) with Frame Stacking.
+    """Isaac Lab environment wrapper for AAC (Asymmetric Actor-Critic).
 
-    Frame Stacking Architecture:
-    - Original Actor observation: 81 dim
-    - Stacked Actor observation: 81 * 3 = 243 dim (3 frames)
-    - Critic observation: 243 + 50 (privileged obstacles) = 293 dim
+    Supports optional frame stacking and privileged critic observations.
+    With num_stack=1 and privileged_dim=0 (current VLP16 config), both
+    actor and critic receive the same 139D observation.
 
     The wrapper:
-    - Maintains a rolling buffer of past observations
-    - Uses observations["policy"] for the actor (stacked, 243-dim)
-    - Provides observations["critic"] as shared_states for the critic (293-dim)
+    - Maintains a rolling buffer of past observations (when num_stack > 1)
+    - Uses observations["policy"] for the actor
+    - Provides observations["critic"] as shared_states for the critic
+    - Clamps observations and replaces NaN to protect RunningStandardScaler
 
     Important: Reset handling clears history for environments that have been reset.
     """
@@ -53,7 +55,7 @@ class AACIsaacLabWrapper(Wrapper):
         self.num_stack = num_stack
         self._device = env.device if hasattr(env, 'device') else torch.device('cuda')
 
-        # Track privileged info dimension (0 in v2 baseline)
+        # Privileged info dimension for critic (0 = symmetric actor-critic)
         self.privileged_dim = 0
 
         # Cache the original observation and state spaces from unwrapped environment
@@ -66,7 +68,7 @@ class AACIsaacLabWrapper(Wrapper):
         self._states = None  # Shared states (critic observations)
         self._info = {}
 
-        # Frame stacking buffer: [num_envs, stacked_obs_dim]
+        # Frame stacking buffer: [num_envs, obs_dim * num_stack]
         self.stacked_obs = None
 
         # Create modified observation and state spaces for SKRL
@@ -87,11 +89,7 @@ class AACIsaacLabWrapper(Wrapper):
             AACIsaacLabWrapper._debug_printed = True
 
     def _get_original_observation_space(self) -> gymnasium.Space:
-        """Get the original observation space from the unwrapped environment.
-
-        Returns:
-            The original policy observation space (81-dim Box)
-        """
+        """Get the original observation space from the unwrapped environment."""
         # First try: single_observation_space
         if hasattr(self._unwrapped, 'single_observation_space'):
             single_obs = self._unwrapped.single_observation_space
@@ -112,42 +110,34 @@ class AACIsaacLabWrapper(Wrapper):
         return self._unwrapped.observation_space
 
     def _get_original_state_space(self) -> gymnasium.Space:
-        """Get the original state space from the unwrapped environment.
-
-        Returns:
-            The original critic observation space (131-dim Box)
-        """
+        """Get the original state space from the unwrapped environment."""
         # First try: single_observation_space (for vectorized environments)
         if hasattr(self._unwrapped, 'single_observation_space'):
             single_obs = self._unwrapped.single_observation_space
-            # Try .spaces attribute (for gym.spaces.Dict)
             if hasattr(single_obs, 'spaces') and 'critic' in single_obs.spaces:
                 return single_obs.spaces['critic']
 
         # Second try: observation_space (for non-vectorized environments)
         if hasattr(self._unwrapped, 'observation_space'):
             obs = self._unwrapped.observation_space
-            # Try .spaces attribute
             if hasattr(obs, 'spaces') and 'critic' in obs.spaces:
                 return obs.spaces['critic']
 
-        # Fallback: return policy observation space (this makes it symmetric, not AAC)
+        # Fallback: return policy observation space (symmetric actor-critic)
         return self._get_original_observation_space()
 
     def _create_modified_spaces(self) -> None:
         """Create modified observation and state spaces with correct dimensions.
 
         This is crucial for SKRL to initialize preprocessors with correct sizes:
-        - observation_space: 81 -> 243 (frame stacking)
-        - state_space: 131 -> 293 (frame stacking + privileged)
+        - observation_space: obs_dim * num_stack
+        - state_space: obs_dim * num_stack + privileged_dim
         """
         import numpy as np
 
-        # Get original observation space (should be Box with shape (81,))
         orig_obs = self._original_observation_space
 
         if orig_obs is not None and hasattr(orig_obs, 'shape') and hasattr(orig_obs, 'low'):
-            # Create modified observation space: 81 -> 81 * num_stack = 243
             orig_dim = orig_obs.shape[0]
             stacked_dim = orig_dim * self.num_stack
 
@@ -166,12 +156,10 @@ class AACIsaacLabWrapper(Wrapper):
             self._modified_observation_space = orig_obs
 
         # Create modified state space for critic (stacked obs + privileged)
-        # For AAC, the state space should be: 243 (stacked) + 50 (privileged) = 293
         if self._modified_observation_space is not None:
             stacked_dim = self._modified_observation_space.shape[0]
             state_dim = stacked_dim + self.privileged_dim
 
-            # Use reasonable bounds for privileged info
             state_low = np.concatenate([
                 self._modified_observation_space.low,
                 np.full(self.privileged_dim, -np.inf, dtype=self._modified_observation_space.dtype)
@@ -192,11 +180,7 @@ class AACIsaacLabWrapper(Wrapper):
 
     @property
     def state_space(self) -> gymnasium.Space:
-        """Get the state space (critic observations) with correct dimensions.
-
-        Returns:
-            The state space for privileged information (293-dim Box)
-        """
+        """Get the state space (critic observations) with correct dimensions."""
         if self._modified_state_space is not None:
             return self._modified_state_space
 
@@ -215,11 +199,7 @@ class AACIsaacLabWrapper(Wrapper):
 
     @property
     def observation_space(self) -> gymnasium.Space:
-        """Get the observation space (policy observations) with correct dimensions.
-
-        Returns:
-            The observation space for the actor (243-dim Box)
-        """
+        """Get the observation space (policy observations) with correct dimensions."""
         if self._modified_observation_space is not None:
             return self._modified_observation_space
 
@@ -244,20 +224,34 @@ class AACIsaacLabWrapper(Wrapper):
     def action_space(self) -> gymnasium.Space:
         """Get the action space.
 
-        Returns:
-            The action space
+        Override to return MultiDiscrete([19, 19]) for the discrete differential
+        drive action term. Isaac Lab's action manager creates Box(2) from action_dim=2,
+        but SKRL needs the correct discrete space type for MultiCategoricalMixin.
         """
-        try:
-            return self._unwrapped.single_action_space
-        except AttributeError:
-            return self._unwrapped.action_space
+        if not hasattr(self, '_cached_action_space'):
+            try:
+                raw_space = self._unwrapped.single_action_space
+            except AttributeError:
+                raw_space = self._unwrapped.action_space
+
+            # Detect discrete action term and override to MultiDiscrete
+            if hasattr(raw_space, 'shape') and raw_space.shape == (2,):
+                # Check if it's our discrete differential drive (action_dim=2)
+                try:
+                    env = self._unwrapped
+                    action_term = list(env.action_manager._terms.values())[0]
+                    if hasattr(action_term, 'cfg') and hasattr(action_term.cfg, 'num_bins'):
+                        n = action_term.cfg.num_bins
+                        self._cached_action_space = MultiDiscrete(np.array([n, n]))
+                        print(f"[AAC_WRAPPER] Action space: MultiDiscrete([{n}, {n}])")
+                        return self._cached_action_space
+                except Exception:
+                    pass
+            self._cached_action_space = raw_space
+        return self._cached_action_space
 
     def state(self) -> torch.Tensor:
-        """Get the privileged observations (states) for the critic.
-
-        Returns:
-            Flattened state tensor for critic observations
-        """
+        """Get the privileged observations (states) for the critic."""
         return self._states
 
     def _init_stacked_obs(self, initial_obs: torch.Tensor) -> None:
@@ -302,12 +296,12 @@ class AACIsaacLabWrapper(Wrapper):
                 self.stacked_obs[reset_indices] = new_obs[reset_indices].repeat(1, self.num_stack)
 
     # ========================================================================
-    # Fix 1: Observation Clamping — 防止物理爆炸毒化 RunningStandardScaler
+    # Observation Clamping — prevent physics explosion from poisoning scaler
     # ========================================================================
-    # 物理引擎偶爾會產生極端值（如 lin_vel=107,546），一次就能永久毒化
-    # RunningStandardScaler 的 running_mean/running_var，導致後續所有觀測
-    # 被錯誤歸一化。在 wrapper 層面 clamp 觀測值是最安全的防線。
-    OBS_CLAMP_RANGE = 100.0  # 合理觀測範圍上限
+    # Physics engine occasionally produces extreme values (e.g. lin_vel=107,546).
+    # A single extreme value can permanently corrupt RunningStandardScaler's
+    # running_mean/running_var. Clamping at the wrapper level is the safest defense.
+    OBS_CLAMP_RANGE = 100.0
 
     def _clamp_observations(self, obs: torch.Tensor) -> torch.Tensor:
         """Clamp observations to prevent physics explosion from poisoning scaler.
@@ -330,23 +324,21 @@ class AACIsaacLabWrapper(Wrapper):
 
         Returns:
             Tuple of (observations, rewards, terminated, truncated, info)
-            - observations: Stacked observations [num_envs, 243]
-            - info["shared_states"]: Stacked obs + privileged info [num_envs, 293]
+            - observations: [num_envs, obs_dim * num_stack]
+            - info["shared_states"]: [num_envs, obs_dim * num_stack + privileged_dim]
         """
         actions = unflatten_tensorized_space(self.action_space, actions)
         observations, reward, terminated, truncated, self._info = self._env.step(actions)
 
-        # Extract policy observations for actor (81-dim)
-        # IsaacLab environment returns torch tensors directly, just flatten them
+        # Extract policy observations for actor
         new_actor_obs = flatten_tensorized_space(observations["policy"])
-        new_actor_obs = self._clamp_observations(new_actor_obs)  # Fix 1: clamp
+        new_actor_obs = self._clamp_observations(new_actor_obs)
 
-        # Extract critic observations for value function (privileged, 131-dim)
+        # Extract critic observations (may contain privileged info)
         if "critic" in observations:
             privileged_info = flatten_tensorized_space(observations["critic"])
-            privileged_info = self._clamp_observations(privileged_info)  # Fix 1: clamp
+            privileged_info = self._clamp_observations(privileged_info)
         else:
-            # Fall back to policy observations if critic not available
             privileged_info = new_actor_obs
 
         # Initialize stacked buffer on first step
@@ -354,7 +346,6 @@ class AACIsaacLabWrapper(Wrapper):
             self._init_stacked_obs(new_actor_obs)
 
         # Update stacked buffer with new observations
-        # Create reset mask from terminated and truncated
         reset_mask = (terminated.view(-1) | truncated.view(-1))
         self._update_stacked_obs(new_actor_obs, reset_mask)
 
@@ -362,26 +353,21 @@ class AACIsaacLabWrapper(Wrapper):
         self._observations = self.stacked_obs.clone()
 
         # Prepare shared_states for Critic: stacked obs + privileged info
-        # Extract only the obstacle state (last 50 dims) from privileged_info
-        # Assuming privileged_info = [base_obs(81), obstacle_state(50)]
         if privileged_info.shape[-1] > new_actor_obs.shape[-1]:
             obstacle_state = privileged_info[:, -self.privileged_dim:]
         else:
-            # No separate privileged info, use zeros
             obstacle_state = torch.zeros(new_actor_obs.shape[0], self.privileged_dim,
                                          device=new_actor_obs.device)
 
-        # Concatenate: [stacked_obs(243), obstacle_state(50)] = [293]
         self._states = torch.cat([self.stacked_obs, obstacle_state], dim=-1)
 
-        # IMPORTANT: Add shared_states to info for AAC agent to use
+        # Add shared_states to info for AAC agent to use
         self._info["shared_states"] = self._states
 
         # Debug: Print shapes (only once at startup)
         if not hasattr(AACIsaacLabWrapper, '_shape_debug_printed'):
             print(f"[AAC_WRAPPER] Actor observations shape: {self._observations.shape}")
             print(f"[AAC_WRAPPER] Critic shared_states shape: {self._states.shape}")
-            print(f"[AAC_WRAPPER] Expected: Actor=243 (81*3), Critic=293 (243+50)")
             AACIsaacLabWrapper._shape_debug_printed = True
 
         return (
@@ -397,21 +383,20 @@ class AACIsaacLabWrapper(Wrapper):
 
         Returns:
             Tuple of (observations, info)
-            - observations: Stacked observations [num_envs, 243]
-            - info["shared_states"]: Stacked obs + privileged info [num_envs, 293]
+            - observations: [num_envs, obs_dim * num_stack]
+            - info["shared_states"]: [num_envs, obs_dim * num_stack + privileged_dim]
         """
         if self._reset_once:
             observations, self._info = self._env.reset()
 
-            # Extract policy observations (81-dim)
-            # IsaacLab environment returns torch tensors directly, just flatten them
+            # Extract policy observations
             new_actor_obs = flatten_tensorized_space(observations["policy"])
-            new_actor_obs = self._clamp_observations(new_actor_obs)  # Fix 1: clamp
+            new_actor_obs = self._clamp_observations(new_actor_obs)
 
-            # Extract critic observations (privileged, 131-dim)
+            # Extract critic observations
             if "critic" in observations:
                 privileged_info = flatten_tensorized_space(observations["critic"])
-                privileged_info = self._clamp_observations(privileged_info)  # Fix 1: clamp
+                privileged_info = self._clamp_observations(privileged_info)
             else:
                 privileged_info = new_actor_obs
 
@@ -430,7 +415,7 @@ class AACIsaacLabWrapper(Wrapper):
 
             self._states = torch.cat([self.stacked_obs, obstacle_state], dim=-1)
 
-            # IMPORTANT: Add shared_states to info for AAC agent to use
+            # Add shared_states to info for AAC agent to use
             self._info["shared_states"] = self._states
 
             self._reset_once = False

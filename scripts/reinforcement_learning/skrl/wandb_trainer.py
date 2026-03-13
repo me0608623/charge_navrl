@@ -31,7 +31,7 @@ class WandBSequentialTrainer(SequentialTrainer):
     - 自动记录 tracking_data 到 WandB
     - 记录自定义指标（FPS、环境统计等）
     - 输出可复制的终端训练摘要
-    - TrainingDebugLogger 集成（5 大类 debug 指标）
+    - TrainingDebugLogger 集成（action/ + robot/ 指标）
     - 保持与原有 Trainer 完全兼容
     """
 
@@ -85,6 +85,9 @@ class WandBSequentialTrainer(SequentialTrainer):
         self._collision_count = 0.0
         self._timeout_count = 0.0
         self._episode_length_sum = 0.0
+
+        # Self-managed episode length counter (fixes Isaac Lab reset-inside-step bug)
+        self._ep_len_counter: Optional[torch.Tensor] = None
 
         # Fix 5: Early stopping — 監控 lin_vel_mean，連續凍結時停止訓練
         self._frozen_steps = 0
@@ -401,25 +404,40 @@ class WandBSequentialTrainer(SequentialTrainer):
                             self._last_loss_data[key] = list(values)
                             tracking_data_snapshot[key] = list(values)
 
-            # ── Debug logger: collect PPO internal metrics after update ──
-            if self.debug_logger is not None and hasattr(agent, '_debug_ppo_metrics'):
-                ppo_metrics = agent._debug_ppo_metrics
-                if ppo_metrics:
-                    self.debug_logger.on_ppo_update(ppo_metrics)
-                    agent._debug_ppo_metrics = {}  # Clear after collection
-
             # update running task metrics
             self._update_task_metrics(infos, terminated, truncated)
 
-            # ── Debug logger: flush aggregated metrics every rollout ──
-            if self.debug_logger is not None and (timestep + 1) % _rollouts == 0:
-                debug_metrics = self.debug_logger.get_and_reset()
-                tracking_data_snapshot.update(
-                    {k: [v] for k, v in debug_metrics.items()}
-                )
+            # ── Flush all metrics every rollout (NOT every step) ──
+            # This is the ONLY place wandb.log / CSV write occurs, avoiding
+            # per-step I/O overhead and reducing CUDA sync frequency.
+            if (timestep + 1) % _rollouts == 0:
+                # Debug logger: flush aggregated GPU metrics
+                if self.debug_logger is not None:
+                    # Scatter plot (built BEFORE get_and_reset clears buffers)
+                    if self.wandb_run is not None:
+                        scatter_table = self.debug_logger.get_accel_scatter_table()
+                        if scatter_table is not None:
+                            try:
+                                import wandb
+                                wandb.log(
+                                    {"action/accel_scatter": wandb.plot.scatter(
+                                        scatter_table,
+                                        x="linear_acceleration",
+                                        y="angular_acceleration",
+                                        title="speed distributed",
+                                    )},
+                                    step=timestep,
+                                )
+                            except ImportError:
+                                pass
 
-            # WandB logging（使用快照数据）
-            self._log_to_wandb(timestep, tracking_data_snapshot=tracking_data_snapshot, single_agent=True)
+                    debug_metrics = self.debug_logger.get_and_reset()
+                    tracking_data_snapshot.update(
+                        {k: [v] for k, v in debug_metrics.items()}
+                    )
+
+                # WandB + CSV + console logging (flush-only, not every step)
+                self._log_to_wandb(timestep, tracking_data_snapshot=tracking_data_snapshot, single_agent=True)
 
             # Fix 5: Early stopping check
             if self._check_frozen_agent(timestep, next_states):
@@ -447,17 +465,26 @@ class WandBSequentialTrainer(SequentialTrainer):
 
         # Count how many envs finished this step
         dones = terminated.view(-1) | truncated.view(-1)
-        num_done = dones.sum().item()
-        if num_done == 0:
+
+        # Self-managed episode length counter (GPU, no CPU transfer per step)
+        num_envs = terminated.shape[0]
+        if self._ep_len_counter is None:
+            self._ep_len_counter = torch.ones(num_envs, device=terminated.device, dtype=torch.long)
+        else:
+            self._ep_len_counter += 1
+
+        # Single GPU→CPU transfer: done count + episode lengths
+        num_done_t = dones.sum()
+        if num_done_t.item() == 0:
             return
+        num_done = int(num_done_t.item())
 
-        self._episode_count += int(num_done)
+        self._episode_count += num_done
 
-        # Read from Episode_Termination/* (now correctly logged thanks to type filter fix)
+        # Read from Episode_Termination/* (infos values are often already scalar)
         for k, v in log_data.items():
             if k.startswith("Episode_Termination/"):
                 term_name = k.split("/", 1)[1]
-                # v is mean proportion across reset envs
                 val = v.item() if isinstance(v, torch.Tensor) else float(v)
                 count = val * num_done
                 if "goal" in term_name.lower():
@@ -467,17 +494,11 @@ class WandBSequentialTrainer(SequentialTrainer):
                 elif "time" in term_name.lower():
                     self._timeout_count += count
 
-        # Track episode length from environment buffer
-        try:
-            env = self.env
-            while hasattr(env, '_env'):
-                env = env._env
-            if hasattr(env, 'episode_length_buf') and dones.any():
-                done_lengths = env.episode_length_buf[dones].float()
-                if done_lengths.numel() > 0:
-                    self._episode_length_sum += done_lengths.sum().item()
-        except Exception:
-            pass
+        # Record episode lengths from self-managed counter, then reset done envs
+        done_lengths = self._ep_len_counter[dones].float()
+        if done_lengths.numel() > 0:
+            self._episode_length_sum += done_lengths.sum().cpu().item()
+        self._ep_len_counter[dones] = 0
 
     def _get_task_metrics(self) -> dict:
         """Return current running task metrics.
@@ -487,11 +508,11 @@ class WandBSequentialTrainer(SequentialTrainer):
         """
         metrics = {}
         if self._episode_count > 0:
-            metrics["Task / success_rate"] = self._goal_reached_count / self._episode_count
-            metrics["Task / collision_rate"] = self._collision_count / self._episode_count
-            metrics["Task / timeout_rate"] = self._timeout_count / self._episode_count
-            metrics["Task / total_episodes"] = self._episode_count
-            metrics["Task / episode_length_mean"] = self._episode_length_sum / self._episode_count
+            metrics["nav/success_rate"] = self._goal_reached_count / self._episode_count
+            metrics["nav/collision_rate"] = self._collision_count / self._episode_count
+            metrics["nav/timeout_rate"] = self._timeout_count / self._episode_count
+            metrics["nav/total_episodes"] = self._episode_count
+            metrics["nav/episode_length_mean"] = self._episode_length_sum / self._episode_count
         return metrics
 
     def _multi_agent_train_with_wandb(self) -> None:

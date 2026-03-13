@@ -1,18 +1,17 @@
 """離散差速驅動動作 (Discrete Differential Drive Action)
 
-動作空間：Discrete(361) = 19 (線加速度) × 19 (角速度)。
+動作空間：MultiDiscrete([19, 19]) — 線加速度 × 角速度，獨立採樣。
+
+v3 變更：Discrete(361) → MultiDiscrete([19, 19])
+  - NN 輸出 38 個 logits（19+19），兩組獨立 Categorical
+  - 降低維度詛咒：從 361 種組合→19+19 獨立選擇
+  - action_dim=2，process_actions 直接接收 [accel_idx, omega_idx]
 
 設計特點：
 1. 中心對稱映射：index 9 = ratio 0.0（零動作），無 Prepend-Zero
 2. 動態加速度邊界：依據當前速度計算合法加速度範圍，確保 v_next ∈ [-v_max, +v_max]
 3. 允許倒車：速度域 [-1.0, +1.0] m/s
 4. 正規化狀態輸出：ā_t, ω̄_t ∈ [-1, 1] 供觀測函數讀取
-
-NN 輸出單一離散索引 action_index ∈ [0, 360]，經 divmod 拆解為：
-  accel_idx = action_index // 19   ∈ [0, 18]
-  omega_idx = action_index %  19   ∈ [0, 18]
-
-再經中心對稱映射 + 動態邊界 → 實際物理指令。
 """
 
 from __future__ import annotations
@@ -33,16 +32,15 @@ from isaaclab.utils import configclass
 
 
 class DiscreteDifferentialDriveAction(ActionTerm):
-    """離散差速驅動動作 — 19×19 = 361 離散索引 + 動態加速度邊界
+    """離散差速驅動動作 — MultiDiscrete([19, 19]) + 動態加速度邊界
 
     完整流程：
-    1. NN 輸出 action_index ∈ [0, 360]
-    2. divmod 拆解為 accel_idx (0~18) 與 omega_idx (0~18)
-    3. 索引 → 意圖比例 ratio ∈ [-1, 1]（以 center=9 為零點）
-    4. 計算動態合法加速度邊界（確保 v_next 不超出 ±v_max）
-    5. ratio × 邊界 → 實際物理加速度 (m/s²) 與角速度 (rad/s)
-    6. 速度積分：v_next = clamp(v + a × Δt, -v_max, +v_max)
-    7. apply_actions：將速度寫入模擬器
+    1. NN 輸出 [accel_idx, omega_idx]，各 ∈ [0, 18]
+    2. 索引 → 意圖比例 ratio ∈ [-1, 1]（以 center=9 為零點）
+    3. 計算動態合法加速度邊界（確保 v_next 不超出 ±v_max）
+    4. ratio × 邊界 → 實際物理加速度 (m/s²) 與角速度 (rad/s)
+    5. 速度積分：v_next = clamp(v + a × Δt, -v_max, +v_max)
+    6. apply_actions：將速度寫入模擬器
     """
 
     cfg: DiscreteDifferentialDriveActionCfg
@@ -58,8 +56,8 @@ class DiscreteDifferentialDriveAction(ActionTerm):
 
         N = env.num_envs
 
-        # 動作緩衝區
-        self._raw_actions = torch.zeros(N, 1, device=self.device)
+        # 動作緩衝區（v3: [N, 2] = [accel_idx, omega_idx]）
+        self._raw_actions = torch.zeros(N, 2, device=self.device)
         # processed_actions: [v_next, ω] — 供 apply_actions 使用
         self._processed_actions = torch.zeros(N, 2, device=self.device)
         # applied_accelerations: [actual_accel, actual_omega] — 供觀測函數讀取
@@ -74,12 +72,11 @@ class DiscreteDifferentialDriveAction(ActionTerm):
 
         # 預計算常數
         self._center = cfg.num_bins // 2    # 9
-        self._total_actions = cfg.num_bins ** 2  # 361
 
         # 啟動時列印配置
         if not hasattr(DiscreteDifferentialDriveAction, '_config_printed'):
             DiscreteDifferentialDriveAction._config_printed = True
-            print(f"[ACTION] DiscreteDifferentialDrive: {cfg.num_bins}×{cfg.num_bins} = {self._total_actions} actions")
+            print(f"[ACTION] DiscreteDifferentialDrive: MultiDiscrete([{cfg.num_bins}, {cfg.num_bins}])")
             print(f"  v_max={cfg.max_linear_velocity} m/s, a_max={cfg.max_linear_accel} m/s², "
                   f"ω_max={cfg.max_angular_vel:.4f} rad/s, dt={self._dt:.3f}s")
 
@@ -88,8 +85,8 @@ class DiscreteDifferentialDriveAction(ActionTerm):
     # ------------------------------------------------------------------
     @property
     def action_dim(self) -> int:
-        """1: 單一離散索引 (0 ~ 360)"""
-        return 1
+        """2: [accel_idx, omega_idx]，各 ∈ [0, num_bins-1]"""
+        return 2
 
     @property
     def raw_actions(self) -> torch.Tensor:
@@ -122,18 +119,16 @@ class DiscreteDifferentialDriveAction(ActionTerm):
     # Core methods
     # ------------------------------------------------------------------
     def process_actions(self, actions: torch.Tensor):
-        """將離散索引解碼為物理指令。
+        """將 MultiDiscrete 索引解碼為物理指令。
 
         Args:
-            actions: [num_envs, 1] float — NN 輸出的離散索引（浮點數）
+            actions: [num_envs, 2] float — NN 輸出的 [accel_idx, omega_idx]
         """
         self._raw_actions[:] = actions
 
-        # ── 第一步：索引拆解 ──
-        # action_index = accel_idx × 19 + omega_idx
-        action_index = actions[:, 0].round().long().clamp(0, self._total_actions - 1)
-        accel_idx = action_index // self.cfg.num_bins   # [N] 0~18
-        omega_idx = action_index %  self.cfg.num_bins   # [N] 0~18
+        # ── 第一步：直接取兩個獨立索引 ──
+        accel_idx = actions[:, 0].round().long().clamp(0, self.cfg.num_bins - 1)  # [N] 0~18
+        omega_idx = actions[:, 1].round().long().clamp(0, self.cfg.num_bins - 1)  # [N] 0~18
 
         # ── 第二步：索引 → 意圖比例 ratio ∈ [-1, 1] ──
         #   idx=0  → (-9)/9 = -1.0   idx=9  → 0/9 = 0.0   idx=18 → 9/9 = +1.0
@@ -304,10 +299,10 @@ class DiscreteDifferentialDriveAction(ActionTerm):
 # --------------------------------------------------------------------------
 @configclass
 class DiscreteDifferentialDriveActionCfg(ActionTermCfg):
-    """離散差速驅動配置 — 19×19 中心對稱 + 動態加速度邊界
+    """離散差速驅動配置 — MultiDiscrete([19, 19]) + 動態加速度邊界
 
     Attributes:
-        num_bins:             每軸離散格數（19 → 動作空間 361）
+        num_bins:             每軸離散格數（19 → MultiDiscrete([19, 19])）
         max_linear_velocity:  線速度極限 (m/s)
         max_linear_accel:     線加速度極限 (m/s²)
         max_angular_vel:      角速度極限 (rad/s)

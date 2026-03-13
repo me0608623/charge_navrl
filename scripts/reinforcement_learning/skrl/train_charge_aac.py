@@ -166,6 +166,7 @@ def patch_skrl_for_aac():
     from skrl.utils.runner.torch import Runner
     from skrl.agents.torch.ppo import PPO
     from skrl.envs.wrappers.torch import MultiAgentEnvWrapper
+    from skrl.resources.schedulers.torch import KLAdaptiveLR
     import copy
     import torch.nn.functional as F
     import itertools
@@ -777,6 +778,7 @@ def patch_skrl_for_aac():
         num_minibatch_updates = 0
         policy_grad_norm = 0.0
         value_grad_norm = 0.0
+        all_kl_divergences = []  # 跨所有 epoch 累計，給 KLAdaptiveLR 用
 
         # Learning epochs
         for epoch in range(self._learning_epochs):
@@ -966,10 +968,18 @@ def patch_skrl_for_aac():
                 if self._entropy_loss_scale:
                     cumulative_entropy_loss += entropy_loss.item()
 
-            # Update learning rate
-            if self._learning_rate_scheduler:
-                if hasattr(self.scheduler, 'step'):
-                    self.scheduler.step()
+            # 累計本 epoch 的 KL（供 scheduler 使用）
+            all_kl_divergences.extend(kl_divergences)
+
+        # Update learning rate ONCE after all epochs (not per-epoch)
+        # 必須傳 KL 給 KLAdaptiveLR，否則 scheduler 不會調整 LR
+        if self._learning_rate_scheduler:
+            if isinstance(self.scheduler, KLAdaptiveLR):
+                if all_kl_divergences:
+                    kl_mean = torch.tensor(all_kl_divergences, device=self.device).mean()
+                    self.scheduler.step(kl_mean.item())
+            elif hasattr(self.scheduler, 'step'):
+                self.scheduler.step()
 
         # Record data
         self.track_data("Loss / Policy loss", cumulative_policy_loss / (self._learning_epochs * self._mini_batches))
@@ -1032,8 +1042,8 @@ def patch_skrl_for_aac():
             "explained_variance": explained_variance,
             # Value prediction error (|returns - values|)
             "value_prediction_error_abs": value_prediction_error_abs,
-            # KL divergence
-            "kl_divergence": kl_divergences[-1].item() if kl_divergences else 0.0,
+            # KL divergence（跨所有 epoch 的均值，與 scheduler 看到的一致）
+            "kl_divergence": torch.tensor(all_kl_divergences, device=self.device).mean().item() if all_kl_divergences else 0.0,
             # Ratio and clip
             "policy_ratio_mean": cumulative_ratio_mean / total_mb,
             "clip_fraction": cumulative_clip_fraction / total_mb,
@@ -1048,10 +1058,9 @@ def patch_skrl_for_aac():
 
         # Also push to SKRL's TensorBoard logger via track_data
         # (ensures metrics appear even without WandBSequentialTrainer)
-        # NOTE: Use "Debug_PPO/" prefix (no spaces) to match debug_logger key format
         for k, v in self._debug_ppo_metrics.items():
             if not (v != v):  # skip NaN
-                self.track_data(f"Debug_PPO/{k}", v)
+                self.track_data(f"ppo/{k}", v)
 
     PPO._update = aac_update
 
