@@ -1,9 +1,10 @@
-"""VLP-16 Curriculum 環境配置 — 20×20m 場景 + 課程學習
+"""VLP-16 Curriculum 環境配置 — 20×20m 場景 + 期望值驅動課程學習 (v9)
 
 繼承 ChargeNavigationEnvCfgVLP16，變更：
 - 場景：16×16m → 20×20m，4 面內部牆（密度更低）
-- 課程學習：4 階段 goal-obstacle 聯動
-- 獎勵：deadzone 加速度 + context-aware 角速度懲罰
+- 課程學習：4 階段 goal-obstacle 聯動（只改環境，不改獎勵）
+- 獎勵：v9 期望值驅動 — 只保留 reaching_goal + potential_progress
+  所有懲罰項歸零，避障動機完全來自死亡機制
 - Episode：45s → 60s（更大場景）
 """
 
@@ -297,21 +298,71 @@ class EventCfgVLP16Curriculum:
 # ============================================================================
 @configclass
 class RewardsCfgVLP16Curriculum(RewardsCfgVLP16):
-    """課程獎勵 — deadzone 加速度 + context-aware 角速度
+    """v9 期望值驅動獎勵 — 只保留核心獎勵 + 死亡機制
 
-    相對 Phase 1 變更：
-    - acceleration_penalty → deadzone_acceleration_penalty（dead_zone=0.1）
-    - angular_velocity_penalty → context_aware_angular_velocity_penalty
+    設計原則（基於期望值理論）：
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ 不要為每個次要能力設計獨立的加減分來干擾 Agent。                  │
+    │ 確立唯一核心 Reward（到達目標），利用死亡機制讓避障成為            │
+    │ 獲取核心獎勵的「必經手段」。                                     │
+    └─────────────────────────────────────────────────────────────────┘
+
+    保留（核心驅動力）：
+    - reaching_goal (+250): 唯一核心獎勵
+    - potential_progress (+60): PBRS 密集引導，數學上不改變最優策略
+
+    歸零（由 RL 機制自然處理）：
+    - collision_terminal → 0: 死亡機制已夠（terminal = 失去未來期望值）
+    - near_obstacle_penalty → 0: 死亡機制已夠
+    - time_penalty → 0: γ=0.995 自然提供時間壓力
+    - velocity_too_low → 0: γ + progress reward 自然驅動前進
+
+    保留微量（sim-to-real 平滑）：
+    - acceleration_penalty (-0.05): 保護馬達
+    - angular_velocity_penalty (-0.05): 平滑控制
     """
 
-    # 平滑：dead-zone 加速度懲罰（|a| < 0.1 免懲罰）
+    # --- 歸零的懲罰項（由 RL 機制自然處理）---
+
+    # 碰撞懲罰 → 0: 死亡機制 = 失去所有未來獎勵（V ≈ 50-100）
+    # 這比任何固定懲罰都更有效，且自動根據 episode 進度調整
+    collision_terminal = RewTerm(
+        func=collision_terminal_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        weight=0.0,
+    )
+
+    # 障礙物接近懲罰 → 0: 死亡機制自動提供避障動機
+    near_obstacle_penalty = RewTerm(
+        func=exponential_obstacle_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "safe_distance": 1.0, "steepness": 6.0},
+        weight=0.0,
+    )
+
+    # 時間懲罰 → 0: γ=0.995 下，20步路徑保留90%價值，60步只剩74%
+    time_penalty = RewTerm(
+        func=per_step_time_penalty,
+        params={},
+        weight=0.0,
+    )
+
+    # 靜止懲罰 → 0: agent 必須前進才能獲得 potential_progress 和 reaching_goal
+    velocity_too_low = RewTerm(
+        func=velocity_too_low_penalty,
+        params={"robot_cfg": SceneEntityCfg("robot")},
+        weight=0.0,
+    )
+
+    # --- 保留微量平滑（sim-to-real）---
+
+    # 加速度懲罰：降低到 -0.05（原 -0.15），只做最低限度的馬達保護
     acceleration_penalty = RewTerm(
         func=deadzone_acceleration_penalty,
         params={"dead_zone": 0.1},
-        weight=-0.15,
+        weight=-0.05,
     )
 
-    # 平滑：context-aware 角速度懲罰（靠近障礙物時降低懲罰）
+    # 角速度懲罰：降低到 -0.05，靠近障礙物時允許急轉
     angular_velocity_penalty = RewTerm(
         func=context_aware_angular_velocity_penalty,
         params={
@@ -320,7 +371,7 @@ class RewardsCfgVLP16Curriculum(RewardsCfgVLP16):
             "proximity_distance": 1.5,
             "max_reduction": 0.7,
         },
-        weight=-0.15,
+        weight=-0.05,
     )
 
 

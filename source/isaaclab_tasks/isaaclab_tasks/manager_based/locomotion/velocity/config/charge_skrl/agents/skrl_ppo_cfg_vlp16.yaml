@@ -39,7 +39,7 @@ agent:
 
   rollouts: 128
 
-  learning_epochs: 8
+  learning_epochs: 4    # v6: 6→4 — 搭配 LinearLR decay，後期低 LR + 少梯度步 = 更穩定
 
   mini_batches: 8
 
@@ -47,20 +47,19 @@ agent:
   # 讓 Agent 看到繞路後的遠期目標獎勵，而非只看眼前的牆
   discount_factor: 0.995
 
+  # v8: 恢復 0.95 — v7 的 0.90 未帶來改善，v6 在 0.95 下 actor_grad 更高
   lambda: 0.95
 
-  # v4: 保守 KL Adaptive — LR 限制在 5e-5 ~ 3e-4
-  # v3 的 kl_threshold=0.016 + 預設 max_lr=1e-2 導致 LR 飆到 0.01（100× 初始值）
-  # 修正：kl_threshold 回到 skrl 預設 0.008，max_lr 壓到 3e-4
+  # v6: KLAdaptiveLR → LinearLR — KL adaptive 在 786K batch 下完全失效
+  # v4 (max=3e-4) 和 v5 (max=1.5e-4) 都全程鎖死 max，KL 始終落在不動區
+  # 改用線性衰減：1e-4 → 1e-5，total_iters = timesteps(234375) / rollouts(128) = 1831
   learning_rate: !!float 1e-4
 
-  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler: "__import__('torch').optim.lr_scheduler.LinearLR"
   learning_rate_scheduler_kwargs:
-    kl_threshold: 0.008
-    min_lr: !!float 5e-5
-    max_lr: !!float 3e-4
-    kl_factor: 2.0
-    lr_factor: 1.5
+    start_factor: 1.0
+    end_factor: 0.1           # 1e-4 → 1e-5 over full training
+    total_iters: 1831         # = 234375 / 128
 
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
@@ -84,11 +83,13 @@ agent:
   clip_predicted_values: False
 
   # MultiDiscrete([19,19])：H_max = ln(19)+ln(19) ≈ 5.89
-  # 0.01 足夠驅動探索，避免 entropy 壓制 policy gradient
+  # v8: 恢復 0.01 — v7 的 0.03 過高，entropy 93% max 壓制 policy gradient
+  # actor_grad 從 v6 的 0.10 降到 v7 的 0.08，策略被迫太均勻
   entropy_loss_scale: 0.01
 
-  # 1.0→0.5: 減緩 Critic 更新，避免 value gradient（峰值 1434）壓制 policy gradient
-  value_loss_scale: 0.5
+  # v5: 0.5→1.0 恢復 — max_lr 砍半 + clip_predicted_values=False 已修，critic gradient 正常
+  # critic 需要更強梯度信號來跟上 value function 變化
+  value_loss_scale: 1.0
 
   kl_threshold: 0.0
 
@@ -124,5 +125,6 @@ trainer:
 # | Critic 輸入 | 139 維 | 與 Policy 相同（v2 無特權資訊）|
 # | 動作空間 | MultiDiscrete([19,19]) | 兩組獨立 Categorical（v3）|
 # | Feature Extractor | VLP16FeatureExtractor | Conv1d(64D) + ObsMLP(32D) + StateMLP(32D) = 128D |
-# | 學習率 | 1e-4 (5e-5~3e-4) | KL Adaptive 調度 (v4: 收緊範圍) |
-# | 熵係數 | 0.01 | 離散空間需更高探索 |
+# | 學習率 | 1e-4 → 1e-5 | LinearLR 線性衰減 (v6: KL Adaptive 失效) |
+# | 熵係數 | 0.01 | v8: 恢復，v7 的 0.03 壓制 policy gradient |
+# | GAE lambda | 0.95 | v8: 恢復，v7 的 0.90 無改善 |
