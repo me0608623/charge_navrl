@@ -48,9 +48,10 @@ class MultiGoalCommand(GoalCommand):
         # 先呼叫父類 __init__（會創建 goal_visualizer）
         super().__init__(cfg, env)
 
-        # 多目標緩存 [num_envs, num_goals, 3]
+        # 多目標緩存 [num_envs, max_goals, 3] — 預分配最大空間
+        max_g = self.cfg.max_goals
         self.all_goals_pos_w = torch.zeros(
-            self.num_envs, self.cfg.num_goals, 3,
+            self.num_envs, max_g, 3,
             device=self.device,
         )
 
@@ -75,7 +76,8 @@ class MultiGoalCommand(GoalCommand):
             [num_envs, 3] 最近目標的世界座標
         """
         robot_pos = self.robot.data.root_pos_w[:, :2]  # [num_envs, 2]
-        goals_xy = self.all_goals_pos_w[:, :, :2]  # [num_envs, num_goals, 2]
+        ng = self.cfg.num_goals
+        goals_xy = self.all_goals_pos_w[:, :ng, :2]  # [num_envs, num_goals, 2]
 
         # 計算距離 [num_envs, num_goals]
         dists = torch.norm(goals_xy - robot_pos.unsqueeze(1), dim=2)
@@ -86,7 +88,7 @@ class MultiGoalCommand(GoalCommand):
 
         # gather 最近目標 [num_envs, 3]
         idx = min_indices.view(-1, 1, 1).expand(-1, 1, 3)
-        nearest = torch.gather(self.all_goals_pos_w, 1, idx).squeeze(1)
+        nearest = torch.gather(self.all_goals_pos_w[:, :ng, :], 1, idx).squeeze(1)
 
         return nearest
 
@@ -172,7 +174,7 @@ class MultiGoalCommand(GoalCommand):
         total = self.num_envs * ng
 
         # [num_envs, num_goals, 3] → [num_envs * num_goals, 3]
-        marker_pos = self.all_goals_pos_w.reshape(-1, 3).clone()
+        marker_pos = self.all_goals_pos_w[:, :ng, :].reshape(-1, 3).clone()
         marker_pos[:, 2] = 0.3  # 抬高避免陷入地面
 
         marker_quat = torch.zeros(total, 4, device=self.device)
@@ -209,5 +211,7 @@ class MultiGoalCommandCfg(GoalCommandCfg):
     class_type: type = MultiGoalCommand
 
     num_goals: int = 10
+
+    max_goals: int = 10
 
     min_goal_spacing: float = 2.0

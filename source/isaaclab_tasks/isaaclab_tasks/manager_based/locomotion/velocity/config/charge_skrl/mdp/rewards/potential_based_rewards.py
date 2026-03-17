@@ -384,6 +384,63 @@ def velocity_too_low_penalty(
     return (speed < min_velocity).float()
 
 
+def proximity_brake_penalty(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    safe_distance: float = 2.0,
+    collision_threshold: float = 0.45,
+) -> torch.Tensor:
+    """近距離制動懲罰：線性遞增，鼓勵提前減速。
+
+    Math:
+        d_min = min(LiDAR readings)
+        penalty = clamp((safe_dist - d_min) / (safe_dist - collision_threshold), 0, 1)
+
+    Properties:
+        - 線性從 0（d_min=safe_distance）到 1.0（d_min=collision_threshold）
+        - Weight 應為負值（例如 -8.0）
+
+    Returns:
+        [num_envs] in [0, 1].
+    """
+    d_min = _get_lidar_min_distance(env, sensor_cfg)
+    range_size = safe_distance - collision_threshold
+    penalty = ((safe_distance - d_min) / (range_size + 1e-6)).clamp(0.0, 1.0)
+    return penalty
+
+
+def risk_speed_penalty(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    risk_distance: float = 1.5,
+) -> torch.Tensor:
+    """風險速度懲罰：障礙物附近高速行駛時懲罰。
+
+    Math:
+        d_min = min(LiDAR readings)
+        risk_factor = clamp((risk_dist - d_min) / risk_dist, 0, 1)
+        penalty = speed * risk_factor
+
+    Properties:
+        - 遠離障礙物時 risk_factor=0，不懲罰
+        - 靠近障礙物時 risk_factor→1，懲罰正比於速度
+        - Weight 應為負值（例如 -3.0）
+
+    Returns:
+        [num_envs] — 非負值。
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    vel_xy = robot.data.root_lin_vel_w[:, :2]
+    speed = torch.norm(vel_xy, dim=-1)
+    speed = torch.nan_to_num(speed, nan=0.0)
+
+    d_min = _get_lidar_min_distance(env, sensor_cfg)
+    risk_factor = ((risk_distance - d_min) / risk_distance).clamp(0.0, 1.0)
+
+    return speed * risk_factor
+
+
 __all__ = [
     "potential_progress_reward",
     "near_obstacle_penalty",
@@ -395,4 +452,6 @@ __all__ = [
     "discrete_acceleration_squared_penalty",
     "angular_velocity_squared_penalty",
     "velocity_too_low_penalty",
+    "proximity_brake_penalty",
+    "risk_speed_penalty",
 ]

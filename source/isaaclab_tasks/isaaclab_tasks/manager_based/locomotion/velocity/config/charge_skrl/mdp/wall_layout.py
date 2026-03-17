@@ -51,9 +51,28 @@ BOUNDARY_WALLS: list[tuple[float, float, float, float]] = [
 # All wall segments: 6 internal + 4 boundary = 10 total
 ALL_WALLS = MAZE_WALLS + BOUNDARY_WALLS
 
+# 20×20m 場景：4 面內部牆（比 16×16 的 6 面少，密度更低）
+MAZE_WALLS_20x20: list[tuple[float, float, float, float]] = [
+    (-7.5,  5.0, 4.0, 0.2),   # Top-left horizontal
+    ( 4.0,  7.5, 0.2, 3.5),   # Top-right vertical
+    (-4.0, -1.5, 0.2, 4.5),   # Center-left vertical
+    ( 2.0, -6.0, 3.5, 0.2),   # Bottom-center horizontal
+]
+
+BOUNDARY_WALLS_20x20: list[tuple[float, float, float, float]] = [
+    ( 0.0,  10.0, 20.2, 0.2),  # North
+    ( 0.0, -10.0, 20.2, 0.2),  # South
+    ( 10.0,  0.0, 0.2, 20.2),  # East
+    (-10.0,  0.0, 0.2, 20.2),  # West
+]
+
+ALL_WALLS_20x20 = MAZE_WALLS_20x20 + BOUNDARY_WALLS_20x20
+
 # Module-level cache: {device_str: (wall_centers, wall_sizes)}
 _wall_tensor_cache: dict[str, tuple[Tensor, Tensor]] = {}
 _all_wall_cache: dict[str, tuple[Tensor, Tensor]] = {}
+_wall_tensor_cache_20x20: dict[str, tuple[Tensor, Tensor]] = {}
+_all_wall_cache_20x20: dict[str, tuple[Tensor, Tensor]] = {}
 
 
 def get_wall_tensors(device) -> tuple[Tensor, Tensor]:
@@ -90,6 +109,24 @@ def get_all_wall_tensors(device) -> tuple[Tensor, Tensor]:
         data = torch.tensor(ALL_WALLS, dtype=torch.float32, device=device)
         _all_wall_cache[key] = (data[:, :2], data[:, 2:])
     return _all_wall_cache[key]
+
+
+def get_wall_tensors_20x20(device) -> tuple[Tensor, Tensor]:
+    """Return cached (wall_centers [4, 2], wall_sizes [4, 2]) for 20×20m maze walls."""
+    key = str(device)
+    if key not in _wall_tensor_cache_20x20:
+        data = torch.tensor(MAZE_WALLS_20x20, dtype=torch.float32, device=device)
+        _wall_tensor_cache_20x20[key] = (data[:, :2], data[:, 2:])
+    return _wall_tensor_cache_20x20[key]
+
+
+def get_all_wall_tensors_20x20(device) -> tuple[Tensor, Tensor]:
+    """Return cached (wall_centers [8, 2], wall_sizes [8, 2]) for all 20×20m walls."""
+    key = str(device)
+    if key not in _all_wall_cache_20x20:
+        data = torch.tensor(ALL_WALLS_20x20, dtype=torch.float32, device=device)
+        _all_wall_cache_20x20[key] = (data[:, :2], data[:, 2:])
+    return _all_wall_cache_20x20[key]
 
 
 def check_wall_proximity_batch(

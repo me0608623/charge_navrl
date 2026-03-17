@@ -54,7 +54,8 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--checkpoint", type=str, default=None, help="Continue the training from checkpoint.")
-parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations (legacy, prefer --timesteps).")
+parser.add_argument("--timesteps", type=int, default=None, help="Override YAML trainer.timesteps directly. 1 timestep = 1 env.step() call.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--ml_framework",
@@ -72,12 +73,29 @@ parser.add_argument(
     default=0,
     help="Print training summary every N timesteps. Default: auto (min(1000, total_timesteps/10)). Set to 0 to disable.",
 )
+parser.add_argument(
+    "--phase",
+    type=int,
+    default=1,
+    choices=[1, 2],
+    help="Training phase: 1=from scratch, 2=fine-tune from checkpoint (requires --checkpoint).",
+)
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 
 # Parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+
+# Phase 2 validation: require --checkpoint
+if args_cli.phase == 2:
+    if args_cli.checkpoint is None:
+        parser.error("--phase 2 requires --checkpoint to specify Phase 1 weights")
+    print(f"\n{'='*70}")
+    print(f"  Phase 2: Obstacle-Avoidance Fine-Tuning")
+    print(f"  Checkpoint: {args_cli.checkpoint}")
+    print(f"  Task: {args_cli.task}")
+    print(f"{'='*70}\n")
 
 # Always enable cameras to record video
 if args_cli.video:
@@ -134,6 +152,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from wandb_trainer import WandBSequentialTrainer
 from console_summary import ConsoleSummaryLogger
+from training_params_logger import dump_training_params
 
 # Registry for custom SKRL model modules (resolved in patched _generate_models)
 import vlp16_models as _vlp16_models_module
@@ -337,8 +356,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.seed = agent_cfg["seed"]
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
-    # Max iterations for training
-    if args_cli.max_iterations is not None:
+    # Override trainer timesteps (--timesteps takes priority over --max_iterations)
+    if args_cli.timesteps is not None:
+        agent_cfg["trainer"]["timesteps"] = args_cli.timesteps
+        ppo_updates = args_cli.timesteps // agent_cfg["agent"]["rollouts"]
+        total_env_steps = args_cli.timesteps * env_cfg.scene.num_envs
+        print(f"[INFO] --timesteps={args_cli.timesteps} → {ppo_updates} PPO updates, {total_env_steps:,} total env steps")
+    elif args_cli.max_iterations is not None:
         print(f"[WARNING] max_iterations={args_cli.max_iterations} is set, overriding timesteps!")
         agent_cfg["trainer"]["timesteps"] = args_cli.max_iterations * agent_cfg["agent"]["rollouts"] * env_cfg.scene.num_envs
 
@@ -360,6 +384,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # Save command used to run the script
     command = " ".join(sys.orig_argv)
     (Path(log_dir) / "command.txt").write_text(command)
+
+    # Dump comprehensive training parameters (rewards, hyperparams, etc.)
+    dump_training_params(
+        log_dir=log_dir,
+        run_name=run_info,
+        env_cfg=env_cfg,
+        agent_cfg=agent_cfg,
+        args_cli=args_cli,
+    )
 
     # Set IO descriptors export flag if requested
     if isinstance(env_cfg, ManagerBasedRLEnvCfg):

@@ -1,0 +1,134 @@
+# ==============================================================================
+# SKRL PPO 配置 - VLP-16 Phase 2: 避障微調
+# ==============================================================================
+# 從 Phase 1 checkpoint 繼續訓練，保守更新策略：
+#   - 降低學習率：1e-4 → 5e-5，LR 範圍 2e-5 ~ 1e-4
+#   - 降低 entropy 係數：0.01 → 0.005（減少探索，更多利用）
+#   - 減少 learning epochs：8 → 6（保守更新）
+#
+# timesteps 語義（SKRL SequentialTrainer）：
+#   1 timestep = 1 次 env.step() = num_envs 個環境各走 1 步
+#   PPO update 每 rollouts(128) 個 timestep 觸發一次
+#   總 env steps = timesteps × num_envs
+#   PPO updates = timesteps / rollouts
+#
+# 建議配置：
+#   Smoke test:  --num_envs 256,  覆寫 timesteps=5120~10240 (40~80 PPO updates)
+#   正式第一輪:  --num_envs 2048, timesteps=64000  (500 PPO updates, 131M env steps)
+#   正式第二輪:  --num_envs 2048, timesteps=128000 (1000 PPO updates, 262M env steps)
+#
+# Checkpoint 載入行為（SKRL agent.load()）：
+#   ✅ 恢復: model weights + RunningStandardScaler 狀態 (obs/value mean/std/count)
+#   ❌ 不恢復: optimizer state (Adam momentum), LR scheduler state
+#   → 對 fine-tuning 而言正確：乾淨 optimizer + 新 LR 起點 (5e-5)
+# ==============================================================================
+
+seed: 42
+
+# ==============================================================================
+# 模型配置 — 與 Phase 1 完全相同
+# ==============================================================================
+models:
+  separate: True
+
+  policy:
+    class: vlp16_models.VLP16DiscretePolicy
+    unnormalized_log_prob: True
+
+  value:
+    class: vlp16_models.VLP16Value
+    clip_actions: False
+
+# ==============================================================================
+# 經驗回放
+# ==============================================================================
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+# ==============================================================================
+# PPO Agent 配置 — Phase 2 保守微調
+# ==============================================================================
+agent:
+  class: PPO
+
+  rollouts: 128
+
+  # Phase 2: 8 → 6（保守更新，避免大幅偏離 Phase 1 策略）
+  learning_epochs: 6
+
+  mini_batches: 8
+
+  discount_factor: 0.995
+
+  lambda: 0.95
+
+  # Phase 2: 1e-4 → 5e-5（微調學習率）
+  learning_rate: !!float 5e-5
+
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.008
+    # Phase 2: 收緊 LR 範圍
+    min_lr: !!float 2e-5
+    max_lr: !!float 1e-4
+    kl_factor: 2.0
+    lr_factor: 1.5
+
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+
+  random_timesteps: 0
+  learning_starts: 0
+
+  grad_norm_clip: 1.0
+
+  ratio_clip: 0.2
+
+  value_clip: 0.2
+  clip_predicted_values: True
+
+  # Phase 2: 0.01 → 0.005（減少探索，更多利用已學到的策略）
+  entropy_loss_scale: 0.005
+
+  value_loss_scale: 0.5
+
+  kl_threshold: 0.0
+
+  rewards_shaper_scale: 1.0
+
+  time_limit_bootstrap: True
+
+  experiment:
+    directory: "charge_vlp16_phase2"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+# ==============================================================================
+# 訓練器配置
+# ==============================================================================
+trainer:
+  class: SequentialTrainer
+
+  # Phase 2 第一輪: 2048 envs × 64000 timesteps = 131M env steps, 500 PPO updates
+  # 若效果健康可加到 128000 (1000 PPO updates)
+  timesteps: 64000
+
+  environment_info: log
+
+# ==============================================================================
+# Phase 2 配置總結
+# ==============================================================================
+#
+# | 參數 | Phase 1 | Phase 2 | 說明 |
+# |------|---------|---------|------|
+# | learning_rate | 1e-4 | 5e-5 | 微調用更小學習率 |
+# | min_lr | 5e-5 | 2e-5 | 收緊 LR 範圍 |
+# | max_lr | 3e-4 | 1e-4 | 收緊 LR 範圍 |
+# | entropy_loss_scale | 0.01 | 0.005 | 減少探索 |
+# | learning_epochs | 8 | 6 | 保守更新 |
+# | timesteps | 234375 | 64000 | 500 PPO updates（第一輪） |

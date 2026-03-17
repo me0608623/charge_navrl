@@ -78,8 +78,10 @@ agent:
   ratio_clip: 0.2
 
   value_clip: 0.2
-  # False→True: 限制 Critic 每次更新幅度，防止 v_pred 從 -8 暴漲到 +34
-  clip_predicted_values: True
+  # True→False: value clipping 在大 reward scale (+250 goal) 下會殺死 critic 梯度
+  # 原因：predicted_values - sampled_values 超出 ±0.2 時 torch.clip 梯度為零
+  # 導致 critic_grad_norm=0，value function 完全停止學習
+  clip_predicted_values: False
 
   # MultiDiscrete([19,19])：H_max = ln(19)+ln(19) ≈ 5.89
   # 0.01 足夠驅動探索，避免 entropy 壓制 policy gradient

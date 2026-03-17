@@ -23,6 +23,8 @@ from .cfg import (
     ChargeNavigationEnvCfgPhase0NavRL,
     ChargeNavigationEnvCfgCompetitive,
     ChargeNavigationEnvCfgVLP16,
+    ChargeNavigationEnvCfgVLP16Phase2,
+    ChargeNavigationEnvCfgVLP16Curriculum,
 )
 
 # 實驗性配置（依賴模組可能尚未完成）
@@ -135,6 +137,32 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16:ChargeNavigationEnvCfgVLP16",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+# ============================================================================
+# VLP-16 Phase 2: 避障微調（從 Phase 1 checkpoint 繼續訓練）
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Phase2",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16:ChargeNavigationEnvCfgVLP16Phase2",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16_phase2.yaml",
+    },
+)
+
+# ============================================================================
+# VLP-16 Curriculum: 20×20m 場景 + 4 階段 Goal-Obstacle 聯動課程學習
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:ChargeNavigationEnvCfgVLP16Curriculum",
         "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
     },
 )

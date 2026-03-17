@@ -89,6 +89,18 @@ class WandBSequentialTrainer(SequentialTrainer):
         # Self-managed episode length counter (fixes Isaac Lab reset-inside-step bug)
         self._ep_len_counter: Optional[torch.Tensor] = None
 
+        # Per-env-type metrics (Phase 2: empty/static/dynamic breakdown)
+        self._env_difficulty: Optional[torch.Tensor] = None  # cached ref
+        self._per_type_window = 200  # rolling window size per type
+        # Buffers: list of (goal_reached, collision, timeout) booleans per type
+        self._per_type_results: dict[int, list[tuple[bool, bool, bool]]] = {
+            0: [],  # empty
+            1: [],  # static
+            2: [],  # dynamic
+        }
+        # Fix 5: Lazy-init termination name→index mapping for per-env bool access
+        self._term_name_to_idx: Optional[dict] = None
+
         # Fix 5: Early stopping — 監控 lin_vel_mean，連續凍結時停止訓練
         self._frozen_steps = 0
         self._frozen_threshold_vel = 0.02     # 低於此速度視為凍結
@@ -97,6 +109,63 @@ class WandBSequentialTrainer(SequentialTrainer):
 
         # Hook agent.track_data()来捕获loss数据
         self._hook_agent_track_data()
+
+        # Module Entropy 訓練健康監控
+        self._module_entropy_monitor = None
+        self._setup_module_entropy_monitor()
+
+    def _setup_module_entropy_monitor(self) -> None:
+        """初始化 Module Entropy 監控器。
+
+        透過 monkey-patch PPO agent 的 scaler.step()，在 optimizer.step() 之前
+        抓取 policy 和 value 各自的 gradient norm。這不修改 SKRL 源碼。
+
+        架構：
+          scaler.step hook → monitor.step()（每 mini-batch 累積，不印東西）
+          rollout flush    → monitor.flush()（取平均、分類、印 console log）
+
+        注意：使用 gradient norm proxy（不是 parameter delta），因為 SKRL PPO
+        使用共享 optimizer，backward 和 step 合在一起，無法分別測量 param delta。
+        """
+        try:
+            from diagnostics.module_entropy import ModuleEntropyMonitor
+
+            agent = self.agents if self.num_simultaneous_agents == 1 else self.agents[0]
+            policy_model = agent.policy
+            value_model = agent.value
+
+            self._module_entropy_monitor = ModuleEntropyMonitor(
+                policy_model, value_model,
+                console_every_n_flush=5,  # 每 5 次 rollout 印一次 console log
+            )
+
+            # Monkey-patch scaler.unscale_()：在 unscale 之後立刻抓梯度
+            # 這是 clip_grad_norm_ 之前的時間點，梯度反映真實的 loss 梯度比例
+            # 不受聯合 grad_norm_clip 汙染
+            #
+            # PPO 流程：backward → unscale_(HERE) → clip_grad_norm → step
+            original_unscale = agent.scaler.unscale_
+
+            def _hooked_unscale(optimizer, *args, **kwargs):
+                # 先執行原始 unscale（AMP 反縮放）
+                result = original_unscale(optimizer, *args, **kwargs)
+                # unscale 完成後，梯度已是真實尺度，clip 尚未執行 → 最佳測量時機
+                if self._module_entropy_monitor is not None:
+                    try:
+                        self._module_entropy_monitor.step()
+                    except Exception:
+                        pass
+                return result
+
+            agent.scaler.unscale_ = _hooked_unscale
+
+            print("[INFO] Module Entropy monitor initialized "
+                  "(gradient norm proxy, measured after unscale before clip)",
+                  flush=True)
+
+        except Exception as e:
+            print(f"[WARNING] Module Entropy monitor init failed: {e}", flush=True)
+            self._module_entropy_monitor = None
 
     def _check_frozen_agent(self, timestep: int, next_states: torch.Tensor) -> bool:
         """Fix 5: 檢查 agent 是否凍結（持續不動）。
@@ -116,9 +185,7 @@ class WandBSequentialTrainer(SequentialTrainer):
 
         # 從 env 取得實際速度
         try:
-            env = self.env
-            while hasattr(env, '_env'):
-                env = env._env
+            env = self._get_base_env()
             if hasattr(env, 'scene') and hasattr(env.scene, '__getitem__'):
                 robot = env.scene["robot"]
                 vel_xy = robot.data.root_lin_vel_w[:, :2]
@@ -298,15 +365,21 @@ class WandBSequentialTrainer(SequentialTrainer):
                                     # 同时添加到tracking_data_snapshot
                                     tracking_data_snapshot[key] = list(values)
 
-                # log environment info
+                # log environment info — also capture into tracking_data_snapshot
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
+                        tag = f"Info / {k}"
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
-                            for agent in self.agents:
-                                agent.track_data(f"Info / {k}", v.item())
+                            val = v.item()
                         elif isinstance(v, (int, float)):
-                            for agent in self.agents:
-                                agent.track_data(f"Info / {k}", float(v))
+                            val = float(v)
+                        else:
+                            continue
+                        for agent in self.agents:
+                            agent.track_data(tag, val)
+                        if tag not in tracking_data_snapshot:
+                            tracking_data_snapshot[tag] = []
+                        tracking_data_snapshot[tag].append(val)
 
             # update running task metrics
             self._update_task_metrics(infos, terminated, truncated)
@@ -384,13 +457,22 @@ class WandBSequentialTrainer(SequentialTrainer):
                                 self._last_loss_data[key] = list(values)
                                 tracking_data_snapshot[key] = list(values)
 
-                # log environment info
+                # log environment info — also capture into tracking_data_snapshot
+                # (agent.tracking_data will be cleared by post_interaction)
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
+                        tag = f"Info / {k}"
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
-                            agent.track_data(f"Info / {k}", v.item())
+                            val = v.item()
                         elif isinstance(v, (int, float)):
-                            agent.track_data(f"Info / {k}", float(v))
+                            val = float(v)
+                        else:
+                            continue
+                        agent.track_data(tag, val)
+                        # Fix: also save to snapshot so it survives post_interaction clearing
+                        if tag not in tracking_data_snapshot:
+                            tracking_data_snapshot[tag] = []
+                        tracking_data_snapshot[tag].append(val)
 
             # post-interaction
             # PPO 的 _update 在 post_interaction 中被调用
@@ -435,6 +517,16 @@ class WandBSequentialTrainer(SequentialTrainer):
                     tracking_data_snapshot.update(
                         {k: [v] for k, v in debug_metrics.items()}
                     )
+
+                # Module Entropy 指標：flush 累積的 mini-batch 數據，取平均後注入
+                if self._module_entropy_monitor is not None:
+                    try:
+                        me_data = self._module_entropy_monitor.flush()
+                        tracking_data_snapshot.update(
+                            {k: [v] for k, v in me_data.items()}
+                        )
+                    except Exception:
+                        pass
 
                 # WandB + CSV + console logging (flush-only, not every step)
                 self._log_to_wandb(timestep, tracking_data_snapshot=tracking_data_snapshot, single_agent=True)
@@ -481,24 +573,189 @@ class WandBSequentialTrainer(SequentialTrainer):
 
         self._episode_count += num_done
 
-        # Read from Episode_Termination/* (infos values are often already scalar)
-        for k, v in log_data.items():
-            if k.startswith("Episode_Termination/"):
-                term_name = k.split("/", 1)[1]
-                val = v.item() if isinstance(v, torch.Tensor) else float(v)
-                count = val * num_done
-                if "goal" in term_name.lower():
-                    self._goal_reached_count += count
-                elif "collision" in term_name.lower():
-                    self._collision_count += count
-                elif "time" in term_name.lower():
-                    self._timeout_count += count
+        # Fix 5: Use per-env termination bools for precise counting
+        done_indices = dones.nonzero(as_tuple=True)[0]
+        term_result = self._get_per_env_termination_bools(done_indices)
+
+        if term_result is not None:
+            per_env_dones, goal_idx, collision_idx, timeout_idx = term_result
+            if goal_idx is not None:
+                self._goal_reached_count += per_env_dones[:, goal_idx].sum().item()
+            if collision_idx is not None:
+                self._collision_count += per_env_dones[:, collision_idx].sum().item()
+            if timeout_idx is not None:
+                self._timeout_count += per_env_dones[:, timeout_idx].sum().item()
+        else:
+            # Fallback: scalar fractions from log_data (approximate)
+            for k, v in log_data.items():
+                if k.startswith("Episode_Termination/"):
+                    term_name = k.split("/", 1)[1]
+                    val = v.item() if isinstance(v, torch.Tensor) else float(v)
+                    count = val * num_done
+                    if "goal" in term_name.lower():
+                        self._goal_reached_count += count
+                    elif "collision" in term_name.lower():
+                        self._collision_count += count
+                    elif "time" in term_name.lower():
+                        self._timeout_count += count
 
         # Record episode lengths from self-managed counter, then reset done envs
         done_lengths = self._ep_len_counter[dones].float()
         if done_lengths.numel() > 0:
             self._episode_length_sum += done_lengths.sum().cpu().item()
         self._ep_len_counter[dones] = 0
+
+        # Per-env-type tracking (Phase 2)
+        self._update_per_type_metrics(log_data, dones, num_done)
+
+    def _get_base_env(self):
+        """Unwrap to the ManagerBasedRLEnv (or similar) base environment.
+
+        Handles both SKRL wrapper chain (_env) and gymnasium wrapper chain (.env / .unwrapped).
+        """
+        env = self.env
+        # First unwrap SKRL wrappers (_env)
+        while hasattr(env, '_env'):
+            env = env._env
+        # Then unwrap gymnasium wrappers (.unwrapped gives the innermost env)
+        if hasattr(env, 'unwrapped'):
+            env = env.unwrapped
+        return env
+
+    def _get_env_difficulty_tensor(self) -> Optional[torch.Tensor]:
+        """Lazily fetch _env_difficulty from the unwrapped env."""
+        if self._env_difficulty is not None:
+            return self._env_difficulty
+        try:
+            base_env = self._get_base_env()
+            if hasattr(base_env, '_env_difficulty'):
+                self._env_difficulty = base_env._env_difficulty
+                counts = torch.bincount(self._env_difficulty, minlength=3)
+                print(f"[INFO] Per-env-type metrics enabled: "
+                      f"empty={counts[0].item()}, static={counts[1].item()}, dynamic={counts[2].item()} "
+                      f"(base_env={base_env.__class__.__name__})")
+                return self._env_difficulty
+            else:
+                print(f"[WARNING] _env_difficulty not found on {base_env.__class__.__name__} — "
+                      f"per-env-type metrics (eval/success_rate_empty etc.) will be unavailable")
+        except Exception as e:
+            print(f"[WARNING] Failed to get _env_difficulty: {e}")
+        return None
+
+    def _get_term_name_to_idx(self) -> Optional[dict]:
+        """Lazily fetch termination name→index mapping from termination_manager."""
+        if self._term_name_to_idx is not None:
+            return self._term_name_to_idx
+        try:
+            base_env = self._get_base_env()
+            if hasattr(base_env, 'termination_manager'):
+                tm = base_env.termination_manager
+                if hasattr(tm, '_term_name_to_term_idx'):
+                    self._term_name_to_idx = tm._term_name_to_term_idx
+                    return self._term_name_to_idx
+        except Exception:
+            pass
+        return None
+
+    def _get_per_env_termination_bools(self, done_indices: torch.Tensor):
+        """Get per-env termination booleans from termination_manager._term_dones.
+
+        Returns:
+            (per_env_dones, goal_idx, collision_idx, timeout_idx) or None if unavailable.
+            per_env_dones: [num_done, num_terms] bool tensor
+        """
+        name_to_idx = self._get_term_name_to_idx()
+        if name_to_idx is None:
+            return None
+
+        try:
+            base_env = self._get_base_env()
+            tm = base_env.termination_manager
+            # _term_dones: [num_envs, num_terms] bool, set during compute(), valid until next compute()
+            if not hasattr(tm, '_term_dones'):
+                return None
+            per_env_dones = tm._term_dones[done_indices]  # [num_done, num_terms]
+
+            # Find indices for goal/collision/timeout
+            goal_idx = None
+            collision_idx = None
+            timeout_idx = None
+            for name, idx in name_to_idx.items():
+                name_lower = name.lower()
+                if "goal" in name_lower:
+                    goal_idx = idx
+                elif "collision" in name_lower:
+                    collision_idx = idx
+                elif "time" in name_lower:
+                    timeout_idx = idx
+
+            return per_env_dones, goal_idx, collision_idx, timeout_idx
+        except Exception:
+            return None
+
+    def _update_per_type_metrics(
+        self, log_data: dict, dones: torch.Tensor, num_done: int
+    ) -> None:
+        """Track per-env-type (empty/static/dynamic) episode outcomes.
+
+        Fix 5: Uses termination_manager._term_dones for per-env bool instead of
+        scalar fractions from infos["log"], which are global averages.
+        """
+        if num_done == 0:
+            return
+
+        difficulty = self._get_env_difficulty_tensor()
+        if difficulty is None:
+            return
+
+        done_indices = dones.nonzero(as_tuple=True)[0]
+
+        # Try per-env bool from termination_manager (Fix 5: correct approach)
+        term_result = self._get_per_env_termination_bools(done_indices)
+
+        if term_result is not None:
+            per_env_dones, goal_idx, collision_idx, timeout_idx = term_result
+            done_types = difficulty[done_indices].cpu().tolist()
+            # per_env_dones is [num_done, num_terms] bool
+            per_env_dones_cpu = per_env_dones.cpu()
+
+            for i, dt in enumerate(done_types):
+                dt_int = int(dt)
+                if dt_int not in self._per_type_results:
+                    continue
+                buf = self._per_type_results[dt_int]
+                g = bool(per_env_dones_cpu[i, goal_idx]) if goal_idx is not None else False
+                c = bool(per_env_dones_cpu[i, collision_idx]) if collision_idx is not None else False
+                t = bool(per_env_dones_cpu[i, timeout_idx]) if timeout_idx is not None else False
+                buf.append((g, c, t))
+                if len(buf) > self._per_type_window:
+                    self._per_type_results[dt_int] = buf[-self._per_type_window:]
+        else:
+            # Fallback: use scalar fractions (old buggy behavior, better than nothing)
+            goal_frac = 0.0
+            collision_frac = 0.0
+            timeout_frac = 0.0
+            for k, v in log_data.items():
+                if not k.startswith("Episode_Termination/"):
+                    continue
+                term_name = k.split("/", 1)[1].lower()
+                val = v.item() if isinstance(v, torch.Tensor) else float(v)
+                if "goal" in term_name:
+                    goal_frac = val
+                elif "collision" in term_name:
+                    collision_frac = val
+                elif "time" in term_name:
+                    timeout_frac = val
+
+            done_types = difficulty[done_indices].cpu().tolist()
+            for dt in done_types:
+                dt_int = int(dt)
+                if dt_int not in self._per_type_results:
+                    continue
+                buf = self._per_type_results[dt_int]
+                buf.append((goal_frac > 0.5, collision_frac > 0.5, timeout_frac > 0.5))
+                if len(buf) > self._per_type_window:
+                    self._per_type_results[dt_int] = buf[-self._per_type_window:]
 
     def _get_task_metrics(self) -> dict:
         """Return current running task metrics.
@@ -513,6 +770,17 @@ class WandBSequentialTrainer(SequentialTrainer):
             metrics["nav/timeout_rate"] = self._timeout_count / self._episode_count
             metrics["nav/total_episodes"] = self._episode_count
             metrics["nav/episode_length_mean"] = self._episode_length_sum / self._episode_count
+
+        # Per-env-type metrics (Phase 2)
+        type_names = {0: "empty", 1: "static", 2: "dynamic"}
+        for type_id, type_name in type_names.items():
+            buf = self._per_type_results.get(type_id, [])
+            if len(buf) >= 10:  # only report with sufficient data
+                n = len(buf)
+                metrics[f"eval/success_rate_{type_name}"] = sum(1 for g, _, _ in buf if g) / n
+                metrics[f"eval/collision_rate_{type_name}"] = sum(1 for _, c, _ in buf if c) / n
+                metrics[f"eval/timeout_rate_{type_name}"] = sum(1 for _, _, t in buf if t) / n
+
         return metrics
 
     def _multi_agent_train_with_wandb(self) -> None:
@@ -574,15 +842,21 @@ class WandBSequentialTrainer(SequentialTrainer):
                                     self._last_loss_data[key] = list(values)
                                     tracking_data_snapshot[key] = list(values)
 
-                # log environment info
+                # log environment info — also capture into tracking_data_snapshot
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
+                        tag = f"Info / {k}"
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
-                            for agent in self.agents:
-                                agent.track_data(f"Info / {k}", v.item())
+                            val = v.item()
                         elif isinstance(v, (int, float)):
-                            for agent in self.agents:
-                                agent.track_data(f"Info / {k}", float(v))
+                            val = float(v)
+                        else:
+                            continue
+                        for agent in self.agents:
+                            agent.track_data(tag, val)
+                        if tag not in tracking_data_snapshot:
+                            tracking_data_snapshot[tag] = []
+                        tracking_data_snapshot[tag].append(val)
 
             # update running task metrics
             self._update_task_metrics(infos, terminated, truncated)

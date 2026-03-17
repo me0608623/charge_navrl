@@ -254,7 +254,8 @@ class GoalCommand(CommandTerm):
         # ------------------------------------------------------------------------
         # 快取牆壁張量（迷宮內部牆壁 proximity 檢查）
         # ------------------------------------------------------------------------
-        wall_c, wall_s = get_wall_tensors(self.device)
+        _get_walls = getattr(self._env, '_wall_tensor_fn', get_wall_tensors)
+        wall_c, wall_s = _get_walls(self.device)
 
         # ------------------------------------------------------------------------
         # 為每個環境生成有效的目標位置

@@ -79,6 +79,8 @@ from ..mdp.rewards.potential_based_rewards import (
     discrete_acceleration_squared_penalty,
     angular_velocity_squared_penalty,
     velocity_too_low_penalty,
+    proximity_brake_penalty,
+    risk_speed_penalty,
 )
 
 # 終止條件
@@ -729,3 +731,107 @@ class ChargeNavigationEnvCfgVLP16(ManagerBasedRLEnvCfg):
         self.viewer.eye = (7.5, 7.5, 7.5)
         self.viewer.lookat = (0.0, 0.0, 0.0)
         self.seed = 42
+
+
+# ============================================================================
+# Phase 2: 避障微調配置
+# ============================================================================
+
+@configclass
+class RewardsCfgVLP16Phase2(RewardsCfgVLP16):
+    """Phase 2 獎勵配置 — 強化避障，保留導航能力
+
+    變更（相對 Phase 1）：
+    - progress_reward: +60 → +45（降低前進壓力，避免衝向障礙物）
+    - near_obstacle_penalty: 移除指數型排斥力（由 proximity_brake 取代）
+    - proximity_brake_penalty: -4.0（線性制動，1.5m→0.45m）
+    - risk_speed_penalty: -5.0（靠近障礙物時懲罰高速）
+    - collision_terminal: -200（保持 Phase 1 值，新 dense penalty 已提供安全梯度）
+
+    量級驗算（dt=0.2s, progress ≈ +0.9/step）：
+    - d=1.5m+: brake=0, risk=0（empty env 不受影響）
+    - d=1.0m: brake=-0.381(42%), risk=-0.167(19%)  → 合計 -0.548(61%)
+    - d=0.5m: brake=-0.762(85%), risk=-0.333(37%)  → 合計 -1.095(122%)
+    """
+
+    # 前進：降低權重，減少衝向障礙物的壓力
+    potential_progress = RewTerm(
+        func=potential_progress_reward,
+        params={"robot_cfg": SceneEntityCfg("robot")},
+        weight=45.0,
+    )
+
+    # 移除指數型排斥力（由 proximity_brake 取代）
+    near_obstacle_penalty = None  # type: ignore[assignment]
+
+    # 新增：近距離制動懲罰（線性 1.5m→0.45m）
+    # d=1.0m: -0.381/step (42% of progress), d=0.5m: -0.762/step (85%)
+    proximity_brake = RewTerm(
+        func=proximity_brake_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "safe_distance": 1.5, "collision_threshold": COLLISION_THRESHOLD},
+        weight=-4.0,
+    )
+
+    # 新增：風險速度懲罰（靠近障礙物時高速行駛懲罰）
+    # d=1.0m, v=0.5: -0.167/step (19%), d=0.5m: -0.333/step (37%)
+    risk_speed = RewTerm(
+        func=risk_speed_penalty,
+        params={"robot_cfg": SceneEntityCfg("robot"), "sensor_cfg": SceneEntityCfg("lidar"), "risk_distance": 1.5},
+        weight=-5.0,
+    )
+
+    # 安全：碰撞終止懲罰（保持 Phase 1 值 -200，新 dense penalty 已提供安全梯度）
+    collision_terminal = RewTerm(
+        func=collision_terminal_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        weight=-200.0,
+    )
+
+
+@configclass
+class EventCfgVLP16Phase2(EventCfgVLP16):
+    """Phase 2 事件配置 — 增加障礙物比例（抗遺忘混合策略）
+
+    環境比例變更：
+    - empty: 0.50 → 0.35（保留較多空環境防止遺忘）
+    - static: 0.30 → 0.35（增加靜態障礙物）
+    - dynamic: 0.20 → 0.30（增加動態障礙物）
+    """
+
+    randomize_obstacles_startup = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="startup",
+        params={
+            "empty_ratio": 0.35, "static_ratio": 0.35, "dynamic_ratio": 0.30,
+            "num_obstacles_static": 5, "num_obstacles_dynamic": 8,
+            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
+            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
+            "min_obstacle_spacing": 1.0, "max_spawn_attempts": 50,
+            "boundary": 7.5, "active_obstacle_ratio": 0.25, "debug": False,
+        },
+    )
+
+    randomize_obstacles = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="reset",
+        params={
+            "empty_ratio": 0.35, "static_ratio": 0.35, "dynamic_ratio": 0.30,
+            "num_obstacles_static": 5, "num_obstacles_dynamic": 8,
+            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
+            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
+            "min_obstacle_spacing": 1.0, "max_spawn_attempts": 50,
+            "boundary": 7.5, "active_obstacle_ratio": 0.25, "debug": False,
+        },
+    )
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16Phase2(ChargeNavigationEnvCfgVLP16):
+    """Phase 2 環境配置 — 避障微調
+
+    繼承 Phase 1 所有設定（scene, obs, actions, terminations, commands），
+    僅覆蓋 rewards 和 events。
+    """
+
+    rewards: RewardsCfgVLP16Phase2 = RewardsCfgVLP16Phase2()
+    events: EventCfgVLP16Phase2 = EventCfgVLP16Phase2()

@@ -289,7 +289,7 @@ class TrainingDebugLogger:
                 raw = action_term._raw_actions
                 applied_a = action_term._applied_accelerations[:, 0]
                 if raw.numel() > 0:
-                    idx_a = raw[:, 0].round().long().clamp(0, action_term.cfg.num_accel_bins - 1)
+                    idx_a = raw[:, 0].round().long().clamp(0, action_term.cfg.num_bins - 1)
                     a_raw = action_term.accel_table[idx_a]
                     gpu_scalars.append(((a_raw.abs() > 1e-6) & (applied_a.abs() < 1e-6)).float().mean())
 

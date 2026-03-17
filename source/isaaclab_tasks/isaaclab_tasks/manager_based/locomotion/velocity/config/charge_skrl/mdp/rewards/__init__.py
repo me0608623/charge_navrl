@@ -36,6 +36,13 @@ from .potential_based_rewards import (
     discrete_acceleration_squared_penalty,
     angular_velocity_squared_penalty,
     velocity_too_low_penalty,
+    proximity_brake_penalty,
+    risk_speed_penalty,
+)
+
+from .smoothness_rewards import (
+    deadzone_acceleration_penalty,
+    context_aware_angular_velocity_penalty,
 )
 
 __all__ = [
@@ -62,4 +69,9 @@ __all__ = [
     "discrete_acceleration_squared_penalty",
     "angular_velocity_squared_penalty",
     "velocity_too_low_penalty",
+    "proximity_brake_penalty",
+    "risk_speed_penalty",
+    # Smoothness rewards
+    "deadzone_acceleration_penalty",
+    "context_aware_angular_velocity_penalty",
 ]
