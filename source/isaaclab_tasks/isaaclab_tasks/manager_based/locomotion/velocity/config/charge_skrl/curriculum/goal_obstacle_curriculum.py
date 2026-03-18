@@ -34,7 +34,7 @@ STAGES = {
     # ------------------------------------------------------------------
     1: {
         "num_goals": 8,
-        "goal_distance": (2.0, 5.0),
+        "goal_distance": (2.0, 13.0),
         "num_obstacles_static": 0,
         "num_obstacles_dynamic": 0,
         "empty_ratio": 1.00,
@@ -56,7 +56,7 @@ STAGES = {
     # ------------------------------------------------------------------
     2: {
         "num_goals": 3,
-        "goal_distance": (4.0, 8.0),
+        "goal_distance": (2.0, 13.0),
         "num_obstacles_static": 3,
         "num_obstacles_dynamic": 2,
         "empty_ratio": 0.55,
@@ -77,7 +77,7 @@ STAGES = {
     # ------------------------------------------------------------------
     3: {
         "num_goals": 2,
-        "goal_distance": (3.0, 8.0),
+        "goal_distance": (2.0, 13.0),
         "num_obstacles_static": 5,
         "num_obstacles_dynamic": 3,
         "empty_ratio": 0.25,
@@ -98,7 +98,7 @@ STAGES = {
     # ------------------------------------------------------------------
     4: {
         "num_goals": 1,
-        "goal_distance": (3.0, 8.0),
+        "goal_distance": (2.0, 13.0),
         "num_obstacles_static": 5,
         "num_obstacles_dynamic": 5,
         "empty_ratio": 0.20,
@@ -118,7 +118,7 @@ STAGES = {
     # ------------------------------------------------------------------
     5: {
         "num_goals": 1,
-        "goal_distance": (3.0, 8.0),
+        "goal_distance": (2.0, 13.0),
         "num_obstacles_static": 5,
         "num_obstacles_dynamic": 8,
         "empty_ratio": 0.15,
