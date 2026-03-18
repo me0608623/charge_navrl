@@ -45,6 +45,12 @@ from .smoothness_rewards import (
     context_aware_angular_velocity_penalty,
 )
 
+from .navrl_rewards import (
+    velocity_to_goal_reward,
+    safety_log_distance_reward,
+    safe_progress_reward,
+)
+
 __all__ = [
     # 工具函數
     "_print_diagnostics",
@@ -74,4 +80,8 @@ __all__ = [
     # Smoothness rewards
     "deadzone_acceleration_penalty",
     "context_aware_angular_velocity_penalty",
+    # NavRL-style dense rewards
+    "velocity_to_goal_reward",
+    "safety_log_distance_reward",
+    "safe_progress_reward",
 ]

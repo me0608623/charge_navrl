@@ -25,6 +25,7 @@ from .cfg import (
     ChargeNavigationEnvCfgVLP16,
     ChargeNavigationEnvCfgVLP16Phase2,
     ChargeNavigationEnvCfgVLP16Curriculum,
+    ChargeNavigationEnvCfgVLP16CurriculumNavRL,
 )
 
 # 實驗性配置（依賴模組可能尚未完成）
@@ -163,6 +164,19 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:ChargeNavigationEnvCfgVLP16Curriculum",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+# ============================================================================
+# VLP-16 Curriculum NavRL: NavRL-Style Dense Rewards（安全導航密集獎勵）
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:ChargeNavigationEnvCfgVLP16CurriculumNavRL",
         "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
     },
 )

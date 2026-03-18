@@ -47,6 +47,11 @@ from ..mdp.rewards.smoothness_rewards import (
     deadzone_acceleration_penalty,
     context_aware_angular_velocity_penalty,
 )
+from ..mdp.rewards.navrl_rewards import (
+    velocity_to_goal_reward,
+    safety_log_distance_reward,
+    safe_progress_reward,
+)
 
 # 事件
 from ..mdp.events import (
@@ -380,7 +385,7 @@ class RewardsCfgVLP16Curriculum(RewardsCfgVLP16):
 # ============================================================================
 @configclass
 class CurriculumCfgVLP16:
-    """4 階段 goal-obstacle 聯動課程"""
+    """5 階段 goal-obstacle 聯動課程（v10: 4a/4b 拆分 + TO-aware）"""
     goal_obstacle_curriculum = CurriculumTermCfg(
         func=goal_obstacle_curriculum,
         params={
@@ -414,3 +419,88 @@ class ChargeNavigationEnvCfgVLP16Curriculum(ChargeNavigationEnvCfgVLP16):
         self.viewer.eye = (9.0, 9.0, 9.0)
         # 設定 wall dispatch 使用 20×20 牆壁
         # （在環境初始化後由 startup event 設定 env._wall_tensor_fn）
+
+
+# ============================================================================
+# NavRL-Style Dense Rewards 配置
+# ============================================================================
+@configclass
+class RewardsCfgVLP16NavRL(RewardsCfgVLP16Curriculum):
+    """NavRL-style dense reward 配置 — 取代 v9 純死亡機制
+
+    設計原則：
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ 引入 3 個 NavRL-style 密集獎勵，提供「方向性的安全導航信號」，  │
+    │ 讓 agent 同時學會前進和避障，而非只靠稀疏的死亡懲罰。           │
+    └─────────────────────────────────────────────────────────────────┘
+
+    獎勵結構（5 項有效）：
+    1. reaching_goal (+250)        — 繼承不變
+    2. velocity_to_goal (+15)      — 新增：雙向速度獎勵 [-1,1]（背離懲罰）
+    3. safety_log_distance (+3)    — 新增：速度耦合 log 安全距離（靜止×0.1）
+    4. safe_progress (+30)         — 新增：安全耦合 PBRS（取代 potential_progress）
+    5a. acceleration_penalty (-0.05) — 繼承：deadzone 版
+    5b. angular_velocity_penalty (-0.05) — 繼承：context-aware 版
+
+    行為排序：安全前進(+2.5) >> 危險前進(+0.6) >> 原地不動(≈0) >> 後退(-0.7) >> 接近碰撞(-0.1)
+    """
+
+    # --- 新增 NavRL-style dense rewards ---
+
+    velocity_to_goal = RewTerm(
+        func=velocity_to_goal_reward,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "min_goal_dist": 0.5,
+            "max_reward_speed": 1.0,
+        },
+        weight=15.0,
+    )
+
+    safety_log_distance = RewTerm(
+        func=safety_log_distance_reward,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "bottom_k": 10,
+            "max_distance": 8.0,
+            "speed_threshold": 0.1,
+            "min_speed_factor": 0.1,
+        },
+        weight=3.0,
+    )
+
+    safe_progress = RewTerm(
+        func=safe_progress_reward,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "bottom_k": 10,
+            "safety_threshold": 1.0,
+            "safety_temperature": 0.3,
+        },
+        weight=30.0,
+    )
+
+    # --- 被 safe_progress 取代的舊版 PBRS ---
+    potential_progress = RewTerm(
+        func=potential_progress_reward,
+        params={"robot_cfg": SceneEntityCfg("robot")},
+        weight=0.0,
+    )
+
+
+# ============================================================================
+# NavRL Curriculum 完整環境配置
+# ============================================================================
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL(ChargeNavigationEnvCfgVLP16Curriculum):
+    """VLP-16 Curriculum + NavRL Dense Rewards
+
+    繼承 VLP16Curriculum 的 scene/commands/events/curriculum，
+    只覆蓋 rewards 為 NavRL-style dense rewards。
+    """
+
+    rewards: RewardsCfgVLP16NavRL = RewardsCfgVLP16NavRL()

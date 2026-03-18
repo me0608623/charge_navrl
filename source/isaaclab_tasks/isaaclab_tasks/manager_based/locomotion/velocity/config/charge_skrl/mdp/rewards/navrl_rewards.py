@@ -1,0 +1,292 @@
+"""NavRL-Style Dense Rewards for VLP16 Curriculum
+
+3 個密集獎勵函數，提供「方向性的安全導航信號」：
+1. velocity_to_goal_reward: 鼓勵朝目標方向高效前進
+2. safety_log_distance_reward: LiDAR bottom-K log 距離（近距離梯度陡，遠距離梯度平）
+3. safe_progress_reward: PBRS × sigmoid 安全 gate（安全前進 >> 危險前進）
+
+設計動機：
+v9 純死亡機制缺乏密集梯度信號，agent 學會「不動=不死」。
+本模組引入 NavRL 風格的密集獎勵，讓 agent 同時學會前進和避障。
+
+References:
+  - NavRL (Xu et al., 2025) for log-distance safety
+  - Ng et al. (1999) for potential-based reward shaping
+"""
+
+from __future__ import annotations
+
+import torch
+from typing import TYPE_CHECKING
+
+from isaaclab.assets import Articulation
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import RayCaster
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+
+
+def _get_lidar_safety_stats(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    body_radius: float = 0.35,
+    bottom_k: int = 10,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """計算 LiDAR bottom-K 安全統計量。
+
+    不做快取，直接計算（GPU 上 5760 ray sort 只需 ~0.1ms）。
+
+    Args:
+        env: 環境實例
+        sensor_cfg: LiDAR 感測器配置
+        body_radius: 機器人車體半徑 (m)
+        bottom_k: 取最近的 K 條 ray
+
+    Returns:
+        (bottom_k_mean, d_safe):
+            bottom_k_mean: [N] 最近 K 條 ray 的平均 2D 距離
+            d_safe: [N] 安全餘裕 = bottom_k_mean - body_radius，clamp >= ε
+    """
+    sensor: RayCaster = env.scene.sensors[sensor_cfg.name]
+
+    # 2D 距離計算（與 _get_lidar_min_distance 一致）
+    sensor_pos_2d = sensor.data.pos_w[:, :2]  # [N, 2]
+    hit_points_2d = sensor.data.ray_hits_w[:, :, :2]  # [N, num_rays, 2]
+    distances_2d = torch.norm(hit_points_2d - sensor_pos_2d.unsqueeze(1), dim=-1)  # [N, num_rays]
+
+    # NaN/inf 保護：未命中的 ray 設為 max_distance
+    distances_2d = torch.nan_to_num(
+        distances_2d,
+        nan=sensor.cfg.max_distance,
+        posinf=sensor.cfg.max_distance,
+    )
+
+    # Bottom-K：取最近 K 條 ray（比 global min 更穩定）
+    # topk(largest=False) 返回最小的 K 個值
+    actual_k = min(bottom_k, distances_2d.shape[1])
+    bottom_k_vals = torch.topk(distances_2d, k=actual_k, dim=1, largest=False).values  # [N, K]
+    bottom_k_mean = bottom_k_vals.mean(dim=1)  # [N]
+
+    # 安全餘裕 = 到最近障礙物表面的距離
+    d_safe = (bottom_k_mean - body_radius).clamp(min=1e-4)  # [N]
+
+    return bottom_k_mean, d_safe
+
+
+def velocity_to_goal_reward(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    min_goal_dist: float = 0.5,
+    max_reward_speed: float = 1.0,
+) -> torch.Tensor:
+    """朝目標方向的速度獎勵（雙向：正向獎勵、背離懲罰）。
+
+    Math:
+        goal_dir = normalize(goal_pos - robot_pos)      # 2D unit vector
+        v_toward = dot(vel_2d, goal_dir)                 # 含正負：正=朝向，負=背離
+        reward = clamp(v_toward / v_max, -1, 1)          # 歸一化到 [-1, 1]
+        reward = reward * (goal_dist > min_dist).float()  # 太近目標時不給
+
+    物理意義：朝目標前進得正獎勵，背離目標得負懲罰。
+    範圍：[-1, 1]，有效 per-step: -3.0 ~ +3.0（×15×0.2）
+
+    Args:
+        env: 環境實例
+        robot_cfg: 機器人配置
+        min_goal_dist: 低於此距離不給獎勵 (m)
+        max_reward_speed: 歸一化用的最大速度 (m/s)
+
+    Returns:
+        [num_envs] in [-1, 1]
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    device = env.device
+
+    # Robot position & velocity (2D)
+    robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)  # [N, 2]
+    vel_2d = torch.nan_to_num(robot.data.root_lin_vel_w[:, :2], nan=0.0)  # [N, 2]
+
+    # Goal position（統一來源）
+    if hasattr(env, "_local_goal_world") and env._local_goal_world is not None:
+        goal_pos = env._local_goal_world  # [N, 2]
+    else:
+        goal_pos = env.command_manager.get_command("goal_command")[:, :2]
+
+    # Goal direction
+    diff = goal_pos - robot_pos  # [N, 2]
+    goal_dist = torch.norm(diff, dim=1, keepdim=True).clamp(min=1e-6)  # [N, 1]
+    goal_dir = diff / goal_dist  # [N, 2] unit vector
+
+    # 朝目標方向的速度分量（雙向：正=朝向，負=背離）
+    v_toward = (vel_2d * goal_dir).sum(dim=1)  # [N]
+
+    # 歸一化到 [-1, 1]
+    reward = (v_toward / max_reward_speed).clamp(-1.0, 1.0)  # [N]
+
+    # 太近目標時不給（避免到達後繼續加速）
+    far_enough = (goal_dist.squeeze(1) > min_goal_dist).float()  # [N]
+    reward = reward * far_enough
+
+    # NaN 保護
+    reward = torch.nan_to_num(reward, nan=0.0)
+
+    return reward
+
+
+def safety_log_distance_reward(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    body_radius: float = 0.35,
+    bottom_k: int = 10,
+    max_distance: float = 8.0,
+    speed_threshold: float = 0.1,
+    min_speed_factor: float = 0.1,
+) -> torch.Tensor:
+    """LiDAR bottom-K log 距離安全獎勵（速度耦合）。
+
+    Math:
+        d_safe = clamp(mean(bottom_k) - body_radius, min=ε)
+        raw = clamp(log(d_safe), -3, 3)
+
+        speed_factor = clamp(speed / speed_threshold, min_sf, 1.0)
+        reward = raw × speed_factor
+
+    速度耦合解決「安全地不動」局部最優：
+    - 靜止時 speed_factor=0.1 → 正向安全獎勵衰減 90%
+    - 移動時 speed_factor=1.0 → 完整安全信號
+    - min_sf=0.1 確保靜止時仍保留 10% 的危險警告
+
+    範圍：[-3, 3]，有效 per-step: -1.8 ~ +1.8（×3×0.2）
+
+    Args:
+        env: 環境實例
+        robot_cfg: 機器人配置（用於讀取速度）
+        sensor_cfg: LiDAR 感測器配置
+        body_radius: 機器人車體半徑 (m)
+        bottom_k: 取最近的 K 條 ray
+        max_distance: 超過此距離視為等效安全（限制 log 上界）
+        speed_threshold: 速度因子飽和閾值 (m/s)
+        min_speed_factor: 靜止時的最低速度因子（保留部分危險警告）
+
+    Returns:
+        [num_envs] in [-3, 3]
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
+
+    # Log 變換：近距離梯度陡，遠距離梯度平
+    raw = torch.log(d_safe).clamp(-3.0, 3.0)  # [N]
+
+    # 速度因子：靜止時衰減安全正獎勵，移動時完整信號
+    speed = torch.norm(
+        torch.nan_to_num(robot.data.root_lin_vel_w[:, :2], nan=0.0), dim=-1
+    )  # [N]
+    speed_factor = (speed / speed_threshold).clamp(min_speed_factor, 1.0)  # [N]
+
+    reward = raw * speed_factor  # [N]
+
+    # NaN 保護
+    reward = torch.nan_to_num(reward, nan=0.0)
+
+    return reward
+
+
+def safe_progress_reward(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    body_radius: float = 0.35,
+    bottom_k: int = 10,
+    safety_threshold: float = 1.0,
+    safety_temperature: float = 0.3,
+) -> torch.Tensor:
+    """安全耦合的 PBRS 進度獎勵。
+
+    Math:
+        # PBRS 部分
+        progress = d_prev - d_curr                          # 距離縮減
+        progress = clamp(progress, -1, 1)
+
+        # 安全耦合（sigmoid gate）
+        d_safe = bottom_k_mean - body_radius
+        gate = sigmoid((d_safe - threshold) / temperature)   # threshold=1.0m, temp=0.3
+
+        # 最終獎勵
+        reward = progress × gate
+
+    PBRS 精神：telescoping sum，total = d_initial - d_final
+    安全耦合：d_safe > 1.5m → gate≈1，d_safe < 0.5m → gate≈0.15
+    「安全前進」和「危險前進」有不同獎勵，agent 自然學會繞路。
+
+    使用 env._prev_goal_dist_navrl（獨立於舊版 _prev_goal_dist）。
+
+    範圍：[-1, 1]，有效 per-step: -12 ~ +12（×60×0.2）
+
+    Args:
+        env: 環境實例
+        robot_cfg: 機器人配置
+        sensor_cfg: LiDAR 感測器配置
+        body_radius: 機器人車體半徑 (m)
+        bottom_k: 取最近的 K 條 ray
+        safety_threshold: 安全 gate 中心點 (m)
+        safety_temperature: 安全 gate sigmoid 溫度
+
+    Returns:
+        [num_envs] in [-1, 1]
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    device = env.device
+
+    # Robot position (2D)
+    robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)  # [N, 2]
+
+    # Goal position（統一來源）
+    if hasattr(env, "_local_goal_world") and env._local_goal_world is not None:
+        goal_pos = env._local_goal_world  # [N, 2]
+    else:
+        goal_pos = env.command_manager.get_command("goal_command")[:, :2]
+
+    # Current distance to goal
+    d_curr = torch.norm(goal_pos - robot_pos, dim=1)  # [N]
+
+    # === PBRS 部分 ===
+    # 使用獨立的 _prev_goal_dist_navrl（不與舊版衝突）
+    if not hasattr(env, "_prev_goal_dist_navrl") or env._prev_goal_dist_navrl is None:
+        env._prev_goal_dist_navrl = d_curr.clone()
+        return torch.zeros(env.num_envs, device=device)
+
+    # Detect episode resets
+    just_reset = env.episode_length_buf == 0
+    env._prev_goal_dist_navrl[just_reset] = d_curr[just_reset]
+
+    d_prev = env._prev_goal_dist_navrl
+
+    # Progress: positive when approaching goal
+    progress = (d_prev - d_curr).clamp(-1.0, 1.0)  # [N]
+
+    # Update for next step
+    env._prev_goal_dist_navrl = d_curr.clone()
+
+    # === 安全耦合部分（sigmoid gate）===
+    _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
+
+    # Sigmoid gate: d_safe > threshold → gate ≈ 1, d_safe < threshold → gate → 0
+    gate = torch.sigmoid((d_safe - safety_threshold) / safety_temperature)  # [N]
+
+    # 最終獎勵
+    reward = progress * gate  # [N]
+
+    # NaN 保護
+    reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return reward
+
+
+__all__ = [
+    "velocity_to_goal_reward",
+    "safety_log_distance_reward",
+    "safe_progress_reward",
+]

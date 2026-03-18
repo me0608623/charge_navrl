@@ -45,6 +45,7 @@ from .charge_env_cfg_vlp16 import (
 
 from .charge_env_cfg_vlp16_curriculum import (
     ChargeNavigationEnvCfgVLP16Curriculum,
+    ChargeNavigationEnvCfgVLP16CurriculumNavRL,
 )
 
 # ============================================================================
@@ -70,4 +71,6 @@ __all__ = [
     "ChargeNavigationEnvCfgCompetitive",
     # VLP-16 Curriculum
     "ChargeNavigationEnvCfgVLP16Curriculum",
+    # VLP-16 Curriculum NavRL
+    "ChargeNavigationEnvCfgVLP16CurriculumNavRL",
 ]
