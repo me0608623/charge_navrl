@@ -74,6 +74,11 @@ class TrainingDebugLogger:
         self._scatter_count: int = 0
         self._accel_scatter_max_samples: int = 5000
 
+        # Velocity scatter data (world-frame vx, vy — GPU tensor buffer)
+        self._vel_scatter_buf: Optional[torch.Tensor] = None  # [max_samples, 2]
+        self._vel_scatter_count: int = 0
+        self._vel_scatter_max_samples: int = 5000
+
         # ── Robot state accumulators ──
         self._lin_vel_mean: list[float] = []
         self._lin_vel_max: list[float] = []
@@ -146,6 +151,27 @@ class TrainingDebugLogger:
         data_cpu = self._scatter_buf[:self._scatter_count].cpu().tolist()
         table = wandb.Table(
             columns=["linear_acceleration", "angular_acceleration"],
+            data=data_cpu,
+        )
+        return table
+
+    def get_velocity_scatter_table(self):
+        """Build a wandb.Table from velocity scatter buffer (linear speed, angular velocity).
+
+        Returns:
+            wandb.Table with columns ["linear_speed", "angular_velocity"],
+            or None if no samples collected or wandb not available.
+        """
+        if self._vel_scatter_count == 0 or self._vel_scatter_buf is None:
+            return None
+        try:
+            import wandb
+        except ImportError:
+            return None
+
+        data_cpu = self._vel_scatter_buf[:self._vel_scatter_count].cpu().tolist()
+        table = wandb.Table(
+            columns=["linear_speed", "angular_velocity"],
             data=data_cpu,
         )
         return table
@@ -348,6 +374,20 @@ class TrainingDebugLogger:
             self._ang_vel_mean.append(vel_batch[2].item())
             self._ang_vel_max.append(vel_batch[3].item())
 
+            # Velocity scatter — (linear_speed, angular_velocity) GPU buffer
+            remaining = self._vel_scatter_max_samples - self._vel_scatter_count
+            if speed.shape[0] > 0 and remaining > 0:
+                if self._vel_scatter_buf is None:
+                    self._vel_scatter_buf = torch.zeros(
+                        self._vel_scatter_max_samples, 2, device=speed.device
+                    )
+                n_sample = min(speed.shape[0], 32, remaining)
+                indices = torch.randperm(speed.shape[0], device=speed.device)[:n_sample]
+                end = self._vel_scatter_count + n_sample
+                self._vel_scatter_buf[self._vel_scatter_count:end, 0] = speed[indices]
+                self._vel_scatter_buf[self._vel_scatter_count:end, 1] = ang_vel[indices]
+                self._vel_scatter_count = end
+
             # Progress per step (distance reduction to goal)
             robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)
             goal_pos = None
@@ -469,6 +509,9 @@ class TrainingDebugLogger:
 
         self._scatter_count = 0
         # Keep _scatter_buf allocated (reuse GPU memory)
+
+        self._vel_scatter_count = 0
+        # Keep _vel_scatter_buf allocated (reuse GPU memory)
 
         self._lin_vel_mean.clear()
         self._lin_vel_max.clear()

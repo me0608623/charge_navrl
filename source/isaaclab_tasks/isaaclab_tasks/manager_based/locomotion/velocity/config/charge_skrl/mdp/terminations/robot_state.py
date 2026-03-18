@@ -28,6 +28,8 @@ import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 
+from ..wall_layout import get_all_wall_tensors, check_wall_proximity_batch
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -154,3 +156,68 @@ def robot_flying(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Ten
     # 高度 > 1 米 → True（異常，終止）
     
     return is_flying
+
+
+_wall_diag_count = 0
+
+
+def wall_collision_termination(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg,
+    threshold: float = 0.45,
+) -> torch.Tensor:
+    """分析式牆壁碰撞偵測 — 不依賴 LiDAR/contact sensor。
+
+    用機器人 2D 位置 vs 所有牆壁 AABB 做距離計算。
+    使用 wall_layout.py 的 check_wall_proximity_batch()。
+
+    作為 LiDAR collision 的互補安全網：
+    - LiDAR 可能因 kinematic wall 穿入、更新間隔跳過等邊緣情況遺漏牆壁碰撞
+    - 此函數直接用幾何位置判斷，100% 可靠
+
+    牆壁來源：
+    - env._all_wall_tensor_fn (20×20 curriculum，由 startup event 設定)
+    - fallback: get_all_wall_tensors() (16×16 預設)
+
+    Args:
+        env: 環境實例
+        asset_cfg: 資產配置（引用機器人）
+        threshold: 碰撞距離閾值 [m]（應與 COLLISION_THRESHOLD 一致）
+
+    Returns:
+        shape [num_envs]：布林張量
+        True = 碰撞（距離 < threshold），終止
+        False = 安全，繼續
+    """
+    global _wall_diag_count
+
+    robot = env.scene[asset_cfg.name]
+    robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)
+    env_origins = env.scene.env_origins[:, :2]
+    robot_pos_local = robot_pos - env_origins
+
+    # 取得所有牆壁（boundary + internal）
+    if hasattr(env, '_all_wall_tensor_fn') and env._all_wall_tensor_fn is not None:
+        wall_c, wall_s = env._all_wall_tensor_fn(env.device)
+    else:
+        wall_c, wall_s = get_all_wall_tensors(env.device)  # 16×16 fallback
+
+    result = check_wall_proximity_batch(robot_pos_local, wall_c, wall_s, threshold)
+
+    # 啟動診斷（僅第 1 步，摘要統計）
+    _wall_diag_count += 1
+    if _wall_diag_count == 1:
+        pos = robot_pos_local.unsqueeze(1)
+        delta = (pos - wall_c.unsqueeze(0)).abs() - wall_s.unsqueeze(0) * 0.5
+        delta = delta.clamp(min=0.0)
+        dists = torch.norm(delta, dim=2)
+        d_min_per_env = dists.min(dim=1).values
+        wall_src = "20x20" if hasattr(env, '_all_wall_tensor_fn') and env._all_wall_tensor_fn else "16x16"
+        print(
+            f"[wall_collision] src={wall_src} walls={wall_c.shape[0]} thr={threshold:.2f}m "
+            f"envs={d_min_per_env.shape[0]} | "
+            f"d_min: min={d_min_per_env.min():.2f} mean={d_min_per_env.mean():.2f} max={d_min_per_env.max():.2f}",
+            flush=True,
+        )
+
+    return result

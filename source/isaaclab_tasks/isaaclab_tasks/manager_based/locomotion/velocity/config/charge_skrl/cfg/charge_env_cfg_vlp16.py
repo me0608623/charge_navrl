@@ -88,6 +88,7 @@ from ..mdp.terminations import (
     goal_reached,
     robot_tipped_over,
     physics_explosion,
+    wall_collision_termination,
 )
 
 # 事件
@@ -618,6 +619,11 @@ class TerminationsCfgVLP16:
     collision = DoneTerm(
         func=collision_occurred,
         params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+    )
+    # AABB 牆壁碰撞偵測（LiDAR collision 的互補安全網）
+    wall_collision = DoneTerm(
+        func=wall_collision_termination,
+        params={"asset_cfg": SceneEntityCfg("robot"), "threshold": COLLISION_THRESHOLD},
     )
     # Fix 2: 物理引擎爆炸檢測
     physics_explosion = DoneTerm(

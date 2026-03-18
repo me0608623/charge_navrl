@@ -90,6 +90,11 @@ class ConsoleSummaryLogger:
         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total_env_steps = timestep * self.num_envs
 
+        # 課程階段
+        cur_stage = metrics.get("Curriculum / stage")
+        stage_labels = {1: "1 密集探索", 2: "2 死亡機制", 3: "3 密集避障", 4: "4a 中等動態", 5: "4b 終極挑戰"}
+        stage_str = stage_labels.get(int(cur_stage), f"{int(cur_stage)}") if cur_stage is not None else "N/A"
+
         summary_lines = [
             "",
             "=" * 60,
@@ -108,6 +113,7 @@ class ConsoleSummaryLogger:
             f"  總環境步數: {total_env_steps:,} (= {timestep} x {self.num_envs} envs)",
             f"  進度: {100.0 * timestep / timesteps_total:.2f}%",
             f"  預計剩餘時間: {self._format_time((timesteps_total - timestep) / fps if fps > 0 else 0)}",
+            f"  課程階段: Phase {stage_str}",
             "",
             "=== 效能 ===",
             f"  FPS (trainer): {fps:.2f}",
@@ -173,8 +179,8 @@ class ConsoleSummaryLogger:
         # 終止原因分析
         termination_components = []
         for key in metrics.keys():
-            if key.startswith("Info / Episode_Termination/"):
-                component_name = key.replace("Info / Episode_Termination/", "")
+            if key.startswith("Termination / "):
+                component_name = key.replace("Termination / ", "")
                 termination_components.append((component_name, key))
 
         if termination_components:
@@ -184,19 +190,56 @@ class ConsoleSummaryLogger:
                 value = metrics.get(key, 0.0)
                 summary_lines.append(f"  {name}: {value:.4f}")
 
-        # 獎勵分項
-        reward_components = []
-        for key in metrics.keys():
-            if key.startswith("Info / Episode_Reward/"):
-                component_name = key.replace("Info / Episode_Reward/", "")
-                reward_components.append((component_name, key))
+        # 獎勵分項（NavRL Curriculum 有效項 + 預期走勢）
+        # 格式: (顯示名, WandB key, 預期走勢)
+        reward_terms = [
+            ("reaching_goal",           "Reward / reaching_goal",           "↑ 隨成功率上升"),
+            ("velocity_to_goal",        "Reward / velocity_to_goal",        "↑ 學會朝目標前進後穩定為正"),
+            ("safe_progress",           "Reward / safe_progress",           "↑ 前期快速上升，後期穩定"),
+            ("safety_log_distance",     "Reward / safety_log_distance",     "↑ 學會保持距離後穩定為正"),
+            ("acceleration_penalty",    "Reward / acceleration_penalty",    "→ 微量負值，接近 0"),
+            ("angular_velocity_penalty","Reward / angular_velocity_penalty","→ 微量負值，接近 0"),
+        ]
+        # weight=0 的項不顯示（collision_terminal, near_obstacle_penalty, time_penalty, velocity_too_low, potential_progress）
 
-        if reward_components:
+        summary_lines.append("")
+        summary_lines.append("=== 獎勵分項（每秒平均） ===")
+        has_any = False
+        for display_name, key, trend in reward_terms:
+            value = metrics.get(key)
+            if value is not None:
+                summary_lines.append(f"  {display_name:30s} {value:+.6f}  {trend}")
+                has_any = True
+        if not has_any:
+            summary_lines.append("  (尚無數據)")
+
+        # 也列出非零的其他 Reward 項（防止遺漏）
+        known_keys = {t[1] for t in reward_terms}
+        skip_prefixes = ("Reward / Total", "Reward / Instantaneous")
+        extra_rewards = []
+        for key in sorted(metrics.keys()):
+            if key.startswith("Reward / ") and key not in known_keys and not any(key.startswith(p) for p in skip_prefixes):
+                extra_rewards.append((key.replace("Reward / ", ""), key))
+        if extra_rewards:
+            summary_lines.append("  --- 其他 ---")
+            for name, key in extra_rewards:
+                value = metrics.get(key, 0.0)
+                summary_lines.append(f"  {name:30s} {value:+.6f}")
+
+        # 課程學習指標
+        cur_sr = metrics.get("Curriculum / success_rate")
+        cur_cr = metrics.get("Curriculum / collision_rate")
+        cur_to = metrics.get("Curriculum / timeout_rate")
+        cur_ep = metrics.get("Curriculum / num_episodes")
+        cur_sep = metrics.get("Curriculum / stage_episodes")
+        cur_fill = metrics.get("Curriculum / window_fill")
+        if cur_sr is not None:
             summary_lines.append("")
-            summary_lines.append("=== 獎勵分項 ===")
-            for component_name, tracking_key in sorted(reward_components):
-                value = metrics.get(tracking_key, 0.0)
-                summary_lines.append(f"  {component_name}: {value:.6f}")
+            summary_lines.append("=== 課程學習 ===")
+            summary_lines.append(f"  階段: Phase {stage_str}")
+            summary_lines.append(f"  成功率: {cur_sr:.4f}  碰撞率: {cur_cr:.4f}  超時率: {cur_to:.4f}")
+            if cur_ep is not None:
+                summary_lines.append(f"  總 episodes: {int(cur_ep)}  階段 episodes: {int(cur_sep or 0)}  窗口填充: {cur_fill:.2f}")
 
         # Loss 指標
         summary_lines.append("")

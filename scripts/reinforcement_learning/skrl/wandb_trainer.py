@@ -24,6 +24,27 @@ from skrl.trainers.torch import SequentialTrainer
 from console_summary import ConsoleSummaryLogger
 
 
+def _info_key_to_wandb_tag(key: str) -> str:
+    """將 Isaac Lab infos["log"] 的 key 映射到 WandB 分組 tag。
+
+    分組規則：
+      Episode_Reward/xxx                    → "Reward / xxx"
+      Episode_Termination/xx                → "Termination / xx"
+      Curriculum/goal_obstacle_curriculum/xx → "Curriculum / xx"
+      其他                                  → "Info / {key}"
+    """
+    if key.startswith("Episode_Reward/"):
+        return "Reward / " + key[len("Episode_Reward/"):]
+    if key.startswith("Episode_Termination/"):
+        return "Termination / " + key[len("Episode_Termination/"):]
+    if key.startswith("Curriculum/"):
+        # Curriculum/goal_obstacle_curriculum/stage → Curriculum / stage
+        parts = key.split("/")
+        leaf = parts[-1] if len(parts) > 1 else key
+        return "Curriculum / " + leaf
+    return f"Info / {key}"
+
+
 class WandBSequentialTrainer(SequentialTrainer):
     """SKRL SequentialTrainer with WandB logging and console summary.
 
@@ -107,6 +128,12 @@ class WandBSequentialTrainer(SequentialTrainer):
         self._frozen_max_steps = 5000         # 連續凍結超過此步數停止訓練
         self._frozen_check_interval = 128     # 每 N 步檢查一次
 
+        # Best-model auto-save — 追蹤滑動窗口 SR，存最佳 checkpoint
+        self._best_sr: float = 0.0
+        self._best_sr_timestep: int = 0
+        self._sr_window: list[float] = []
+        self._sr_window_size: int = 10
+
         # Hook agent.track_data()来捕获loss数据
         self._hook_agent_track_data()
 
@@ -166,6 +193,44 @@ class WandBSequentialTrainer(SequentialTrainer):
         except Exception as e:
             print(f"[WARNING] Module Entropy monitor init failed: {e}", flush=True)
             self._module_entropy_monitor = None
+
+    def _maybe_save_best_model(self, timestep: int) -> None:
+        """追蹤滑動窗口 SR，當超過歷史最佳時自動儲存 best model。
+
+        使用 self._episode_count / self._goal_reached_count 計算即時 SR，
+        維護 _sr_window_size 個 rollout 的滑動窗口取平均。
+        """
+        if self._episode_count < 10:
+            return
+
+        current_sr = self._goal_reached_count / self._episode_count
+        self._sr_window.append(current_sr)
+        if len(self._sr_window) > self._sr_window_size:
+            self._sr_window = self._sr_window[-self._sr_window_size:]
+
+        smoothed_sr = sum(self._sr_window) / len(self._sr_window)
+
+        if smoothed_sr > self._best_sr and len(self._sr_window) >= 3:
+            self._best_sr = smoothed_sr
+            self._best_sr_timestep = timestep
+
+            agent = self.agents if self.num_simultaneous_agents == 1 else self.agents[0]
+            try:
+                # 使用 agent 的 experiment directory 作為基礎路徑
+                exp_dir = agent.experiment_dir if hasattr(agent, 'experiment_dir') else "."
+                best_dir = os.path.join(exp_dir, "best_model")
+                os.makedirs(best_dir, exist_ok=True)
+                agent.save(os.path.join(best_dir, "best_agent.pt"))
+                print(
+                    f"[Best Model] SR={smoothed_sr:.1%} (new best) @ timestep {timestep} "
+                    f"→ saved to {best_dir}/",
+                    flush=True,
+                )
+                if self._wandb_run is not None:
+                    self._wandb_run.summary["best_sr"] = smoothed_sr
+                    self._wandb_run.summary["best_sr_timestep"] = timestep
+            except Exception as e:
+                print(f"[Best Model] Save failed: {e}", flush=True)
 
     def _check_frozen_agent(self, timestep: int, next_states: torch.Tensor) -> bool:
         """Fix 5: 檢查 agent 是否凍結（持續不動）。
@@ -368,7 +433,7 @@ class WandBSequentialTrainer(SequentialTrainer):
                 # log environment info — also capture into tracking_data_snapshot
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
-                        tag = f"Info / {k}"
+                        tag = _info_key_to_wandb_tag(k)
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
                             val = v.item()
                         elif isinstance(v, (int, float)):
@@ -461,7 +526,7 @@ class WandBSequentialTrainer(SequentialTrainer):
                 # (agent.tracking_data will be cleared by post_interaction)
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
-                        tag = f"Info / {k}"
+                        tag = _info_key_to_wandb_tag(k)
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
                             val = v.item()
                         elif isinstance(v, (int, float)):
@@ -498,18 +563,27 @@ class WandBSequentialTrainer(SequentialTrainer):
                     # Scatter plot (built BEFORE get_and_reset clears buffers)
                     if self.wandb_run is not None:
                         scatter_table = self.debug_logger.get_accel_scatter_table()
-                        if scatter_table is not None:
+                        vel_scatter_table = self.debug_logger.get_velocity_scatter_table()
+                        if scatter_table is not None or vel_scatter_table is not None:
                             try:
                                 import wandb
-                                wandb.log(
-                                    {"action/accel_scatter": wandb.plot.scatter(
+                                scatter_logs = {}
+                                if scatter_table is not None:
+                                    scatter_logs["action/accel_scatter"] = wandb.plot.scatter(
                                         scatter_table,
                                         x="linear_acceleration",
                                         y="angular_acceleration",
+                                        title="acceleration distributed",
+                                    )
+                                if vel_scatter_table is not None:
+                                    scatter_logs["action/speed_scatter"] = wandb.plot.scatter(
+                                        vel_scatter_table,
+                                        x="linear_speed",
+                                        y="angular_velocity",
                                         title="speed distributed",
-                                    )},
-                                    step=timestep,
-                                )
+                                    )
+                                if scatter_logs:
+                                    wandb.log(scatter_logs, step=timestep)
                             except ImportError:
                                 pass
 
@@ -530,6 +604,9 @@ class WandBSequentialTrainer(SequentialTrainer):
 
                 # WandB + CSV + console logging (flush-only, not every step)
                 self._log_to_wandb(timestep, tracking_data_snapshot=tracking_data_snapshot, single_agent=True)
+
+                # Best-model auto-save (每個 log cycle 檢查一次)
+                self._maybe_save_best_model(timestep)
 
             # Fix 5: Early stopping check
             if self._check_frozen_agent(timestep, next_states):
@@ -677,17 +754,28 @@ class WandBSequentialTrainer(SequentialTrainer):
             per_env_dones = tm._term_dones[done_indices]  # [num_done, num_terms]
 
             # Find indices for goal/collision/timeout
+            # collision 可能有多個 term（collision + wall_collision），需要 OR 合併
             goal_idx = None
-            collision_idx = None
+            collision_indices = []
             timeout_idx = None
             for name, idx in name_to_idx.items():
                 name_lower = name.lower()
                 if "goal" in name_lower:
                     goal_idx = idx
                 elif "collision" in name_lower:
-                    collision_idx = idx
+                    collision_indices.append(idx)
                 elif "time" in name_lower:
                     timeout_idx = idx
+
+            # 合併多個 collision term 為單一 column（OR）
+            collision_idx = None
+            if collision_indices:
+                merged = per_env_dones[:, collision_indices[0]]
+                for ci in collision_indices[1:]:
+                    merged = merged | per_env_dones[:, ci]
+                # 寫入第一個 collision column 以保持返回格式不變
+                per_env_dones[:, collision_indices[0]] = merged
+                collision_idx = collision_indices[0]
 
             return per_env_dones, goal_idx, collision_idx, timeout_idx
         except Exception:
@@ -845,7 +933,7 @@ class WandBSequentialTrainer(SequentialTrainer):
                 # log environment info — also capture into tracking_data_snapshot
                 if self.environment_info in infos:
                     for k, v in infos[self.environment_info].items():
-                        tag = f"Info / {k}"
+                        tag = _info_key_to_wandb_tag(k)
                         if isinstance(v, torch.Tensor) and v.numel() == 1:
                             val = v.item()
                         elif isinstance(v, (int, float)):

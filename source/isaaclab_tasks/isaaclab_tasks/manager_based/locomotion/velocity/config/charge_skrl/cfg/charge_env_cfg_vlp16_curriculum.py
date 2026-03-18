@@ -66,12 +66,13 @@ from ..mdp.events.state import set_obstacle_metadata
 from ..curriculum.goal_obstacle_curriculum import goal_obstacle_curriculum
 
 # 牆壁
-from ..mdp.wall_layout import get_wall_tensors_20x20
+from ..mdp.wall_layout import get_wall_tensors_20x20, get_all_wall_tensors_20x20
 
 
 def _set_wall_fn_20x20(env, env_ids):
     """Startup event: 設定 env._wall_tensor_fn 為 20×20 牆壁版本。"""
     env._wall_tensor_fn = get_wall_tensors_20x20
+    env._all_wall_tensor_fn = get_all_wall_tensors_20x20
 
 
 # ============================================================================
