@@ -18,6 +18,7 @@ from isaaclab.managers import (
     SceneEntityCfg,
 )
 import isaaclab.sim as sim_utils
+from isaaclab.sensors import MultiMeshRayCasterCfg
 from isaaclab.utils import configclass
 
 from .charge_env_cfg_vlp16 import (
@@ -59,6 +60,7 @@ from ..mdp.events import (
     move_obstacles_vectorized,
 )
 from ..mdp.events.reset import reset_root_state_random_safe
+from ..mdp.events.walls import init_perenv_walls, randomize_walls
 from ..domain_randomization import apply_domain_randomization
 from ..mdp.events.state import set_obstacle_metadata
 
@@ -66,13 +68,7 @@ from ..mdp.events.state import set_obstacle_metadata
 from ..curriculum.goal_obstacle_curriculum import goal_obstacle_curriculum
 
 # 牆壁
-from ..mdp.wall_layout import get_wall_tensors_20x20, get_all_wall_tensors_20x20
-
-
-def _set_wall_fn_20x20(env, env_ids):
-    """Startup event: 設定 env._wall_tensor_fn 為 20×20 牆壁版本。"""
-    env._wall_tensor_fn = get_wall_tensors_20x20
-    env._all_wall_tensor_fn = get_all_wall_tensors_20x20
+from ..mdp.wall_layout import WALL_SLOT_SPECS, MAX_WALL_SLOTS
 
 
 # ============================================================================
@@ -88,7 +84,7 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
         InteractiveSceneCfg.__post_init__(self)
 
         room_size = 10.0  # ±10m = 20×20m
-        wall_thickness = 0.2
+        wall_thickness = 1.0  # 1.0m 厚度（原 0.2m）
         wall_height = 1.5
         wall_length = room_size * 2 + wall_thickness
         wall_color = (0.5, 0.5, 0.5)
@@ -97,7 +93,7 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
         wall_collision_props = sim_utils.CollisionPropertiesCfg()
         wall_visual = sim_utils.PreviewSurfaceCfg(diffuse_color=wall_color, metallic=0.1)
 
-        # 四面外牆（20×20m）
+        # 四面外牆（20×20m, 1.0m 厚度）
         self.wall_north = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/Wall_North",
             spawn=sim_utils.CuboidCfg(size=(wall_length, wall_thickness, wall_height),
@@ -123,33 +119,46 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
             init_state=AssetBaseCfg.InitialStateCfg(pos=(-room_size, 0.0, wall_height / 2)),
         )
 
-        # 4 面內部牆壁（匹配 wall_layout.py MAZE_WALLS_20x20）
-        internal_walls = [
-            ((4.0, 0.2, 1.5), (-7.5, 5.0, 0.75)),    # wall_internal_0: Top-left horizontal
-            ((0.2, 3.5, 1.5), (4.0, 7.5, 0.75)),      # wall_internal_1: Top-right vertical
-            ((0.2, 4.5, 1.5), (-4.0, -1.5, 0.75)),    # wall_internal_2: Center-left vertical
-            ((3.5, 0.2, 1.5), (2.0, -6.0, 0.75)),     # wall_internal_3: Bottom-center horizontal
-        ]
+        # 8 個內部牆壁 slots (RigidObjectCfg — 支援 per-env 移動)
+        # 初始隱藏在 Z=-10，由 randomize_walls event 控制位置/可見性
+        HIDDEN_Z = -10.0
+        internal_wall_color = (0.6, 0.55, 0.5)
+        internal_wall_visual = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=internal_wall_color, metallic=0.1,
+        )
 
-        # 先刪除繼承的 16×16 內部牆（index 4, 5 不存在於 20×20）
+        # 刪除繼承的 16×16 內部牆 (wall_internal_0..5)
         for i in range(6):
             attr_name = f"wall_internal_{i}"
-            if i < len(internal_walls):
-                size, pos = internal_walls[i]
-                setattr(self, attr_name, AssetBaseCfg(
-                    prim_path=f"{{ENV_REGEX_NS}}/Wall_Internal_{i}",
-                    spawn=sim_utils.CuboidCfg(
-                        size=size,
-                        rigid_props=wall_rigid_props,
-                        collision_props=wall_collision_props,
-                        visual_material=wall_visual,
-                    ),
-                    init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
-                ))
-            else:
-                # 移除多餘的內部牆（16×16 有 6 面，20×20 只有 4 面）
-                if hasattr(self, attr_name):
-                    delattr(self, attr_name)
+            if hasattr(self, attr_name):
+                delattr(self, attr_name)
+
+        # 建立 8 個 wall slots
+        for i, (length, width, height) in enumerate(WALL_SLOT_SPECS):
+            setattr(self, f"wall_internal_{i}", RigidObjectCfg(
+                prim_path=f"{{ENV_REGEX_NS}}/Wall_Internal_{i}",
+                spawn=sim_utils.CuboidCfg(
+                    size=(length, width, height),
+                    rigid_props=wall_rigid_props,
+                    collision_props=wall_collision_props,
+                    visual_material=internal_wall_visual,
+                ),
+                init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, HIDDEN_Z)),
+            ))
+
+        # LiDAR: 覆蓋繼承的 mesh_prim_paths
+        # Wall_.* 必須 track_mesh_transforms=True（牆壁會移動）
+        self.lidar.mesh_prim_paths = [
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/ground", track_mesh_transforms=False,
+            ),
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="{ENV_REGEX_NS}/Wall_.*", track_mesh_transforms=True,
+            ),
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="{ENV_REGEX_NS}/Obstacle_.*", track_mesh_transforms=True,
+            ),
+        ]
 
         # 10 個混合障礙物（與 16×16 相同，初始隱藏在 Z = -10.0）
         HIDDEN_Z = -10.0
@@ -225,6 +234,55 @@ class CommandsCfgVLP16Curriculum:
 class EventCfgVLP16Curriculum:
     """課程事件：20×20m 場景 + Stage 1 初始障礙物分布"""
 
+    # --- Startup events (宣告順序 = 執行順序) ---
+
+    # 初始化 per-env 牆壁數據結構（必須最先）
+    init_walls = EventTerm(
+        func=init_perenv_walls,
+        mode="startup",
+        params={},
+    )
+
+    # Phase 1 初始分布：100% empty（純導航學習，無障礙物）
+    randomize_obstacles_startup = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="startup",
+        params={
+            "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
+            "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
+            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
+            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
+            "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
+            "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
+        },
+    )
+
+    # --- Reset events (宣告順序 = 執行順序) ---
+    # 牆壁 → 障礙物 → 機器人（牆壁先就位，障礙物/機器人才能避開）
+
+    randomize_wall_positions = EventTerm(
+        func=randomize_walls,
+        mode="reset",
+        params={
+            "min_walls": 0, "max_walls": 2,  # Stage 1 初始值（課程動態調整）
+            "boundary": 8.5, "min_wall_spacing": 2.0,
+            "max_spawn_attempts": 30, "robot_safe_dist": 1.5,
+        },
+    )
+
+    randomize_obstacles = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="reset",
+        params={
+            "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
+            "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
+            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
+            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
+            "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
+            "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
+        },
+    )
+
     reset_base = EventTerm(
         func=reset_root_state_random_safe,
         mode="reset",
@@ -245,46 +303,12 @@ class EventCfgVLP16Curriculum:
         },
     )
 
-    # 設定 20×20 牆壁 dispatch（必須在 goal_command 之前執行）
-    set_wall_fn = EventTerm(
-        func=_set_wall_fn_20x20,
-        mode="startup",
-        params={},
-    )
-
     reset_obstacles = None  # 由 randomize_obstacles 處理
 
     domain_randomization = EventTerm(
         func=apply_domain_randomization,
         mode="reset",
         params={"enable_physics": True, "enable_sensor_noise": True, "enable_external_force": True},
-    )
-
-    # Phase 1 初始分布：100% empty（純導航學習，無障礙物）
-    randomize_obstacles_startup = EventTerm(
-        func=randomize_obstacles_by_difficulty,
-        mode="startup",
-        params={
-            "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
-            "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
-            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
-            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
-            "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
-            "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
-        },
-    )
-
-    randomize_obstacles = EventTerm(
-        func=randomize_obstacles_by_difficulty,
-        mode="reset",
-        params={
-            "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
-            "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
-            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
-            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
-            "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
-            "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
-        },
     )
 
     move_dynamic_obstacles = EventTerm(
@@ -416,10 +440,9 @@ class ChargeNavigationEnvCfgVLP16Curriculum(ChargeNavigationEnvCfgVLP16):
 
     def __post_init__(self):
         super().__post_init__()
-        self.episode_length_s = 60.0  # 20×20 更大，給 60s
+        self.episode_length_s = 45.0  # Phase 1 初始值（課程動態調整 45→90s）
         self.viewer.eye = (9.0, 9.0, 9.0)
-        # 設定 wall dispatch 使用 20×20 牆壁
-        # （在環境初始化後由 startup event 設定 env._wall_tensor_fn）
+        # Per-env 牆壁由 init_perenv_walls (startup) + randomize_walls (reset) 管理
 
 
 # ============================================================================
@@ -454,8 +477,13 @@ class RewardsCfgVLP16NavRL(RewardsCfgVLP16Curriculum):
         func=velocity_to_goal_reward,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
             "min_goal_dist": 0.5,
             "max_reward_speed": 1.0,
+            "body_radius": ROBOT_BODY_RADIUS,
+            "bottom_k": 10,
+            "d_attenuate": 1.0,
+            "d_full": 2.5,
         },
         weight=15.0,
     )
@@ -481,8 +509,8 @@ class RewardsCfgVLP16NavRL(RewardsCfgVLP16Curriculum):
             "sensor_cfg": SceneEntityCfg("lidar"),
             "body_radius": ROBOT_BODY_RADIUS,
             "bottom_k": 10,
-            "d_danger": 0.5,
-            "d_comfort": 1.5,
+            "d_danger": 0.8,
+            "d_comfort": 2.0,
             "negative_scale": 0.5,
         },
         weight=20.0,

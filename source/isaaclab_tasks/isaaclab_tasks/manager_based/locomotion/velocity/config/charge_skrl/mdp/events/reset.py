@@ -36,7 +36,12 @@ from .obstacles import reset_obstacles
 import isaaclab.utils.math as math_utils
 
 # 迷宮牆壁 proximity 檢查（原 core/wall_layout.py → mdp/wall_layout.py）
-from ..wall_layout import get_wall_tensors, check_wall_proximity_batch
+from ..wall_layout import (
+    get_wall_tensors,
+    check_wall_proximity_batch,
+    check_wall_proximity_perenv,
+    get_combined_wall_data,
+)
 
 
 def hide_unused_obstacles(env, env_ids=None):
@@ -406,23 +411,29 @@ def reset_root_state_fixed_per_env(
         )
         
         # ----------------------------------------------------------------
-        # 迷宮牆壁 proximity 拒絕採樣
+        # 迷宮牆壁 proximity 拒絕採樣 (per-env walls)
         # ----------------------------------------------------------------
-        wall_c, wall_s = get_wall_tensors(device)
         WALL_SAFE = 0.8  # robot radius(0.5) + margin(0.3)
 
         pos_xy = pos_samples[:, :2].clone()
         x_range = pos_ranges[0]  # (min, max) for x
         y_range = pos_ranges[1]  # (min, max) for y
 
-        too_close = check_wall_proximity_batch(pos_xy, wall_c, wall_s, WALL_SAFE)
+        uninitialized_ids = env_ids[uninitialized_mask]
+        wall_c, wall_s, wall_mask = get_combined_wall_data(env)
+        # 取出被重置 env 的牆壁數據
+        wc = wall_c[uninitialized_ids]       # [n_reset, W, 2]
+        ws = wall_s[uninitialized_ids]       # [n_reset, W, 2]
+        wm = wall_mask[uninitialized_ids]    # [n_reset, W]
+
+        too_close = check_wall_proximity_perenv(pos_xy, wc, ws, wm, WALL_SAFE)
         for _ in range(50):
             if not too_close.any():
                 break
             n = too_close.sum().item()
             pos_xy[too_close, 0] = torch.rand(n, device=device) * (x_range[1] - x_range[0]) + x_range[0]
             pos_xy[too_close, 1] = torch.rand(n, device=device) * (y_range[1] - y_range[0]) + y_range[0]
-            too_close = check_wall_proximity_batch(pos_xy, wall_c, wall_s, WALL_SAFE)
+            too_close = check_wall_proximity_perenv(pos_xy, wc, ws, wm, WALL_SAFE)
 
         pos_samples[:, :2] = pos_xy
 

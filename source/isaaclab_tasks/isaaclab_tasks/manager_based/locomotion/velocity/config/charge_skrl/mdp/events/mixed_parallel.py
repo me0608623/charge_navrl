@@ -39,6 +39,8 @@ from .state import (
     get_obstacle_sizes as _get_obstacle_sizes,
 )
 
+from ..wall_layout import check_wall_proximity_perenv, get_combined_wall_data
+
 
 def randomize_obstacles_by_difficulty(
     env,
@@ -279,8 +281,14 @@ def randomize_obstacles_by_difficulty(
             pos[:, 0] = rand_x
             pos[:, 1] = rand_y
 
-            # 碰撞檢查（拒絕採樣）
+            # 碰撞檢查（拒絕採樣）— 含牆壁近接檢查
             needs_resample = visible_mask.clone()
+
+            # 取得 per-env 牆壁數據（局部座標）
+            wall_c_all, wall_s_all, wall_mask_all = get_combined_wall_data(env)
+            wc = wall_c_all[env_ids]       # [N, W, 2]
+            ws = wall_s_all[env_ids]       # [N, W, 2]
+            wm = wall_mask_all[env_ids]    # [N, W]
 
             for attempt in range(max_spawn_attempts):
                 if not needs_resample.any():
@@ -309,8 +317,12 @@ def randomize_obstacles_by_difficulty(
                     except KeyError:
                         pass
 
+                # 檢查與牆壁的距離（障礙物不應在牆壁內部或太近）
+                # pos[:, :2] 是局部座標（尚未加 env_origins）
+                valid_walls = ~check_wall_proximity_perenv(pos[:, :2], wc, ws, wm, 0.8)
+
                 # 綜合判斷
-                all_valid = valid_robot & valid_goal & valid_obstacles & needs_resample
+                all_valid = valid_robot & valid_goal & valid_obstacles & valid_walls & needs_resample
                 needs_resample = needs_resample & ~all_valid
 
                 # 對無效位置重新採樣

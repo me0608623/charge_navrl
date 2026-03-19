@@ -539,6 +539,18 @@ class WandBSequentialTrainer(SequentialTrainer):
                             tracking_data_snapshot[tag] = []
                         tracking_data_snapshot[tag].append(val)
 
+            # ── Curriculum gamma sync ──
+            # Must run before post_interaction → _update → compute_gae(discount_factor)
+            try:
+                base_env = self._get_base_env()
+                target_gamma = getattr(base_env, '_target_discount_factor', None)
+                if target_gamma is not None and abs(agent._discount_factor - target_gamma) > 1e-6:
+                    old_gamma = agent._discount_factor
+                    agent._discount_factor = target_gamma
+                    print(f"[Trainer] discount_factor: {old_gamma:.4f} → {target_gamma:.4f}", flush=True)
+            except Exception:
+                pass
+
             # post-interaction
             # PPO 的 _update 在 post_interaction 中被调用
             agent.post_interaction(timestep=timestep, timesteps=self.timesteps)

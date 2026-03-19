@@ -77,10 +77,15 @@ def _get_lidar_safety_stats(
 def velocity_to_goal_reward(
     env: ManagerBasedRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
     min_goal_dist: float = 0.5,
     max_reward_speed: float = 1.0,
+    body_radius: float = 0.35,
+    bottom_k: int = 10,
+    d_attenuate: float = 1.0,
+    d_full: float = 2.5,
 ) -> torch.Tensor:
-    """朝目標方向的速度獎勵（雙向：正向獎勵、背離懲罰）。
+    """朝目標方向的速度獎勵（雙向：正向獎勵、背離懲罰 + LiDAR 安全衰減）。
 
     Math:
         goal_dir = normalize(goal_pos - robot_pos)      # 2D unit vector
@@ -88,14 +93,24 @@ def velocity_to_goal_reward(
         reward = clamp(v_toward / v_max, -1, 1)          # 歸一化到 [-1, 1]
         reward = reward * (goal_dist > min_dist).float()  # 太近目標時不給
 
+        # 安全衰減：靠近障礙物時削弱 v_to_goal，防止撞牆
+        v_gate = clamp((d_safe - d_attenuate) / (d_full - d_attenuate), 0, 1)
+        reward = reward * v_gate
+
     物理意義：朝目標前進得正獎勵，背離目標得負懲罰。
+    靠近障礙物時獎勵被衰減，避免目標在牆後時推 agent 撞牆。
     範圍：[-1, 1]，有效 per-step: -3.0 ~ +3.0（×15×0.2）
 
     Args:
         env: 環境實例
         robot_cfg: 機器人配置
+        sensor_cfg: LiDAR 感測器配置（用於安全衰減）
         min_goal_dist: 低於此距離不給獎勵 (m)
         max_reward_speed: 歸一化用的最大速度 (m/s)
+        body_radius: 機器人車體半徑 (m)
+        bottom_k: 取最近的 K 條 ray
+        d_attenuate: 低於此距離開始削弱 v_to_goal (m)
+        d_full: 高於此距離完整獎勵 (m)
 
     Returns:
         [num_envs] in [-1, 1]
@@ -127,6 +142,14 @@ def velocity_to_goal_reward(
     # 太近目標時不給（避免到達後繼續加速）
     far_enough = (goal_dist.squeeze(1) > min_goal_dist).float()  # [N]
     reward = reward * far_enough
+
+    # 安全衰減：靠近障礙物時削弱 v_to_goal，防止目標在牆後時推 agent 撞牆
+    # d_safe < d_attenuate → v_gate=0（完全關閉）
+    # d_attenuate < d_safe < d_full → v_gate ∈ (0, 1)（線性過渡）
+    # d_safe > d_full → v_gate=1.0（完整信號）
+    _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
+    v_gate = ((d_safe - d_attenuate) / (d_full - d_attenuate + 1e-6)).clamp(0.0, 1.0)
+    reward = reward * v_gate
 
     # NaN 保護
     reward = torch.nan_to_num(reward, nan=0.0)
@@ -202,8 +225,8 @@ def safe_progress_reward(
     bottom_k: int = 10,
     safety_threshold: float = 1.0,
     safety_temperature: float = 0.3,
-    d_danger: float = 0.5,
-    d_comfort: float = 1.5,
+    d_danger: float = 0.8,
+    d_comfort: float = 2.0,
     negative_scale: float = 0.5,
 ) -> torch.Tensor:
     """安全耦合的 PBRS 進度獎勵（分段線性 gate，含負區）。

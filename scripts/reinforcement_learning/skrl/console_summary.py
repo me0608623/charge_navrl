@@ -92,8 +92,7 @@ class ConsoleSummaryLogger:
 
         # 課程階段
         cur_stage = metrics.get("Curriculum / stage")
-        stage_labels = {1: "1 密集探索", 2: "2 死亡機制", 3: "3 密集避障", 4: "4a 中等動態", 5: "4b 終極挑戰"}
-        stage_str = stage_labels.get(int(cur_stage), f"{int(cur_stage)}") if cur_stage is not None else "N/A"
+        stage_str = str(int(cur_stage)) if cur_stage is not None else "N/A"
 
         summary_lines = [
             "",
@@ -237,7 +236,42 @@ class ConsoleSummaryLogger:
             summary_lines.append("")
             summary_lines.append("=== 課程學習 ===")
             summary_lines.append(f"  階段: Phase {stage_str}")
+
+            # 環境配置摘要：Goals / Obstacles / Walls
+            cur_goals = metrics.get("Curriculum / num_goals")
+            cur_obs_s = metrics.get("Curriculum / num_obstacles_static")
+            cur_obs_d = metrics.get("Curriculum / num_obstacles_dynamic")
+            cur_min_w = metrics.get("Curriculum / min_walls")
+            cur_max_w = metrics.get("Curriculum / max_walls")
+            if cur_goals is not None:
+                goals_str = f"{int(cur_goals)}G"
+                obs_str = f"{int(cur_obs_s or 0)}S+{int(cur_obs_d or 0)}D"
+                walls_str = f"{int(cur_min_w or 0)}-{int(cur_max_w or 0)}" if cur_min_w is not None else "N/A"
+                summary_lines.append(f"  配置: {goals_str} goals / {obs_str} obstacles / {walls_str} walls")
+
             summary_lines.append(f"  成功率: {cur_sr:.4f}  碰撞率: {cur_cr:.4f}  超時率: {cur_to:.4f}")
+
+            # 升級差距
+            sr_gap = metrics.get("Curriculum / sr_gap")
+            cr_gap = metrics.get("Curriculum / cr_gap")
+            to_gap = metrics.get("Curriculum / to_gap")
+            up_sr_t = metrics.get("Curriculum / upgrade_sr_target")
+            up_cr_t = metrics.get("Curriculum / upgrade_cr_target")
+            up_to_t = metrics.get("Curriculum / upgrade_to_target")
+            pass_count = metrics.get("Curriculum / upgrade_pass_count", 0)
+            if sr_gap is not None:
+                def _flag(gap):
+                    return "OK" if gap >= 0 else f"{gap:+.4f}"
+                sr_s = _flag(sr_gap)
+                cr_s = _flag(cr_gap) if up_cr_t is not None and up_cr_t < 1.0 else "--"
+                to_s = _flag(to_gap)
+                summary_lines.append(
+                    f"  升級目標: SR>{up_sr_t:.0%}({sr_s})  "
+                    f"CR<{up_cr_t:.0%}({cr_s})  "
+                    f"TO<{up_to_t:.0%}({to_s})  "
+                    f"連續通過: {int(pass_count)}/5"
+                )
+
             if cur_ep is not None:
                 summary_lines.append(f"  總 episodes: {int(cur_ep)}  階段 episodes: {int(cur_sep or 0)}  窗口填充: {cur_fill:.2f}")
 

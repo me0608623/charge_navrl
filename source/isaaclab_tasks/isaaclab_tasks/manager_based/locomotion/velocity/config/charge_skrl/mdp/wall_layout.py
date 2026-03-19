@@ -2,23 +2,29 @@
 
 原位置: core/wall_layout.py → 遷移至 mdp/wall_layout.py (共用工具)
 
-場景: 16x16m 訓練房間 (center origin)
+場景: 16x16m / 20x20m 訓練房間 (center origin)
     - 4 面外牆 (BOUNDARY_WALLS): 封閉房間
-    - 6 面內部牆 (MAZE_WALLS): 迷宮結構，製造遮擋和走廊
+    - 6~8 面內部牆 (MAZE_WALLS / WALL_SLOT_SPECS): 迷宮結構
 
 資料格式: (center_x, center_y, size_x, size_y) — AABB 表示
 
-函數:
+函數 (legacy — global wall data):
     get_wall_tensors(device):        內部牆 (6 段) → GPU tensor
     get_all_wall_tensors(device):    全部牆 (10 段) → GPU tensor
     check_wall_proximity_batch():    GPU AABB proximity — 批量檢查 N 個點是否太近牆壁
     check_los_batch():               GPU slab method — 批量 Line-of-Sight 遮擋檢查
 
+函數 (per-env — randomized walls):
+    check_wall_proximity_perenv():   per-env AABB proximity — [N,2] vs [N,W,2]
+    check_los_perenv():              per-env LOS — [N,2] origins, [N,F,2] targets
+    get_combined_wall_data(env):     合併 per-env maze walls + global boundary walls
+
 使用者:
     - events/reset.py: 重置位置時避免放在牆內
-    - events/obstacles.py: 障礙物放置時避開牆壁
+    - events/mixed_parallel.py: 障礙物放置時避開牆壁
     - observations/obs_functions.py: topk_obstacles 的 LOS 遮擋判斷
     - goal_command.py: 目標生成時避開牆壁
+    - terminations/robot_state.py: 牆壁碰撞終止
 
 效能: 全部 GPU 向量化，O(N×W) 複雜度，256×14=3,584 次比較在 GPU 上微不足道。
 """
@@ -60,13 +66,30 @@ MAZE_WALLS_20x20: list[tuple[float, float, float, float]] = [
 ]
 
 BOUNDARY_WALLS_20x20: list[tuple[float, float, float, float]] = [
-    ( 0.0,  10.0, 20.2, 0.2),  # North
-    ( 0.0, -10.0, 20.2, 0.2),  # South
-    ( 10.0,  0.0, 0.2, 20.2),  # East
-    (-10.0,  0.0, 0.2, 20.2),  # West
+    ( 0.0,  10.0, 21.0, 1.0),  # North  (thickness 1.0m)
+    ( 0.0, -10.0, 21.0, 1.0),  # South
+    ( 10.0,  0.0, 1.0, 21.0),  # East
+    (-10.0,  0.0, 1.0, 21.0),  # West
 ]
 
 ALL_WALLS_20x20 = MAZE_WALLS_20x20 + BOUNDARY_WALLS_20x20
+
+# ============================================================================
+# Per-env randomized wall slot specifications
+# ============================================================================
+# 8 wall slots with different lengths, all 1.0m thick, 1.5m tall
+# Mesh size is fixed at spawn time (Isaac Sim limitation); mask controls visibility.
+WALL_SLOT_SPECS: list[tuple[float, float, float]] = [
+    (4.0, 1.0, 1.5),   # slot 0: 4m
+    (3.0, 1.0, 1.5),   # slot 1: 3m
+    (5.0, 1.0, 1.5),   # slot 2: 5m
+    (3.5, 1.0, 1.5),   # slot 3: 3.5m
+    (4.5, 1.0, 1.5),   # slot 4: 4.5m
+    (2.5, 1.0, 1.5),   # slot 5: 2.5m
+    (4.0, 1.0, 1.5),   # slot 6: 4m
+    (3.0, 1.0, 1.5),   # slot 7: 3m
+]
+MAX_WALL_SLOTS = 8
 
 # Module-level cache: {device_str: (wall_centers, wall_sizes)}
 _wall_tensor_cache: dict[str, tuple[Tensor, Tensor]] = {}
@@ -254,3 +277,154 @@ def check_los_batch(
 
     # Visible = NOT occluded
     return ~occluded
+
+
+# ============================================================================
+# Per-env wall query functions (randomized walls)
+# ============================================================================
+
+def check_wall_proximity_perenv(
+    positions: Tensor,     # [N, 2]
+    wall_centers: Tensor,  # [N, W, 2]
+    wall_sizes: Tensor,    # [N, W, 2]
+    wall_mask: Tensor,     # [N, W]
+    min_dist: float,
+) -> Tensor:
+    """Per-env GPU-vectorized AABB proximity check.
+
+    Same logic as check_wall_proximity_batch, but each env has its own
+    set of walls (different positions, different active mask).
+
+    Args:
+        positions: [N, 2] query positions in local frame.
+        wall_centers: [N, W, 2] per-env wall center coordinates.
+        wall_sizes: [N, W, 2] per-env wall (size_x, size_y).
+        wall_mask: [N, W] boolean — True = wall is active.
+        min_dist: minimum clearance distance.
+
+    Returns:
+        [N] boolean tensor — True if position is too close to any active wall.
+    """
+    pos = positions.unsqueeze(1)                      # [N, 1, 2]
+    delta = (pos - wall_centers).abs() - wall_sizes * 0.5  # [N, W, 2]
+    delta = delta.clamp(min=0.0)                       # [N, W, 2]
+    dist = torch.norm(delta, dim=2)                    # [N, W]
+
+    # Inactive walls → large distance (never trigger proximity)
+    dist = torch.where(wall_mask, dist, torch.full_like(dist, 1e6))
+
+    too_close = (dist < min_dist).any(dim=1)           # [N]
+    return too_close
+
+
+def check_los_perenv(
+    origins: Tensor,       # [N, 2] robot positions
+    targets: Tensor,       # [N, F, 2] obstacle positions
+    wall_centers: Tensor,  # [N, W, 2]
+    wall_sizes: Tensor,    # [N, W, 2]
+    wall_mask: Tensor,     # [N, W]
+) -> Tensor:
+    """Per-env vectorized 2D line-of-sight check using slab method.
+
+    Same logic as check_los_batch, but each env has its own walls.
+
+    Args:
+        origins: [N, 2] robot positions (XY).
+        targets: [N, F, 2] obstacle positions (XY).
+        wall_centers: [N, W, 2] per-env wall center coordinates.
+        wall_sizes: [N, W, 2] per-env wall (size_x, size_y).
+        wall_mask: [N, W] boolean — True = wall is active.
+
+    Returns:
+        [N, F] boolean tensor — True = visible (no active wall blocks LOS).
+    """
+    # AABB bounds: [N, W, 2]
+    wall_min = wall_centers - wall_sizes * 0.5
+    wall_max = wall_centers + wall_sizes * 0.5
+
+    # Direction vectors: [N, F, 2]
+    A = origins.unsqueeze(1)          # [N, 1, 2]
+    d = targets - A                   # [N, F, 2]
+
+    # Expand for broadcasting against walls
+    A = A.unsqueeze(2)                # [N, 1, 1, 2]
+    d = d.unsqueeze(2)                # [N, F, 1, 2]
+
+    # wall bounds: [N, 1, W, 2]
+    wmin = wall_min.unsqueeze(1)      # [N, 1, W, 2]
+    wmax = wall_max.unsqueeze(1)      # [N, 1, W, 2]
+
+    # Slab parameters
+    eps = 1e-8
+    d_safe = d.clone()
+    parallel = d.abs() < eps
+
+    d_safe[parallel] = eps
+
+    t1 = (wmin - A) / d_safe          # [N, F, W, 2]
+    t2 = (wmax - A) / d_safe          # [N, F, W, 2]
+
+    t_min = torch.min(t1, t2)
+    t_max = torch.max(t1, t2)
+
+    A_broad = A.expand_as(t1)
+    outside_slab = (A_broad < wmin) | (A_broad > wmax)
+    parallel_broad = parallel.expand_as(t1)
+
+    big = torch.tensor(1e6, device=origins.device)
+    neg_big = torch.tensor(-1e6, device=origins.device)
+
+    t_min = torch.where(parallel_broad & outside_slab, big, t_min)
+    t_max = torch.where(parallel_broad & outside_slab, neg_big, t_max)
+    t_min = torch.where(parallel_broad & ~outside_slab, neg_big, t_min)
+    t_max = torch.where(parallel_broad & ~outside_slab, big, t_max)
+
+    t_enter = t_min.max(dim=-1).values   # [N, F, W]
+    t_leave = t_max.min(dim=-1).values   # [N, F, W]
+
+    hit = (t_enter <= t_leave) & (t_leave > 0.0) & (t_enter < 1.0)  # [N, F, W]
+
+    # Apply wall mask: inactive walls can't block LOS
+    # wall_mask: [N, W] → [N, 1, W]
+    hit = hit & wall_mask.unsqueeze(1)
+
+    occluded = hit.any(dim=-1)        # [N, F]
+    return ~occluded
+
+
+def get_combined_wall_data(env) -> tuple[Tensor, Tensor, Tensor]:
+    """合併 per-env maze walls + global boundary walls.
+
+    Returns:
+        (centers [N, W_total, 2], sizes [N, W_total, 2], mask [N, W_total])
+        where W_total = MAX_WALL_SLOTS + 4 (boundary).
+    """
+    if hasattr(env, '_maze_wall_centers') and env._maze_wall_centers is not None:
+        mc = env._maze_wall_centers   # [N, 8, 2]
+        ms = env._maze_wall_sizes     # [N, 8, 2]
+        mm = env._maze_wall_mask      # [N, 8]
+        bc = env._boundary_wall_centers  # [4, 2]
+        bs = env._boundary_wall_sizes    # [4, 2]
+
+        N = mc.shape[0]
+        bc_exp = bc.unsqueeze(0).expand(N, -1, -1)   # [N, 4, 2]
+        bs_exp = bs.unsqueeze(0).expand(N, -1, -1)   # [N, 4, 2]
+        bm = torch.ones(N, 4, dtype=torch.bool, device=mc.device)
+
+        centers = torch.cat([mc, bc_exp], dim=1)  # [N, W_total, 2]
+        sizes = torch.cat([ms, bs_exp], dim=1)
+        mask = torch.cat([mm, bm], dim=1)
+
+        return centers, sizes, mask
+
+    # Fallback: broadcast static 20x20 walls to all envs
+    device = env.device
+    N = env.num_envs
+    data = torch.tensor(ALL_WALLS_20x20, dtype=torch.float32, device=device)
+    c = data[:, :2]   # [W, 2]
+    s = data[:, 2:]   # [W, 2]
+    W = c.shape[0]
+    centers = c.unsqueeze(0).expand(N, -1, -1)   # [N, W, 2]
+    sizes = s.unsqueeze(0).expand(N, -1, -1)
+    mask = torch.ones(N, W, dtype=torch.bool, device=device)
+    return centers, sizes, mask

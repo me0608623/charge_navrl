@@ -1,17 +1,21 @@
-"""Goal-Obstacle 聯動課程學習 — v11 (穩定升降級機制)
+"""Goal-Obstacle 聯動課程學習 — v12 (線性 8 階段)
 
-v10 → v11 變更：
-  1. 連續通過 K=3 次才升級（anti-fluke gate）
-  2. 高階 Stage 門檻收緊（Stage 3→4a, 4a→4b）
-  3. 最少 rollout cycles 門檻（min_stage_updates）
-  4. Dynamic-only SR 子集門檻（Stage 3+ 升級用）
+v11 → v12 變更：
+  1. 取代 hardcoded 5 階段 → 線性規則動態生成 8 階段
+  2. Stage 1 純導航（8 goals, 0 obstacles）
+  3. Stage 2+ 每階 +1 static, +1 dynamic, -1 goal (min 1)
+  4. γ / episode_length_s / env mix 皆線性內插
+  5. 統一升降級門檻（每階 Δ 難度小，不需個別調整）
 
-5 階段定義：
-  Phase 1: 0 障礙物 → 純導航（建立 V > 0）
-  Phase 2: 少量障礙物 → 死亡機制啟動
-  Phase 3: 密集靜態+少量動態 → 避障為必經手段
-  Phase 4a: 中等動態 → 過渡階段（5 static + 5 dynamic）
-  Phase 4b: 密集動態 → 終極挑戰（5 static + 8 dynamic）
+8 階段摘要：
+  Stage 1: 8G / 0S+0D  (純導航)
+  Stage 2: 7G / 1S+1D
+  Stage 3: 6G / 2S+2D
+  Stage 4: 5G / 3S+3D
+  Stage 5: 4G / 4S+4D
+  Stage 6: 3G / 5S+5D
+  Stage 7: 2G / 6S+6D
+  Stage 8: 1G / 7S+7D  (終極挑戰)
 
 獎勵函數在所有階段完全不變。課程只改變環境參數。
 """
@@ -28,118 +32,83 @@ if TYPE_CHECKING:
 # ============================================================================
 # 連續通過次數要求
 # ============================================================================
-UPGRADE_PASS_REQUIRED = 3
+UPGRADE_PASS_REQUIRED = 5
 
 # ============================================================================
-# 5 階段定義 — 只有環境參數，沒有獎勵權重
+# 線性課程生成參數
 # ============================================================================
-STAGES = {
-    # ------------------------------------------------------------------
-    # Phase 1: 密集探索 — 建立 V(s) > 0
-    # ------------------------------------------------------------------
-    1: {
-        "num_goals": 8,
-        "goal_distance": (2.0, 13.0),
-        "num_obstacles_static": 0,
-        "num_obstacles_dynamic": 0,
-        "empty_ratio": 1.00,
-        "static_ratio": 0.00,
-        "dynamic_ratio": 0.00,
-        # 升級：SR > 72% AND TO < 30%
-        "upgrade_sr": 0.72,
-        "upgrade_max_cr": 1.0,
-        "upgrade_max_to": 0.30,
-        "upgrade_min_dyn_sr": 0.0,   # 不適用
-        "min_stage_updates": 0,       # 不適用
-        "downgrade_sr": 0.0,
-        "downgrade_min_cr": 1.0,
-        "downgrade_min_to": 1.0,
-    },
-    # ------------------------------------------------------------------
-    # Phase 2: 死亡機制啟動 — 障礙物出現
-    # ------------------------------------------------------------------
-    2: {
-        "num_goals": 3,
-        "goal_distance": (2.0, 13.0),
-        "num_obstacles_static": 3,
-        "num_obstacles_dynamic": 2,
-        "empty_ratio": 0.55,
-        "static_ratio": 0.30,
-        "dynamic_ratio": 0.15,
-        # 升級：SR > 65% AND CR < 40% AND TO < 35%
-        "upgrade_sr": 0.65,
-        "upgrade_max_cr": 0.40,
-        "upgrade_max_to": 0.35,
-        "upgrade_min_dyn_sr": 0.0,   # 不適用
-        "min_stage_updates": 0,       # 不適用
-        "downgrade_sr": 0.20,
-        "downgrade_min_cr": 0.75,
-        "downgrade_min_to": 0.70,
-    },
-    # ------------------------------------------------------------------
-    # Phase 3: 密集避障 — 避障成為必經手段
-    # ------------------------------------------------------------------
-    3: {
-        "num_goals": 2,
-        "goal_distance": (2.0, 13.0),
-        "num_obstacles_static": 5,
-        "num_obstacles_dynamic": 3,
-        "empty_ratio": 0.25,
-        "static_ratio": 0.40,
-        "dynamic_ratio": 0.35,
-        # 升級：SR > 65% AND CR < 35% AND TO < 30% AND dynSR > 40%
-        "upgrade_sr": 0.65,
-        "upgrade_max_cr": 0.35,
-        "upgrade_max_to": 0.30,
-        "upgrade_min_dyn_sr": 0.40,
-        "min_stage_updates": 50,
-        "downgrade_sr": 0.20,
-        "downgrade_min_cr": 0.65,
-        "downgrade_min_to": 0.65,
-    },
-    # ------------------------------------------------------------------
-    # Phase 4a: 中等動態 — Stage 3→4b 的過渡
-    # ------------------------------------------------------------------
-    4: {
-        "num_goals": 1,
-        "goal_distance": (2.0, 13.0),
-        "num_obstacles_static": 5,
-        "num_obstacles_dynamic": 5,
-        "empty_ratio": 0.20,
-        "static_ratio": 0.40,
-        "dynamic_ratio": 0.40,
-        # 升級：SR > 60% AND CR < 30% AND TO < 25% AND dynSR > 45%
-        "upgrade_sr": 0.60,
-        "upgrade_max_cr": 0.30,
-        "upgrade_max_to": 0.25,
-        "upgrade_min_dyn_sr": 0.45,
-        "min_stage_updates": 50,
-        "downgrade_sr": 0.15,
-        "downgrade_min_cr": 0.60,
-        "downgrade_min_to": 0.60,
-    },
-    # ------------------------------------------------------------------
-    # Phase 4b: 終極挑戰 — 密集動態障礙物
-    # ------------------------------------------------------------------
-    5: {
-        "num_goals": 1,
-        "goal_distance": (2.0, 13.0),
-        "num_obstacles_static": 5,
-        "num_obstacles_dynamic": 8,
-        "empty_ratio": 0.15,
-        "static_ratio": 0.35,
-        "dynamic_ratio": 0.50,
-        # 不升級（最終階段）
-        "upgrade_sr": 1.0,
-        "upgrade_max_cr": 0.0,
-        "upgrade_max_to": 0.0,
-        "upgrade_min_dyn_sr": 0.0,
-        "min_stage_updates": 0,
-        "downgrade_sr": 0.15,
-        "downgrade_min_cr": 0.60,
-        "downgrade_min_to": 0.60,
-    },
-}
+INITIAL_GOALS = 8
+MIN_GOALS = 1
+GAMMA_START = 0.990
+GAMMA_END = 0.998
+EPISODE_START = 45.0
+EPISODE_END = 90.0
+MIN_EMPTY_RATIO = 0.15
+
+
+def _build_stages() -> dict:
+    """動態生成課程階段。
+
+    規則：Stage 1 純導航（8 goals, 0 obstacles），
+    Stage 2+ 每階 -1 goal, +1 static, +1 dynamic。
+    """
+    stages = {}
+    max_stage = INITIAL_GOALS - MIN_GOALS + 1  # = 8
+
+    for s in range(1, max_stage + 1):
+        progress = (s - 1) / (max_stage - 1)  # 0.0 → 1.0
+        goals = max(INITIAL_GOALS - (s - 1), MIN_GOALS)
+        n_static = s - 1   # 0, 1, 2, ..., 7
+        n_dynamic = s - 1  # 0, 1, 2, ..., 7
+
+        gamma = round(GAMMA_START + progress * (GAMMA_END - GAMMA_START), 3)
+        episode = round(EPISODE_START + progress * (EPISODE_END - EPISODE_START))
+        empty = round(max(MIN_EMPTY_RATIO, 1.0 - progress * (1.0 - MIN_EMPTY_RATIO)), 2)
+
+        if n_static + n_dynamic > 0:
+            remaining = round(1.0 - empty, 2)
+            s_ratio = round(remaining / 2, 2)
+            d_ratio = round(remaining - s_ratio, 2)
+        else:
+            s_ratio = 0.0
+            d_ratio = 0.0
+
+        is_first = (s == 1)
+        is_last = (s == max_stage)
+
+        # 牆壁數量: min_walls = (s-1)*4//7, max_walls = min(2 + s-1, 8)
+        min_walls = (s - 1) * 4 // 7
+        max_walls_s = min(2 + s - 1, 8)
+
+        stages[s] = {
+            "num_goals": goals,
+            "goal_distance": (2.0, 13.0),
+            "num_obstacles_static": n_static,
+            "num_obstacles_dynamic": n_dynamic,
+            "empty_ratio": empty,
+            "static_ratio": s_ratio,
+            "dynamic_ratio": d_ratio,
+            "gamma": gamma,
+            "episode_length_s": float(episode),
+            # 牆壁數量
+            "min_walls": min_walls,
+            "max_walls": max_walls_s,
+            # 升級
+            "upgrade_sr": 0.72 if is_first else (1.0 if is_last else 0.65),
+            "upgrade_max_cr": 1.0 if is_first else (0.0 if is_last else 0.40),
+            "upgrade_max_to": 0.30 if is_first else (0.0 if is_last else 0.30),
+            "upgrade_min_dyn_sr": 0.0 if is_first else (0.0 if is_last else 0.35),
+            "min_stage_updates": 50 if is_first else (0 if is_last else 50 + (s - 1) * 15),
+            # 降級
+            "downgrade_sr": 0.0 if is_first else 0.15,
+            "downgrade_min_cr": 1.0 if is_first else 0.70,
+            "downgrade_min_to": 1.0 if is_first else 0.65,
+        }
+
+    return stages
+
+
+STAGES = _build_stages()
 
 MAX_STAGE = max(STAGES.keys())
 
@@ -151,13 +120,12 @@ def goal_obstacle_curriculum(
     min_stage_episodes: int = 5000,
     initial_stage: int = 1,
 ) -> dict[str, float]:
-    """v11 課程學習 — 穩定升降級機制。
+    """v12 課程學習 — 線性 8 階段。
 
-    v10 → v11 變更：
-    - 連續通過 K=3 次才升級（anti-fluke gate）
-    - 高階 Stage 門檻收緊
-    - 最少 rollout cycles 門檻
-    - Dynamic-only SR 子集門檻（Stage 3+）
+    v11 → v12 變更：
+    - 線性規則動態生成 8 階段（取代 hardcoded 5 階段）
+    - 每階 +1 static, +1 dynamic, -1 goal
+    - 統一升降級門檻
     """
     if not hasattr(env, "_goal_obs_curriculum"):
         n = env.num_envs
@@ -177,12 +145,14 @@ def goal_obstacle_curriculum(
         s = STAGES[initial_stage]
         print(
             f"\n{'='*70}\n"
-            f"[Curriculum v11] 初始化 — Phase {_stage_label(initial_stage)}: "
+            f"[Curriculum v12] 初始化 — Phase {_stage_label(initial_stage)}: "
             f"{_phase_name(initial_stage)}\n"
             f"  num_envs={n}  |  窗口={effective_window}  |  "
             f"最低停留={effective_min} episodes\n"
             f"  Goals={s['num_goals']}  距離={s['goal_distance']}m  "
-            f"障礙物={s['num_obstacles_static']}靜/{s['num_obstacles_dynamic']}動\n"
+            f"障礙物={s['num_obstacles_static']}靜/{s['num_obstacles_dynamic']}動  "
+            f"牆壁={s['min_walls']}-{s['max_walls']}\n"
+            f"  γ={s['gamma']}  episode={s['episode_length_s']}s\n"
             f"  獎勵：固定不變\n"
             f"  升級: SR>{s['upgrade_sr']:.0%}"
             f"{'  CR<' + format(s['upgrade_max_cr'], '.0%') if s['upgrade_max_cr'] < 1.0 else ''}"
@@ -252,7 +222,7 @@ def goal_obstacle_curriculum(
             s = STAGES[new_stage]
             print(
                 f"\n{'='*70}\n"
-                f"[Curriculum v11] {direction} Phase {_stage_label(old_stage)} → "
+                f"[Curriculum v12] {direction} Phase {_stage_label(old_stage)} → "
                 f"Phase {_stage_label(new_stage)}: {_phase_name(new_stage)}\n"
                 f"  --- raw counts (window={total}) ---\n"
                 f"  success={success_count}  collision={collision_count}  timeout={timeout_count}\n"
@@ -271,7 +241,9 @@ def goal_obstacle_curriculum(
                 f"階段 {state['stage_episodes']} ep, "
                 f"第 {state['stage_transitions']} 次轉換\n"
                 f"  Goals={s['num_goals']}  距離={s['goal_distance']}m  "
-                f"障礙物={s['num_obstacles_static']}靜/{s['num_obstacles_dynamic']}動\n"
+                f"障礙物={s['num_obstacles_static']}靜/{s['num_obstacles_dynamic']}動  "
+                f"牆壁={s['min_walls']}-{s['max_walls']}\n"
+                f"  γ={s['gamma']}  episode={s['episode_length_s']}s\n"
                 f"  下一升級: SR>{s['upgrade_sr']}"
                 f"{'  CR<' + str(s['upgrade_max_cr']) if s['upgrade_max_cr'] < 1.0 else ''}"
                 f"  TO<{s['upgrade_max_to']}"
@@ -304,7 +276,7 @@ def goal_obstacle_curriculum(
             else:
                 # 待確認
                 print(
-                    f"[Curriculum v11] 升級待確認 "
+                    f"[Curriculum v12] 升級待確認 "
                     f"{state['upgrade_pass_count']}/{UPGRADE_PASS_REQUIRED} — "
                     f"SR={success_rate:.3f} CR={collision_rate:.3f} "
                     f"TO={timeout_rate:.3f} dynSR={dynamic_sr:.3f} "
@@ -315,7 +287,7 @@ def goal_obstacle_curriculum(
             # 條件不通過 → 歸零連續計數
             if state["upgrade_pass_count"] > 0:
                 print(
-                    f"[Curriculum v11] 升級連續計數歸零 "
+                    f"[Curriculum v12] 升級連續計數歸零 "
                     f"(was {state['upgrade_pass_count']}/{UPGRADE_PASS_REQUIRED}) — "
                     f"SR={success_rate:.3f} CR={collision_rate:.3f} "
                     f"TO={timeout_rate:.3f} dynSR={dynamic_sr:.3f}",
@@ -345,6 +317,11 @@ def goal_obstacle_curriculum(
                     _debug_log(f"▼ ({reason})", old, current_stage)
                     stage_cfg = STAGES[current_stage]
 
+    # 升級門檻差距
+    up_sr_target = stage_cfg["upgrade_sr"]
+    up_cr_target = stage_cfg["upgrade_max_cr"]
+    up_to_target = stage_cfg["upgrade_max_to"]
+
     return {
         "stage": float(current_stage),
         "success_rate": success_rate,
@@ -352,27 +329,39 @@ def goal_obstacle_curriculum(
         "timeout_rate": timeout_rate,
         "dynamic_sr": dynamic_sr,
         "num_goals": float(stage_cfg["num_goals"]),
+        "num_obstacles_static": float(stage_cfg["num_obstacles_static"]),
+        "num_obstacles_dynamic": float(stage_cfg["num_obstacles_dynamic"]),
+        "min_walls": float(stage_cfg["min_walls"]),
+        "max_walls": float(stage_cfg["max_walls"]),
+        "gamma": float(stage_cfg["gamma"]),
+        "episode_length_s": float(stage_cfg["episode_length_s"]),
         "num_episodes": float(state["total_episodes"]),
         "stage_episodes": float(state["stage_episodes"]),
         "window_fill": float(len(window)) / float(effective_window),
         "upgrade_pass_count": float(state["upgrade_pass_count"]),
         "approx_rollout_cycles": float(approx_rollout_cycles),
+        # 升級門檻（供 console_summary 顯示差距）
+        "upgrade_sr_target": up_sr_target,
+        "upgrade_cr_target": up_cr_target,
+        "upgrade_to_target": up_to_target,
+        "sr_gap": success_rate - up_sr_target,       # >0 = 已達標
+        "cr_gap": up_cr_target - collision_rate,      # >0 = 已達標
+        "to_gap": up_to_target - timeout_rate,        # >0 = 已達標
     }
 
 
 def _stage_label(stage: int) -> str:
-    """Stage 數字 → 顯示標籤（4→4a, 5→4b）"""
-    return {1: "1", 2: "2", 3: "3", 4: "4a", 5: "4b"}[stage]
+    return str(stage)
 
 
 def _phase_name(stage: int) -> str:
-    return {
-        1: "密集探索（建立 V>0）",
-        2: "死亡機制啟動（避障萌芽）",
-        3: "密集避障（避障為必經手段）",
-        4: "中等動態（過渡階段）",
-        5: "終極挑戰（動態密集障礙）",
-    }[stage]
+    cfg = STAGES[stage]
+    g = cfg["num_goals"]
+    s = cfg["num_obstacles_static"]
+    d = cfg["num_obstacles_dynamic"]
+    if s == 0 and d == 0:
+        return f"純導航（{g} goals）"
+    return f"{g}G / {s}S+{d}D 障礙物"
 
 
 def _collect_episode_results(
@@ -464,7 +453,24 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
     except Exception:
         pass
 
-    # --- 3. 不修改獎勵權重 ---
+    # --- 2b. 更新牆壁隨機化事件 ---
+    try:
+        evt = env.event_manager
+        ec = evt.get_term_cfg("randomize_wall_positions")
+        ec.params["min_walls"] = cfg["min_walls"]
+        ec.params["max_walls"] = cfg["max_walls"]
+        evt.set_term_cfg("randomize_wall_positions", ec)
+    except Exception:
+        pass
+
+    # --- 3. 更新 episode 長度 ---
+    env.cfg.episode_length_s = cfg["episode_length_s"]
+
+    # --- 4. 通知 trainer 更新 discount_factor ---
+    # 課程函數無法直接存取 agent，寫入 env 中繼屬性由 trainer 讀取同步
+    env._target_discount_factor = cfg["gamma"]
+
+    # --- 5. 不修改獎勵權重 ---
     # 獎勵在所有階段保持固定
 
 

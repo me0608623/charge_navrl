@@ -77,6 +77,8 @@ from .events import (
     get_obstacle_num,
     get_obstacle_sizes,
     get_obstacle_metadata,
+    init_perenv_walls,
+    randomize_walls,
 )
 
 # ============================================================================
@@ -84,10 +86,15 @@ from .events import (
 # ============================================================================
 from .wall_layout import (
     MAZE_WALLS,
+    WALL_SLOT_SPECS,
+    MAX_WALL_SLOTS,
     get_wall_tensors,
     get_all_wall_tensors,
     check_wall_proximity_batch,
     check_los_batch,
+    check_wall_proximity_perenv,
+    check_los_perenv,
+    get_combined_wall_data,
 )
 
 __all__ = [
@@ -134,10 +141,17 @@ __all__ = [
     "get_obstacle_num",
     "get_obstacle_sizes",
     "get_obstacle_metadata",
+    "init_perenv_walls",
+    "randomize_walls",
     # 牆壁幾何
     "MAZE_WALLS",
+    "WALL_SLOT_SPECS",
+    "MAX_WALL_SLOTS",
     "get_wall_tensors",
     "get_all_wall_tensors",
     "check_wall_proximity_batch",
     "check_los_batch",
+    "check_wall_proximity_perenv",
+    "check_los_perenv",
+    "get_combined_wall_data",
 ]

@@ -40,6 +40,11 @@ from .state import (
     update_obstacle_direction,
 )
 
+from .walls import (
+    init_perenv_walls,
+    randomize_walls,
+)
+
 __all__ = [
     # 障礙物事件
     "reset_obstacles",
@@ -66,4 +71,7 @@ __all__ = [
     "get_obstacle_directions",
     "update_obstacle_start_position",
     "update_obstacle_direction",
+    # 牆壁隨機化事件
+    "init_perenv_walls",
+    "randomize_walls",
 ]

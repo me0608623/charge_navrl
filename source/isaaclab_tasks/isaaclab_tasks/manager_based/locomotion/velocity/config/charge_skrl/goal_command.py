@@ -185,8 +185,8 @@ class GoalCommand(CommandTerm):
             env_ids: 需要重新生成目標的環境 ID 列表
                      例如：[0, 5, 12] = 第 0、5、12 個環境
         """
-        # 牆壁 proximity 檢查工具
-        from .mdp.wall_layout import get_wall_tensors, check_wall_proximity_batch
+        # 牆壁 proximity 檢查工具 (per-env)
+        from .mdp.wall_layout import check_wall_proximity_perenv, get_combined_wall_data
 
         # 獲取需要重置的環境數量
         num_envs = len(env_ids)
@@ -252,10 +252,13 @@ class GoalCommand(CommandTerm):
             all_obstacle_radii = None
         
         # ------------------------------------------------------------------------
-        # 快取牆壁張量（迷宮內部牆壁 proximity 檢查）
+        # per-env 牆壁數據（迷宮內部 + 邊界牆壁 proximity 檢查）
         # ------------------------------------------------------------------------
-        _get_walls = getattr(self._env, '_wall_tensor_fn', get_wall_tensors)
-        wall_c, wall_s = _get_walls(self.device)
+        wall_c_all, wall_s_all, wall_mask_all = get_combined_wall_data(self._env)
+        # 索引需要重新採樣的 env
+        wall_c = wall_c_all[env_ids_tensor]      # [num_envs, W, 2]
+        wall_s = wall_s_all[env_ids_tensor]      # [num_envs, W, 2]
+        wall_m = wall_mask_all[env_ids_tensor]   # [num_envs, W]
 
         # ------------------------------------------------------------------------
         # 為每個環境生成有效的目標位置
@@ -348,10 +351,10 @@ class GoalCommand(CommandTerm):
             clear_of_robot = dist_to_robot > 0.5  # 至少離機器人 0.5 米
             
             # ------------------------------------------------------------------------
-            # 檢查 4：內部迷宮牆壁（確保目標不在牆壁內或過近）
+            # 檢查 4：per-env 迷宮牆壁（確保目標不在牆壁內或過近）
             # ------------------------------------------------------------------------
-            clear_of_walls = ~check_wall_proximity_batch(
-                candidate_goals_local, wall_c, wall_s, 0.5  # 目標離牆 >= 0.5m
+            clear_of_walls = ~check_wall_proximity_perenv(
+                candidate_goals_local, wall_c, wall_s, wall_m, 0.5  # 目標離牆 >= 0.5m
             )
 
             # ------------------------------------------------------------------------

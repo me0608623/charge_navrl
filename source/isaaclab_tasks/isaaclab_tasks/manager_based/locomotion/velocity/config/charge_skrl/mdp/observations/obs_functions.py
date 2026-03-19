@@ -416,7 +416,7 @@ def topk_obstacles_ego_centric(
     Returns:
         [num_envs, top_k * 4] 扁平化特徵張量（預設 [N, 40]）
     """
-    from ..wall_layout import get_all_wall_tensors, check_los_batch
+    from ..wall_layout import check_los_perenv, get_combined_wall_data
 
     # ----------------------------------------------------------
     # 從 Scene 取得自車位置、速度、航向
@@ -490,14 +490,13 @@ def topk_obstacles_ego_centric(
     F = num_found
 
     # ----------------------------------------------------------
-    # 3. 牆壁 LOS 遮擋檢測（局部座標系）
-    #    牆壁定義在局部座標系，需將世界座標扣除 env_origins
+    # 3. 牆壁 LOS 遮擋檢測（per-env 牆壁, 局部座標系）
     # ----------------------------------------------------------
     if wall_occlusion:
         robot_pos_local = robot_pos_xy - env_origins           # [N, 2]
         pos_local = pos - env_origins.unsqueeze(1)             # [N, F, 2]
-        wall_centers, wall_sizes = get_all_wall_tensors(device)
-        los_visible = check_los_batch(robot_pos_local, pos_local, wall_centers, wall_sizes)
+        wall_c, wall_s, wall_mask = get_combined_wall_data(env)
+        los_visible = check_los_perenv(robot_pos_local, pos_local, wall_c, wall_s, wall_mask)
         valid = valid & los_visible                            # [N, F]
 
     # ----------------------------------------------------------
@@ -639,7 +638,7 @@ def topk_obstacles_global_frame(
     Returns:
         [num_envs, top_k * 7] 扁平化特徵張量（預設 [N, 70]）
     """
-    from ..wall_layout import get_all_wall_tensors, check_los_batch
+    from ..wall_layout import check_los_perenv, get_combined_wall_data
 
     # ----------------------------------------------------------
     # 從 Scene 取得自車位置
@@ -714,13 +713,13 @@ def topk_obstacles_global_frame(
     F = num_found
 
     # ----------------------------------------------------------
-    # 3. 牆壁 LOS 遮擋檢測（局部座標系）
+    # 3. 牆壁 LOS 遮擋檢測（per-env 牆壁, 局部座標系）
     # ----------------------------------------------------------
     if wall_occlusion:
         robot_pos_local = robot_pos_xy - env_origins
         pos_local = pos - env_origins.unsqueeze(1)
-        wall_centers, wall_sizes = get_all_wall_tensors(device)
-        los_visible = check_los_batch(robot_pos_local, pos_local, wall_centers, wall_sizes)
+        wall_c, wall_s, wall_mask = get_combined_wall_data(env)
+        los_visible = check_los_perenv(robot_pos_local, pos_local, wall_c, wall_s, wall_mask)
         valid = valid & los_visible
 
     # ----------------------------------------------------------
@@ -881,7 +880,7 @@ def topk_obstacles_body_frame(
     Returns:
         [num_envs, top_k * 7] 扁平化特徵張量（預設 [N, 70]）
     """
-    from ..wall_layout import get_all_wall_tensors, check_los_batch
+    from ..wall_layout import check_los_perenv, get_combined_wall_data
 
     # ----------------------------------------------------------
     # 從 Scene 取得自車狀態
@@ -969,13 +968,13 @@ def topk_obstacles_body_frame(
     F = num_found
 
     # ----------------------------------------------------------
-    # 2. 牆壁 LOS 遮擋檢測（局部座標系）
+    # 2. 牆壁 LOS 遮擋檢測（per-env 牆壁, 局部座標系）
     # ----------------------------------------------------------
     if wall_occlusion:
         robot_pos_local = robot_pos_xy - env_origins
         pos_local = pos - env_origins.unsqueeze(1)
-        wall_centers, wall_sizes = get_all_wall_tensors(device)
-        los_visible = check_los_batch(robot_pos_local, pos_local, wall_centers, wall_sizes)
+        wall_c, wall_s, wall_mask = get_combined_wall_data(env)
+        los_visible = check_los_perenv(robot_pos_local, pos_local, wall_c, wall_s, wall_mask)
         valid = valid & los_visible
 
     # ----------------------------------------------------------

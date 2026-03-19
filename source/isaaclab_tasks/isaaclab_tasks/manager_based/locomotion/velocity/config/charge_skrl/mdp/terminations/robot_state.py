@@ -28,7 +28,12 @@ import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 
-from ..wall_layout import get_all_wall_tensors, check_wall_proximity_batch
+from ..wall_layout import (
+    get_all_wall_tensors,
+    check_wall_proximity_batch,
+    check_wall_proximity_perenv,
+    get_combined_wall_data,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -176,8 +181,8 @@ def wall_collision_termination(
     - 此函數直接用幾何位置判斷，100% 可靠
 
     牆壁來源：
-    - env._all_wall_tensor_fn (20×20 curriculum，由 startup event 設定)
-    - fallback: get_all_wall_tensors() (16×16 預設)
+    - get_combined_wall_data(env): per-env maze walls + boundary walls
+    - fallback: 靜態 20x20 牆壁（env._maze_wall_centers 不存在時）
 
     Args:
         env: 環境實例
@@ -196,25 +201,23 @@ def wall_collision_termination(
     env_origins = env.scene.env_origins[:, :2]
     robot_pos_local = robot_pos - env_origins
 
-    # 取得所有牆壁（boundary + internal）
-    if hasattr(env, '_all_wall_tensor_fn') and env._all_wall_tensor_fn is not None:
-        wall_c, wall_s = env._all_wall_tensor_fn(env.device)
-    else:
-        wall_c, wall_s = get_all_wall_tensors(env.device)  # 16×16 fallback
-
-    result = check_wall_proximity_batch(robot_pos_local, wall_c, wall_s, threshold)
+    # 取得所有牆壁（per-env maze + boundary）
+    wall_c, wall_s, wall_mask = get_combined_wall_data(env)
+    result = check_wall_proximity_perenv(robot_pos_local, wall_c, wall_s, wall_mask, threshold)
 
     # 啟動診斷（僅第 1 步，摘要統計）
     _wall_diag_count += 1
     if _wall_diag_count == 1:
-        pos = robot_pos_local.unsqueeze(1)
-        delta = (pos - wall_c.unsqueeze(0)).abs() - wall_s.unsqueeze(0) * 0.5
+        pos = robot_pos_local.unsqueeze(1)          # [N, 1, 2]
+        delta = (pos - wall_c).abs() - wall_s * 0.5  # [N, W, 2]
         delta = delta.clamp(min=0.0)
-        dists = torch.norm(delta, dim=2)
+        dists = torch.norm(delta, dim=2)             # [N, W]
+        # Mask out inactive walls
+        dists = torch.where(wall_mask, dists, torch.full_like(dists, 1e6))
         d_min_per_env = dists.min(dim=1).values
-        wall_src = "20x20" if hasattr(env, '_all_wall_tensor_fn') and env._all_wall_tensor_fn else "16x16"
+        wall_src = "perenv" if hasattr(env, '_maze_wall_centers') else "fallback"
         print(
-            f"[wall_collision] src={wall_src} walls={wall_c.shape[0]} thr={threshold:.2f}m "
+            f"[wall_collision] src={wall_src} walls={wall_c.shape[1]} thr={threshold:.2f}m "
             f"envs={d_min_per_env.shape[0]} | "
             f"d_min: min={d_min_per_env.min():.2f} mean={d_min_per_env.mean():.2f} max={d_min_per_env.max():.2f}",
             flush=True,

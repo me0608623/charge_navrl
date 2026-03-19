@@ -43,23 +43,25 @@ agent:
 
   mini_batches: 8
 
-  # v3: 0.98→0.995 — 有效視野 50→200 步，匹配 episode 長度 225 步
-  # 讓 Agent 看到繞路後的遠期目標獎勵，而非只看眼前的牆
-  discount_factor: 0.995
+  # Phase 1 初始值（課程動態調整 0.990→0.998）
+  # Phase 1: 0.990（100步視野），Phase 4b: 0.998（500步視野）
+  discount_factor: 0.990
 
   # v8: 恢復 0.95 — v7 的 0.90 未帶來改善，v6 在 0.95 下 actor_grad 更高
   lambda: 0.95
 
   # v6: KLAdaptiveLR → LinearLR — KL adaptive 在 786K batch 下完全失效
   # v4 (max=3e-4) 和 v5 (max=1.5e-4) 都全程鎖死 max，KL 始終落在不動區
-  # 改用線性衰減：1e-4 → 1e-5，total_iters = timesteps(234375) / rollouts(128) = 1831
+  # 改用線性衰減：1e-4 → 3e-5
+  # 注意：SKRL 每個 PPO update 呼叫 step() × learning_epochs 次
+  # total_iters = (timesteps / rollouts) × learning_epochs = 1831 × 4 = 7324
   learning_rate: !!float 1e-4
 
   learning_rate_scheduler: "__import__('torch').optim.lr_scheduler.LinearLR"
   learning_rate_scheduler_kwargs:
     start_factor: 1.0
-    end_factor: 0.1           # 1e-4 → 1e-5 over full training
-    total_iters: 1831         # = 234375 / 128
+    end_factor: 0.3           # 1e-4 → 3e-5（保持後期學習能力）
+    total_iters: 7324         # = 1831 × 4 (learning_epochs)，覆蓋完整訓練
 
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
