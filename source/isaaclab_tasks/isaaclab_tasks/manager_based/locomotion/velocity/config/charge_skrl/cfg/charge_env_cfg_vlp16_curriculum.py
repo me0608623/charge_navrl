@@ -433,17 +433,19 @@ class RewardsCfgVLP16NavRL(RewardsCfgVLP16Curriculum):
     ┌─────────────────────────────────────────────────────────────────┐
     │ 引入 3 個 NavRL-style 密集獎勵，提供「方向性的安全導航信號」，  │
     │ 讓 agent 同時學會前進和避障，而非只靠稀疏的死亡懲罰。           │
+    │ 危險區 progress 翻負 + 碰撞懲罰 -100，雙重保險避免衝撞行為。   │
     └─────────────────────────────────────────────────────────────────┘
 
-    獎勵結構（5 項有效）：
-    1. reaching_goal (+250)        — 繼承不變
+    獎勵結構（6 項有效）：
+    1. reaching_goal (+500)        — 覆蓋父類 250→500，提高 goal-seeking 動機
     2. velocity_to_goal (+15)      — 新增：雙向速度獎勵 [-1,1]（背離懲罰）
     3. safety_log_distance (+3)    — 新增：速度耦合 log 安全距離（靜止×0.1）
-    4. safe_progress (+30)         — 新增：安全耦合 PBRS（取代 potential_progress）
-    5a. acceleration_penalty (-0.05) — 繼承：deadzone 版
-    5b. angular_velocity_penalty (-0.05) — 繼承：context-aware 版
+    4. safe_progress (+20)         — 分段線性 gate：danger zone 內 gate=-0.5（前進扣分）
+    5. collision_terminal (-100)   — 恢復碰撞懲罰（reaching:collision = 5:1）
+    6a. acceleration_penalty (-0.05) — 繼承：deadzone 版
+    6b. angular_velocity_penalty (-0.05) — 繼承：context-aware 版
 
-    行為排序：安全前進(+2.5) >> 危險前進(+0.6) >> 原地不動(≈0) >> 後退(-0.7) >> 接近碰撞(-0.1)
+    行為排序：安全前進(+6.8) >> 原地不動(≈0) >> 危險前進(-1.2) >> 危險撤退(-0.8) >> 碰撞(-100)
     """
 
     # --- 新增 NavRL-style dense rewards ---
@@ -479,10 +481,26 @@ class RewardsCfgVLP16NavRL(RewardsCfgVLP16Curriculum):
             "sensor_cfg": SceneEntityCfg("lidar"),
             "body_radius": ROBOT_BODY_RADIUS,
             "bottom_k": 10,
-            "safety_threshold": 1.0,
-            "safety_temperature": 0.3,
+            "d_danger": 0.5,
+            "d_comfort": 1.5,
+            "negative_scale": 0.5,
         },
-        weight=30.0,
+        weight=20.0,
+    )
+
+    # --- 恢復碰撞懲罰: 0 → -100（reaching:collision = 5:1）---
+    collision_terminal = RewTerm(
+        func=collision_terminal_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        weight=-100.0,
+    )
+
+    # --- 覆蓋父類 reaching_goal: 250 → 500 ---
+    # 讓 terminal reward 從 dense 累計的 ~10% 提升到 ~20%
+    reaching_goal = RewTerm(
+        func=reaching_goal,
+        params={"asset_cfg": SceneEntityCfg("robot"), "threshold": GOAL_REACH_THRESHOLD, "body_radius": ROBOT_BODY_RADIUS},
+        weight=500.0,
     )
 
     # --- 被 safe_progress 取代的舊版 PBRS ---

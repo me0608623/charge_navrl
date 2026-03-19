@@ -3,7 +3,7 @@
 3 個密集獎勵函數，提供「方向性的安全導航信號」：
 1. velocity_to_goal_reward: 鼓勵朝目標方向高效前進
 2. safety_log_distance_reward: LiDAR bottom-K log 距離（近距離梯度陡，遠距離梯度平）
-3. safe_progress_reward: PBRS × sigmoid 安全 gate（安全前進 >> 危險前進）
+3. safe_progress_reward: PBRS × 分段線性安全 gate（含負區：危險前進扣分）
 
 設計動機：
 v9 純死亡機制缺乏密集梯度信號，agent 學會「不動=不死」。
@@ -171,14 +171,14 @@ def safety_log_distance_reward(
         min_speed_factor: 靜止時的最低速度因子（保留部分危險警告）
 
     Returns:
-        [num_envs] in [-3, 3]
+        [num_envs] in [-6, 2]
     """
     robot: Articulation = env.scene[robot_cfg.name]
 
     _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
 
     # Log 變換：近距離梯度陡，遠距離梯度平
-    raw = torch.log(d_safe).clamp(-3.0, 3.0)  # [N]
+    raw = torch.log(d_safe).clamp(-6.0, 2.0)  # [N]
 
     # 速度因子：靜止時衰減安全正獎勵，移動時完整信號
     speed = torch.norm(
@@ -202,24 +202,29 @@ def safe_progress_reward(
     bottom_k: int = 10,
     safety_threshold: float = 1.0,
     safety_temperature: float = 0.3,
+    d_danger: float = 0.5,
+    d_comfort: float = 1.5,
+    negative_scale: float = 0.5,
 ) -> torch.Tensor:
-    """安全耦合的 PBRS 進度獎勵。
+    """安全耦合的 PBRS 進度獎勵（分段線性 gate，含負區）。
 
     Math:
         # PBRS 部分
         progress = d_prev - d_curr                          # 距離縮減
         progress = clamp(progress, -1, 1)
 
-        # 安全耦合（sigmoid gate）
+        # 安全耦合（分段線性 gate，含負區）
         d_safe = bottom_k_mean - body_radius
-        gate = sigmoid((d_safe - threshold) / temperature)   # threshold=1.0m, temp=0.3
+        gate:
+          d_safe < d_danger   → -η         (懲罰前進)
+          d_danger ≤ d_safe ≤ d_comfort → [0, 1]  (線性過渡)
+          d_safe > d_comfort  → 1.0        (完整獎勵)
 
         # 最終獎勵
         reward = progress × gate
 
-    PBRS 精神：telescoping sum，total = d_initial - d_final
-    安全耦合：d_safe > 1.5m → gate≈1，d_safe < 0.5m → gate≈0.15
-    「安全前進」和「危險前進」有不同獎勵，agent 自然學會繞路。
+    關鍵性質：gate < 0 且 progress > 0 → reward < 0（危險區前進扣分）。
+    反之 gate < 0 且 progress < 0 → reward > 0（獎勵撤退！）
 
     使用 env._prev_goal_dist_navrl（獨立於舊版 _prev_goal_dist）。
 
@@ -231,8 +236,11 @@ def safe_progress_reward(
         sensor_cfg: LiDAR 感測器配置
         body_radius: 機器人車體半徑 (m)
         bottom_k: 取最近的 K 條 ray
-        safety_threshold: 安全 gate 中心點 (m)
-        safety_temperature: 安全 gate sigmoid 溫度
+        safety_threshold: 安全 gate 中心點 (m)（保留向後相容）
+        safety_temperature: 安全 gate sigmoid 溫度（保留向後相容）
+        d_danger: 低於此距離 gate 為負 (m)
+        d_comfort: 高於此距離 gate = 1.0 (m)
+        negative_scale: η，danger zone 內 gate = -η
 
     Returns:
         [num_envs] in [-1, 1]
@@ -270,11 +278,18 @@ def safe_progress_reward(
     # Update for next step
     env._prev_goal_dist_navrl = d_curr.clone()
 
-    # === 安全耦合部分（sigmoid gate）===
+    # === 安全耦合部分（分段線性 gate，含負區）===
     _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
 
-    # Sigmoid gate: d_safe > threshold → gate ≈ 1, d_safe < threshold → gate → 0
-    gate = torch.sigmoid((d_safe - safety_threshold) / safety_temperature)  # [N]
+    # 分段線性 gate:
+    #   d_safe < d_danger   → gate = -η        (懲罰前進)
+    #   d_danger ≤ d_safe ≤ d_comfort → gate ∈ [0, 1]  (線性過渡)
+    #   d_safe > d_comfort  → gate = 1.0       (完整獎勵)
+    gate = torch.where(
+        d_safe < d_danger,
+        torch.full_like(d_safe, -negative_scale),
+        ((d_safe - d_danger) / (d_comfort - d_danger + 1e-6)).clamp(0.0, 1.0),
+    )
 
     # 最終獎勵
     reward = progress * gate  # [N]
