@@ -5,7 +5,14 @@ from .discrete_differential_drive import (
     DiscreteDifferentialDriveActionCfg,
 )
 
+from .safety_shield import (
+    ShieldedDiscreteDifferentialDriveAction,
+    ShieldedDiscreteDifferentialDriveActionCfg,
+)
+
 __all__ = [
     "DiscreteDifferentialDriveAction",
     "DiscreteDifferentialDriveActionCfg",
+    "ShieldedDiscreteDifferentialDriveAction",
+    "ShieldedDiscreteDifferentialDriveActionCfg",
 ]

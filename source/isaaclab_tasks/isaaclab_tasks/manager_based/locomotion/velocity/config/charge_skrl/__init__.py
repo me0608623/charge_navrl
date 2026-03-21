@@ -180,3 +180,23 @@ gym.register(
         "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
     },
 )
+
+# ============================================================================
+# NavRL 消融實驗 01-04
+# ============================================================================
+_ablation_variants = {
+    "NavRL01": "NavRL_NavRL01",  # v_gate floor=0.2
+    "NavRL02": "NavRL_NavRL02",  # safe_progress d_danger=0.55
+    "NavRL03": "NavRL_NavRL03",  # +gap rewards
+    "NavRL04": "NavRL_NavRL04",  # +safety shield
+}
+for _suffix, _cls in _ablation_variants.items():
+    gym.register(
+        id=f"Isaac-Navigation-Charge-VLP16-Curriculum-{_suffix}",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:ChargeNavigationEnvCfgVLP16Curriculum{_cls}",
+            "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+        },
+    )

@@ -551,3 +551,124 @@ class ChargeNavigationEnvCfgVLP16CurriculumNavRL(ChargeNavigationEnvCfgVLP16Curr
     """
 
     rewards: RewardsCfgVLP16NavRL = RewardsCfgVLP16NavRL()
+
+
+# ============================================================================
+# 消融實驗 Configs (NavRL01-04)
+# ============================================================================
+
+# --- Gap reward imports ---
+from ..mdp.rewards.gap_rewards import (
+    heading_to_gap_reward,
+    forward_clearance_improvement_reward,
+)
+
+# --- Shield action import ---
+from ..mdp.actions.safety_shield import ShieldedDiscreteDifferentialDriveActionCfg
+
+# --- NavRL01: v_gate floor=0.2 (保留 20% goal attraction near obstacles) ---
+@configclass
+class RewardsCfgVLP16NavRL01(RewardsCfgVLP16NavRL):
+    """NavRL01: v_gate 永不完全關閉 — floor=0.2"""
+    velocity_to_goal = RewTerm(
+        func=velocity_to_goal_reward,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "min_goal_dist": 0.5,
+            "max_reward_speed": 1.0,
+            "body_radius": ROBOT_BODY_RADIUS,
+            "bottom_k": 10,
+            "d_attenuate": 1.0,
+            "d_full": 2.5,
+            "v_gate_floor": 0.2,
+        },
+        weight=15.0,
+    )
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL_NavRL01(ChargeNavigationEnvCfgVLP16CurriculumNavRL):
+    """NavRL01: v_gate floor 消融"""
+    rewards: RewardsCfgVLP16NavRL01 = RewardsCfgVLP16NavRL01()
+
+
+# --- NavRL02: safe_progress d_danger 0.8→0.55 (縮小 danger zone) ---
+@configclass
+class RewardsCfgVLP16NavRL02(RewardsCfgVLP16NavRL):
+    """NavRL02: 延遲 danger zone — d_danger=0.55"""
+    safe_progress = RewTerm(
+        func=safe_progress_reward,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "bottom_k": 10,
+            "d_danger": 0.55,
+            "d_comfort": 2.0,
+            "negative_scale": 0.5,
+        },
+        weight=20.0,
+    )
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL_NavRL02(ChargeNavigationEnvCfgVLP16CurriculumNavRL):
+    """NavRL02: safe_progress delayed danger zone"""
+    rewards: RewardsCfgVLP16NavRL02 = RewardsCfgVLP16NavRL02()
+
+
+# --- NavRL03: baseline + gap-seeking rewards ---
+@configclass
+class RewardsCfgVLP16NavRL03(RewardsCfgVLP16NavRL):
+    """NavRL03: 新增 gap reward 引導繞行"""
+    heading_to_gap = RewTerm(
+        func=heading_to_gap_reward,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "min_gap_width": 0.9,
+            "activation_d_safe": 2.0,
+            "speed_threshold": 0.05,
+        },
+        weight=5.0,
+    )
+    forward_clearance = RewTerm(
+        func=forward_clearance_improvement_reward,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "front_arc_bins": 12,
+            "activation_d_safe": 2.0,
+        },
+        weight=8.0,
+    )
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL_NavRL03(ChargeNavigationEnvCfgVLP16CurriculumNavRL):
+    """NavRL03: gap reward 消融"""
+    rewards: RewardsCfgVLP16NavRL03 = RewardsCfgVLP16NavRL03()
+
+
+# --- NavRL04: soft safety shield (rewards 不變) ---
+@configclass
+class ActionsCfgVLP16Shielded:
+    """VLP16 動作 + soft safety shield"""
+    diff_drive = ShieldedDiscreteDifferentialDriveActionCfg(
+        asset_name="robot",
+        debug_vis=True,
+        num_bins=19,
+        max_linear_velocity=1.0,
+        max_linear_accel=0.5,
+        max_angular_vel=0.25 * math.pi,
+        shield_mode="soft",
+        shield_d_danger=0.55,
+        shield_d_safe=1.2,
+        sensor_name="lidar",
+        body_radius=ROBOT_BODY_RADIUS,
+    )
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL_NavRL04(ChargeNavigationEnvCfgVLP16CurriculumNavRL):
+    """NavRL04: soft safety shield 消融"""
+    actions: ActionsCfgVLP16Shielded = ActionsCfgVLP16Shielded()

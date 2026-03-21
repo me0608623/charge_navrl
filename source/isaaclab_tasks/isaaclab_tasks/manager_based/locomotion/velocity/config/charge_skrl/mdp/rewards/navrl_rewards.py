@@ -84,6 +84,7 @@ def velocity_to_goal_reward(
     bottom_k: int = 10,
     d_attenuate: float = 1.0,
     d_full: float = 2.5,
+    v_gate_floor: float = 0.0,
 ) -> torch.Tensor:
     """朝目標方向的速度獎勵（雙向：正向獎勵、背離懲罰 + LiDAR 安全衰減）。
 
@@ -148,7 +149,7 @@ def velocity_to_goal_reward(
     # d_attenuate < d_safe < d_full → v_gate ∈ (0, 1)（線性過渡）
     # d_safe > d_full → v_gate=1.0（完整信號）
     _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
-    v_gate = ((d_safe - d_attenuate) / (d_full - d_attenuate + 1e-6)).clamp(0.0, 1.0)
+    v_gate = ((d_safe - d_attenuate) / (d_full - d_attenuate + 1e-6)).clamp(v_gate_floor, 1.0)
     reward = reward * v_gate
 
     # NaN 保護

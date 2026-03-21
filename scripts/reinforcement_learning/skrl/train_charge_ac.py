@@ -539,6 +539,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             log_dir=log_dir,
         )
         print("[INFO] WandB-enabled trainer configured (Standard AC)")
+
+        # Ablation metrics logger (NavRL0* tasks)
+        task_name = args_cli.task
+        if "NavRL0" in task_name or "NavRL" in task_name:
+            try:
+                from diagnostics.ablation_metrics import AblationMetricsLogger
+                trainer.ablation_logger = AblationMetricsLogger(env)
+                print(f"[INFO] AblationMetricsLogger enabled for task: {task_name}")
+            except Exception as e:
+                print(f"[WARN] AblationMetricsLogger failed to init: {e}")
     else:
         runner = Runner(env, agent_cfg)
         trainer = None

@@ -83,6 +83,7 @@ class WandBSequentialTrainer(SequentialTrainer):
         self.wandb_run = wandb_run
         self.console_summary_logger = console_summary_logger
         self.debug_logger = debug_logger
+        self.ablation_logger = None  # Set externally for NavRL0* tasks
         self._initial_timestamp = None
         self._last_log_time = None
 
@@ -497,6 +498,8 @@ class WandBSequentialTrainer(SequentialTrainer):
                 # ── Debug logger: per-step collection ──
                 if self.debug_logger is not None:
                     self.debug_logger.step(actions, rewards, terminated, truncated, infos)
+                if self.ablation_logger is not None:
+                    self.ablation_logger.step(actions, rewards, terminated, truncated, infos)
 
                 # 保存tracking_data（在record_transition清空之前）
                 tracking_data_snapshot = self._capture_tracking_data(single_agent=True)
@@ -602,6 +605,13 @@ class WandBSequentialTrainer(SequentialTrainer):
                     debug_metrics = self.debug_logger.get_and_reset()
                     tracking_data_snapshot.update(
                         {k: [v] for k, v in debug_metrics.items()}
+                    )
+
+                # Ablation 診斷指標 flush
+                if self.ablation_logger is not None:
+                    abl_metrics = self.ablation_logger.get_and_reset()
+                    tracking_data_snapshot.update(
+                        {k: [v] for k, v in abl_metrics.items()}
                     )
 
                 # Module Entropy 指標：flush 累積的 mini-batch 數據，取平均後注入

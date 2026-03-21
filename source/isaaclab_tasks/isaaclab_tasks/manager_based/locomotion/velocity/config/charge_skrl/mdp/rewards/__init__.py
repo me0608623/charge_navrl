@@ -51,6 +51,11 @@ from .navrl_rewards import (
     safe_progress_reward,
 )
 
+from .gap_rewards import (
+    heading_to_gap_reward,
+    forward_clearance_improvement_reward,
+)
+
 __all__ = [
     # 工具函數
     "_print_diagnostics",
@@ -84,4 +89,7 @@ __all__ = [
     "velocity_to_goal_reward",
     "safety_log_distance_reward",
     "safe_progress_reward",
+    # Gap-seeking rewards
+    "heading_to_gap_reward",
+    "forward_clearance_improvement_reward",
 ]
