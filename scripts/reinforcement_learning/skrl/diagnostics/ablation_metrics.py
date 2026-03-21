@@ -129,7 +129,8 @@ class AblationMetricsLogger:
         self._prev_goal_dist = goal_dist.clone()
 
         # Episode reset 時重置
-        done = terminated | truncated
+        done = (terminated | truncated).squeeze(-1) if (terminated | truncated).dim() > 1 else (terminated | truncated)
+        done = done.bool()
         if done.any():
             self._consecutive_slow[done] = 0
             self._prev_goal_dist[done] = goal_dist[done]
