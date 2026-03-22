@@ -44,13 +44,14 @@ conda activate env_isaaclab
 
 ### 3. 機器人 USD 路徑
 
-**重要**: `charge_cfg.py` 中 USD 路徑是 hardcoded:
+USD 檔案已納入 repo：`assets/usd/charge/charge.usd` (12KB)
 
-```python
-usd_path="/home/aa/usd/charge/charge.usd"
-```
+`charge_cfg.py` 自動搜尋順序：
+1. 環境變數 `CHARGE_USD_PATH`（最高優先）
+2. `{repo_root}/assets/usd/charge/charge.usd`（repo 內，跨機器免設定）
+3. `/home/aa/usd/charge/charge.usd`（本機 fallback）
 
-若 PC-B 的 USD 檔案位置不同，需修改此行。USD 檔案在 git 外部（太大不入版控）。
+通常不需額外設定，checkout 後即可用。
 
 ### 4. Git Remote
 
@@ -203,7 +204,7 @@ PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_ch
 1. Clone repo: `git clone git@github.com:me0608623/charge_skrl.git IsaacLab` 或 add remote
 2. `git checkout charge_skrl/abl`
 3. `conda activate env_isaaclab`
-4. 確認 USD 路徑: `ls /home/aa/usd/charge/charge.usd` — 若不在此位置，修改 `charge_cfg.py`
+4. USD 已在 repo 內 (`assets/usd/charge/charge.usd`)，無需額外設定
 5. `wandb login`
 6. 跑一個快速測試: `./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_charge_ac.py --task Isaac-Navigation-Charge-VLP16-Curriculum-NavRL --num_envs 4 --headless --timesteps 10`
 7. 確認 WandB 出現 `ablation/*` metrics

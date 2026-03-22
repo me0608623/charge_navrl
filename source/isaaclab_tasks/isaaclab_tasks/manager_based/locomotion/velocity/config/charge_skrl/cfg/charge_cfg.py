@@ -10,13 +10,24 @@
 3. 執行器（輪子驅動方式）
 """
 
+import os
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
+# USD 路徑: 優先使用環境變數 CHARGE_USD_PATH，其次 repo 內 assets/，最後本機路徑
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..", ".."))
+_USD_CANDIDATES = [
+    os.environ.get("CHARGE_USD_PATH", ""),
+    os.path.join(_REPO_ROOT, "assets", "usd", "charge", "charge.usd"),
+    "/home/aa/usd/charge/charge.usd",
+]
+_USD_PATH = next((p for p in _USD_CANDIDATES if p and os.path.isfile(p)), _USD_CANDIDATES[-1])
+
 CHARGE_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/aa/usd/charge/charge.usd",
+        usd_path=_USD_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
