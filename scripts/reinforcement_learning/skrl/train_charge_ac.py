@@ -81,6 +81,30 @@ parser.add_argument(
     help="Training phase: 1=from scratch, 2=fine-tune from checkpoint (requires --checkpoint).",
 )
 
+# --- 實驗命名 ---
+parser.add_argument("--run_name", type=str, default=None,
+                    help="Custom run name for log dir / wandb (e.g. abl1_vgate-floor_s1_ne512)")
+
+# --- 消融實驗 CLI ---
+parser.add_argument("--v_gate_mode", type=str, default="baseline",
+                    choices=["baseline", "floor", "softer"],
+                    help="v_gate ablation: baseline / floor(min=0.2) / softer(d_att=0.6)")
+parser.add_argument("--progress_gate_mode", type=str, default="baseline",
+                    choices=["baseline", "delayed_negative", "weaken_negative"],
+                    help="safe_progress gate: baseline / delayed(d_danger=0.55) / weaken(neg=-0.2)")
+parser.add_argument("--use_gap_reward", action="store_true", default=False,
+                    help="Enable gap-seeking rewards (heading_to_gap / forward_clearance)")
+parser.add_argument("--gap_reward_type", type=str, default="heading",
+                    choices=["heading", "clearance", "both"],
+                    help="Gap reward type")
+parser.add_argument("--gap_reward_weight", type=float, default=5.0,
+                    help="Gap reward weight")
+parser.add_argument("--use_safety_shield", action="store_true", default=False,
+                    help="Enable safety shield on actions (speed limiting near obstacles)")
+parser.add_argument("--shield_mode", type=str, default="soft",
+                    choices=["soft", "hard"],
+                    help="Shield mode: soft(linear reduction) / hard(force stop)")
+
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 
@@ -338,6 +362,97 @@ def disable_debug_vis(cfg) -> None:
 
 
 # ============================================================================
+# 消融實驗 CLI → env_cfg 覆蓋
+# ============================================================================
+
+def _apply_ablation_overrides(env_cfg, args_cli):
+    """根據 CLI 消融參數覆蓋 env_cfg 的 reward/action 設定。
+
+    所有參數預設值 = baseline 行為，不帶參數時不做任何修改。
+    """
+    rewards = getattr(env_cfg, 'rewards', None)
+    if rewards is None:
+        return
+
+    changed = False
+
+    # --- v_gate_mode ---
+    if args_cli.v_gate_mode != "baseline":
+        vt = getattr(rewards, 'velocity_to_goal', None)
+        if vt is not None:
+            if args_cli.v_gate_mode == "floor":
+                vt.params["v_gate_floor"] = 0.2
+            elif args_cli.v_gate_mode == "softer":
+                vt.params["d_attenuate"] = 0.6
+            print(f"[ABLATION] v_gate_mode={args_cli.v_gate_mode}: {vt.params}")
+            changed = True
+
+    # --- progress_gate_mode ---
+    if args_cli.progress_gate_mode != "baseline":
+        sp = getattr(rewards, 'safe_progress', None)
+        if sp is not None:
+            if args_cli.progress_gate_mode == "delayed_negative":
+                sp.params["d_danger"] = 0.55
+            elif args_cli.progress_gate_mode == "weaken_negative":
+                sp.params["negative_scale"] = 0.2
+            print(f"[ABLATION] progress_gate_mode={args_cli.progress_gate_mode}: {sp.params}")
+            changed = True
+
+    # --- gap reward ---
+    if args_cli.use_gap_reward:
+        from isaaclab.managers import RewardTermCfg as RewTerm, SceneEntityCfg
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.rewards.gap_rewards import (
+            heading_to_gap_reward, forward_clearance_improvement_reward,
+        )
+        BODY_R = 0.35
+        w = args_cli.gap_reward_weight
+        if args_cli.gap_reward_type in ("heading", "both"):
+            rewards.heading_to_gap = RewTerm(
+                func=heading_to_gap_reward,
+                params={"robot_cfg": SceneEntityCfg("robot"), "sensor_cfg": SceneEntityCfg("lidar"),
+                        "body_radius": BODY_R, "min_gap_width": 0.9,
+                        "activation_d_safe": 2.0, "speed_threshold": 0.05},
+                weight=w,
+            )
+        if args_cli.gap_reward_type in ("clearance", "both"):
+            rewards.forward_clearance = RewTerm(
+                func=forward_clearance_improvement_reward,
+                params={"robot_cfg": SceneEntityCfg("robot"), "sensor_cfg": SceneEntityCfg("lidar"),
+                        "body_radius": BODY_R, "front_arc_bins": 12, "activation_d_safe": 2.0},
+                weight=w,
+            )
+        print(f"[ABLATION] gap_reward: type={args_cli.gap_reward_type} weight={w}")
+        changed = True
+
+    # --- safety shield ---
+    if args_cli.use_safety_shield:
+        import math as _math
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.actions.safety_shield import (
+            ShieldedDiscreteDifferentialDriveActionCfg,
+        )
+        from isaaclab.utils import configclass as _configclass
+        BODY_R = 0.35
+        mode = args_cli.shield_mode
+
+        @_configclass
+        class _ShieldedActions:
+            diff_drive = ShieldedDiscreteDifferentialDriveActionCfg(
+                asset_name="robot", debug_vis=True, num_bins=19,
+                max_linear_velocity=1.0, max_linear_accel=0.5,
+                max_angular_vel=0.25 * _math.pi,
+                shield_mode=mode,
+                shield_d_danger=0.55, shield_d_safe=1.2,
+                sensor_name="lidar", body_radius=BODY_R,
+            )
+        env_cfg.actions = _ShieldedActions()
+        print(f"[ABLATION] safety_shield: mode={mode}")
+        changed = True
+
+    if not changed:
+        print("[ABLATION] baseline (no overrides)")
+
+
+# ============================================================================
 # Main Training Function
 # ============================================================================
 
@@ -371,11 +486,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
 
     # Directory for logging — use "ac" subdirectory to separate from AAC logs
-    run_info = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if args_cli.run_name:
+        run_info = args_cli.run_name
+    else:
+        run_info = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_root_path = os.path.abspath(os.path.join("logs", "skrl", args_cli.task + "-AC"))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    print(f"Exact experiment name requested from command line: {run_info}")
+    print(f"[INFO] Run name: {run_info}")
     log_dir = os.path.join(log_root_path, run_info)
+
+    # --- 消融實驗: CLI → env_cfg 覆蓋 (在 config dump 前，gym.make 前) ---
+    _apply_ablation_overrides(env_cfg, args_cli)
 
     # Dump configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
@@ -464,16 +585,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if headless_mode:
         try:
             import wandb
+            wandb_name = args_cli.run_name if args_cli.run_name else f"AC_{run_info}"
             wandb.init(
                 project="charge_skrl",
-                name=f"AC_{run_info}",
+                name=wandb_name,
                 config={
                     "task": args_cli.task,
                     "num_envs": env_cfg.scene.num_envs,
                     "agent": "PPO",
-                    "architecture": "AC",  # 標記為 AC 而非 AAC
+                    "architecture": "AC",
                     "seed": agent_cfg["seed"],
                     "ml_framework": args_cli.ml_framework,
+                    "run_name": wandb_name,
+                    # 消融參數
+                    "v_gate_mode": args_cli.v_gate_mode,
+                    "progress_gate_mode": args_cli.progress_gate_mode,
+                    "use_gap_reward": args_cli.use_gap_reward,
+                    "gap_reward_type": args_cli.gap_reward_type,
+                    "gap_reward_weight": args_cli.gap_reward_weight,
+                    "use_safety_shield": args_cli.use_safety_shield,
+                    "shield_mode": args_cli.shield_mode,
                 },
                 tags=["AC", "ablation"],
             )
