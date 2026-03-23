@@ -839,7 +839,7 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
             "body_radius": ROBOT_BODY_RADIUS,
             "bottom_k": 10,
             "v_max": 1.0,
-            "min_goal_dist": 0.5,
+            "min_goal_dist": 0.1,   # 0.5→0.1: 消除 0.35~0.5m 死區
             "use_soft_gate": False,  # 無 gate，對齊 NavRL
         },
         weight=2.0,
