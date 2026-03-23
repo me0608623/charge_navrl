@@ -410,13 +410,14 @@ class RewardsCfgVLP16Curriculum(RewardsCfgVLP16):
 # ============================================================================
 @configclass
 class CurriculumCfgVLP16:
-    """5 階段 goal-obstacle 聯動課程（v10: 4a/4b 拆分 + TO-aware）"""
+    """資料驅動課程學習 — 支援 baseline_v1 / goal_first_v1 版本切換"""
     goal_obstacle_curriculum = CurriculumTermCfg(
         func=goal_obstacle_curriculum,
         params={
             "window_size": 2000,
             "min_stage_episodes": 5000,
             "initial_stage": 1,
+            "curriculum_version": "baseline_v1",  # CLI --curriculum_version 可覆蓋
         },
     )
 
@@ -672,3 +673,133 @@ class ActionsCfgVLP16Shielded:
 class ChargeNavigationEnvCfgVLP16CurriculumNavRL_NavRL04(ChargeNavigationEnvCfgVLP16CurriculumNavRL):
     """NavRL04: soft safety shield 消融"""
     actions: ActionsCfgVLP16Shielded = ActionsCfgVLP16Shielded()
+
+
+# ============================================================================
+# NavRL-Ground v1: 地面差速機器人版 NavRL 獎勵
+# ============================================================================
+
+from ..mdp.rewards.navrl_ground_rewards import (
+    goal_velocity_reward as _ground_goal_vel,
+    goal_progress_reward as _ground_progress,
+    static_safety_reward as _ground_static,
+    dynamic_safety_reward as _ground_dynamic,
+    control_smoothness_penalty as _ground_smooth,
+)
+
+@configclass
+class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
+    """NavRL-Ground v1: 8 項 reward，無硬關閉 gate / 無翻負 progress。
+
+    設計原則：
+    1. goal_velocity: soft gate (beta=0.2 floor)，永不完全歸零
+    2. goal_progress: soft scale (gamma=0.3 floor)，永不翻負
+    3. static_safety: 72-bin log clearance + 前向堵塞懲罰
+    4. dynamic_safety: per-obstacle log clearance + closing risk
+    5. smoothness: dv² + dw²
+    6. time: 每步小懲罰
+    7. goal: 到達目標終端獎勵（沿用）
+    8. collision: 碰撞終端懲罰（沿用）
+    """
+
+    # --- 新版 reward 項 ---
+    goal_velocity = RewTerm(
+        func=_ground_goal_vel,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "bottom_k": 10,
+            "v_max": 1.0,
+            "min_goal_dist": 0.5,
+            "use_soft_gate": True,
+            "gate_beta": 0.2,
+            "gate_dmin": 0.6,
+            "gate_dmax": 2.0,
+        },
+        weight=10.0,
+    )
+
+    goal_progress = RewTerm(
+        func=_ground_progress,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "bottom_k": 10,
+            "progress_clip": 1.0,
+            "use_soft_scale": True,
+            "scale_gamma": 0.3,
+            "scale_dmin": 0.5,
+            "scale_dmax": 2.0,
+        },
+        weight=12.0,
+    )
+
+    static_safety = RewTerm(
+        func=_ground_static,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "a_global": 1.0,
+            "a_front_block": 1.0,
+            "front_half_angle_deg": 20.0,
+            "front_nearest_k": 5,
+            "front_warn_dist": 1.2,
+        },
+        weight=3.0,
+    )
+
+    dynamic_safety = RewTerm(
+        func=_ground_dynamic,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "max_obstacles": 10,
+            "mode": "log_distance",
+            "risk_sigma": 1.0,
+            "b_log": 1.0,
+            "b_risk": 1.0,
+        },
+        weight=4.0,
+    )
+
+    smoothness = RewTerm(
+        func=_ground_smooth,
+        params={"smooth_v_coeff": 1.0, "smooth_w_coeff": 1.0},
+        weight=-0.05,
+    )
+
+    time_penalty = RewTerm(
+        func=per_step_time_penalty,
+        params={},
+        weight=-0.1,
+    )
+
+    # --- 沿用的終端 reward ---
+    reaching_goal = RewTerm(
+        func=reaching_goal,
+        params={"asset_cfg": SceneEntityCfg("robot"), "threshold": GOAL_REACH_THRESHOLD, "body_radius": ROBOT_BODY_RADIUS},
+        weight=500.0,
+    )
+
+    collision_ground = RewTerm(
+        func=collision_terminal_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        weight=-100.0,
+    )
+
+    # --- 歸零父類繼承的舊版 reward（避免重複計算）---
+    potential_progress = RewTerm(func=potential_progress_reward, params={"robot_cfg": SceneEntityCfg("robot")}, weight=0.0)
+    collision_terminal = RewTerm(func=collision_terminal_penalty, params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD}, weight=0.0)
+    near_obstacle_penalty = RewTerm(func=exponential_obstacle_penalty, params={"sensor_cfg": SceneEntityCfg("lidar"), "safe_distance": 1.0, "steepness": 6.0}, weight=0.0)
+    velocity_too_low = RewTerm(func=velocity_too_low_penalty, params={"robot_cfg": SceneEntityCfg("robot")}, weight=0.0)
+    acceleration_penalty = RewTerm(func=deadzone_acceleration_penalty, params={"dead_zone": 0.1}, weight=0.0)
+    angular_velocity_penalty = RewTerm(func=context_aware_angular_velocity_penalty, params={"robot_cfg": SceneEntityCfg("robot"), "sensor_cfg": SceneEntityCfg("lidar"), "proximity_distance": 1.5, "max_reduction": 0.7}, weight=0.0)
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRLGround(ChargeNavigationEnvCfgVLP16Curriculum):
+    """VLP-16 Curriculum + NavRL-Ground v1 Rewards"""
+    rewards: RewardsCfgVLP16NavRLGround = RewardsCfgVLP16NavRLGround()
