@@ -62,6 +62,7 @@ from .navrl_ground_rewards import (
     static_safety_reward,
     dynamic_safety_reward,
     control_smoothness_penalty,
+    alive_reward,
 )
 
 __all__ = [
@@ -106,4 +107,5 @@ __all__ = [
     "static_safety_reward",
     "dynamic_safety_reward",
     "control_smoothness_penalty",
+    "alive_reward",
 ]

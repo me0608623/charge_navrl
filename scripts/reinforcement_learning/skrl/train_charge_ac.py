@@ -107,8 +107,8 @@ parser.add_argument("--shield_mode", type=str, default="soft",
 
 # --- NavRL-Ground v1 reward mode ---
 parser.add_argument("--reward_mode", type=str, default="current",
-                    choices=["current", "navrl_ground_v1"],
-                    help="Reward mode: current(unchanged) / navrl_ground_v1(ground robot NavRL)")
+                    choices=["current", "navrl_ground_v1", "navrl_ground_v2"],
+                    help="Reward mode: current / navrl_ground_v1 / navrl_ground_v2(no gate+alive)")
 parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
                     choices=["log_distance", "closing_risk"],
                     help="Dynamic safety reward mode")
@@ -502,6 +502,25 @@ def _apply_ablation_overrides(env_cfg, args_cli):
             f"ss={args_cli.w_ss} ds={args_cli.w_ds} smooth={args_cli.w_smooth} "
             f"time={args_cli.w_time} collision={args_cli.w_collision} | "
             f"beta={args_cli.goal_vel_gate_beta} gamma={args_cli.progress_scale_gamma} "
+            f"ds_mode={args_cli.dynamic_safety_mode}"
+        )
+        changed = True
+
+    # --- reward_mode: navrl_ground_v2 (no gate + alive reward) ---
+    if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v2":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            RewardsCfgVLP16NavRLGroundV2,
+        )
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV2()
+
+        # 套用 dynamic_safety_mode
+        r = env_cfg.rewards
+        r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+
+        print(
+            f"[REWARD_MODE] navrl_ground_v2 (no gate + alive) | "
+            f"w: alive=1.0 vel=2.0 prog=3.0 ss=2.0 ds=2.0 "
+            f"smooth=-0.1 goal=100 collision=-50 | "
             f"ds_mode={args_cli.dynamic_safety_mode}"
         )
         changed = True

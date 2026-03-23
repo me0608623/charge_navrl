@@ -413,10 +413,22 @@ def control_smoothness_penalty(
     return torch.nan_to_num(penalty, nan=0.0).clamp(0.0, 10.0)
 
 
+def alive_reward(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """NavRL 風格存活獎勵：每步無條件 +1.0。
+
+    配合 γ=0.99 折扣產生時間壓力：停在原地也有 +1.0，
+    但朝目標走有 +1.0 + r_vel > +1.0，所以前進永遠比不動好。
+
+    Returns: [N] = 1.0
+    """
+    return torch.ones(env.num_envs, device=env.device)
+
+
 __all__ = [
     "goal_velocity_reward",
     "goal_progress_reward",
     "static_safety_reward",
     "dynamic_safety_reward",
     "control_smoothness_penalty",
+    "alive_reward",
 ]
