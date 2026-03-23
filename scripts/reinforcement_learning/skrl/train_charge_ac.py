@@ -519,7 +519,7 @@ def _apply_ablation_overrides(env_cfg, args_cli):
 
         print(
             f"[REWARD_MODE] navrl_ground_v2 (no gate + alive) | "
-            f"w: alive=1.0 vel=2.0 prog=3.0 ss=2.0 ds=2.0 "
+            f"w: alive=0.2 vel=2.0 prog=3.0 ss=2.0 ds=2.0 "
             f"smooth=-0.1 goal=100 collision=-50 | "
             f"ds_mode={args_cli.dynamic_safety_mode}"
         )

@@ -823,11 +823,11 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
     5. 移除 time_penalty（alive reward + γ 折扣已提供時間壓力）
     """
 
-    # --- 存活獎勵 (NavRL 核心) ---
+    # --- 存活獎勵 (NavRL 核心，降低佔比避免「活著比到達更好」) ---
     alive = RewTerm(
         func=_ground_alive,
         params={},
-        weight=1.0,
+        weight=0.2,
     )
 
     # --- r_vel: 移除 soft_gate ---
