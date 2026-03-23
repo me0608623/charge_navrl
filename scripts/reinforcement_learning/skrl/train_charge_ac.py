@@ -124,6 +124,7 @@ parser.add_argument("--w_ds", type=float, default=4.0, help="Dynamic safety rewa
 parser.add_argument("--w_smooth", type=float, default=-0.05, help="Smoothness penalty weight")
 parser.add_argument("--w_time", type=float, default=-0.1, help="Time penalty weight")
 parser.add_argument("--w_collision", type=float, default=-100.0, help="Collision penalty weight")
+parser.add_argument("--w_alive", type=float, default=0.2, help="Alive reward weight (v2 only)")
 
 # --- Curriculum version ---
 parser.add_argument("--curriculum_version", type=str, default=None,
@@ -513,13 +514,14 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         )
         env_cfg.rewards = RewardsCfgVLP16NavRLGroundV2()
 
-        # 套用 dynamic_safety_mode
+        # 套用 CLI 覆蓋
         r = env_cfg.rewards
+        r.alive.weight = args_cli.w_alive
         r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
 
         print(
             f"[REWARD_MODE] navrl_ground_v2 (no gate + alive) | "
-            f"w: alive=0.2 vel=2.0 prog=3.0 ss=2.0 ds=2.0 "
+            f"w: alive={args_cli.w_alive} vel=2.0 prog=3.0 ss=2.0 ds=2.0 "
             f"smooth=-0.1 goal=100 collision=-50 | "
             f"ds_mode={args_cli.dynamic_safety_mode}"
         )
@@ -707,6 +709,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "w_time": args_cli.w_time,
                     "w_collision": args_cli.w_collision,
                     "curriculum_version": args_cli.curriculum_version or "baseline_v1",
+                    "w_alive": args_cli.w_alive,
                 },
                 tags=["AC", "ablation"],
             )
