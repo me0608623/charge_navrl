@@ -28,8 +28,13 @@ def _make_stage(
     upgrade_min_dyn_sr=0.0, min_stage_updates=50,
     downgrade_sr=0.15, downgrade_min_cr=0.70, downgrade_min_to=0.65,
     name="",
+    reward_weights=None,
 ):
-    """建立單一 stage config dict。"""
+    """建立單一 stage config dict。
+
+    reward_weights: dict of {reward_term_name: weight} 用於 stage-dependent 獎勵權重。
+                   None = 不修改權重（使用 config 預設值）。
+    """
     if n_static + n_dynamic > 0:
         remaining = round(1.0 - empty_ratio, 2)
         total_obs = n_static + n_dynamic
@@ -39,7 +44,7 @@ def _make_stage(
         s_ratio = 0.0
         d_ratio = 0.0
 
-    return {
+    stage = {
         "name": name,
         "num_goals": num_goals,
         "goal_distance": (2.0, 13.0),
@@ -61,6 +66,9 @@ def _make_stage(
         "downgrade_min_cr": downgrade_min_cr,
         "downgrade_min_to": downgrade_min_to,
     }
+    if reward_weights is not None:
+        stage["reward_weights"] = reward_weights
+    return stage
 
 
 CURRICULUM_CONFIGS = {
@@ -113,57 +121,80 @@ CURRICULUM_CONFIGS = {
     # 表中 "~" 表示 mixed_parallel 的隨機採樣範圍，
     # 下面 num_obstacles_static/dynamic 設為該範圍的中位數或上限。
     # ==================================================================
+    # ==================================================================
+    # goal_first_v1: 先導航再避障 + stage-dependent reward weights
+    #
+    # Stage-dependent 權重設計理念：
+    # - Phase A (1-2): 無障礙物 → safety 權重低，goal 權重高
+    # - Phase B (3-4): 有 static → 提高 static_safety
+    # - Phase C (5-8): 有 dynamic → 提高 dynamic_safety
+    #
+    # | Stage | vel | prog | ss  | ds  | 理由 |
+    # |-------|-----|------|-----|-----|------|
+    # | 1-2   | 4.0 | 5.0  | 0.5 | 0   | 專注 goal-reaching |
+    # | 3-4   | 3.0 | 4.0  | 2.0 | 0.5 | 開始學 static 避障 |
+    # | 5-6   | 2.0 | 3.0  | 2.0 | 2.0 | 加入 dynamic |
+    # | 7-8   | 2.0 | 3.0  | 2.0 | 2.0 | 全功能 |
+    # ==================================================================
     "goal_first_v1": {
         "upgrade_pass_required": 5,
         "clear_window_on_promote": True,
         "stages": [
             # --- Phase A: Goal-reaching (Stage 1-2) ---
-            # S1: 純 goal-reaching，完全開放空間
             _make_stage(7, 0, 0, 0, 1, 0.990, 45, 1.00,
                         upgrade_sr=0.85, upgrade_max_cr=1.0, upgrade_max_to=0.20,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=50,
                         downgrade_sr=0.0, downgrade_min_cr=1.0, downgrade_min_to=1.0,
-                        name="goal_reaching_open"),
-            # S2: 加入少量牆壁，仍無障礙物
+                        name="goal_reaching_open",
+                        reward_weights={"goal_velocity": 4.0, "goal_progress": 5.0,
+                                        "static_safety": 0.5, "dynamic_safety": 0.0}),
             _make_stage(6, 0, 0, 1, 2, 0.990, 50, 1.00,
                         upgrade_sr=0.85, upgrade_max_cr=1.0, upgrade_max_to=0.20,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=60,
                         downgrade_sr=0.30, downgrade_min_cr=1.0, downgrade_min_to=0.80,
-                        name="goal_walls"),
+                        name="goal_walls",
+                        reward_weights={"goal_velocity": 4.0, "goal_progress": 5.0,
+                                        "static_safety": 0.5, "dynamic_safety": 0.0}),
 
             # --- Phase B: Static obstacles (Stage 3-4) ---
-            # S3: 開始學繞路 — 少量 static + 中等牆壁
             _make_stage(5, 2, 0, 2, 3, 0.992, 55, 0.55,
                         upgrade_sr=0.80, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=70,
-                        name="static_intro"),
-            # S4: 增加靜態擁擠度
+                        name="static_intro",
+                        reward_weights={"goal_velocity": 3.0, "goal_progress": 4.0,
+                                        "static_safety": 2.0, "dynamic_safety": 0.5}),
             _make_stage(4, 3, 0, 3, 4, 0.993, 60, 0.40,
                         upgrade_sr=0.80, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=85,
-                        name="static_dense"),
+                        name="static_dense",
+                        reward_weights={"goal_velocity": 3.0, "goal_progress": 4.0,
+                                        "static_safety": 2.0, "dynamic_safety": 0.5}),
 
             # --- Phase C: Dynamic obstacles (Stage 5-8) ---
-            # S5: 輕度動態干擾 — 首次引入少量 dynamic
             _make_stage(4, 3, 1, 3, 4, 0.994, 65, 0.30,
                         upgrade_sr=0.75, upgrade_max_cr=0.40, upgrade_max_to=0.30,
                         upgrade_min_dyn_sr=0.30, min_stage_updates=100,
-                        name="dynamic_intro"),
-            # S6: 中度動態避障
+                        name="dynamic_intro",
+                        reward_weights={"goal_velocity": 2.0, "goal_progress": 3.0,
+                                        "static_safety": 2.0, "dynamic_safety": 2.0}),
             _make_stage(3, 4, 3, 4, 5, 0.995, 72, 0.20,
                         upgrade_sr=0.75, upgrade_max_cr=0.40, upgrade_max_to=0.30,
                         upgrade_min_dyn_sr=0.35, min_stage_updates=115,
-                        name="dynamic_medium"),
-            # S7: 高擁擠 + 多障礙
+                        name="dynamic_medium",
+                        reward_weights={"goal_velocity": 2.0, "goal_progress": 3.0,
+                                        "static_safety": 2.0, "dynamic_safety": 2.0}),
             _make_stage(2, 5, 4, 5, 6, 0.997, 80, 0.15,
                         upgrade_sr=0.70, upgrade_max_cr=0.40, upgrade_max_to=0.30,
                         upgrade_min_dyn_sr=0.35, min_stage_updates=130,
-                        name="crowded"),
-            # S8: 最終挑戰 — 固定終局
+                        name="crowded",
+                        reward_weights={"goal_velocity": 2.0, "goal_progress": 3.0,
+                                        "static_safety": 2.0, "dynamic_safety": 2.0}),
             _make_stage(1, 7, 7, 6, 8, 0.998, 90, 0.15,
                         upgrade_sr=1.0, upgrade_max_cr=0.0, upgrade_max_to=0.0,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=0,
-                        downgrade_sr=0.15, name="final_challenge"),
+                        downgrade_sr=0.15, name="final_challenge",
+                        reward_weights={"goal_velocity": 2.0, "goal_progress": 3.0,
+                                        "static_safety": 2.0, "dynamic_safety": 2.0}),
         ],
     },
 }
@@ -479,7 +510,7 @@ def _collect_episode_results(
 
 
 def _apply_stage(env: ManagerBasedRLEnv, stage: int):
-    """套用指定階段的環境參數。不改獎勵權重。"""
+    """套用指定階段的環境參數 + reward 權重。"""
     cfg = STAGES[stage]
 
     try:
@@ -516,6 +547,23 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
 
     env.cfg.episode_length_s = cfg["episode_length_s"]
     env._target_discount_factor = cfg["gamma"]
+
+    # --- Stage-dependent reward weights ---
+    rw = cfg.get("reward_weights")
+    if rw is not None:
+        try:
+            rm = env.reward_manager
+            for term_name, weight in rw.items():
+                try:
+                    tc = rm.get_term_cfg(term_name)
+                    tc.weight = weight
+                    rm.set_term_cfg(term_name, tc)
+                except Exception:
+                    pass
+            weights_str = " ".join(f"{k}={v}" for k, v in rw.items())
+            print(f"[Curriculum] Stage {stage} reward weights: {weights_str}", flush=True)
+        except Exception:
+            pass
 
 
 __all__ = ["goal_obstacle_curriculum", "CURRICULUM_CONFIGS", "STAGES", "MAX_STAGE"]
