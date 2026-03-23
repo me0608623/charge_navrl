@@ -837,10 +837,10 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
             "robot_cfg": SceneEntityCfg("robot"),
             "sensor_cfg": SceneEntityCfg("lidar"),
             "body_radius": ROBOT_BODY_RADIUS,
-            "bottom_k": 10,
+            "bottom_k": 36,          # 10→36: 更穩定的 d_safe 估計 (36/5760=0.6%)
             "v_max": 1.0,
-            "min_goal_dist": 0.1,   # 0.5→0.1: 消除 0.35~0.5m 死區
-            "use_soft_gate": False,  # 無 gate，對齊 NavRL
+            "min_goal_dist": 0.1,    # 0.5→0.1: 消除 0.35~0.5m 死區
+            "use_soft_gate": False,   # 無 gate，對齊 NavRL
         },
         weight=2.0,
     )
@@ -852,9 +852,9 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
             "robot_cfg": SceneEntityCfg("robot"),
             "sensor_cfg": SceneEntityCfg("lidar"),
             "body_radius": ROBOT_BODY_RADIUS,
-            "bottom_k": 10,
-            "progress_clip": 1.0,
-            "use_soft_scale": False,  # 無縮放，對齊 NavRL
+            "bottom_k": 36,           # 10→36: 與 goal_velocity 一致
+            "progress_clip": 0.25,    # 1.0→0.25: max displacement=0.2m/step, 留 25% margin
+            "use_soft_scale": False,   # 無縮放，對齊 NavRL
         },
         weight=3.0,
     )
@@ -868,7 +868,7 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
             "body_radius": ROBOT_BODY_RADIUS,
             "a_global": 1.0,
             "a_front_block": 1.0,
-            "front_half_angle_deg": 20.0,
+            "front_half_angle_deg": 30.0,  # 20→30: ±30°=60° 前方扇區，覆蓋側碰風險
             "front_nearest_k": 5,
             "front_warn_dist": 1.2,
         },
@@ -882,7 +882,7 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
             "body_radius": ROBOT_BODY_RADIUS,
             "max_obstacles": 10,
             "mode": "log_distance",
-            "risk_sigma": 1.0,
+            "risk_sigma": 2.0,        # 1.0→2.0: 更平緩的衰減，0.5m clearance 從 61%→78%
             "b_log": 1.0,
             "b_risk": 1.0,
         },
