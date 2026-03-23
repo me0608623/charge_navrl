@@ -125,6 +125,8 @@ parser.add_argument("--w_smooth", type=float, default=-0.05, help="Smoothness pe
 parser.add_argument("--w_time", type=float, default=-0.1, help="Time penalty weight")
 parser.add_argument("--w_collision", type=float, default=-100.0, help="Collision penalty weight")
 parser.add_argument("--w_alive", type=float, default=0.2, help="Alive reward weight (v2 only)")
+parser.add_argument("--goal_vel_use_soft_gate", action="store_true", default=False,
+                    help="Enable soft gate on goal_velocity (v2 default=off, v1 style=on)")
 
 # --- Curriculum version ---
 parser.add_argument("--curriculum_version", type=str, default=None,
@@ -518,6 +520,12 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         r = env_cfg.rewards
         r.alive.weight = args_cli.w_alive
         r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+
+        # gate 消融：v2 預設 False，--goal_vel_use_soft_gate 可恢復 gate
+        if args_cli.goal_vel_use_soft_gate:
+            r.goal_velocity.params["use_soft_gate"] = True
+            r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
+            print(f"[ABLATION] goal_velocity: soft_gate ON, beta={args_cli.goal_vel_gate_beta}")
 
         print(
             f"[REWARD_MODE] navrl_ground_v2 (no gate + alive) | "
