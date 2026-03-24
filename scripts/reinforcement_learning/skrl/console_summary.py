@@ -189,17 +189,17 @@ class ConsoleSummaryLogger:
                 value = metrics.get(key, 0.0)
                 summary_lines.append(f"  {name}: {value:.4f}")
 
-        # 獎勵分項（NavRL Curriculum 有效項 + 預期走勢）
+        # 獎勵分項 — NavRL-Ground v4 活躍項 + 預期走勢
         # 格式: (顯示名, WandB key, 預期走勢)
         reward_terms = [
-            ("reaching_goal",           "Reward / reaching_goal",           "↑ 隨成功率上升"),
-            ("velocity_to_goal",        "Reward / velocity_to_goal",        "↑ 學會朝目標前進後穩定為正"),
-            ("safe_progress",           "Reward / safe_progress",           "↑ 前期快速上升，後期穩定"),
-            ("safety_log_distance",     "Reward / safety_log_distance",     "↑ 學會保持距離後穩定為正"),
-            ("acceleration_penalty",    "Reward / acceleration_penalty",    "→ 微量負值，接近 0"),
-            ("angular_velocity_penalty","Reward / angular_velocity_penalty","→ 微量負值，接近 0"),
+            ("reaching_goal",   "Reward / reaching_goal",   "↑ 隨 SR 上升 (terminal w=500)"),
+            ("goal_velocity",   "Reward / goal_velocity",   "↑ 朝目標速度 (r_vel, 核心驅動力)"),
+            ("goal_progress",   "Reward / goal_progress",   "↑ 距離縮減 PBRS"),
+            ("static_safety",   "Reward / static_safety",   "↑ LiDAR 72-bin log clearance"),
+            ("dynamic_safety",  "Reward / dynamic_safety",  "↑ 動態障礙物安全 (Stage 6+)"),
+            ("smoothness",      "Reward / smoothness",      "→ 微量負值 (控制平滑)"),
+            ("collision_ground","Reward / collision_ground", "↓ 隨 CR 下降 (terminal w=-50)"),
         ]
-        # weight=0 的項不顯示（collision_terminal, near_obstacle_penalty, time_penalty, velocity_too_low, potential_progress）
 
         summary_lines.append("")
         summary_lines.append("=== 獎勵分項（每秒平均） ===")
@@ -212,15 +212,17 @@ class ConsoleSummaryLogger:
         if not has_any:
             summary_lines.append("  (尚無數據)")
 
-        # 也列出非零的其他 Reward 項（防止遺漏）
+        # 列出非零的其他 Reward 項（跳過 weight=0 的零值項）
         known_keys = {t[1] for t in reward_terms}
         skip_prefixes = ("Reward / Total", "Reward / Instantaneous")
         extra_rewards = []
         for key in sorted(metrics.keys()):
             if key.startswith("Reward / ") and key not in known_keys and not any(key.startswith(p) for p in skip_prefixes):
-                extra_rewards.append((key.replace("Reward / ", ""), key))
+                value = metrics.get(key, 0.0)
+                if value != 0.0:  # 跳過 weight=0 的項
+                    extra_rewards.append((key.replace("Reward / ", ""), key))
         if extra_rewards:
-            summary_lines.append("  --- 其他 ---")
+            summary_lines.append("  --- 其他 (非零) ---")
             for name, key in extra_rewards:
                 value = metrics.get(key, 0.0)
                 summary_lines.append(f"  {name:30s} {value:+.6f}")
