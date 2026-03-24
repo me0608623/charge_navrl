@@ -375,5 +375,39 @@ $r_\text{vel}$ + $\gamma$ 折扣提供明確的「盡快到達」激勵。
 - Ng et al. (1999): Potential-based reward shaping (PBRS) — policy invariance 證明
 - `navrl_ground_rewards.py`: 8 項 reward 實作
 - `goal_rewards.py`: reaching_goal 稀疏終端獎勵
-- `charge_env_cfg_vlp16_curriculum.py`: RewardsCfgVLP16NavRLGroundV3 (v4 基礎)
-- `goal_obstacle_curriculum.py`: goal_first_v2 stage-dependent 權重
+- `charge_env_cfg_vlp16_curriculum.py`: RewardsCfgVLP16NavRLGroundV3 (v4), V5 (v5)
+- `goal_obstacle_curriculum.py`: goal_first_v2 (v4), goal_first_v3 (v5)
+
+---
+
+## 附錄: NavRL-Ground v5 (navrl_ground_v5 + goal_first_v3)
+
+> v4 訓練中期分析後的局部修正 — 2026-03-24
+
+### 問題
+
+v4 在 Stage 4 SR 卡在 ~74%，agent 走直線硬闖 (path efficiency 94%)。
+Stage 4 的前進側 (goal_vel=4.0 + goal_prog=5.0) 遠強於安全側 (ss=0.8, ds=0.0)，
+reward 結構偏向 aggressive progress，agent 不學繞行。
+
+### v5 改動（最小可驗證版本）
+
+**collision_ground**: -50 → **-100** (per-trigger: -10 → -20)
+
+**goal_first_v3**: 只改 Stage 3-6 的 static_safety，其餘與 v2 相同
+
+| Stage | ss (v2/v4) | ss (v3/v5) | 變化 |
+|-------|:---:|:---:|:---:|
+| 1-2 | 0.2 | 0.2 | 不動 |
+| 3 | 0.4 | **0.8** | ×2 |
+| 4 | 0.8 | **1.4** | ×1.75 |
+| 5 | 1.2 | **1.8** | ×1.5 |
+| 6 | 1.0 | **1.6** | ×1.6 |
+| 7-12 | 原值 | 原值 | 不動 |
+
+### 驗證目標
+
+- CR 降低 (24% → <15%)
+- path efficiency 降低 (94% → <90%，推論: 若 agent 開始繞行)
+- SR 突破 80% 升到 Stage 5
+- speed_mean 不大幅下降 (>0.4 m/s)

@@ -1053,6 +1053,15 @@ class WandBSequentialTrainer(SequentialTrainer):
         for k, v in task_metrics.items():
             tracking_data_snapshot[k] = [v]
 
+        # CADN diagnostics (if preprocessor supports it)
+        try:
+            agent = self.agents if not isinstance(self.agents, list) else self.agents[0]
+            pp = getattr(agent, "_state_preprocessor", None)
+            if pp is not None and hasattr(pp, "get_diagnostics"):
+                metrics.update(pp.get_diagnostics())
+        except Exception:
+            pass
+
         # 记录到WandB
         if self.wandb_run is not None:
             try:
