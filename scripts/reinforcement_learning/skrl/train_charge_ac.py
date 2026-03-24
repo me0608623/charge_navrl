@@ -587,12 +587,12 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         )
         changed = True
 
-    # --- reward_mode: navrl_ground_v5 (v4 + collision_ground=-100 + ss_boost via goal_first_v3) ---
+    # --- reward_mode: navrl_ground_v5 (collision=-100 + goal_first_v3 ss_boost Stage 3-6) ---
     if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v5":
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
-            RewardsCfgVLP16NavRLGroundV4,
+            RewardsCfgVLP16NavRLGroundV5,
         )
-        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV4()
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV5()
 
         r = env_cfg.rewards
         r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
@@ -602,7 +602,7 @@ def _apply_ablation_overrides(env_cfg, args_cli):
             r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
 
         print(
-            f"[REWARD_MODE] navrl_ground_v5 (v4 + collision=-100 + ss_boost) | "
+            f"[REWARD_MODE] navrl_ground_v5 (collision=-100 + ss_boost Stage 3-6) | "
             f"w: reaching_goal={r.reaching_goal.weight} "
             f"collision={r.collision_ground.weight} alive={r.alive.weight} | "
             f"ds_mode={args_cli.dynamic_safety_mode} | "

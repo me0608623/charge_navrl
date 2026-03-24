@@ -311,105 +311,108 @@ CURRICULUM_CONFIGS = {
     },
 
     # ==================================================================
-    # goal_first_v3: v2 基礎 + 提高 static_safety 權重
+    # goal_first_v3: v2 基礎 + Stage 3-6 局部提高 static_safety
     #
-    # 修正: v2 的前進側 (goal_vel+goal_prog) 遠強於安全側 (ss)，
-    # 導致 agent 偏向硬闖而非繞行。v3 提高 ss 讓 log(clearance)
-    # 的負值能抗衡 goal_vel 的推力。
+    # 修正: v2 Stage 3-6 的安全側 (ss) 太弱，agent 偏向硬闖。
+    # 只改 Stage 3-6，其餘 stage 與 v2 完全相同，確保可診斷。
+    #
+    # Stage 3: ss 0.4→0.8  | Stage 4: ss 0.8→1.4
+    # Stage 5: ss 1.2→1.8  | Stage 6: ss 1.0→1.6
     # ==================================================================
     "goal_first_v3": {
         "upgrade_pass_required": 5,
         "clear_window_on_promote": True,
         "stages": [
-            # --- Phase A: Goal-reaching (Stage 1-2) ---
+            # --- Phase A: Goal-reaching (Stage 1-2) — 與 v2 相同 ---
             _make_stage(7, 0, 0, 0, 1, 0.990, 45, 1.00,
                         upgrade_sr=0.85, upgrade_max_cr=1.0, upgrade_max_to=0.20,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=50,
                         downgrade_sr=0.0, downgrade_min_cr=1.0, downgrade_min_to=1.0,
                         name="goal_open",
                         reward_weights={"goal_velocity": 5.0, "goal_progress": 6.0,
-                                        "static_safety": 0.5, "dynamic_safety": 0.0}),
+                                        "static_safety": 0.2, "dynamic_safety": 0.0}),
             _make_stage(6, 0, 0, 1, 2, 0.990, 50, 1.00,
                         upgrade_sr=0.85, upgrade_max_cr=1.0, upgrade_max_to=0.20,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=60,
                         downgrade_sr=0.30, downgrade_min_cr=1.0, downgrade_min_to=0.80,
                         name="goal_walls",
                         reward_weights={"goal_velocity": 5.0, "goal_progress": 6.0,
-                                        "static_safety": 0.5, "dynamic_safety": 0.0}),
+                                        "static_safety": 0.2, "dynamic_safety": 0.0}),
 
-            # --- Phase B: Static obstacles (Stage 3-5) ---
-            # ss 大幅提高: 1.0, 2.0, 2.5 (vs v2: 0.4, 0.8, 1.2)
+            # --- Phase B: Static obstacles (Stage 3-5) — ss 局部提高 ---
+            # v2: 0.4, 0.8, 1.2 → v3: 0.8, 1.4, 1.8
             _make_stage(5, 2, 0, 2, 3, 0.992, 55, 0.55,
                         upgrade_sr=0.80, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=70,
                         name="static_light",
                         reward_weights={"goal_velocity": 4.5, "goal_progress": 5.5,
-                                        "static_safety": 1.0, "dynamic_safety": 0.0}),
+                                        "static_safety": 0.8, "dynamic_safety": 0.0}),
             _make_stage(4, 4, 0, 3, 4, 0.993, 60, 0.40,
                         upgrade_sr=0.80, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=85,
                         name="static_medium",
                         reward_weights={"goal_velocity": 4.0, "goal_progress": 5.0,
-                                        "static_safety": 2.0, "dynamic_safety": 0.0}),
+                                        "static_safety": 1.4, "dynamic_safety": 0.0}),
             _make_stage(3, 6, 0, 3, 5, 0.994, 65, 0.30,
                         upgrade_sr=0.78, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=100,
                         name="static_dense",
                         reward_weights={"goal_velocity": 3.5, "goal_progress": 4.5,
-                                        "static_safety": 2.5, "dynamic_safety": 0.0}),
+                                        "static_safety": 1.8, "dynamic_safety": 0.0}),
 
-            # --- Phase C: Dynamic obstacles (Stage 6-8) ---
+            # --- Phase C: Dynamic obstacles (Stage 6-8) — Stage 6 ss 提高，7-8 同 v2 ---
             _make_stage(3, 5, 2, 4, 5, 0.995, 72, 0.20,
                         upgrade_sr=0.75, upgrade_max_cr=0.40, upgrade_max_to=0.30,
                         upgrade_min_dyn_sr=0.30, min_stage_updates=115,
                         name="dynamic_intro",
                         reward_weights={"reaching_goal": 1000,
                                         "goal_velocity": 3.0, "goal_progress": 4.0,
-                                        "static_safety": 2.5, "dynamic_safety": 0.4}),
+                                        "static_safety": 1.6, "dynamic_safety": 0.4}),
+            # Stage 7-8: 與 v2 相同
             _make_stage(2, 6, 4, 5, 6, 0.996, 78, 0.15,
                         upgrade_sr=0.72, upgrade_max_cr=0.40, upgrade_max_to=0.30,
                         upgrade_min_dyn_sr=0.35, min_stage_updates=130,
                         name="dynamic_medium",
                         reward_weights={"reaching_goal": 1000,
                                         "goal_velocity": 2.5, "goal_progress": 3.5,
-                                        "static_safety": 2.5, "dynamic_safety": 0.8}),
+                                        "static_safety": 1.2, "dynamic_safety": 0.8}),
             _make_stage(1, 7, 6, 6, 7, 0.997, 85, 0.15,
                         upgrade_sr=0.70, upgrade_max_cr=0.40, upgrade_max_to=0.30,
                         upgrade_min_dyn_sr=0.35, min_stage_updates=140,
                         name="crowded",
                         reward_weights={"reaching_goal": 1000,
                                         "goal_velocity": 2.0, "goal_progress": 3.0,
-                                        "static_safety": 3.0, "dynamic_safety": 1.2}),
+                                        "static_safety": 1.4, "dynamic_safety": 1.2}),
 
-            # --- Phase D: Open-ended (Stage 9-12) ---
+            # --- Phase D: Open-ended (Stage 9-12) — 與 v2 相同 ---
             _make_stage(1, 8, 8, 7, 8, 0.998, 90, 0.15,
                         upgrade_sr=0.68, upgrade_max_cr=0.40, upgrade_max_to=0.35,
                         upgrade_min_dyn_sr=0.30, min_stage_updates=150,
                         name="dense_9",
                         reward_weights={"reaching_goal": 1500,
                                         "goal_velocity": 2.0, "goal_progress": 3.0,
-                                        "static_safety": 3.0, "dynamic_safety": 1.6}),
+                                        "static_safety": 1.6, "dynamic_safety": 1.6}),
             _make_stage(1, 9, 9, 7, 8, 0.998, 90, 0.10,
                         upgrade_sr=0.65, upgrade_max_cr=0.45, upgrade_max_to=0.35,
                         upgrade_min_dyn_sr=0.30, min_stage_updates=160,
                         name="dense_10",
                         reward_weights={"reaching_goal": 1500,
                                         "goal_velocity": 2.0, "goal_progress": 3.0,
-                                        "static_safety": 3.5, "dynamic_safety": 1.8}),
+                                        "static_safety": 1.8, "dynamic_safety": 1.8}),
             _make_stage(1, 10, 10, 8, 8, 0.998, 90, 0.10,
                         upgrade_sr=0.60, upgrade_max_cr=0.45, upgrade_max_to=0.40,
                         upgrade_min_dyn_sr=0.25, min_stage_updates=170,
                         name="dense_11",
                         reward_weights={"reaching_goal": 1500,
                                         "goal_velocity": 2.0, "goal_progress": 3.0,
-                                        "static_safety": 4.0, "dynamic_safety": 2.0}),
+                                        "static_safety": 2.0, "dynamic_safety": 2.0}),
             _make_stage(1, 10, 10, 8, 8, 0.998, 90, 0.10,
                         upgrade_sr=1.0, upgrade_max_cr=0.0, upgrade_max_to=0.0,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=0,
                         downgrade_sr=0.15, name="ultimate",
                         reward_weights={"reaching_goal": 1500,
                                         "goal_velocity": 2.0, "goal_progress": 3.0,
-                                        "static_safety": 4.0, "dynamic_safety": 2.0}),
+                                        "static_safety": 2.0, "dynamic_safety": 2.0}),
         ],
     },
 }

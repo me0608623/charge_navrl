@@ -983,15 +983,18 @@ class ChargeNavigationEnvCfgVLP16CurriculumNavRLGroundV3(ChargeNavigationEnvCfgV
 
 
 # ============================================================================
-# NavRL-Ground v4 (v5 reward mode): v3 + collision_ground 加倍
+# NavRL-Ground v5: v3(v4) 基礎 + collision_ground 加倍
+# 搭配 goal_first_v3 課程（Stage 3-6 局部提高 static_safety）
 # ============================================================================
 
 @configclass
-class RewardsCfgVLP16NavRLGroundV4(RewardsCfgVLP16NavRLGroundV3):
-    """NavRL-Ground v4: v3 基礎 + collision_ground -50→-100
+class RewardsCfgVLP16NavRLGroundV5(RewardsCfgVLP16NavRLGroundV3):
+    """NavRL-Ground v5: collision_ground -50→-100
 
-    配合 goal_first_v3 課程（提高 static_safety 權重），
-    加大碰撞顯性成本，讓「碰撞→重來」的代價明確超過「繞行→多花幾步」。
+    搭配 goal_first_v3 課程使用：
+    - Stage 3-6 的 static_safety 權重局部提高
+    - collision 顯性成本加倍 (-10→-20 per trigger)
+    目的: 讓安全側訊號能抗衡前進側推力，促進繞行學習。
     """
     collision_ground = RewTerm(
         func=collision_terminal_penalty,
