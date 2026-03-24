@@ -939,7 +939,26 @@ class RewardsCfgVLP16NavRLGroundV3(RewardsCfgVLP16NavRLGroundV2):
 
     唯一差異：dynamic_safety 的 max_obstacles 從 10 改為 20。
     reward weights 由 curriculum goal_first_v2 動態控制。
+
+    v3.1 修正: reaching_goal 100→500, alive 0.2→0.1
+    根因: 停在目標前的 per-step 生存 reward (alive+static_safety) 累計
+    遠大於到達目標的 terminal reward，agent 學會不到達。
+    Stage 4: V(stay)=43 >> V(reach)=20 → 修正後 V(reach)=100 > V(stay)=41
     """
+    # --- reaching_goal: 100→500 確保 terminal > 累計生存 reward ---
+    reaching_goal = RewTerm(
+        func=reaching_goal,
+        params={"asset_cfg": SceneEntityCfg("robot"), "threshold": GOAL_REACH_THRESHOLD, "body_radius": ROBOT_BODY_RADIUS},
+        weight=500.0,
+    )
+
+    # --- alive: 0.2→0.1 降低「活著比到達更好」的誘惑 ---
+    alive = RewTerm(
+        func=_ground_alive,
+        params={},
+        weight=0.1,
+    )
+
     dynamic_safety = RewTerm(
         func=_ground_dynamic,
         params={

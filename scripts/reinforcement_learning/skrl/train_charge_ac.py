@@ -107,8 +107,8 @@ parser.add_argument("--shield_mode", type=str, default="soft",
 
 # --- NavRL-Ground v1 reward mode ---
 parser.add_argument("--reward_mode", type=str, default="current",
-                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3"],
-                    help="Reward mode: current / v1 / v2(no gate+alive) / v3(v2+20obs)")
+                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4"],
+                    help="Reward mode: current / v1 / v2(no gate+alive) / v3(v2+20obs) / v4(v3+goal500+alive0.1)")
 parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
                     choices=["log_distance", "closing_risk"],
                     help="Dynamic safety reward mode")
@@ -553,6 +553,30 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         print(
             f"[REWARD_MODE] navrl_ground_v3 (v2 + 20obs + density weights) | "
             f"w: alive={args_cli.w_alive} | "
+            f"ds_mode={args_cli.dynamic_safety_mode} | "
+            f"weights controlled by curriculum stage"
+        )
+        changed = True
+
+    # --- reward_mode: navrl_ground_v4 (v3 + reaching_goal=500 + alive=0.1) ---
+    if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v4":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            RewardsCfgVLP16NavRLGroundV3,
+        )
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV3()
+
+        r = env_cfg.rewards
+        # v4 核心修正: reaching_goal=500, alive=0.1 (已在 V3 class 中設定)
+        # CLI --w_alive 不覆蓋，保持 0.1
+        r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+
+        if args_cli.goal_vel_use_soft_gate:
+            r.goal_velocity.params["use_soft_gate"] = True
+            r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
+
+        print(
+            f"[REWARD_MODE] navrl_ground_v4 (v3 + goal=500 + alive=0.1) | "
+            f"w: reaching_goal={r.reaching_goal.weight} alive={r.alive.weight} | "
             f"ds_mode={args_cli.dynamic_safety_mode} | "
             f"weights controlled by curriculum stage"
         )
