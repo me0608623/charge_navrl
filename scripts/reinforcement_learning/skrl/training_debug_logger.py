@@ -84,6 +84,8 @@ class TrainingDebugLogger:
         self._lin_vel_max: list[float] = []
         self._ang_vel_mean: list[float] = []
         self._ang_vel_max: list[float] = []
+        self._ang_vel_signed_mean: list[float] = []  # 帶符號均值：>0=左轉偏向, <0=右轉偏向
+        self._ang_vel_variance: list[float] = []     # 方差：高=轉向不穩定, 低=平滑
         self._progress_per_step: list[float] = []  # delta distance to goal
         self._min_obstacle_dist: list[float] = []
         # LiDAR diagnostics
@@ -204,6 +206,8 @@ class TrainingDebugLogger:
         if self._ang_vel_mean:
             m["robot/angular_vel_mean"] = np.mean(self._ang_vel_mean)
             m["robot/angular_vel_max"] = np.mean(self._ang_vel_max)
+            m["robot/angular_vel_signed_mean"] = np.mean(self._ang_vel_signed_mean)
+            m["robot/angular_vel_variance"] = np.mean(self._ang_vel_variance)
         if self._progress_per_step:
             m["robot/progress_per_step"] = np.mean(self._progress_per_step)
         if self._min_obstacle_dist:
@@ -367,12 +371,16 @@ class TrainingDebugLogger:
             ang_abs = ang_vel.abs()
 
             vel_batch = torch.stack([
-                speed.mean(), speed.max(), ang_abs.mean(), ang_abs.max()
+                speed.mean(), speed.max(), ang_abs.mean(), ang_abs.max(),
+                ang_vel.mean(),  # 帶符號均值：>0=左轉偏向, <0=右轉偏向, ≈0=無偏向
+                ang_vel.var() if ang_vel.numel() > 1 else ang_vel.new_zeros(()),  # 方差：高=轉向不穩定
             ]).cpu()
             self._lin_vel_mean.append(vel_batch[0].item())
             self._lin_vel_max.append(vel_batch[1].item())
             self._ang_vel_mean.append(vel_batch[2].item())
             self._ang_vel_max.append(vel_batch[3].item())
+            self._ang_vel_signed_mean.append(vel_batch[4].item())
+            self._ang_vel_variance.append(vel_batch[5].item())
 
             # Velocity scatter — (linear_speed, angular_velocity) GPU buffer
             remaining = self._vel_scatter_max_samples - self._vel_scatter_count
@@ -517,6 +525,8 @@ class TrainingDebugLogger:
         self._lin_vel_max.clear()
         self._ang_vel_mean.clear()
         self._ang_vel_max.clear()
+        self._ang_vel_signed_mean.clear()
+        self._ang_vel_variance.clear()
         self._progress_per_step.clear()
         self._min_obstacle_dist.clear()
         self._lidar_min_raw.clear()
