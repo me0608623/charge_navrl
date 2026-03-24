@@ -558,7 +558,7 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         )
         changed = True
 
-    # --- reward_mode: navrl_ground_v4 (v3 + reaching_goal=500 + alive=0.1) ---
+    # --- reward_mode: navrl_ground_v4 (v3 + goal=500 + alive→alignment) ---
     if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v4":
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
             RewardsCfgVLP16NavRLGroundV3,
@@ -566,8 +566,9 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         env_cfg.rewards = RewardsCfgVLP16NavRLGroundV3()
 
         r = env_cfg.rewards
-        # v4 核心修正: reaching_goal=500, alive=0.1 (已在 V3 class 中設定)
-        # CLI --w_alive 不覆蓋，保持 0.1
+        # v4 核心修正:
+        # 1. reaching_goal=500 (已在 V3 class 中設定)
+        # 2. alive=0 (移除存活獎勵，r_vel + γ折扣已足夠)
         r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
 
         if args_cli.goal_vel_use_soft_gate:
@@ -575,7 +576,7 @@ def _apply_ablation_overrides(env_cfg, args_cli):
             r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
 
         print(
-            f"[REWARD_MODE] navrl_ground_v4 (v3 + goal=500 + alive=0.1) | "
+            f"[REWARD_MODE] navrl_ground_v4 (v3 + goal=500 + no alive) | "
             f"w: reaching_goal={r.reaching_goal.weight} alive={r.alive.weight} | "
             f"ds_mode={args_cli.dynamic_safety_mode} | "
             f"weights controlled by curriculum stage"

@@ -822,6 +822,7 @@ class ChargeNavigationEnvCfgVLP16CurriculumNavRLGround(ChargeNavigationEnvCfgVLP
 # ============================================================================
 
 from ..mdp.rewards.navrl_ground_rewards import alive_reward as _ground_alive
+from ..mdp.rewards.goal_rewards import alignment_reward as _ground_alignment
 
 @configclass
 class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
@@ -940,23 +941,24 @@ class RewardsCfgVLP16NavRLGroundV3(RewardsCfgVLP16NavRLGroundV2):
     唯一差異：dynamic_safety 的 max_obstacles 從 10 改為 20。
     reward weights 由 curriculum goal_first_v2 動態控制。
 
-    v3.1 修正: reaching_goal 100→500, alive 0.2→0.1
-    根因: 停在目標前的 per-step 生存 reward (alive+static_safety) 累計
-    遠大於到達目標的 terminal reward，agent 學會不到達。
-    Stage 4: V(stay)=43 >> V(reach)=20 → 修正後 V(reach)=100 > V(stay)=41
+    v4 修正:
+    1. reaching_goal 100→500 (terminal reward 必須大於累計 per-step reward)
+    2. alive weight=0 (移除存活獎勵)
+       NavRL 設計: r_vel + γ折扣 = agent 想盡快到達
+       alive 獎勵反而鼓勵「活著比到達更好」，與目標矛盾
     """
-    # --- reaching_goal: 100→500 確保 terminal > 累計生存 reward ---
+    # --- reaching_goal: 100→500 確保 terminal > 累計 per-step reward ---
     reaching_goal = RewTerm(
         func=reaching_goal,
         params={"asset_cfg": SceneEntityCfg("robot"), "threshold": GOAL_REACH_THRESHOLD, "body_radius": ROBOT_BODY_RADIUS},
         weight=500.0,
     )
 
-    # --- alive: 0.2→0.1 降低「活著比到達更好」的誘惑 ---
+    # --- alive: 歸零 — r_vel + γ折扣已提供「盡快完成」的激勵 ---
     alive = RewTerm(
         func=_ground_alive,
         params={},
-        weight=0.1,
+        weight=0.0,
     )
 
     dynamic_safety = RewTerm(
