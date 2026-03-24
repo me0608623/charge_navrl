@@ -875,11 +875,11 @@ class WandBSequentialTrainer(SequentialTrainer):
         """
         metrics = {}
         if self._episode_count > 0:
-            metrics["nav/success_rate"] = self._goal_reached_count / self._episode_count
-            metrics["nav/collision_rate"] = self._collision_count / self._episode_count
-            metrics["nav/timeout_rate"] = self._timeout_count / self._episode_count
-            metrics["nav/total_episodes"] = self._episode_count
-            metrics["nav/episode_length_mean"] = self._episode_length_sum / self._episode_count
+            metrics["perf/success_rate"] = self._goal_reached_count / self._episode_count
+            metrics["perf/collision_rate"] = self._collision_count / self._episode_count
+            metrics["perf/timeout_rate"] = self._timeout_count / self._episode_count
+            metrics["perf/total_episodes"] = self._episode_count
+            metrics["perf/episode_length"] = self._episode_length_sum / self._episode_count
 
         # Per-env-type metrics (Phase 2)
         type_names = {0: "empty", 1: "static", 2: "dynamic"}

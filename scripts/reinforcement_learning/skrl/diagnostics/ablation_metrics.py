@@ -200,47 +200,47 @@ class AblationMetricsLogger:
         near_total = max(self._near_obs_steps, 1)
 
         metrics = {
-            "ablation/stuck_count": self._stuck_count,
-            "ablation/freeze_ratio": self._freeze_steps / total,
-            "ablation/oscillation_score": (
+            # Tier 2: 行為診斷
+            "behavior/stuck_events": self._stuck_count,
+            "behavior/freeze_ratio": self._freeze_steps / total,
+            "behavior/oscillation": (
                 self._sign_changes_total / max(self._sign_checks_total, 1)
             ),
-            "ablation/retreat_ratio": self._retreat_near_steps / near_total,
-            "ablation/progress_near_obs": (
+            "behavior/retreat_ratio": self._retreat_near_steps / near_total,
+            "behavior/progress_near_obstacle": (
                 float(np.mean(self._progress_near_obs)) if self._progress_near_obs else 0.0
             ),
-            "ablation/v_toward_near_obs": (
+            "behavior/goal_velocity_near_obstacle": (
                 float(np.mean(self._v_toward_near_obs)) if self._v_toward_near_obs else 0.0
             ),
-            "ablation/d_safe_mean": (
+            "behavior/obstacle_distance_avg": (
                 float(np.mean(self._d_safe_values)) if self._d_safe_values else 0.0
             ),
-            "ablation/d_safe_min": (
+            "behavior/obstacle_distance_min": (
                 float(np.min(self._d_safe_values)) if self._d_safe_values else 0.0
             ),
-            "ablation/danger_ratio": self._danger_zone_steps / total,
-            "ablation/speed_near_obs": (
+            "behavior/danger_zone_ratio": self._danger_zone_steps / total,
+            "behavior/speed_near_obstacle": (
                 float(np.mean(self._speed_near_obs)) if self._speed_near_obs else 0.0
             ),
-            "ablation/front_clearance": (
+            "behavior/front_clearance": (
                 float(np.mean(self._front_clearance_values)) if self._front_clearance_values else 0.0
             ),
-            "ablation/avg_ep_length": (
+            "behavior/avg_episode_length": (
                 float(np.mean(self._episode_lengths_all)) if self._episode_lengths_all else 0.0
             ),
-            "ablation/collision_ep_len": (
+            "behavior/collision_episode_length": (
                 float(np.mean(self._episode_lengths_at_collision)) if self._episode_lengths_at_collision else 0.0
             ),
-            "ablation/step_count": self._total_steps,
         }
 
-        # Shield stats (if available)
+        # Tier 3: Shield stats (if available)
         try:
             action_term = list(self._env.action_manager._terms.values())[0]
             if hasattr(action_term, 'shield_stats'):
                 shield = action_term.shield_stats
-                metrics["ablation/shield_rate"] = shield["shield_intervention_rate"]
-                metrics["ablation/action_override_rate"] = shield["shield_override_rate"]
+                metrics["shield/intervention_rate"] = shield["shield_intervention_rate"]
+                metrics["shield/action_modified_rate"] = shield["shield_override_rate"]
                 action_term.reset_shield_stats()
         except Exception:
             pass

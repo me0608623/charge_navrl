@@ -155,11 +155,11 @@ class ConsoleSummaryLogger:
 
         # 任務指標
         task_metrics = [
-            ("成功率", "nav/success_rate"),
-            ("碰撞率", "nav/collision_rate"),
-            ("超時率", "nav/timeout_rate"),
-            ("總 Episode 數", "nav/total_episodes"),
-            ("平均 Episode 長度", "nav/episode_length_mean"),
+            ("成功率", "perf/success_rate"),
+            ("碰撞率", "perf/collision_rate"),
+            ("超時率", "perf/timeout_rate"),
+            ("總 Episode 數", "perf/total_episodes"),
+            ("平均 Episode 長度", "perf/episode_length"),
         ]
 
         has_task_metrics = False
