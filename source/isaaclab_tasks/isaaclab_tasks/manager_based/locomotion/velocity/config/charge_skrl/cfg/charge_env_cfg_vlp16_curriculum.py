@@ -160,9 +160,10 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
             ),
         ]
 
-        # 10 個混合障礙物（與 16×16 相同，初始隱藏在 Z = -10.0）
+        # 20 個混合障礙物（初始隱藏在 Z = -10.0，由 curriculum 控制啟用數量）
         HIDDEN_Z = -10.0
         obstacle_configs = [
+            # 0-9: 原始 10 個
             {"type": "cuboid", "size": (0.5, 0.5, 1.2), "color": (0.8, 0.2, 0.2)},
             {"type": "cylinder", "radius": 0.3, "height": 1.0, "color": (0.8, 0.8, 0.2)},
             {"type": "cuboid", "size": (0.7, 0.7, 1.4), "color": (0.2, 0.4, 0.8)},
@@ -173,6 +174,17 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
             {"type": "cylinder", "radius": 0.2, "height": 1.5, "color": (0.5, 0.5, 0.5)},
             {"type": "cuboid", "size": (0.55, 0.55, 1.1), "color": (0.9, 0.9, 0.9)},
             {"type": "cylinder", "radius": 0.28, "height": 1.1, "color": (0.3, 0.3, 0.3)},
+            # 10-19: 新增 10 個（尺寸混合，不同顏色）
+            {"type": "cuboid", "size": (0.45, 0.45, 1.0), "color": (0.9, 0.3, 0.3)},
+            {"type": "cylinder", "radius": 0.32, "height": 1.3, "color": (0.3, 0.9, 0.3)},
+            {"type": "cuboid", "size": (0.65, 0.65, 1.2), "color": (0.3, 0.3, 0.9)},
+            {"type": "cylinder", "radius": 0.22, "height": 0.9, "color": (0.9, 0.9, 0.3)},
+            {"type": "cuboid", "size": (0.5, 0.5, 1.3), "color": (0.9, 0.3, 0.9)},
+            {"type": "cylinder", "radius": 0.3, "height": 1.1, "color": (0.3, 0.9, 0.9)},
+            {"type": "cuboid", "size": (0.6, 0.6, 0.8), "color": (0.7, 0.4, 0.2)},
+            {"type": "cylinder", "radius": 0.26, "height": 1.4, "color": (0.4, 0.7, 0.4)},
+            {"type": "cuboid", "size": (0.5, 0.5, 1.0), "color": (0.6, 0.6, 0.6)},
+            {"type": "cylinder", "radius": 0.33, "height": 1.0, "color": (0.4, 0.4, 0.7)},
         ]
 
         obstacle_sizes: list[float] = []
@@ -201,7 +213,7 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
             ))
             obstacle_sizes.append(size_scalar)
 
-        set_obstacle_metadata(10, obstacle_sizes)
+        set_obstacle_metadata(20, obstacle_sizes)
 
 
 # ============================================================================
@@ -250,7 +262,7 @@ class EventCfgVLP16Curriculum:
         params={
             "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
             "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
-            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
+            "max_obstacles": 20, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
             "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
@@ -276,7 +288,7 @@ class EventCfgVLP16Curriculum:
         params={
             "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
             "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
-            "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
+            "max_obstacles": 20, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
             "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
@@ -915,3 +927,35 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
         params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
         weight=-50.0,
     )
+
+
+# ============================================================================
+# NavRL-Ground v3: v2 + 20 obstacles + density-based reward weights
+# ============================================================================
+
+@configclass
+class RewardsCfgVLP16NavRLGroundV3(RewardsCfgVLP16NavRLGroundV2):
+    """NavRL-Ground v3: 與 v2 相同但支援 20 個障礙物。
+
+    唯一差異：dynamic_safety 的 max_obstacles 從 10 改為 20。
+    reward weights 由 curriculum goal_first_v2 動態控制。
+    """
+    dynamic_safety = RewTerm(
+        func=_ground_dynamic,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "max_obstacles": 20,
+            "mode": "log_distance",
+            "risk_sigma": 2.0,
+            "b_log": 1.0,
+            "b_risk": 1.0,
+        },
+        weight=2.0,
+    )
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRLGroundV3(ChargeNavigationEnvCfgVLP16Curriculum):
+    """VLP-16 Curriculum + NavRL-Ground v3 (20 obstacles)"""
+    rewards: RewardsCfgVLP16NavRLGroundV3 = RewardsCfgVLP16NavRLGroundV3()

@@ -113,7 +113,7 @@ ROBOT_BODY_RADIUS = 0.35  # 實際機器人半徑 [m]
 GOAL_REACH_THRESHOLD = ROBOT_BODY_RADIUS
 COLLISION_BUFFER = 0.10  # 安全裕量：縮減以釋放窄道可行駛空間 [m]
 COLLISION_THRESHOLD = round(ROBOT_BODY_RADIUS + COLLISION_BUFFER, 2)  # 0.45m
-MAX_OBSTACLES = 10
+MAX_OBSTACLES = 20
 
 
 # ============================================================================
