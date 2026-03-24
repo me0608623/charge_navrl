@@ -441,6 +441,9 @@ class WandBSequentialTrainer(SequentialTrainer):
                             val = float(v)
                         else:
                             continue
+                        # 跳過 weight=0 的 reward term（永遠為 0）
+                        if k.startswith("Episode_Reward/") and val == 0.0:
+                            continue
                         for agent in self.agents:
                             agent.track_data(tag, val)
                         if tag not in tracking_data_snapshot:
@@ -961,6 +964,9 @@ class WandBSequentialTrainer(SequentialTrainer):
                         elif isinstance(v, (int, float)):
                             val = float(v)
                         else:
+                            continue
+                        # 跳過 weight=0 的 reward term（永遠為 0）
+                        if k.startswith("Episode_Reward/") and val == 0.0:
                             continue
                         for agent in self.agents:
                             agent.track_data(tag, val)
