@@ -105,10 +105,14 @@ parser.add_argument("--shield_mode", type=str, default="soft",
                     choices=["soft", "hard"],
                     help="Shield mode: soft(linear reduction) / hard(force stop)")
 
+# --- CADN observation preprocessor ---
+parser.add_argument("--use_cadn", action="store_true", default=False,
+                    help="Replace state preprocessor with CADN (per-branch dual-rate EMA normalizer)")
+
 # --- NavRL-Ground v1 reward mode ---
 parser.add_argument("--reward_mode", type=str, default="current",
-                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4"],
-                    help="Reward mode: current / v1 / v2(no gate+alive) / v3(v2+20obs) / v4(v3+goal500+alive0.1)")
+                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4", "navrl_ground_v5"],
+                    help="Reward mode: current / v1-v4 / v5(v4+collision100+ss_boost)")
 parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
                     choices=["log_distance", "closing_risk"],
                     help="Dynamic safety reward mode")
@@ -130,7 +134,7 @@ parser.add_argument("--goal_vel_use_soft_gate", action="store_true", default=Fal
 
 # --- Curriculum version ---
 parser.add_argument("--curriculum_version", type=str, default=None,
-                    choices=["baseline_v1", "goal_first_v1", "goal_first_v2"],
+                    choices=["baseline_v1", "goal_first_v1", "goal_first_v2", "goal_first_v3"],
                     help="Curriculum version (default: use task config's baseline_v1)")
 
 # Append AppLauncher cli args
@@ -583,6 +587,29 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         )
         changed = True
 
+    # --- reward_mode: navrl_ground_v5 (v4 + collision_ground=-100 + ss_boost via goal_first_v3) ---
+    if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v5":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            RewardsCfgVLP16NavRLGroundV4,
+        )
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV4()
+
+        r = env_cfg.rewards
+        r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+
+        if args_cli.goal_vel_use_soft_gate:
+            r.goal_velocity.params["use_soft_gate"] = True
+            r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
+
+        print(
+            f"[REWARD_MODE] navrl_ground_v5 (v4 + collision=-100 + ss_boost) | "
+            f"w: reaching_goal={r.reaching_goal.weight} "
+            f"collision={r.collision_ground.weight} alive={r.alive.weight} | "
+            f"ds_mode={args_cli.dynamic_safety_mode} | "
+            f"搭配 goal_first_v3 使用"
+        )
+        changed = True
+
     # --- curriculum_version ---
     cv = getattr(args_cli, 'curriculum_version', None)
     if cv is not None:
@@ -844,6 +871,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         runner = Runner(env, agent_cfg)
         trainer = None
+
+    # --- CADN injection (after agent creation, before checkpoint load) ---
+    if args_cli.use_cadn:
+        from cadn_preprocessor import CurriculumAwareDualRateNormalizer
+        obs_dim = env.observation_space.shape[-1] if hasattr(env.observation_space, "shape") else 139
+        cadn = CurriculumAwareDualRateNormalizer(
+            size=obs_dim,
+            device=runner.agent.device,
+        )
+        runner.agent._state_preprocessor = cadn
+        runner.agent.checkpoint_modules["state_preprocessor"] = cadn
+        print(f"[INFO] CADN enabled: state_preprocessor replaced (obs_dim={obs_dim})")
 
     # Load checkpoint if specified
     checkpoint_agent = runner.agent

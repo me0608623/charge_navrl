@@ -980,3 +980,21 @@ class RewardsCfgVLP16NavRLGroundV3(RewardsCfgVLP16NavRLGroundV2):
 class ChargeNavigationEnvCfgVLP16CurriculumNavRLGroundV3(ChargeNavigationEnvCfgVLP16Curriculum):
     """VLP-16 Curriculum + NavRL-Ground v3 (20 obstacles)"""
     rewards: RewardsCfgVLP16NavRLGroundV3 = RewardsCfgVLP16NavRLGroundV3()
+
+
+# ============================================================================
+# NavRL-Ground v4 (v5 reward mode): v3 + collision_ground 加倍
+# ============================================================================
+
+@configclass
+class RewardsCfgVLP16NavRLGroundV4(RewardsCfgVLP16NavRLGroundV3):
+    """NavRL-Ground v4: v3 基礎 + collision_ground -50→-100
+
+    配合 goal_first_v3 課程（提高 static_safety 權重），
+    加大碰撞顯性成本，讓「碰撞→重來」的代價明確超過「繞行→多花幾步」。
+    """
+    collision_ground = RewTerm(
+        func=collision_terminal_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        weight=-100.0,
+    )
