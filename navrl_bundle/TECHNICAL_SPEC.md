@@ -415,123 +415,42 @@ NN output [B, 38 logits]
 
 ## 8. WandB 指標完整清單
 
-> weight=0 的 reward term 不會顯示在 WandB（已過濾）。
+> 對應 WandB dashboard 分組。weight=0 的 reward term 在 v4 中不會顯示。
 > 記錄頻率: 每 128 timesteps（rollout flush 時）一次。
 
-### 8.1 Reward 指標 (`Reward /`)
+### 8.1 `perf` (5)
 
-來源: RewardManager → `Episode_Reward/{name}` → 映射為 `Reward / {name}`
-值 = episode_sum / max_episode_length_s（每秒平均 reward）
-
-| WandB Key | 物理意義 | 期望值（健康訓練） |
-|-----------|---------|:---:|
-| `Reward / reaching_goal` | 到達目標的一次性獎勵（稀疏） | 0.1→0.5（隨 SR 上升） |
-| `Reward / goal_velocity` | 朝目標速度的密集獎勵 | 0.05→0.20（越快越高） |
-| `Reward / goal_progress` | 距離縮減的 PBRS 獎勵 | 0.01→0.05（正=接近） |
-| `Reward / static_safety` | LiDAR 72-bin log clearance | 0.05→0.15（空曠高，擁擠低） |
-| `Reward / dynamic_safety` | 動態障礙物安全（Stage 6+ 才有值） | 0.0→0.10 |
-| `Reward / smoothness` | 控制平滑懲罰（負值） | -0.01→-0.005 |
-| `Reward / collision_ground` | 碰撞終端懲罰（負值） | -0.15→-0.02（隨 CR 下降） |
-
-### 8.2 Termination 指標 (`Termination /`)
-
-來源: TerminationManager → `Episode_Termination/{name}`
-值 = 該終止條件觸發次數 / 總 episode 數
+來源: `WandBSequentialTrainer._get_task_metrics()` → `wandb.log()`
 
 | WandB Key | 物理意義 | 期望值 |
 |-----------|---------|:---:|
-| `Termination / goal_reached` | 成功到達目標的比例 | 0.5→0.85 |
-| `Termination / collision` | LiDAR 碰撞終止比例 | 0.4→0.05 |
-| `Termination / wall_collision` | 牆壁碰撞終止比例 | 0.0→0.02 |
-| `Termination / time_out` | 超時終止比例 | 0.3→0.10 |
-| `Termination / physics_explosion` | 物理引擎爆炸 | ≈0（>0 表示有 bug） |
-| `Termination / robot_tipped_over` | 機器人翻倒 | ≈0 |
+| `perf/success_rate` | 全局成功率（到達目標/總 episode） | 0.3→0.85 |
+| `perf/collision_rate` | 全局碰撞率 | 0.5→0.05 |
+| `perf/timeout_rate` | 全局超時率 | 0.3→0.10 |
+| `perf/total_episodes` | 累計 episode 數 | 持續增長 |
+| `perf/episode_length` | 平均 episode 長度（步數） | 30→50 |
 
-### 8.3 Curriculum 指標 (`Curriculum /`)
+### 8.2 `behavior` (13)
 
-來源: `goal_obstacle_curriculum()` 每次 rollout flush 時計算
-
-| WandB Key | 物理意義 | 期望值 |
-|-----------|---------|:---:|
-| `Curriculum / stage` | 當前課程階段 (1-12) | 1→8+（逐步升級） |
-| `Curriculum / success_rate` | 滑動窗口 SR | 隨 stage 升級要求而變 |
-| `Curriculum / collision_rate` | 滑動窗口 CR | <0.35→<0.45 |
-| `Curriculum / timeout_rate` | 滑動窗口 TO | <0.20→<0.35 |
-| `Curriculum / dynamic_sr` | 僅動態場景的 SR | Stage 6+ 才有意義 |
-| `Curriculum / sr_gap` | SR - 升級門檻（>0 = 已達標） | 接近 0 時升級 |
-| `Curriculum / cr_gap` | 升級 CR 門檻 - 當前 CR | >0 = CR 達標 |
-| `Curriculum / to_gap` | 升級 TO 門檻 - 當前 TO | >0 = TO 達標 |
-| `Curriculum / upgrade_pass_count` | 連續達標次數 (需 5 次) | 0→5 循環 |
-| `Curriculum / window_fill` | 窗口填充率 | 0→1.0 |
-| `Curriculum / approx_rollout_cycles` | 階段內 PPO updates 數 | 持續增長 |
-| `Curriculum / num_goals` | 當前目標數 | 7→1（隨 stage 遞減） |
-| `Curriculum / num_obstacles_static` | 靜態障礙物數 | 0→10 |
-| `Curriculum / num_obstacles_dynamic` | 動態障礙物數 | 0→10 |
-| `Curriculum / min_walls` / `max_walls` | 牆壁範圍 | 0-1→8-8 |
-| `Curriculum / gamma` | 折扣因子 | 0.990→0.998 |
-| `Curriculum / episode_length_s` | Episode 長度 (秒) | 45→90 |
-| `Curriculum / num_episodes` | 累計 episode 數 | 持續增長 |
-| `Curriculum / stage_episodes` | 當前 stage 的 episode 數 | 升級後歸零 |
-
-### 8.4 Navigation Performance (`nav/`, `eval/`)
-
-來源: `WandBSequentialTrainer._update_task_metrics()`
+來源: `AblationMetricsLogger.get_and_reset()` → `wandb.log()`
 
 | WandB Key | 物理意義 | 期望值 |
 |-----------|---------|:---:|
-| `nav/success_rate` | 全局 SR（滑動窗口） | 0.5→0.85 |
-| `nav/collision_rate` | 全局 CR | 0.4→0.05 |
-| `nav/timeout_rate` | 全局 TO | 0.3→0.10 |
-| `nav/episode_length_mean` | 平均 episode 步數 | 30→50 |
-| `nav/total_episodes` | 累計 episode 數 | 持續增長 |
-| `eval/success_rate_empty` | 空曠場景 SR | 0.8→0.95 |
-| `eval/collision_rate_empty` | 空曠場景 CR | <0.05 |
-| `eval/timeout_rate_empty` | 空曠場景 TO | <0.10 |
-| `eval/success_rate_static` | 靜態障礙場景 SR | 0.3→0.70 |
-| `eval/collision_rate_static` | 靜態障礙場景 CR | 0.5→0.15 |
-| `eval/timeout_rate_static` | 靜態障礙場景 TO | 0.2→0.15 |
-| `eval/success_rate_dynamic` | 動態障礙場景 SR（Stage 6+） | 0.2→0.60 |
-| `eval/collision_rate_dynamic` | 動態障礙場景 CR | 0.6→0.20 |
-| `eval/timeout_rate_dynamic` | 動態障礙場景 TO | 0.2→0.20 |
+| `behavior/stuck_events` | 卡住事件數（連續 ≥5 步 v<0.02） | <1000 |
+| `behavior/freeze_ratio` | 靜止步數佔比 (v<0.02) | <0.10 |
+| `behavior/oscillation` | v_toward 符號翻轉頻率 | <0.3 |
+| `behavior/retreat_ratio` | 近障礙時後退佔比 | 0.1→0.3 |
+| `behavior/progress_near_obstacle` | 近障礙時每步進度 (m) | >0 |
+| `behavior/goal_velocity_near_obstacle` | 近障礙時朝目標速度 (m/s) | >0 |
+| `behavior/obstacle_distance_avg` | 全局平均安全距離 (m) | 1.0→2.0 |
+| `behavior/obstacle_distance_min` | rollout 最小安全距離 (m) | >0.45 |
+| `behavior/danger_zone_ratio` | 危險區 (d_safe<0.8m) 步數佔比 | <0.15 |
+| `behavior/speed_near_obstacle` | 近障礙時平均速度 (m/s) | 0.1→0.4 |
+| `behavior/front_clearance` | 前方淨空距離 (m) | 1.0→2.0 |
+| `behavior/avg_episode_length` | 平均 episode 步數 | 30→50 |
+| `behavior/collision_episode_length` | 碰撞 episode 平均步數 | <avg |
 
-### 8.5 Robot State (`robot/`)
-
-來源: `TrainingDebugLogger` 每 rollout flush 統計
-
-| WandB Key | 物理意義 | 期望值 |
-|-----------|---------|:---:|
-| `robot/speed_mean` | 平均 2D 速度 (m/s) | 0.2→0.6 |
-| `robot/speed_max` | 最大 2D 速度 (m/s) | ~1.0 |
-| `robot/angular_vel_mean` | 平均角速度 \|ω_z\| (rad/s) | 0.2→0.4 |
-| `robot/angular_vel_max` | 最大角速度 (rad/s) | ~0.785 (ω_max) |
-| `robot/progress_per_step` | 每步接近目標距離 (m) | 0.02→0.10 |
-| `robot/min_obstacle_dist_mean` | 平均最近障礙物距離 (m) | 1.0→2.0 |
-| `robot/min_obstacle_dist_min` | rollout 中最小障礙物距離 (m) | >0.45（<0.45=碰撞） |
-| `robot/lidar_min_raw` | LiDAR 全 ray 最小距離平均 (m) | 0.3→0.5 |
-| `robot/lidar_no_hit_ratio` | LiDAR 無回波 ray 比例 | 0.2→0.3 |
-
-### 8.6 Action Pipeline (`action/`)
-
-來源: `TrainingDebugLogger` 每 rollout flush 統計
-
-| WandB Key | 物理意義 | 期望值 |
-|-----------|---------|:---:|
-| `action/raw_mean` | 策略輸出原始值平均 | ≈0（對稱動作空間） |
-| `action/raw_std` | 策略輸出標準差 | 5→8（探索中） |
-
-### 8.7 PPO Training (`Loss /`, `Policy /`, `Learning /`)
-
-來源: SKRL PPO agent tracking_data
-
-| WandB Key | 物理意義 | 期望值 |
-|-----------|---------|:---:|
-| `Loss / Policy loss` | PPO clip surrogate loss | -0.05→-0.005 |
-| `Loss / Value loss` | MSE(V_pred, returns) | 下降趨勢 |
-| `Loss / Entropy loss` | -entropy_coeff × mean(entropy) | 穩定在 -0.04→-0.06 |
-| `Policy / Standard deviation` | 策略分佈標準差 | N/A（離散動作） |
-| `Learning / Learning rate` | 當前 LR | 1e-4→3e-5（線性衰減） |
-
-### 8.8 Training Health (`train/`)
+### 8.3 `train` (6)
 
 來源: `WandBSequentialTrainer` + `ModuleEntropyMonitor`
 
@@ -540,45 +459,173 @@ NN output [B, 38 logits]
 | `train/fps` | 每秒 timesteps | 2.5→3.5 |
 | `train/elapsed_time` | 訓練經過時間 (秒) | 持續增長 |
 | `train/timestep` | 當前全局 timestep | 0→234,375 |
-| `train/module_entropy` | log10(actor_grad / critic_grad) | -1→+1（平衡） |
+| `train/module_entropy` | log10(actor_grad / critic_grad) | -1→+1（≈0=平衡） |
 | `train/actor_grad_norm` | Actor 梯度 L2 norm | 0.2→0.5 |
 | `train/critic_grad_norm` | Critic 梯度 L2 norm | 0.3→0.6 |
-| `train/update_ratio_actor_over_critic` | Actor/Critic 更新比 | 0.5→1.5 |
-| `train/module_entropy_state_code` | 訓練狀態碼 | 0=正常 |
 
-**module_entropy 解讀:** >1.0 = Policy 更新過度; ≈0 = 平衡; <-3 = Policy 凍結
+### 8.4 `Loss` (3)
 
-### 8.9 Ablation 行為診斷 (`ablation/`)
-
-來源: `AblationMetricsLogger` 每 rollout flush 統計
+來源: SKRL PPO agent tracking_data
 
 | WandB Key | 物理意義 | 期望值 |
 |-----------|---------|:---:|
-| `ablation/stuck_count` | 卡住事件數（連續 ≥5 步 v<0.02） | <1000（>5000=凍結風險） |
-| `ablation/freeze_ratio` | 靜止步數佔比 (v<0.02) | <0.10 |
-| `ablation/oscillation_score` | v_toward 符號翻轉頻率 | <0.3（>0.5=嚴重搖擺） |
-| `ablation/retreat_ratio` | 近障礙時後退步數佔比 | 0.1→0.3 |
-| `ablation/progress_near_obs` | 近障礙時每步進度 (m) | >0（負=後退） |
-| `ablation/v_toward_near_obs` | 近障礙時朝目標速度 (m/s) | >0 |
-| `ablation/speed_near_obs` | 近障礙時平均速度 (m/s) | 0.1→0.4 |
-| `ablation/d_safe_mean` | 全局平均安全距離 (m) | 1.0→2.0 |
-| `ablation/d_safe_min` | rollout 最小安全距離 (m) | >0.45 |
-| `ablation/danger_ratio` | 危險區域 (d_safe<0.8m) 步數佔比 | <0.15 |
-| `ablation/front_clearance` | 前方淨空距離 (m) | 1.0→2.0 |
-| `ablation/avg_ep_length` | 平均 episode 步數 | 30→50 |
-| `ablation/collision_ep_len` | 碰撞 episode 平均步數 | <avg_ep_length |
-| `ablation/step_count` | rollout 總步數 | = rollouts × num_envs |
-| `ablation/shield_rate` | Safety shield 介入比例 | 0（未啟用 shield） |
+| `Loss / Policy loss` | PPO clip surrogate loss | -0.05→-0.005 |
+| `Loss / Value loss` | MSE(V_pred, returns) | 下降趨勢 |
+| `Loss / Entropy loss` | -entropy_coeff × mean(entropy) | -0.04→-0.06 |
 
-### 8.10 Episode 總量指標
+### 8.5 `Termination` (6)
+
+來源: TerminationManager → `Episode_Termination/{name}` → `Termination / {name}`
 
 | WandB Key | 物理意義 | 期望值 |
 |-----------|---------|:---:|
-| `Reward / Total reward (mean)` | 每 episode 平均總 reward | 15→40 |
+| `Termination / goal_reached` | 成功到達目標的比例 | 0.3→0.85 |
+| `Termination / collision` | LiDAR 碰撞終止比例 | 0.5→0.05 |
+| `Termination / wall_collision` | 牆壁碰撞終止比例 | ≈0 |
+| `Termination / time_out` | 超時終止比例 | 0.3→0.10 |
+| `Termination / physics_explosion` | 物理引擎爆炸（>0=bug） | ≈0 |
+| `Termination / robot_tipped_over` | 機器人翻倒 | ≈0 |
+
+### 8.6 `Curriculum` (23)
+
+來源: `goal_obstacle_curriculum()` → `infos["log"]` → `Curriculum / {leaf}`
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
+| `Curriculum / stage` | 當前階段 (1-12) | 1→8+ |
+| `Curriculum / success_rate` | 滑動窗口 SR | 隨 stage 變化 |
+| `Curriculum / collision_rate` | 滑動窗口 CR | <0.35 |
+| `Curriculum / timeout_rate` | 滑動窗口 TO | <0.25 |
+| `Curriculum / dynamic_sr` | 僅動態場景 SR（Stage 6+） | 0→0.6 |
+| `Curriculum / sr_gap` | SR - 升級門檻（>0=達標） | 升級時≈0 |
+| `Curriculum / cr_gap` | CR 門檻 - 當前 CR | >0=達標 |
+| `Curriculum / to_gap` | TO 門檻 - 當前 TO | >0=達標 |
+| `Curriculum / upgrade_pass_count` | 連續達標次數 (/5) | 0→5 循環 |
+| `Curriculum / upgrade_sr_target` | 當前 stage 升級 SR 門檻 | 0.60→0.85 |
+| `Curriculum / upgrade_cr_target` | 當前 stage 升級 CR 門檻 | 0.35→0.45 |
+| `Curriculum / upgrade_to_target` | 當前 stage 升級 TO 門檻 | 0.20→0.35 |
+| `Curriculum / window_fill` | 窗口填充率 | 0→1.0 |
+| `Curriculum / approx_rollout_cycles` | 階段內 PPO updates | 持續增長 |
+| `Curriculum / num_goals` | 當前目標數 | 7→1 |
+| `Curriculum / num_obstacles_static` | 靜態障礙物數 | 0→10 |
+| `Curriculum / num_obstacles_dynamic` | 動態障礙物數 | 0→10 |
+| `Curriculum / min_walls` | 牆壁下限 | 0→8 |
+| `Curriculum / max_walls` | 牆壁上限 | 1→8 |
+| `Curriculum / gamma` | 折扣因子 | 0.990→0.998 |
+| `Curriculum / episode_length_s` | Episode 長度 (秒) | 45→90 |
+| `Curriculum / num_episodes` | 累計 episode 數 | 持續增長 |
+| `Curriculum / stage_episodes` | 當前 stage episode 數 | 升級後歸零 |
+
+### 8.7 `Reward` (v3: 15, v4: ~13)
+
+來源: RewardManager → `Episode_Reward/{name}` → `Reward / {name}`
+值 = episode_sum / max_episode_length_s（每秒平均 reward）
+v4 過濾: weight=0 的 term 不送 WandB（val==0.0 跳過）
+
+**Per-term reward（v4 活躍項）:**
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
+| `Reward / reaching_goal` | 到達目標獎勵（稀疏） | 0.1→0.5 |
+| `Reward / goal_velocity` | 朝目標速度獎勵 | 0.05→0.20 |
+| `Reward / goal_progress` | 距離縮減 PBRS | 0.01→0.05 |
+| `Reward / static_safety` | LiDAR 靜態安全 | 0.05→0.15 |
+| `Reward / dynamic_safety` | 動態障礙物安全（Stage 6+） | 0→0.10 |
+| `Reward / smoothness` | 控制平滑懲罰（負值） | -0.01→-0.005 |
+| `Reward / collision_ground` | 碰撞懲罰（負值） | -0.15→-0.02 |
+
+**Aggregate reward:**
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
 | `Reward / Total reward (max)` | 最高單 episode reward | >80 |
+| `Reward / Total reward (mean)` | 平均 episode reward | 15→40 |
 | `Reward / Total reward (min)` | 最低單 episode reward | >-15 |
+| `Reward / Instantaneous reward (max)` | 單步最高 reward | ~20 (觸發 goal) |
 | `Reward / Instantaneous reward (mean)` | 每步平均 reward | 0.3→0.8 |
+| `Reward / Instantaneous reward (min)` | 單步最低 reward | ~-10 (碰撞) |
+
+**v3 額外顯示（v4 已過濾, weight=0）:**
+alive, acceleration_penalty, angular_velocity_penalty, collision_terminal, near_obstacle_penalty, potential_progress, time_penalty, velocity_too_low
+
+### 8.8 `eval` (6)
+
+來源: `WandBSequentialTrainer._log_per_env_type_metrics()`
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
+| `eval/success_rate_empty` | 空曠場景 SR | 0.8→0.95 |
+| `eval/collision_rate_empty` | 空曠場景 CR | <0.05 |
+| `eval/timeout_rate_empty` | 空曠場景 TO | <0.10 |
+| `eval/success_rate_static` | 靜態障礙場景 SR | 0.3→0.70 |
+| `eval/collision_rate_static` | 靜態障礙場景 CR | 0.5→0.15 |
+| `eval/timeout_rate_static` | 靜態障礙場景 TO | 0.2→0.15 |
+
+> dynamic 場景指標（Stage 6+ 才出現）: `eval/{success,collision,timeout}_rate_dynamic`
+
+### 8.9 `robot` (9)
+
+來源: `TrainingDebugLogger.get_and_reset()`
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
+| `robot/speed_mean` | 平均 2D 速度 (m/s) | 0.2→0.6 |
+| `robot/speed_max` | 最大 2D 速度 (m/s) | ~1.0 |
+| `robot/angular_vel_mean` | 平均 \|ω_z\| (rad/s) | 0.2→0.4 |
+| `robot/angular_vel_max` | 最大 \|ω_z\| (rad/s) | ~0.785 |
+| `robot/progress_per_step` | 每步接近目標 (m) | 0.02→0.10 |
+| `robot/min_obstacle_dist_mean` | 平均最近障礙距離 (m) | 1.0→2.0 |
+| `robot/min_obstacle_dist_min` | 最小障礙距離 (m) | >0.45 |
+| `robot/lidar_min_raw` | LiDAR 最小距離平均 (m) | 0.3→0.5 |
+| `robot/lidar_no_hit_ratio` | 無回波 ray 比例 | 0.2→0.3 |
+
+### 8.10 `action` (4)
+
+來源: `TrainingDebugLogger.get_and_reset()`
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
+| `action/raw_mean` | 策略輸出原始值平均 | ≈0 |
+| `action/raw_std` | 策略輸出標準差 | 5→8 |
+| `action/accel_scatter` | 線加速度 vs 角加速度散佈圖 | — |
+| `action/speed_scatter` | 線速度 vs 角速度散佈圖 | — |
+
+### 8.11 `Policy` (1) / `Learning` (1)
+
+來源: SKRL PPO agent tracking_data
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
+| `Policy / Standard deviation` | 策略標準差 | N/A（離散動作=nan） |
+| `Learning / Learning rate` | 當前 LR | 1e-4→3e-5 |
+
+### 8.12 `Episode` (3)
+
+來源: SKRL SequentialTrainer
+
+| WandB Key | 物理意義 | 期望值 |
+|-----------|---------|:---:|
+| `Episode / Total timesteps (max)` | 最長 episode 步數 | ≤max_steps |
 | `Episode / Total timesteps (mean)` | 平均 episode 步數 | 30→50 |
+| `Episode / Total timesteps (min)` | 最短 episode 步數 | ≥1 |
+
+### 8.13 `System` (21)
+
+來源: WandB 自動收集（GPU/CPU/Memory/Network）
+
+| WandB Key 範例 | 物理意義 |
+|-----------|---------|
+| `system/gpu.0.gpu` | GPU 使用率 (%) |
+| `system/gpu.0.memory` | GPU 記憶體使用率 (%) |
+| `system/gpu.0.temp` | GPU 溫度 (°C) |
+| `system/gpu.0.powerWatts` | GPU 功耗 (W) |
+| `system/cpu` | CPU 使用率 (%) |
+| `system/memory` | 系統記憶體使用率 (%) |
+| `system/disk.*` | 磁碟 I/O |
+| `system/network.*` | 網路 I/O |
+| `system/proc.memory.*` | 程序記憶體 |
+
+> 共 ~21 項，由 WandB agent 自動採集，不需手動設定。
 
 ---
 
