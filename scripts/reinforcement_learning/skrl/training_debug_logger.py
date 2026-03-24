@@ -314,7 +314,11 @@ class TrainingDebugLogger:
                 if vel.numel() > 0:
                     gpu_scalars.append(((vel >= max_v - 1e-4) | (vel <= 1e-4)).float().mean())
 
-            has_override = hasattr(action_term, '_applied_accelerations') and hasattr(action_term, '_raw_actions')
+            has_override = (
+                hasattr(action_term, '_applied_accelerations')
+                and hasattr(action_term, '_raw_actions')
+                and hasattr(action_term, 'accel_table')
+            )
             if has_override:
                 raw = action_term._raw_actions
                 applied_a = action_term._applied_accelerations[:, 0]

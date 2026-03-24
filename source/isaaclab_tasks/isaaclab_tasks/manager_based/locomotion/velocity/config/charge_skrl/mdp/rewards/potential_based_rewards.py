@@ -231,21 +231,7 @@ def collision_terminal_penalty(
     Returns:
         [num_envs] -- 0.0 or 1.0.
     """
-    global _collision_diag_count
     d_min = _get_lidar_min_distance(env, sensor_cfg)  # [num_envs]
-
-    # 啟動診斷（僅前 5 步）
-    if _collision_diag_count < 5:
-        _collision_diag_count += 1
-        colliding = (d_min <= threshold).sum().item()
-        print(
-            f"[碰撞偵測 #{_collision_diag_count}] "
-            f"碰撞門檻={threshold:.2f}m | "
-            f"最近障礙物距離 — 第0環境={d_min[0].item():.3f} 最近={d_min.min().item():.3f} 平均={d_min.mean().item():.3f} | "
-            f"碰撞中={colliding}/{d_min.shape[0]}環境",
-            flush=True,
-        )
-
     return (d_min <= threshold).float()
 
 

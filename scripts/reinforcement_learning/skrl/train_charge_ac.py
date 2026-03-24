@@ -890,11 +890,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO] Loading model checkpoint from: {args_cli.checkpoint}")
         checkpoint_agent.load(args_cli.checkpoint)
 
-    # Print training info
-    print(f"[INFO] Starting training (Standard AC): {agent_cfg['trainer']['timesteps']} timesteps...")
-    print(f"[INFO] Rollouts per update: {agent_cfg['agent']['rollouts']}")
-    print(f"[INFO] Learning epochs: {agent_cfg['agent']['learning_epochs']}")
-    print(f"[INFO] Mini batches: {agent_cfg['agent']['mini_batches']}")
+    # ── 訓練啟動摘要 ──
+    r = env_cfg.rewards
+    reward_terms = []
+    for attr_name in dir(r):
+        attr = getattr(r, attr_name, None)
+        if hasattr(attr, 'weight') and hasattr(attr, 'func'):
+            reward_terms.append((attr_name, attr.weight))
+    active_terms = [(n, w) for n, w in reward_terms if w != 0.0]
+    inactive_terms = [n for n, w in reward_terms if w == 0.0]
+
+    cv = getattr(args_cli, 'curriculum_version', None) or 'default'
+    print("\n" + "=" * 70)
+    print("  訓練配置摘要")
+    print("=" * 70)
+    print(f"  Task:       {args_cli.task}")
+    print(f"  Reward:     {args_cli.reward_mode}")
+    print(f"  Curriculum: {cv}")
+    print(f"  Seed: {args_cli.seed}  |  Envs: {env_cfg.scene.num_envs}  |  dt: {env_cfg.decimation * env_cfg.sim.dt:.2f}s")
+    print(f"  Timesteps:  {agent_cfg['trainer']['timesteps']}  |  Rollouts: {agent_cfg['agent']['rollouts']}  |  Epochs: {agent_cfg['agent']['learning_epochs']}  |  Batches: {agent_cfg['agent']['mini_batches']}")
+    print(f"  γ: {agent_cfg['agent']['discount_factor']}  |  LR: {agent_cfg['agent']['learning_rate']}  |  Clip: {agent_cfg['agent']['ratio_clip']}")
+    print(f"\n  活躍 Reward Terms ({len(active_terms)}):")
+    for name, weight in sorted(active_terms, key=lambda x: -abs(x[1])):
+        print(f"    {name:30s} w={weight:+.1f}")
+    if inactive_terms:
+        print(f"  已關閉 ({len(inactive_terms)}): {', '.join(sorted(inactive_terms))}")
+    print("=" * 70 + "\n")
 
     try:
         if wandb_run is not None:

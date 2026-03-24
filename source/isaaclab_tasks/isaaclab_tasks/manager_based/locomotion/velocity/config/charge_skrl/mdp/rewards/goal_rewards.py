@@ -349,18 +349,6 @@ def reaching_goal(
     distance = torch.nan_to_num(distance, nan=100.0, posinf=100.0, neginf=0.0)
     distance = torch.clamp(distance, 0.0, 100.0)
 
-    # 啟動診斷（僅前 5 步）
-    if _reaching_diag_count < 5:
-        _reaching_diag_count += 1
-        reached = (distance < threshold).sum().item()
-        print(
-            f"[目標到達 #{_reaching_diag_count}] "
-            f"到達門檻={threshold:.2f}m 扣除半徑={body_radius:.2f}m | "
-            f"距離 — 第0環境={distance[0].item():.3f} 最近={distance.min().item():.3f} 平均={distance.mean().item():.3f} | "
-            f"已到達={reached}/{distance.shape[0]}環境",
-            flush=True,
-        )
-
     # 判斷是否到達
     reward = (distance < threshold).float()
 
