@@ -142,6 +142,10 @@ class WandBSequentialTrainer(SequentialTrainer):
         self._module_entropy_monitor = None
         self._setup_module_entropy_monitor()
 
+        # Training Health Monitor (Tier 1-2 診斷)
+        self._health_monitor = None
+        self._setup_health_monitor()
+
     def _setup_module_entropy_monitor(self) -> None:
         """初始化 Module Entropy 監控器。
 
@@ -194,6 +198,58 @@ class WandBSequentialTrainer(SequentialTrainer):
         except Exception as e:
             print(f"[WARNING] Module Entropy monitor init failed: {e}", flush=True)
             self._module_entropy_monitor = None
+
+    def _setup_health_monitor(self) -> None:
+        """初始化 Training Health Monitor (Tier 1-2 診斷指標)。
+
+        指標分兩類：
+        1. 從 PPO memory (returns, values) 計算: explained_variance, td_error
+        2. 從 model weights/activations 計算: dead_neuron, erank, weight_mag
+        """
+        try:
+            from diagnostics.training_health import TrainingHealthMonitor
+
+            agent = self.agents if self.num_simultaneous_agents == 1 else self.agents[0]
+            self._health_monitor = TrainingHealthMonitor(
+                agent.policy, agent.value,
+                compute_tier2_every=5,
+            )
+
+            # Monkey-patch agent._update 來攔截 PPO 內部數據
+            original_update = agent._update
+            monitor = self._health_monitor
+
+            def _hooked_update(timestep, timesteps):
+                result = original_update(timestep, timesteps)
+                # PPO update 完成後，從 memory 取 returns 和 values 計算 EV
+                try:
+                    import torch
+                    mem = agent.memory
+                    returns = mem.get_tensor_by_name("returns")  # [T, 1]
+                    values = mem.get_tensor_by_name("values")    # [T, 1]
+                    log_prob = mem.get_tensor_by_name("log_prob")  # [T, 1]
+                    states = mem.get_tensor_by_name("states")    # [T, obs_dim]
+                    if returns is not None and values is not None:
+                        # 用整個 rollout 的 returns/values 計算 explained variance
+                        monitor.on_ppo_batch(
+                            sampled_returns=returns,
+                            predicted_values=values,
+                            old_log_prob=log_prob if log_prob is not None else torch.zeros_like(returns),
+                            new_log_prob=log_prob if log_prob is not None else torch.zeros_like(returns),
+                            sampled_states=states,
+                        )
+                except Exception:
+                    pass
+                return result
+
+            agent._update = _hooked_update
+
+            print("[INFO] Training Health monitor initialized "
+                  "(Tier 1-2: EV, dead_neuron, erank, weight_mag)",
+                  flush=True)
+        except Exception as e:
+            print(f"[WARNING] Training Health monitor init failed: {e}", flush=True)
+            self._health_monitor = None
 
     def _maybe_save_best_model(self, timestep: int) -> None:
         """追蹤滑動窗口 SR，當超過歷史最佳時自動儲存 best model。
@@ -623,6 +679,16 @@ class WandBSequentialTrainer(SequentialTrainer):
                         me_data = self._module_entropy_monitor.flush()
                         tracking_data_snapshot.update(
                             {k: [v] for k, v in me_data.items()}
+                        )
+                    except Exception:
+                        pass
+
+                # Training Health 指標：flush Tier 1-2 診斷
+                if self._health_monitor is not None:
+                    try:
+                        health_data = self._health_monitor.flush()
+                        tracking_data_snapshot.update(
+                            {k: [v] for k, v in health_data.items()}
                         )
                     except Exception:
                         pass
