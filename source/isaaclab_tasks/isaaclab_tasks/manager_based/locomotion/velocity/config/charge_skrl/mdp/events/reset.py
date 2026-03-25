@@ -411,9 +411,10 @@ def reset_root_state_fixed_per_env(
         )
         
         # ----------------------------------------------------------------
-        # 迷宮牆壁 proximity 拒絕採樣 (per-env walls)
+        # 牆壁 + 障礙物 proximity 拒絕採樣
+        # agent 必須離牆壁和障礙物都至少 SPAWN_SAFE_DIST
         # ----------------------------------------------------------------
-        WALL_SAFE = 0.8  # robot radius(0.5) + margin(0.3)
+        SPAWN_SAFE_DIST = 2.0  # 離牆壁和障礙物至少 2m
 
         pos_xy = pos_samples[:, :2].clone()
         x_range = pos_ranges[0]  # (min, max) for x
@@ -421,19 +422,44 @@ def reset_root_state_fixed_per_env(
 
         uninitialized_ids = env_ids[uninitialized_mask]
         wall_c, wall_s, wall_mask = get_combined_wall_data(env)
-        # 取出被重置 env 的牆壁數據
         wc = wall_c[uninitialized_ids]       # [n_reset, W, 2]
         ws = wall_s[uninitialized_ids]       # [n_reset, W, 2]
         wm = wall_mask[uninitialized_ids]    # [n_reset, W]
 
-        too_close = check_wall_proximity_perenv(pos_xy, wc, ws, wm, WALL_SAFE)
+        # 收集所有障礙物位置（per-env local coords）
+        obs_positions = []  # list of [N, 2] tensors
+        obs_radii = []
+        obs_sizes = getattr(env, "_obstacle_sizes", None)
+        for i in range(20):
+            obs_name = f"obstacle_{i}"
+            if obs_name not in env.scene.keys():
+                continue
+            obs_entity = env.scene[obs_name]
+            obs_pos_w = obs_entity.data.root_pos_w[uninitialized_ids]  # [n_reset, 3]
+            # 只考慮 visible 的障礙物 (z > 0)
+            visible = obs_pos_w[:, 2] > 0.0
+            # 轉換為 env-local 座標
+            env_origins_xy = env.scene.env_origins[uninitialized_ids, :2]
+            obs_local = obs_pos_w[:, :2] - env_origins_xy  # [n_reset, 2]
+            r = obs_sizes[i] / 2.0 if obs_sizes is not None and i < len(obs_sizes) else 0.3
+            obs_positions.append((obs_local, visible, r))
+
+        def _check_too_close(xy):
+            """檢查 xy 是否離牆壁或障礙物太近"""
+            bad = check_wall_proximity_perenv(xy, wc, ws, wm, SPAWN_SAFE_DIST)
+            for obs_local, visible, r in obs_positions:
+                dist = torch.norm(xy - obs_local, dim=1)
+                bad = bad | (visible & (dist < SPAWN_SAFE_DIST + r))
+            return bad
+
+        too_close = _check_too_close(pos_xy)
         for _ in range(50):
             if not too_close.any():
                 break
             n = too_close.sum().item()
             pos_xy[too_close, 0] = torch.rand(n, device=device) * (x_range[1] - x_range[0]) + x_range[0]
             pos_xy[too_close, 1] = torch.rand(n, device=device) * (y_range[1] - y_range[0]) + y_range[0]
-            too_close = check_wall_proximity_perenv(pos_xy, wc, ws, wm, WALL_SAFE)
+            too_close = _check_too_close(pos_xy)
 
         pos_samples[:, :2] = pos_xy
 

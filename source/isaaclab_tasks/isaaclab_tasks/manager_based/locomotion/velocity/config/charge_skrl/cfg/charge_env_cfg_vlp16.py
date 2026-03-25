@@ -296,8 +296,8 @@ class CommandsCfgVLP16:
             angle=(-math.pi, math.pi),
         ),
         wall_boundary=7.5,
-        wall_safe_margin=0.5,
-        obstacle_safe_distance=1.0,
+        wall_safe_margin=2.0,
+        obstacle_safe_distance=2.0,
         num_obstacles=0,
         num_goals=5,
     )
