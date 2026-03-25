@@ -136,6 +136,8 @@ parser.add_argument("--goal_vel_use_soft_gate", action="store_true", default=Fal
 parser.add_argument("--curriculum_version", type=str, default=None,
                     choices=["baseline_v1", "goal_first_v1", "goal_first_v2", "goal_first_v3"],
                     help="Curriculum version (default: use task config's baseline_v1)")
+parser.add_argument("--no_walls", action="store_true", default=False,
+                    help="移除所有內牆（保留外牆），所有 stage 的 min/max_walls=0")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -620,6 +622,19 @@ def _apply_ablation_overrides(env_cfg, args_cli):
                 term.params["curriculum_version"] = cv
                 print(f"[CURRICULUM] version={cv}")
                 changed = True
+
+    # --- no_walls: 強制所有 stage 的內牆為 0 ---
+    if getattr(args_cli, 'no_walls', False):
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
+            CURRICULUM_CONFIGS,
+        )
+        cv_key = cv or "baseline_v1"
+        if cv_key in CURRICULUM_CONFIGS:
+            for stage_cfg in CURRICULUM_CONFIGS[cv_key]["stages"]:
+                stage_cfg["min_walls"] = 0
+                stage_cfg["max_walls"] = 0
+            print(f"[NO_WALLS] 所有 stage 的 min/max_walls 已設為 0（保留外牆）")
+            changed = True
 
     if not changed:
         print("[ABLATION] baseline (no overrides)")
