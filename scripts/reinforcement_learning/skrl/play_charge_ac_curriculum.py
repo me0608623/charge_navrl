@@ -291,6 +291,7 @@ def main():
         else:
             s_ratio, d_ratio, empty_ratio = 0.0, 0.0, 1.0
 
+        max_obs = max(n_s, n_d, 10)  # 至少 10，或取 static/dynamic 中較大的
         for evt_attr in ["randomize_obstacles", "randomize_obstacles_startup"]:
             evt_term = getattr(env_cfg.events, evt_attr, None)
             if evt_term is not None:
@@ -300,7 +301,12 @@ def main():
                     "dynamic_ratio": d_ratio,
                     "num_obstacles_static": n_s,
                     "num_obstacles_dynamic": n_d,
+                    "max_obstacles": max_obs,
                 })
+        # 同步 move_dynamic_obstacles 的 max_obstacles
+        move_evt = getattr(env_cfg.events, "move_dynamic_obstacles", None)
+        if move_evt is not None:
+            move_evt.params["max_obstacles"] = max_obs
         wall_evt = getattr(env_cfg.events, "randomize_wall_positions", None)
         if wall_evt is not None:
             wall_evt.params["min_walls"] = n_w
