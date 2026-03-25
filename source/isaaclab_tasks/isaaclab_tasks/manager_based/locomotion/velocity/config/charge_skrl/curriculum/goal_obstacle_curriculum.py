@@ -415,7 +415,210 @@ CURRICULUM_CONFIGS = {
                                         "static_safety": 2.0, "dynamic_safety": 2.0}),
         ],
     },
+
+    # ==================================================================
+    # open_ended_v1: 6 bootstrap stages + 無上限 open-ended curriculum
+    #
+    # Bootstrap (B1-B6): 固定 stages，先學 goal-reaching + 基本避障
+    # Open-ended: difficulty_level 無上限，參數化映射場景難度
+    #   static clamp 20, dynamic clamp 5, walls=0
+    # ==================================================================
+    "open_ended_v1": {
+        "upgrade_pass_required": 5,
+        "clear_window_on_promote": True,
+        "open_ended": True,  # 標記此版本使用 open-ended 模式
+        "stages": [
+            # B1: goal_open — 純導航
+            _make_stage(6, 0, 0, 0, 0, 0.990, 45, 1.00,
+                        upgrade_sr=0.85, upgrade_max_cr=1.0, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=50,
+                        downgrade_sr=0.0, downgrade_min_cr=1.0, downgrade_min_to=1.0,
+                        name="B1_goal_open",
+                        reward_weights={"goal_velocity": 5.0, "goal_progress": 6.0,
+                                        "static_safety": 0.0, "dynamic_safety": 0.0}),
+            # B2: goal_sparse_static
+            _make_stage(5, 2, 0, 0, 0, 0.992, 50, 0.60,
+                        upgrade_sr=0.82, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=60,
+                        downgrade_sr=0.30, downgrade_min_cr=1.0, downgrade_min_to=0.80,
+                        name="B2_sparse_static",
+                        reward_weights={"goal_velocity": 5.0, "goal_progress": 5.8,
+                                        "static_safety": 0.2, "dynamic_safety": 0.0}),
+            # B3: static_light
+            _make_stage(4, 4, 0, 0, 0, 0.993, 55, 0.40,
+                        upgrade_sr=0.80, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=70,
+                        name="B3_static_light",
+                        reward_weights={"goal_velocity": 4.8, "goal_progress": 5.5,
+                                        "static_safety": 0.4, "dynamic_safety": 0.0}),
+            # B4: static_medium
+            _make_stage(3, 6, 0, 0, 0, 0.994, 60, 0.25,
+                        upgrade_sr=0.78, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=85,
+                        name="B4_static_medium",
+                        reward_weights={"goal_velocity": 4.5, "goal_progress": 5.0,
+                                        "static_safety": 0.6, "dynamic_safety": 0.0}),
+            # B5: dynamic_intro
+            _make_stage(3, 6, 2, 0, 0, 0.995, 68, 0.10,
+                        upgrade_sr=0.75, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=100,
+                        name="B5_dynamic_intro",
+                        reward_weights={"goal_velocity": 4.0, "goal_progress": 4.5,
+                                        "static_safety": 0.8, "dynamic_safety": 0.3}),
+            # B6: dynamic_bridge — open-ended 入口
+            _make_stage(2, 8, 3, 0, 0, 0.996, 75, 0.0,
+                        upgrade_sr=0.72, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=115,
+                        name="B6_dynamic_bridge",
+                        reward_weights={"goal_velocity": 3.5, "goal_progress": 4.0,
+                                        "static_safety": 1.0, "dynamic_safety": 0.5}),
+        ],
+    },
 }
+
+
+# ============================================================================
+# Open-ended curriculum 參數映射
+# ============================================================================
+
+def _open_ended_params(level: int) -> dict:
+    """difficulty_level → 場景參數映射。level=0 從 B6 延續。"""
+    static_count = min(20, 8 + level)
+    dynamic_count = min(5, 3 + level // 3)
+    goal_count = 1 if level >= 2 else 2
+    episode_length_s = min(95, 75 + level * 2)
+    gamma = min(0.998, 0.996 + level * 0.0002)
+
+    # 達到物件數上限後 (level≈12+)，透過隨機性增加難度
+    beyond = max(0, level - 12)
+    dynamic_speed_scale = min(1.4, 1.0 + 0.03 * beyond)
+    spawn_compactness = min(1.3, 1.0 + 0.02 * beyond)
+    goal_distance_scale = min(1.25, 1.0 + 0.02 * beyond)
+
+    # 有動態障礙時：100% dynamic ratio（含 static subset）
+    if dynamic_count > 0:
+        empty_ratio = 0.0
+        static_ratio = 0.0
+        dynamic_ratio = 1.0
+    else:
+        empty_ratio = 0.0
+        static_ratio = 1.0
+        dynamic_ratio = 0.0
+
+    return {
+        "name": f"OE_L{level}",
+        "num_goals": goal_count,
+        "num_obstacles_static": static_count,
+        "num_obstacles_dynamic": dynamic_count,
+        "empty_ratio": empty_ratio,
+        "static_ratio": static_ratio,
+        "dynamic_ratio": dynamic_ratio,
+        "min_walls": 0,
+        "max_walls": 0,
+        "episode_length_s": float(episode_length_s),
+        "gamma": gamma,
+        "goal_distance": (3.0, min(13.0, 8.0 * goal_distance_scale)),
+        # 進階難度參數
+        "speed_range": 1.2 * dynamic_speed_scale,
+        "boundary": max(5.5, 7.5 / spawn_compactness),
+    }
+
+
+def _open_ended_reward_weights(level: int) -> dict:
+    """difficulty_level → reward 權重映射。"""
+    return {
+        "goal_velocity": max(2.5, 3.5 - 0.08 * level),
+        "goal_progress": max(3.0, 4.0 - 0.08 * level),
+        "static_safety": min(1.2, 1.0 + 0.05 * level),
+        "dynamic_safety": min(1.0, 0.5 + 0.05 * level),
+    }
+
+
+def _open_ended_target_sr(level: int) -> float:
+    return max(0.58, 0.72 - 0.01 * level)
+
+def _open_ended_target_cr(level: int) -> float:
+    return min(0.28, 0.18 + 0.01 * level)
+
+def _open_ended_target_to(level: int) -> float:
+    return 0.30
+
+
+def _apply_open_ended(env, level: int):
+    """套用 open-ended 難度等級的場景參數 + reward 權重。"""
+    cfg = _open_ended_params(level)
+
+    # Goal command
+    try:
+        cmd = env.command_manager.get_term("goal_command")
+        cmd.cfg.num_goals = cfg["num_goals"]
+        cmd.cfg.ranges.distance = cfg["goal_distance"]
+        cmd.cfg.num_obstacles = cfg["num_obstacles_static"] + cfg["num_obstacles_dynamic"]
+    except Exception:
+        pass
+
+    # Obstacle event params
+    try:
+        evt = env.event_manager
+        for name in ["randomize_obstacles", "randomize_obstacles_startup"]:
+            try:
+                ec = evt.get_term_cfg(name)
+                ec.params["empty_ratio"] = cfg["empty_ratio"]
+                ec.params["static_ratio"] = cfg["static_ratio"]
+                ec.params["dynamic_ratio"] = cfg["dynamic_ratio"]
+                ec.params["num_obstacles_static"] = cfg["num_obstacles_static"]
+                ec.params["num_obstacles_dynamic"] = cfg["num_obstacles_dynamic"]
+                ec.params["boundary"] = cfg["boundary"]
+                evt.set_term_cfg(name, ec)
+            except Exception:
+                continue
+        # 動態速度
+        try:
+            ec = evt.get_term_cfg("move_dynamic_obstacles")
+            ec.params["speed_max"] = cfg["speed_range"]
+            evt.set_term_cfg("move_dynamic_obstacles", ec)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Walls = 0
+    try:
+        evt = env.event_manager
+        ec = evt.get_term_cfg("randomize_wall_positions")
+        ec.params["min_walls"] = 0
+        ec.params["max_walls"] = 0
+        evt.set_term_cfg("randomize_wall_positions", ec)
+    except Exception:
+        pass
+
+    # Episode length + gamma
+    env.cfg.episode_length_s = cfg["episode_length_s"]
+    env._target_discount_factor = cfg["gamma"]
+
+    # Reward weights
+    rw = _open_ended_reward_weights(level)
+    try:
+        rm = env.reward_manager
+        for term_name, weight in rw.items():
+            try:
+                tc = rm.get_term_cfg(term_name)
+                tc.weight = weight
+                rm.set_term_cfg(term_name, tc)
+            except Exception:
+                pass
+        weights_str = " ".join(f"{k}={v:.2f}" for k, v in rw.items())
+        print(f"[OpenEnded] Level {level} reward weights: {weights_str}", flush=True)
+    except Exception:
+        pass
+
+    print(
+        f"[OpenEnded] Level {level}: "
+        f"{cfg['num_goals']}G {cfg['num_obstacles_static']}S+{cfg['num_obstacles_dynamic']}D "
+        f"walls=0 ep={cfg['episode_length_s']:.0f}s γ={cfg['gamma']:.4f} "
+        f"speed={cfg['speed_range']:.2f} boundary={cfg['boundary']:.1f}",
+        flush=True,
+    )
 
 
 def _load_stages(version: str) -> tuple[dict, int, dict]:
@@ -462,9 +665,13 @@ def goal_obstacle_curriculum(
         STAGES = stages
         MAX_STAGE = max_stage
         upgrade_pass_required = ver_config.get("upgrade_pass_required", 5)
+        is_open_ended = ver_config.get("open_ended", False)
 
         n = env.num_envs
-        effective_window = max(window_size, n * 5)
+        if is_open_ended:
+            effective_window = max(4000, n * 6)
+        else:
+            effective_window = max(window_size, n * 5)
         effective_min = max(min_stage_episodes, n * 8)
         env._goal_obs_curriculum = {
             "stage": initial_stage,
@@ -478,6 +685,12 @@ def goal_obstacle_curriculum(
             "upgrade_pass_required": upgrade_pass_required,
             "curriculum_version": curriculum_version,
             "clear_window_on_promote": ver_config.get("clear_window_on_promote", True),
+            # Open-ended 狀態
+            "is_open_ended": is_open_ended,
+            "curriculum_mode": "bootstrap",  # "bootstrap" | "open_ended"
+            "difficulty_level": 0,
+            "cooldown_remaining": 0,
+            "downgrade_streak": 0,  # 連續降級 window 計數
         }
         _apply_stage(env, initial_stage)
         s = STAGES[initial_stage]
@@ -569,7 +782,112 @@ def goal_obstacle_curriculum(
                 flush=True,
             )
 
-        # 升級檢查
+        # ============================================================
+        # Open-ended 模式的升降級邏輯
+        # ============================================================
+        if state.get("curriculum_mode") == "open_ended":
+            level = state["difficulty_level"]
+            cooldown = state.get("cooldown_remaining", 0)
+            cooldown_size = max(2000, env.num_envs * 4)
+
+            # Cooldown 遞減
+            new_episodes = state["stage_episodes"]  # 本 level 的 episode 數
+            if cooldown > 0:
+                state["cooldown_remaining"] = max(0, cooldown - len(window))
+            else:
+                t_sr = _open_ended_target_sr(level)
+                t_cr = _open_ended_target_cr(level)
+                t_to = _open_ended_target_to(level)
+
+                sr_ok = success_rate > t_sr
+                cr_ok = collision_rate < t_cr
+                to_ok = timeout_rate < t_to
+
+                if sr_ok and cr_ok and to_ok:
+                    state["upgrade_pass_count"] += 1
+                    state["downgrade_streak"] = 0
+                    if state["upgrade_pass_count"] >= upgrade_pass_required:
+                        old_level = level
+                        level += 1
+                        state["difficulty_level"] = level
+                        state["outcome_window"].clear()
+                        state["stage_episodes"] = 0
+                        state["stage_transitions"] += 1
+                        state["upgrade_pass_count"] = 0
+                        state["cooldown_remaining"] = cooldown_size
+                        _apply_open_ended(env, level)
+                        p = _open_ended_params(level)
+                        print(
+                            f"\n{'='*70}\n"
+                            f"[OpenEnded] ▲ Level {old_level} → {level} | "
+                            f"SR={success_rate:.3f} CR={collision_rate:.3f} TO={timeout_rate:.3f}\n"
+                            f"{'='*70}", flush=True,
+                        )
+                else:
+                    state["upgrade_pass_count"] = 0
+
+                    # 降級檢查 (需要連續 2 個 window 觸發)
+                    should_down = (
+                        success_rate < t_sr - 0.12 or
+                        collision_rate > t_cr + 0.12
+                    )
+                    if should_down:
+                        state["downgrade_streak"] += 1
+                    else:
+                        state["downgrade_streak"] = 0
+
+                    if state["downgrade_streak"] >= 2 and level > 0:
+                        old_level = level
+                        level -= 1
+                        state["difficulty_level"] = level
+                        state["outcome_window"].clear()
+                        state["stage_episodes"] = 0
+                        state["stage_transitions"] += 1
+                        state["cooldown_remaining"] = cooldown_size
+                        state["downgrade_streak"] = 0
+                        _apply_open_ended(env, level)
+                        print(
+                            f"\n{'='*70}\n"
+                            f"[OpenEnded] ▼ Level {old_level} → {level} | "
+                            f"SR={success_rate:.3f} CR={collision_rate:.3f} TO={timeout_rate:.3f}\n"
+                            f"{'='*70}", flush=True,
+                        )
+
+            # 回傳 open-ended metrics
+            oe_cfg = _open_ended_params(level)
+            t_sr = _open_ended_target_sr(level)
+            t_cr = _open_ended_target_cr(level)
+            t_to = _open_ended_target_to(level)
+            return {
+                "stage": float(MAX_STAGE + level),  # bootstrap stages + level
+                "stage_name": oe_cfg["name"],
+                "success_rate": success_rate,
+                "collision_rate": collision_rate,
+                "timeout_rate": timeout_rate,
+                "dynamic_sr": dynamic_sr,
+                "num_goals": float(oe_cfg["num_goals"]),
+                "num_obstacles_static": float(oe_cfg["num_obstacles_static"]),
+                "num_obstacles_dynamic": float(oe_cfg["num_obstacles_dynamic"]),
+                "min_walls": 0.0,
+                "max_walls": 0.0,
+                "gamma": float(oe_cfg["gamma"]),
+                "episode_length_s": float(oe_cfg["episode_length_s"]),
+                "num_episodes": float(state["total_episodes"]),
+                "stage_episodes": float(state["stage_episodes"]),
+                "window_fill": float(len(window)) / float(effective_window),
+                "upgrade_pass_count": float(state["upgrade_pass_count"]),
+                "approx_rollout_cycles": float(approx_rollout_cycles),
+                "upgrade_sr_target": t_sr,
+                "upgrade_cr_target": t_cr,
+                "upgrade_to_target": t_to,
+                "sr_gap": success_rate - t_sr,
+                "cr_gap": t_cr - collision_rate,
+                "to_gap": t_to - timeout_rate,
+            }
+
+        # ============================================================
+        # Bootstrap / 固定 stage 模式的升降級邏輯（原有邏輯）
+        # ============================================================
         sr_ok = success_rate > up_sr
         cr_ok = collision_rate < up_cr
         to_ok = timeout_rate < up_to
@@ -587,9 +905,20 @@ def goal_obstacle_curriculum(
                 state["stage_episodes"] = 0
                 state["stage_transitions"] += 1
                 state["upgrade_pass_count"] = 0
-                _apply_stage(env, current_stage)
-                _debug_log(f"▲ 升級", old, current_stage)
-                stage_cfg = STAGES[current_stage]
+
+                # 檢查是否從 bootstrap 最後一級升級到 open-ended
+                if state.get("is_open_ended") and current_stage > MAX_STAGE:
+                    # 不會到這裡，因為 current_stage < MAX_STAGE 才進 if
+                    pass
+                elif state.get("is_open_ended") and current_stage == MAX_STAGE:
+                    # 完成 bootstrap 最後一級 — 下次升級將進入 open-ended
+                    _apply_stage(env, current_stage)
+                    _debug_log(f"▲ 升級 (bootstrap)", old, current_stage)
+                    stage_cfg = STAGES[current_stage]
+                else:
+                    _apply_stage(env, current_stage)
+                    _debug_log(f"▲ 升級", old, current_stage)
+                    stage_cfg = STAGES[current_stage]
             else:
                 print(
                     f"[Curriculum {ver}] 升級待確認 "
@@ -597,6 +926,50 @@ def goal_obstacle_curriculum(
                     f"SR={success_rate:.3f} CR={collision_rate:.3f} TO={timeout_rate:.3f}",
                     flush=True,
                 )
+        elif all_pass and current_stage == MAX_STAGE and state.get("is_open_ended"):
+            # Bootstrap 最後一級達標 → 進入 open-ended
+            state["upgrade_pass_count"] += 1
+            if state["upgrade_pass_count"] >= upgrade_pass_required:
+                state["curriculum_mode"] = "open_ended"
+                state["difficulty_level"] = 0
+                state["outcome_window"].clear()
+                state["stage_episodes"] = 0
+                state["stage_transitions"] += 1
+                state["upgrade_pass_count"] = 0
+                cooldown_size = max(2000, env.num_envs * 4)
+                state["cooldown_remaining"] = cooldown_size
+                _apply_open_ended(env, 0)
+                print(
+                    f"\n{'='*70}\n"
+                    f"[Curriculum {ver}] ★ Bootstrap 完成 → Open-ended Mode (Level 0)\n"
+                    f"  SR={success_rate:.3f} CR={collision_rate:.3f} TO={timeout_rate:.3f}\n"
+                    f"{'='*70}", flush=True,
+                )
+                oe_cfg = _open_ended_params(0)
+                t_sr = _open_ended_target_sr(0)
+                t_cr = _open_ended_target_cr(0)
+                t_to = _open_ended_target_to(0)
+                return {
+                    "stage": float(MAX_STAGE),
+                    "stage_name": "open_ended_L0",
+                    "success_rate": success_rate,
+                    "collision_rate": collision_rate,
+                    "timeout_rate": timeout_rate,
+                    "dynamic_sr": dynamic_sr,
+                    "num_goals": float(oe_cfg["num_goals"]),
+                    "num_obstacles_static": float(oe_cfg["num_obstacles_static"]),
+                    "num_obstacles_dynamic": float(oe_cfg["num_obstacles_dynamic"]),
+                    "min_walls": 0.0, "max_walls": 0.0,
+                    "gamma": float(oe_cfg["gamma"]),
+                    "episode_length_s": float(oe_cfg["episode_length_s"]),
+                    "num_episodes": float(state["total_episodes"]),
+                    "stage_episodes": 0.0,
+                    "window_fill": 0.0,
+                    "upgrade_pass_count": 0.0,
+                    "approx_rollout_cycles": 0.0,
+                    "upgrade_sr_target": t_sr, "upgrade_cr_target": t_cr, "upgrade_to_target": t_to,
+                    "sr_gap": 0.0, "cr_gap": 0.0, "to_gap": 0.0,
+                }
         else:
             if state["upgrade_pass_count"] > 0:
                 print(

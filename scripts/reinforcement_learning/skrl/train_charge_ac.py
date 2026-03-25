@@ -111,8 +111,8 @@ parser.add_argument("--use_cadn", action="store_true", default=False,
 
 # --- NavRL-Ground v1 reward mode ---
 parser.add_argument("--reward_mode", type=str, default="current",
-                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4", "navrl_ground_v5"],
-                    help="Reward mode: current / v1-v4 / v5(v4+collision100+ss_boost)")
+                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4", "navrl_ground_v5", "navrl_ground_v6"],
+                    help="Reward mode: current / v1-v5 / v6(open-ended, front_block=0.4)")
 parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
                     choices=["log_distance", "closing_risk"],
                     help="Dynamic safety reward mode")
@@ -134,7 +134,7 @@ parser.add_argument("--goal_vel_use_soft_gate", action="store_true", default=Fal
 
 # --- Curriculum version ---
 parser.add_argument("--curriculum_version", type=str, default=None,
-                    choices=["baseline_v1", "goal_first_v1", "goal_first_v2", "goal_first_v3"],
+                    choices=["baseline_v1", "goal_first_v1", "goal_first_v2", "goal_first_v3", "open_ended_v1"],
                     help="Curriculum version (default: use task config's baseline_v1)")
 parser.add_argument("--no_walls", action="store_true", default=False,
                     help="移除所有內牆（保留外牆），所有 stage 的 min/max_walls=0")
@@ -609,6 +609,28 @@ def _apply_ablation_overrides(env_cfg, args_cli):
             f"collision={r.collision_ground.weight} alive={r.alive.weight} | "
             f"ds_mode={args_cli.dynamic_safety_mode} | "
             f"搭配 goal_first_v3 使用"
+        )
+        changed = True
+
+    # --- reward_mode: navrl_ground_v6 (open-ended, front_block=0.4, collision=-50) ---
+    if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v6":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            RewardsCfgVLP16NavRLGroundV6,
+        )
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV6()
+
+        r = env_cfg.rewards
+        r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+
+        if args_cli.goal_vel_use_soft_gate:
+            r.goal_velocity.params["use_soft_gate"] = True
+            r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
+
+        print(
+            f"[REWARD_MODE] navrl_ground_v6 (open-ended, front_block=0.4) | "
+            f"w: goal={r.reaching_goal.weight} coll={r.collision_ground.weight} "
+            f"alive={r.alive.weight} ss_front={r.static_safety.params['a_front_block']} | "
+            f"ds_mode={args_cli.dynamic_safety_mode}"
         )
         changed = True
 

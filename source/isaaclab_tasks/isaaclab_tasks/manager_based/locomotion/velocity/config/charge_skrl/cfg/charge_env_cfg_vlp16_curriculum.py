@@ -1001,3 +1001,39 @@ class RewardsCfgVLP16NavRLGroundV5(RewardsCfgVLP16NavRLGroundV3):
         params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
         weight=-100.0,
     )
+
+
+# ============================================================================
+# NavRL-Ground v6: open-ended curriculum 專用
+# v3 基礎 + a_front_block=0.4（弱化前向堵塞）+ collision=-50
+# ============================================================================
+
+@configclass
+class RewardsCfgVLP16NavRLGroundV6(RewardsCfgVLP16NavRLGroundV3):
+    """NavRL-Ground v6: open-ended curriculum 專用。
+
+    vs V3/V4:
+    - collision_ground: -50（不加倍，v5 加倍反而 side-grade）
+    - static_safety: a_front_block 1.0→0.4（弱化前向堵塞，降低 freeze 風險）
+    - reward 權重由 open_ended_v1 課程動態控制
+    """
+    static_safety = RewTerm(
+        func=_ground_static,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "body_radius": ROBOT_BODY_RADIUS,
+            "a_global": 1.0,
+            "a_front_block": 0.4,
+            "front_half_angle_deg": 30.0,
+            "front_nearest_k": 5,
+            "front_warn_dist": 1.2,
+        },
+        weight=2.0,
+    )
+
+    collision_ground = RewTerm(
+        func=collision_terminal_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        weight=-50.0,
+    )
