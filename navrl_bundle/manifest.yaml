@@ -1,0 +1,182 @@
+# NavRL Bundle Manifest — 2026-03-23
+# Charge-SKRL Navigation Ablation Experiments
+
+project: charge_skrl
+branch: curriculum_navrl_reward
+git_remote: git@github.com:me0608623/charge_skrl.git
+date: 2026-03-23
+
+# ============================================================================
+# Software Versions (Exact)
+# ============================================================================
+versions:
+  algorithm: PPO
+  framework: SKRL
+  skrl_version: "1.4.3"
+  pytorch: "2.7.0+cu128"
+  cuda: "12.8"
+  isaac_sim: "5.1.0-rc.19"
+  physx: "107.3.26"
+  gymnasium: "1.2.1"
+  numpy: "1.26.0"
+  python: "3.11"
+  conda_env: env_isaaclab
+
+# ============================================================================
+# PPO Hyperparameters (Exact Values, NOT Ranges)
+# ============================================================================
+ppo:
+  rollouts: 128
+  learning_epochs: 4
+  mini_batches: 8
+  discount_factor: 0.990  # Phase 1 initial; curriculum adjusts to 0.998
+  gae_lambda: 0.95
+  learning_rate_init: 0.0001
+  learning_rate_final: 0.00003
+  lr_scheduler: LinearLR
+  lr_scheduler_factor: 0.3
+  lr_scheduler_total_iters: 7324
+  gradient_clip_norm: 1.0
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: false
+  entropy_loss_scale: 0.01
+  value_loss_scale: 1.0
+  kl_threshold: 0.0  # Disabled
+  rewards_shaper_scale: 1.0
+  time_limit_bootstrap: true
+  state_preprocessor: RunningStandardScaler
+  value_preprocessor: RunningStandardScaler
+  random_timesteps: 0
+  learning_starts: 0
+  total_timesteps: 234375
+  ppo_updates: 1831  # = 234375 / 128
+  total_gradient_steps: 7324  # = 1831 × 4
+
+# ============================================================================
+# Training Configuration
+# ============================================================================
+training:
+  default_num_envs: 512  # CLI overridable via --num_envs
+  default_seed: 42  # CLI overridable via --seed
+  checkpoint_interval: auto  # SKRL default: every 10% of total_timesteps
+  checkpoint_saves: [actor, critic, optimizer, running_standard_scaler_stats]
+  eval_interval: null  # No separate eval; SR/CR/TO computed from training episodes
+  log_dir_pattern: "logs/skrl/{task}-AC/{run_name}/"
+
+# ============================================================================
+# Diagnostics Definitions (Exact Formulas)
+# ============================================================================
+diagnostics:
+  success_rate:
+    numerator: "count(episode_outcome == goal_reached)"
+    denominator: "count(all_completed_episodes_in_window)"
+    window: "max(2000, num_envs × 5) episodes (sliding deque)"
+    source: "termination_manager.get_term('goal_reached')"
+
+  timeout_rate:
+    numerator: "count(episode_outcome == time_out)"
+    denominator: "count(all_completed_episodes_in_window)"
+    window: "same as SR"
+    source: "episode not goal_reached and not collision"
+
+  collision_rate:
+    numerator: "count(episode_outcome == collision)"
+    denominator: "count(all_completed_episodes_in_window)"
+    window: "same as SR"
+    source: "termination_manager.get_term('collision_occurred') OR get_term('wall_collision')"
+
+  freeze_ratio:
+    numerator: "count(steps where speed < 0.02 m/s)"
+    denominator: "total_steps_in_rollout"
+    speed: "torch.norm(robot.data.root_lin_vel_w[:, :2], dim=-1)"
+
+  stuck_count:
+    definition: "count of events where speed < 0.02 m/s for >= 5 consecutive steps AND goal_dist change < 0.01m"
+    unit: "events per rollout"
+
+  retreat_ratio:
+    numerator: "count(steps where d_safe < 1.5m AND v_toward_goal < 0)"
+    denominator: "count(steps where d_safe < 1.5m)"
+    v_toward: "dot(vel_2d, normalize(goal_pos - robot_pos))"
+
+  oscillation_score:
+    definition: "fraction of 10-step windows where v_toward sign changes > 0.3 threshold"
+    window: 10
+
+  module_entropy:
+    formula: "log10(actor_grad_norm / critic_grad_norm + 1e-8)"
+    interpretation: ">1=actor overupdating, ~0=balanced, <-3=actor frozen"
+
+# ============================================================================
+# Runs Index
+# ============================================================================
+runs:
+  baseline_s1_ne512:
+    status: completed
+    seed: 1
+    num_envs: 512
+    reward_mode: current  # NavRL Dense (v_gate hard cutoff)
+    ablation: none
+    total_timesteps: 234375
+    total_env_steps: 120_000_000  # 234375 × 512
+    metrics_rows: 1831
+    has_checkpoints: true
+    has_best_model: true
+    has_tensorboard: true
+    has_csv: true
+    files:
+      train_config: runs/baseline_s1_ne512/train_config.yaml
+      env_config: runs/baseline_s1_ne512/env.yaml
+      agent_config: runs/baseline_s1_ne512/agent.yaml
+      git_rev: runs/baseline_s1_ne512/git_rev.txt
+      hardware: runs/baseline_s1_ne512/hardware.txt
+      metrics: runs/baseline_s1_ne512/logs/metrics.csv
+      tensorboard: runs/baseline_s1_ne512/logs/events.out.tfevents.*
+      best_checkpoint: runs/baseline_s1_ne512/checkpoint/best_agent.pt
+      latest_checkpoint: runs/baseline_s1_ne512/checkpoint/latest_agent.pt
+      episodes: "NOT YET COLLECTED"
+
+  abl1_vgate-floor_s1_ne512:
+    status: partial  # Only ~195 PPO updates (training interrupted/in progress)
+    seed: 1
+    num_envs: 512
+    reward_mode: current
+    ablation: v_gate_mode=floor (v_gate_floor=0.2)
+    total_timesteps: 234375
+    metrics_rows: 195
+    has_checkpoints: true  # Partial
+    has_csv: true
+    files:
+      git_rev: runs/abl1_vgate-floor_s1_ne512/git_rev.txt
+      hardware: runs/abl1_vgate-floor_s1_ne512/hardware.txt
+      metrics: runs/abl1_vgate-floor_s1_ne512/logs/metrics.csv
+      episodes: "NOT YET COLLECTED"
+
+# ============================================================================
+# Pending Runs (Not Yet Executed)
+# ============================================================================
+pending_runs:
+  - abl1_vgate-softer_s1_ne512
+  - abl2_progress-baseline_s1_ne512
+  - abl2_progress-delayed_neg_s1_ne512
+  - abl2_progress-weaken_neg_s1_ne512
+  - abl3_gap-off_s1_ne512
+  - abl3_gap-heading_w1.0_s1_ne512
+  - abl3_gap-heading_w2.0_s1_ne512
+  - abl3_gap-clearance_w1.0_s1_ne512
+  - abl3_gap-clearance_w2.0_s1_ne512
+  - abl4_shield-off_s1_ne512
+  - abl4_shield-soft_s1_ne512
+  - abl4_shield-hard_s1_ne512
+  - ground_v1_s1_ne512  # NavRL-Ground v1
+
+# ============================================================================
+# Missing Items (Explicitly Marked)
+# ============================================================================
+missing:
+  - "Episode trajectory dumps (.npz): not yet implemented in training pipeline"
+  - "Multi-seed runs (seed 2, 3): only seed=1 completed so far"
+  - "reward_breakdown.csv: per-episode reward term decomposition not yet exported"
+  - "WandB export CSV: available via wandb.ai but not bundled offline"
+  - "obs_samples.npz: observation dumps for t-SNE analysis not yet collected"

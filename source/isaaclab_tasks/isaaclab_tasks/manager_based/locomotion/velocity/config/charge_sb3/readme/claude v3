@@ -1,0 +1,391 @@
+
+目前我有 Phase2.5 的修改，新增了三個觀測維度：
+1) angular_velocity (1 dim)
+2) heading_error (2 dims)
+
+但是從 Phase2 的訓練結果來看：
+- Phase2 本身在接近目標與直線前進的行為上非常穩定且不 snake。
+- Phase2.5 加入 obstacle avoidance + 更遠目標後會 snake。
+
+我懷疑這三個新增的觀測「並非造成蛇行改善的核心因素」，而蛇行可能是由 reward conflict 而不是缺少這些觀測造成。
+
+請閱讀目前 reward 與觀測修改配置後：
+
+1) 分析新增 obs 維度對策略學習的實際貢獻。
+2) 判斷是否可以不加入這些新增觀測、僅用 reward gating / reward structure 來改善蛇行。
+3) 如果確定新增 obs 貢獻不大，請提出一個可以去除它們的替代方案（在不降低避障能力的前提下）。
+4) 提供一段可直接貼入 Change Log 的 Markdown，說明「移除新增觀測的原因、方法與預期效果」。
+
+請給出基於理論與 train/play 實驗設計的結論，而不是簡單斷言。
+
+
+  ---                                                                                       
+  Phase 2 vs Phase 2.5 根因分析                                                             
+                                                                                            
+  關鍵配置差異                                                                              
+  ┌───────────────────────┬─────────┬────────────────────┬─────────────┐                    
+  │        獎勵項         │ Phase 2 │ Phase 2.5 (修改後) │    變化     │                    
+  ├───────────────────────┼─────────┼────────────────────┼─────────────┤                    
+  │ progressive_collision │ -1.0    │ -2.5               │ ↑ 2.5x 懲罰 │                    
+  ├───────────────────────┼─────────┼────────────────────┼─────────────┤                    
+  │ distance_to_goal      │ 5.0     │ 3.0                │ ↓ 40% 獎勵  │                    
+  ├───────────────────────┼─────────┼────────────────────┼─────────────┤                    
+  │ safe_navigation       │ 0.1     │ 0.4                │ ↑ 4x 獎勵   │                    
+  ├───────────────────────┼─────────┼────────────────────┼─────────────┤                    
+  │ speed_control         │ 0.1     │ 0.4                │ ↑ 4x 影響   │                    
+  ├───────────────────────┼─────────┼────────────────────┼─────────────┤                    
+  │ forward_motion        │ -       │ 1.0                │ 新增        │                    
+  ├───────────────────────┼─────────┼────────────────────┼─────────────┤                    
+  │ alignment             │ -       │ 2.5                │ 新增        │                    
+  ├───────────────────────┼─────────┼────────────────────┼─────────────┤                    
+  │ action_smoothness     │ -       │ -0.8               │ 新增        │                    
+  └───────────────────────┴─────────┴────────────────────┴─────────────┘                    
+  關鍵發現：Phase 2 的 目標導向:避障比 = 5.0:0.1 = 50:1                                     
+  Phase 2.5 的 目標導向:避障比 = 3.0:0.4 = 7.5:1                                            
+                                                                                            
+  這個比例變化才是蛇行的根本原因！                                                          
+                                                                                            
+  ---                                                                                       
+  1. 新增 Obs 維度對策略學習的實際貢獻分析                                                  
+                                                                                            
+  理論分析                                                                                  
+  觀測: angular_velocity (ω_z)                                                              
+  理論貢獻: 提供角速度感知，可實現阻尼控制                                                  
+  實際必要性: 🟡 冗餘：goal_position_in_robot_frame 已包含朝向資訊，策略可從連續幀推斷角速度
+  ────────────────────────────────────────                                                  
+  觀測: heading_error [sin, cos]                                                            
+  理論貢獻: 直接提供朝向誤差                                                                
+  實際必要性: 🟡 冗餘：goal_position_in_robot_frame = [dx, dy] 本身就包含 heading_error =   
+    atan2(dy, dx)                                                                           
+  數學證明：現有觀測已足夠                                                                  
+                                                                                            
+  已有觀測：goal_position_in_robot_frame = [dx, dy]                                         
+                                                                                            
+  隱含的 heading_error = atan2(dy, dx)                                                      
+    - dx > 0, dy = 0 → θ = 0°（正前方）                                                     
+    - dx > 0, dy > 0 → θ > 0°（左前方）                                                     
+    - dx < 0         → θ ≈ ±180°（後方）                                                    
+                                                                                            
+  策略可學習：f([dx, dy]) → 角速度輸出                                                      
+    - 這等價於：f(heading_error) → 角速度輸出                                               
+                                                                                            
+  Phase 2 不蛇行的證據                                                                      
+                                                                                            
+  Phase 2 沒有 angular_velocity 和 heading_error 觀測，但：                                 
+  - 在接近目標時表現穩定                                                                    
+  - 不會蛇行                                                                                
+  - 直線前進行為良好                                                                        
+                                                                                            
+  結論：這證明策略已經能從 [dx, dy] 學會正確的朝向控制，新增觀測對消除蛇行的貢獻有限。      
+                                                                                            
+  新增觀測可能的負面影響                                                                    
+                                                                                            
+  1. 增加觀測維度：從 131 維增加到 134 維，增加網絡學習負擔                                 
+  2. 無法 resume：需要額外的 checkpoint 轉換步驟                                            
+  3. 潛在過擬合：更多維度可能導致策略依賴不必要的特徵                                       
+  4. 訓練不穩定：新維度初始化為 0，可能在訓練初期產生不穩定                                 
+                                                                                            
+  ---                                                                                       
+  2. 僅用 Reward 結構改善蛇行的可行性                                                       
+                                                                                            
+  蛇行的真正原因：Reward Conflict                                                           
+                                                                                            
+  Phase 2（不蛇行）的獎勵信號：                                                             
+    接近障礙物時：                                                                          
+      - progress_to_goal: +5.0 × Δdist（強烈鼓勵前進）                                      
+      - safe_navigation: +0.1 × (1 - dist/2.0)（微弱影響）                                  
+      - speed_control: -0.1 × (speed - 1.0)（微弱影響）                                     
+    → 淨效果：幾乎只有「前進」信號，策略行為明確                                            
+                                                                                            
+  Phase 2.5（蛇行）的獎勵信號：                                                             
+    接近障礙物時：                                                                          
+      - progress_to_goal: +3.0 × Δdist（中等鼓勵前進）                                      
+      - safe_navigation: +0.4 × (1 - dist/2.0)（顯著影響）                                  
+      - speed_control: +0.4 × (max_speed - speed)（顯著影響）                               
+      - progressive_collision: -2.5 × penalty（強烈懲罰）                                   
+    → 淨效果：多個信號競爭，策略「猶豫不決」→ 蛇行                                          
+                                                                                            
+  解決方案：Reward Gating                                                                   
+                                                                                            
+  核心思路：讓「目標導向」和「避障」不要同時作用，而是根據情境選擇性啟用。                  
+                                                                                            
+  # 方案 A：距離閘門（Distance-Gated Reward）                                               
+  if dist_to_obstacle > safe_threshold:                                                     
+      # 遠離障礙物：只給目標獎勵，不給避障獎勵                                              
+      reward = progress_to_goal * weight_high                                               
+  else:                                                                                     
+      # 靠近障礙物：目標獎勵降低，避障獎勵啟用                                              
+      reward = progress_to_goal * weight_low + avoidance_reward                             
+                                                                                            
+  # 方案 B：恢復 Phase 2 的權重比例                                                         
+  # 保持 目標:避障 ≥ 30:1 的比例                                                            
+  rewards = {                                                                               
+      "distance_to_goal": 5.0,  # 恢復                                                      
+      "safe_navigation": 0.15,  # 略微提高但保持很低                                        
+      "speed_control": 0.15,    # 略微提高但保持很低                                        
+      "progressive_collision": -1.5,  # 適度提高                                            
+  }                                                                                         
+                                                                                            
+  結論                                                                                      
+                                                                                            
+  ✅ 可以不加入新觀測，僅用 reward 調整來改善蛇行                                           
+                                                                                            
+  理由：                                                                                    
+  1. Phase 2 已證明現有觀測足夠                                                             
+  2. 蛇行的根本原因是 reward conflict，不是觀測不足                                         
+  3. 調整權重比例可直接消除蛇行                                                             
+                                                                                            
+  ---                                                                                       
+  3. 移除新增觀測的替代方案                                                                 
+                                                                                            
+  方案：調整 Reward 權重（不改變觀測維度）                                                  
+                                                                                            
+  修改 charge_env_cfg_v2_5.py                                                               
+                                                                                            
+  @configclass                                                                              
+  class RewardsCfgV2_5_NoNewObs(RewardsCfgV2):                                              
+      """Phase 2.5 獎勵配置（無新增觀測版本）                                               
+                                                                                            
+      蛇行修正策略：恢復 Phase 2 的 目標:避障 權重比例                                      
+      而非新增觀測維度。                                                                    
+                                                                                            
+      關鍵洞察：                                                                            
+      - Phase 2 的 目標:避障比 = 50:1，不蛇行                                               
+      - Phase 2.5 原版的 目標:避障比 = 7.5:1，蛇行                                          
+      - 修正版的 目標:避障比 = 25:1，平衡安全與效率                                         
+      """                                                                                   
+                                                                                            
+      # ------------------------------------------------------------------------            
+      # 核心調整：恢復 Phase 2 的強目標導向                                                 
+      # ------------------------------------------------------------------------            
+      distance_to_goal = RewTerm(                                                           
+          func=progress_to_goal,                                                            
+          weight=5.0,  # 恢復 Phase 2 的權重                                                
+          params={"asset_cfg": SceneEntityCfg("robot")},                                    
+      )                                                                                     
+                                                                                            
+      # ------------------------------------------------------------------------            
+      # 避障獎勵：適度提高，但保持低比例                                                    
+      # ------------------------------------------------------------------------            
+      progressive_collision = RewTerm(                                                      
+          func=progressive_collision_penalty,                                               
+          weight=-1.5,  # 適度提高（-1.0 → -1.5），但不過度                                 
+          params={                                                                          
+              "sensor_cfg": SceneEntityCfg("lidar"),                                        
+              "safe_distance": 1.5,                                                         
+              "danger_distance": 1.0,                                                       
+              "collision_distance": 0.6,                                                    
+          },                                                                                
+      )                                                                                     
+                                                                                            
+      safe_navigation = RewTerm(                                                            
+          func=safe_navigation_bonus,                                                       
+          weight=0.2,  # 適度提高（0.1 → 0.2），但保持低                                    
+          params={                                                                          
+              "asset_cfg": SceneEntityCfg("robot"),                                         
+              "sensor_cfg": SceneEntityCfg("lidar"),                                        
+              "comfort_distance": 2.0,                                                      
+          },                                                                                
+      )                                                                                     
+                                                                                            
+      speed_control_near_obstacles = RewTerm(                                               
+          func=speed_control_near_obstacles,                                                
+          weight=0.2,  # 適度提高（0.1 → 0.2），但保持低                                    
+          params={                                                                          
+              "asset_cfg": SceneEntityCfg("robot"),                                         
+              "sensor_cfg": SceneEntityCfg("lidar"),                                        
+              "warning_distance": 1.5,                                                      
+              "max_safe_speed": 1.0,  # 恢復正常速度                                        
+          },                                                                                
+      )                                                                                     
+                                                                                            
+      # ------------------------------------------------------------------------            
+      # 保留 Phase 2.5 的其他改進                                                           
+      # ------------------------------------------------------------------------            
+      reaching_goal = RewTerm(                                                              
+          func=reaching_goal,                                                               
+          weight=500,                                                                       
+          params={                                                                          
+              "asset_cfg": SceneEntityCfg("robot"),                                         
+              "threshold": GOAL_REACH_THRESHOLD,                                            
+              "body_radius": ROBOT_BODY_RADIUS,                                             
+          },                                                                                
+      )                                                                                     
+                                                                                            
+      forward_motion = RewTerm(                                                             
+          func=forward_motion_reward,                                                       
+          weight=1.0,                                                                       
+          params={"asset_cfg": SceneEntityCfg("robot")},                                    
+      )                                                                                     
+                                                                                            
+      tipped_over_penalty = RewTerm(                                                        
+          func=robot_tipped_over,                                                           
+          weight=-200.0,                                                                    
+          params={"asset_cfg": SceneEntityCfg("robot")},                                    
+      )                                                                                     
+                                                                                            
+      # ❌ 移除 alignment 和 action_smoothness（因為不需要新觀測）                          
+                                                                                            
+  修改觀測配置（恢復原有維度）                                                              
+                                                                                            
+  @configclass                                                                              
+  class ObservationsCfgV2_5_NoNewObs(ObservationsCfgV2):                                    
+      """觀測配置（無新增維度版本）                                                         
+                                                                                            
+      繼承 Phase 2 的觀測配置，不新增角速度和朝向誤差觀測。                                 
+      這樣可以直接從 Phase 2 checkpoint resume。                                            
+      """                                                                                   
+      pass  # 直接繼承 Phase 2，不修改                                                      
+                                                                                            
+  權重比例對照表                                                                            
+  配置版本: Phase 2                                                                         
+  distance_to_goal: 5.0                                                                     
+  safe_nav: 0.1                                                                             
+  speed_ctrl: 0.1                                                                           
+  目標:避障比: 50:1                                                                         
+  預期行為: 不蛇行 ✅                                                                       
+  ────────────────────────────────────────                                                  
+  配置版本: Phase 2.5 原版                                                                  
+  distance_to_goal: 3.0                                                                     
+  safe_nav: 0.4                                                                             
+  speed_ctrl: 0.4                                                                           
+  目標:避障比: 7.5:1                                                                        
+  預期行為: 蛇行 ❌                                                                         
+  ────────────────────────────────────────                                                  
+  配置版本: Phase 2.5 修正版                                                                
+  distance_to_goal: 5.0                                                                     
+  safe_nav: 0.2                                                                             
+  speed_ctrl: 0.2                                                                           
+  目標:避障比: 25:1                                                                         
+  預期行為: 預期不蛇行 ✅                                                                   
+  實驗設計：驗證假設                                                                        
+  ┌──────────┬─────────────┬────────────────────────┬────────────────────────┐              
+  │   Run    │    觀測     │     Reward 權重比      │        預期結果        │              
+  ├──────────┼─────────────┼────────────────────────┼────────────────────────┤              
+  │ Baseline │ Phase 2 obs │ 50:1                   │ 不蛇行（對照）         │              
+  ├──────────┼─────────────┼────────────────────────┼────────────────────────┤              
+  │ Run A    │ Phase 2 obs │ 7.5:1 (Phase 2.5 原版) │ 蛇行                   │              
+  ├──────────┼─────────────┼────────────────────────┼────────────────────────┤              
+  │ Run B    │ Phase 2 obs │ 25:1 (修正版)          │ 不蛇行                 │              
+  ├──────────┼─────────────┼────────────────────────┼────────────────────────┤              
+  │ Run C    │ +3 dim obs  │ 25:1                   │ 不蛇行（驗證觀測貢獻） │              
+  └──────────┴─────────────┴────────────────────────┴────────────────────────┘              
+  如果 Run B 不蛇行而 Run A 蛇行，則證明 reward conflict 是根因，新觀測不必要。             
+                                                                                            
+  ---                                                                                       
+  4. Change Log Markdown                                                                    
+                                                                                            
+  # Charge Navigation - Phase 2.5 蛇行修正（觀測維度回滾版）                                
+                                                                                            
+  ## [v2.5.2] - 2024-XX-XX - 移除新增觀測維度                                               
+                                                                                            
+  ### 問題分析                                                                              
+                                                                                            
+  | 現象 | 原始假設 | 修正後結論 |                                                          
+  |------|---------|-----------|                                                            
+  | Phase 2.5 出現蛇行 | 缺少角速度/朝向觀測 | ❌ 非根本原因 |                              
+  | Phase 2 不蛇行 | - | ✅ 關鍵證據 |                                                      
+                                                                                            
+  **根本原因**：Reward Conflict（目標導向 vs 避障獎勵的權重失衡）                           
+                                                                                            
+  | 配置 | 目標:避障比 | 行為 |                                                             
+  |-----|------------|------|                                                               
+  | Phase 2 | 50:1 | 不蛇行 |                                                               
+  | Phase 2.5 (v2.5.1) | 7.5:1 | 蛇行 |                                                     
+                                                                                            
+  ### 移除的功能                                                                            
+                                                                                            
+  | 項目 | 原因 |                                                                           
+  |------|------|                                                                           
+  | `angular_velocity` 觀測 | 冗餘：策略可從 goal_position 推斷 |                           
+  | `heading_error` 觀測 | 冗餘：goal_position = [dx, dy] 已隱含 heading_error |            
+  | `alignment_reward` | 改用權重調整替代 |                                                 
+  | `action_rate_penalty` | 改用權重調整替代 |                                              
+                                                                                            
+  ### 修改內容                                                                              
+                                                                                            
+  #### 獎勵權重調整                                                                         
+                                                                                            
+  | 獎勵項 | v2.5.1 | v2.5.2 | 變更原因 |                                                   
+  |-------|--------|--------|---------|                                                     
+  | `distance_to_goal` | 3.0 | **5.0** | 恢復強目標導向 |                                   
+  | `safe_navigation` | 0.4 | **0.2** | 降低避障干擾 |                                      
+  | `speed_control` | 0.4 | **0.2** | 降低速度限制 |                                        
+  | `progressive_collision` | -2.5 | **-1.5** | 適度碰撞懲罰 |                              
+  | `alignment` | 2.5 | **移除** | 不需要 |                                                 
+  | `action_smoothness` | -0.8 | **移除** | 不需要 |                                        
+                                                                                            
+  #### 觀測配置                                                                             
+                                                                                            
+  v2.5.1: 131 + 3 = 134 dims（需要 checkpoint 轉換）                                        
+  v2.5.2: 131 dims（可直接 resume Phase 2）                                                 
+                                                                                            
+  ### 修改的檔案                                                                            
+                                                                                            
+  cfg/charge_env_cfg_v2_5.py   # 移除新觀測，調整權重                                       
+                                                                                            
+  ### 移除的檔案/函數（保留但不使用）                                                       
+                                                                                            
+  mdp/observations/functions.py:base_angular_velocity_z()    # 保留，不在 v2.5 使用         
+  mdp/observations/functions.py:heading_error_to_goal()      # 保留，不在 v2.5 使用         
+  mdp/rewards/motion_rewards.py:action_rate_penalty()        # 保留，不在 v2.5 使用         
+                                                                                            
+  ### 預期效果                                                                              
+                                                                                            
+  | 指標 | v2.5.1 預期 | v2.5.2 預期 |                                                      
+  |-----|------------|------------|                                                         
+  | 蛇行幅度 | 改善但可能殘餘 | 消除 |                                                      
+  | 路徑效率 | ~1.2 | ~1.15 |                                                               
+  | 可 resume Phase 2 | ❌ | ✅ |                                                           
+  | 訓練穩定性 | 新維度可能不穩 | 與 Phase 2 相同 |                                         
+                                                                                            
+  ### 風險點                                                                                
+                                                                                            
+  | 風險 | 等級 | 緩解措施 |                                                                
+  |-----|------|---------|                                                                  
+  | 避障能力可能下降 | 🟡 中 | 監控 collision_rate，必要時微調權重 |                        
+  | 假設可能錯誤（觀測仍有貢獻） | 🟡 中 | 執行 Run A/B/C 對照實驗驗證 |                    
+                                                                                            
+  ### 驗證結果                                                                              
+                                                                                            
+  | 指標 | 預期值 | 實際值 | 狀態 |                                                         
+  |-----|-------|-------|------|                                                            
+  | 蛇行消除 | Yes | ___ | ⬜ |                                                             
+  | 可 resume Phase 2 | Yes | ___ | ⬜ |                                                    
+  | collision_rate | < 20% | ___ | ⬜ |                                                     
+  | goal_reached_rate | > 75% | ___ | ⬜ |                                                  
+  | 路徑效率 | < 1.2 | ___ | ⬜ |                                                           
+                                                                                            
+  ### 使用說明                                                                              
+                                                                                            
+  ```bash                                                                                   
+  # 直接從 Phase 2 checkpoint 繼續訓練（無需轉換）                                          
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \                         
+      --task Isaac-Navigation-Charge-v2.5 \                                                 
+      --num_envs 128 \                                                                      
+      --resume \                                                                            
+      --load_run "logs/rsl_rl/charge_navigation_phase2/<run_name>"                          
+                                                                                            
+  設計決策記錄                                                                              
+                                                                                            
+  為什麼移除新增觀測而非調整權重後保留？                                                    
+                                                                                            
+  1. Occam's Razor：最簡單的解決方案通常是最好的                                            
+  2. Phase 2 已證明：現有觀測足夠完成任務                                                   
+  3. 維護成本：更少的觀測維度 = 更少的除錯點                                                
+  4. Resume 便利性：無需 checkpoint 轉換                                                    
+                                                                                            
+  如果未來需要更精確的控制：                                                                
+  - 可在 Phase 3 重新引入這些觀測                                                           
+  - 屆時可有更多數據驗證其貢獻                                                              
+                                                                                            
+  ---                                                                                       
+                                                                                            
+  ## 總結                                                                                   
+                                                                                            
+  | 結論 | 說明 |                                                                           
+  |------|------|                                                                           
+  | 新增 obs 貢獻 | **有限**：Phase 2 已證明現有觀測足夠 |                                  
+  | 蛇行根本原因 | **Reward Conflict**：目標:避障比從 50:1 降到 7.5:1 |                     
+  | 建議方案 | **移除新增觀測，恢復權重比例** |                                             
+  | 可 resume Phase 2 | ✅ 是（無需 checkpoint 轉換） |   

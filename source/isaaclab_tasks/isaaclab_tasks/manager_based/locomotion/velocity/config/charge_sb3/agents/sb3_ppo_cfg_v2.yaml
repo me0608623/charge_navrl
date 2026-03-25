@@ -1,0 +1,86 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ==============================================================================
+# Stable Baselines 3 PPO 配置 for Charge 導航任務 - Phase 2 (5 個障礙物）
+# ==============================================================================
+# 此配置專為 Phase 2 設計，處理更多障礙物，適配更穩定的訓練參數
+# 適配觀測空間：131 維（lidar 72 + speed 2 + goal_pos 2 + goal_dist 1 + time 1 + alive 1 + obstacles 50 + actions 2）
+# 適配動作空間：2 維（linear_speed, angular_speed）範圍 [-1, 1]
+# ==============================================================================
+
+# ==================== 基礎配置 ====================
+seed: 42
+n_timesteps: !!float 3e7
+# 總訓練步數：30,000,000 步（Phase 2 需要更多訓練）
+# Phase 2 特點：障礙物更多（5 個），需要更多時間學習避障策略
+
+policy: 'MlpPolicy'
+
+# ==================== PPO 算法參數 ====================
+n_steps: 24
+n_minibatches: 4
+gae_lambda: 0.95
+gamma: 0.99
+n_epochs: 6
+vf_coef: 1.0
+# Phase 2：增加到 6 個 epoch（更多訓練次數，更穩定）
+
+ent_coef: 0.002
+# 🔥 Phase 2：適度熵係數（已調整：0.0005 → 0.002）
+# 原因：導航+避障需要持續探索，避免陷入局部最優路徑
+# 說明：
+#   - 0.002 提供足夠探索，同時允許收斂
+#   - 障礙物配置隨機，需要嘗試不同路徑
+
+learning_rate: !!float 5e-5
+# Phase 2：降低學習率（從 1e-4 到 5e-5）
+# 原因：Phase 2 環境更複雜，需要更穩定的訓練
+
+clip_range: !!float 0.15
+# Phase 2：收緊 clipping（從 0.2 到 0.15）
+# 原因：更保守的更新，避免已學會的策略被破壞
+
+# ==================== 策略網絡架構 ====================
+policy_kwargs:
+  activation_fn: 'nn.ELU'
+  net_arch: [512, 256, 128]
+  optimizer_kwargs:
+    eps: !!float 1e-8
+  ortho_init: False
+
+# ==================== 梯度裁剪 ====================
+max_grad_norm: 0.8
+# Phase 2：收緊梯度裁剪（從 1.0 到 0.8）
+# 原因：更激進的梯度控制，防止策略崩潰
+
+# ==================== 觀測歸一化 ====================
+normalize_input: True
+normalize_value: True
+# Phase 2：啟用價值歸一化（從 False 到 True）
+# 原因：更複雜的環境，價值函數變化更大，需要歸一化
+clip_obs: 10.0
+
+# ==================== Phase 2 特定配置 ====================
+# Phase 2 訓練建議：
+# 1. 預期成功率：> 60%（障礙物從 3 增加到 5）
+# 2. 預期訓練時間：4-6 小時（RTX 3090）
+# 3. 關鍵監控指標：
+#    - success_rate：應該逐漸上升
+#    - collision_rate：應該逐漸下降
+#    - progressive_collision_avg：平均漸進式懲罰（應該下降）
+
+# 常見問題和解決方案：
+# 問題：成功率停留在 30-40%
+# 解決方案：
+#   1. 增加訓練步數到 5e7
+#   2. 降低學習率到 3e-5
+#   3. 增加 ent_coef 到 0.001（更多探索）
+#
+# 問題：策略崩潰（獎驟突然下降）
+# 解決方案：
+#   1. 收緊 clip_range 到 0.1
+#   2. 收緊 max_grad_norm 到 0.5
+#   3. 從 Phase 1 的檢查點恢復訓練

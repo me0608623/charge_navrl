@@ -1,0 +1,20 @@
+aitstar_path_planner:
+  ros__parameters:
+    # Planning parameters
+    max_iterations: 5000          # Maximum iterations for AIT* algorithm
+    max_batch_size: 100           # Number of samples per batch
+    goal_radius: 0.5              # Radius for goal region (meters)
+    rewire_radius: 2.0            # Maximum radius for rewiring (meters)
+    goal_bias: 0.05               # Probability of sampling goal directly (0.0-1.0)
+    
+    # AIT* specific parameters
+    adaptive_factor: 1.2          # Adaptive factor for informed set scaling
+    min_informed_ratio: 0.1       # Minimum ratio of informed set to total space (0.0-1.0)
+    
+    # Frame parameters
+    map_frame: "map"               # Map frame ID
+    
+    # Performance tuning
+    # AIT* adaptively adjusts the informed set based on search progress
+    # Increase adaptive_factor for faster convergence (but may miss optimal solutions)
+    # Decrease min_informed_ratio for more exploration (but slower convergence)

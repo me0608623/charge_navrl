@@ -1,0 +1,250 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ==============================================================================
+# Stable Baselines 3 PPO 配置 for Charge 導航任務
+# ==============================================================================
+# 此配置專為 Charge 機器人的導航任務設計，使用 PPO 算法進行強化學習
+# 適配觀測空間：131 維（lidar 72 + speed 2 + goal_pos 2 + goal_dist 1 + time 1 + alive 1 + obstacles 50 + actions 2）
+# 適配動作空間：2 維（linear_speed, angular_speed）範圍 [-1, 1]
+# ==============================================================================
+
+# ==================== 基礎配置 ====================
+seed: 42
+# 隨機種子：確保實驗可重現性
+# 建議：不同實驗使用不同種子（如 42, 123, 456）
+
+n_timesteps: !!float 5e7
+# 總訓練步數：50,000,000 步
+# 計算公式：num_envs * steps_per_env * num_iterations
+# 例如：128 envs * 24 steps * 16300 iterations ≈ 50M steps
+# 建議：
+#   - 快速測試：1e6 (1M steps)
+#   - 正式訓練：5e7 (50M steps)
+#   - 長期訓練：1e8 (100M steps)
+
+policy: 'MlpPolicy'
+# 策略網絡架構類型
+# 選項：
+#   - 'MlpPolicy': 多層感知機（適合高維觀測，如 Charge 的 131 維觀測）
+#   - 'CnnPolicy': 卷積神經網絡（適合圖像輸入）
+#   - 'MultiInputPolicy': 多輸入網絡（適合混合輸入類型）
+
+# ==================== PPO 算法參數 ====================
+n_steps: 24
+# 每次更新的步數（每個環境）
+# 說明：收集 n_steps 步經驗後進行一次策略更新
+# 總經驗量 = n_steps * num_envs
+# 例如：24 * 128 = 3,072 步/更新
+# 建議：
+#   - 導航任務：24（平衡更新頻率和樣本效率）
+#   - 需要更快更新：16（更頻繁但樣本效率較低）
+#   - 需要更高效率：32（樣本效率更高但更新較慢）
+
+n_minibatches: 4
+# 每次更新的 minibatch 數量
+# batch_size = (n_steps * num_envs) / n_minibatches
+# 例如：(24 * 128) / 4 = 768 samples/batch
+# 建議：
+#   - GPU 內存充足：4-8（更大 batch size 更穩定）
+#   - GPU 內存有限：2-4（較小 batch size 減少內存使用）
+
+gae_lambda: 0.95
+# GAE (Generalized Advantage Estimation) 的 lambda 參數
+# 範圍：[0.0, 1.0]
+# 作用：平衡偏差和方差
+#   - 1.0 = Monte Carlo（無偏差，高方差）
+#   - 0.0 = TD(0)（有偏差，低方差）
+# 建議：0.95（標準值，適合大多數任務）
+
+gamma: 0.99
+# 折扣因子（Discount factor）
+# 範圍：[0.0, 1.0]
+# 作用：計算未來獎勵的重要性
+#   - 0.99 = 非常看重長期獎勵（適合導航任務）
+#   - 0.95 = 中等看重長期獎勵
+#   - 0.90 = 較少看重長期獎勵
+# 建議：0.99（導航任務通常需要長期規劃）
+
+n_epochs: 5
+# 每次策略更新的訓練 epoch 數
+# 說明：每收集一批數據後，用這批數據訓練策略網絡 n_epochs 次
+# 建議：
+#   - 標準：5（經驗證實的穩定值）
+#   - 快速訓練：3（更快但可能收斂較慢）
+#   - 更穩定：10（更穩定但訓練更慢）
+
+vf_coef: 1.0
+# 價值函數損失的權重
+
+ent_coef: 0.003
+# 熵係數（Entropy coefficient）🔥 已調整：0.001 → 0.003
+# 作用：鼓勵探索（防止過早收斂到次優策略）
+# 說明：
+#   - 較大值（0.01）：大量探索，可能更難收斂
+#   - 中等值（0.003）：適度探索，適合導航+避障任務 ⭐
+#   - 較小值（0.001）：較少探索，更快收斂
+#   - 0.0：無探索純利用（可能陷入局部最優）
+# 建議：0.003（導航任務需要持續探索不同路徑）
+
+learning_rate: !!float 1e-4
+# 學習率（Learning rate）
+# 說明：控制策略更新的幅度
+# 建議：
+#   - 1e-3：快速學習（可能不穩定）
+#   - 1e-4：標準值（平衡速度和穩定性）
+#   - 5e-5：慢速學習（更穩定，適合後期微調）
+#   - 1e-5：非常慢（適合最後階段的微調）
+
+clip_range: !!float 0.2
+# PPO clipping 範圍
+# 範圍：(0, 1.0)
+# 作用：限制策略更新的幅度（防止崩潰）
+# 說明：
+#   - 0.2：標準值（平衡探索和利用）
+#   - 0.1：更保守的更新（適合後期收斂）
+#   - 0.3：更激進的更新（可能更快但更不穩定）
+# 建議：0.2（導航任務的標準值）
+
+# ==================== 策略網絡架構 ====================
+policy_kwargs:
+  # 策略網絡的額外參數
+
+  activation_fn: 'nn.ELU'
+  # 激活函數類型
+  # 選項：
+  #   - 'nn.Tanh': Tanh 激活函數（輸出範圍 [-1, 1]）
+  #   - 'nn.ReLU': ReLU 激活函數（輸出範圍 [0, +∞)）
+  #   - 'nn.ELU': ELU 激活函數（平滑 ReLU，避免死亡神經元）
+  # 建議：'nn.ELU'（導航任務的標準選擇）
+
+  net_arch: [512, 256, 128]
+  # 策略和價值網絡的隱藏層架構
+  # 格式：[layer1_size, layer2_size, layer3_size, ...]
+  # 說明：共享這些層，然後分離出 policy 和 value head
+  # 輸入：131 維（Charge 觀測空間）
+  # 隱藏層：512 → 256 → 128（逐層降維）
+  # 輸出：policy (2維動作) + value (1維價值)
+  # 建議：
+  #   - 小模型：[256, 128]（更快訓練，可能欠擬合）
+  #   - 中等模型：[512, 256, 128]（標準，平衡）
+  #   - 大模型：[1024, 512, 256]（更強表達能力，可能過擬合）
+
+  optimizer_kwargs:
+    # 優化器的額外參數
+
+    eps: !!float 1e-8
+    # Adam 優化器的 epsilon（數值穩定性）
+    # 說明：防止除以零，非常小的值
+    # 建議：1e-8（標準值，不需要修改）
+
+  ortho_init: False
+  # 是否使用正交初始化（Orthogonal initialization）
+  # 說明：正交初始化可以幫助訓練穩定性
+  # 建議：False（導航任務通常不需要）
+
+# ==================== 梯度裁剪 ====================
+max_grad_norm: 1.0
+# 梯度裁剪的最大範數（Maximum gradient norm）
+# 作用：防止梯度爆炸（保持訓練穩定性）
+# 說明：
+#   - 1.0：標準值（適合大多數任務）
+#   - 0.5：更激進的裁剪（更穩定但可能限制學習）
+#   - 2.0：更寬鬆的裁剪（可能更快但不穩定）
+# 建議：1.0（導航任務的標準值）
+
+# ==================== 觀測歸一化 ====================
+normalize_input: True
+# 是否歸一化觀測（Normalize input）
+# 作用：將觀測值縮放到 [-1, 1] 範圍，加速訓練
+# 說明：
+#   - True：啟用歸一化（推薦，加速收斂）
+#   - False：不歸一化（可能訓練更慢）
+# 建議：True（導航任務觀測範圍大，需要歸一化）
+
+normalize_value: False
+# 是否歸一化價值估計（Normalize value）
+# 作用：將價值估計標準化，提高穩定性
+# 說明：
+#   - True：啟用價值歸一化（更穩定）
+#   - False：不歸一化（訓練更快）
+# 建議：False（導航任務通常不需要）
+
+clip_obs: 10.0
+# 觀測裁剪閾值（Clip observations）
+# 作用：將歸一化後的觀測裁剪到 [-clip_obs, clip_obs]
+# 說明：防止極端值影響訓練
+# 建議：10.0（標準值）
+
+# ==================== 高級配置 ====================
+# (以下為可選的高級配置，通常不需要修改)
+
+# batch_size: null
+# 自動計算的 batch_size（無需手動設置）
+# 計算公式：(n_steps * num_envs) / n_minibatches
+
+# learning_rate_schedule: 'linear'
+# 學習率調度策略（Learning rate schedule）
+# 選項：'constant', 'linear', 'cosine'
+# 說明：如何調整學習率隨訓練進度變化
+# 建議：不設置（使用默認值）
+
+# use_sde: False
+# 是否使用狀態依賴探索（State-Dependent Exploration）
+# 說明：Gaussian policy 的變體，可能提高樣本效率
+# 建議：False（導航任務通常不需要）
+
+# sde_sample_freq: -1
+# SDE 採樣頻率（如果使用 SDE）
+# 建議：不設置
+
+# target_kl: null
+# 目標 KL 散度（Target KL divergence）
+# 說明：如果策略改變太大，提前停止訓練
+# 建議：不設置（使用默認值）
+
+# tensorboard_log: null
+# TensorBoard 日誌路徑（由訓練腳本自動設置）
+
+# verbose: 1
+# 日誌詳細程度
+# 選項：0, 1, 2
+# 說明：
+#   - 0：無輸出
+#   - 1：進度條
+#   - 2：詳細日誌
+# 建議：1（標準值）
+
+# seed: null
+# 隨機種子（在最上面已設置為 42）
+
+# device: 'auto'
+# 訓練設備（'auto', 'cuda', 'cpu'）
+# 說明：'auto' 自動選擇 GPU（如果可用）
+# 建議：'auto'（由訓練腳本設置）
+
+# ==================== 訓練參考 ====================
+# 預期訓練時間（GPU：NVIDIA RTX 3090）：
+#   - num_envs = 128, n_steps = 24
+#   - 總步數 = 50,000,000
+#   - 預估時間 ≈ 6-8 小時
+#
+# 訓練命令：
+#   ./isaaclab.sh -p scripts/reinforcement_learning/sb3/train_charge.py \
+#       --task Isaac-Navigation-Charge-v1 \
+#       --num_envs 128 \
+#       --headless \
+#       --agent sb3_cfg_entry_point
+#
+# 監控訓練：
+#   tensorboard --logdir logs/sb3/Isaac-Navigation-Charge-v1/
+#
+# 關鍵監控指標：
+#   - ep_rew_mean：平均 episode 獎勵（應逐漸上升）
+#   - ep_len_mean：平均 episode 長度（應逐漸下降或穩定）
+#   - success_rate：成功率（應逐漸上升，目標 > 0.8）
+#   - loss/value_function：價值函數損失（應逐漸下降）
+#   - clip_fraction：被裁剪的比例（應 < 0.2，表示更新幅度合適）
+#   - entropy_loss：熵損失（應逐漸下降，表示探索減少）

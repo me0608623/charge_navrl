@@ -1,0 +1,485 @@
+  值域分析                                                                                  
+  ┌──────────┬──────┬────────┬───────────────────────┬────────────┐                         
+  │   狀態   │  θ   │ cos(θ) │ alignment_reward_base │    備註    │                         
+  ├──────────┼──────┼────────┼───────────────────────┼────────────┤                         
+  │ 正對     │ 0°   │ 1.0    │ 1.0                   │ 最大獎勵   │                         
+  ├──────────┼──────┼────────┼───────────────────────┼────────────┤                         
+  │ 偏離 15° │ 15°  │ 0.966  │ 0.966                 │ 仍接近最大 │                         
+  ├──────────┼──────┼────────┼───────────────────────┼────────────┤                         
+  │ 偏離 30° │ 30°  │ 0.866  │ 0.866                 │ 明顯下降   │                         
+  ├──────────┼──────┼────────┼───────────────────────┼────────────┤                         
+  │ 側對     │ 90°  │ 0.0    │ 0.0                   │ 零獎勵     │                         
+  ├──────────┼──────┼────────┼───────────────────────┼────────────┤                         
+  │ 背對     │ 180° │ -1.0   │ 0.0                   │ 被 clamp   │                         
+  └──────────┴──────┴────────┴───────────────────────┴────────────┘                         
+  最終值域：[-10, 1]（clamp 後），正常情況 [0, 1]                                           
+                                                                                            
+  梯度行為分析（關鍵問題）                                                                  
+                                                                                            
+  d(cos θ)/dθ = -sin(θ)                                                                     
+  ┌─────┬────────┬──────────┬───────────────┐                                               
+  │  θ  │ sin(θ) │ 梯度大小 │     問題      │                                               
+  ├─────┼────────┼──────────┼───────────────┤                                               
+  │ 0°  │ 0.0    │ ≈ 0      │ ⚠️ 梯度消失！ │                                               
+  ├─────┼────────┼──────────┼───────────────┤                                               
+  │ 5°  │ 0.087  │ 0.087    │ 非常小        │                                               
+  ├─────┼────────┼──────────┼───────────────┤                                               
+  │ 15° │ 0.259  │ 0.259    │ 較小          │                                               
+  ├─────┼────────┼──────────┼───────────────┤                                               
+  │ 45° │ 0.707  │ 0.707    │ 較大          │                                               
+  ├─────┼────────┼──────────┼───────────────┤                                               
+  │ 90° │ 1.0    │ 1.0      │ 最大          │                                               
+  └─────┴────────┴──────────┴───────────────┘                                               
+  ⚠️ 蛇行風險評估                                                                           
+                                                                                            
+  問題：cos(θ) 在小角度時梯度接近零（vanishing gradient）                                   
+                                                                                            
+  後果：                                                                                    
+  1. 當 θ < 10° 時，獎勵變化 Δr < 0.015，策略難以學到精確對準                               
+  2. 小角度修正時，獎勵信號太弱，可能導致 residual oscillation（殘餘擺動）                  
+  3. 策略可能學會「差不多對準就衝」，而非精確對準                                           
+                                                                                            
+  建議修正：使用角度的平方懲罰而非純 cos                                                    
+                                                                                            
+  # 改進版：混合 cos + 角度平方項                                                           
+  heading_error = atan2(sin(θ), cos(θ))  # 限制在 [-π, π]                                   
+  alignment_reward = cos(θ) - 0.5 * (heading_error / π)²                                    
+                                                                                            
+  這樣在小角度時仍有非零梯度（θ² 的導數是 2θ）。                                            
+                                                                                            
+  ---                                                                                       
+  2. action_rate_penalty 值域分析                                                           
+                                                                                            
+  數學形式                                                                                  
+                                                                                            
+  penalty = Δa₀² + angular_weight × Δa₁²                                                    
+          = Δa₀² + 2.0 × Δa₁²                                                               
+                                                                                            
+  其中 action ∈ [-1, 1]，因此 Δa ∈ [-2, 2]                                                  
+                                                                                            
+  Raw 值域表                                                                                
+  ┌──────────────────┬──────────────┬──────────────┬───────────────────┬─────────────────┐  
+  │     行為模式     │ Δa₀ (線速度) │ Δa₁ (角速度) │    penalty_raw    │ × weight (-0.8) │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 完全靜止         │ 0.0          │ 0.0          │ 0.0               │ 0.0             │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 平滑控制         │ 0.05         │ 0.05         │ 0.0075            │ -0.006          │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 正常控制         │ 0.1          │ 0.1          │ 0.03              │ -0.024          │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 中等變化         │ 0.2          │ 0.3          │ 0.22              │ -0.176          │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 較大變化         │ 0.3          │ 0.5          │ 0.59              │ -0.472          │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 劇烈變化         │ 0.5          │ 0.8          │ 1.53              │ -1.224          │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 極端（符號翻轉） │ 1.0          │ 1.5          │ 5.5               │ -4.4            │  
+  ├──────────────────┼──────────────┼──────────────┼───────────────────┼─────────────────┤  
+  │ 最大理論值       │ 2.0          │ 2.0          │ 12.0 → clamp 10.0 │ -8.0            │  
+  └──────────────────┴──────────────┴──────────────┴───────────────────┴─────────────────┘  
+  建議 W&B Logging Metrics                                                                  
+                                                                                            
+  需要 log 以下 raw metrics 來校正權重：                                                    
+                                                                                            
+  # 在 reward 計算後添加 logging                                                            
+  metrics_to_log = {                                                                        
+      # action_rate_penalty 相關                                                            
+      "debug/action_rate_penalty_raw": penalty.mean(),  # raw 值（未乘權重）                
+      "debug/action_diff_linear": action_diff[:, 0].abs().mean(),                           
+      "debug/action_diff_angular": action_diff[:, 1].abs().mean(),                          
+      "debug/action_diff_angular_sq": (action_diff[:, 1] ** 2).mean(),                      
+                                                                                            
+      # alignment 相關                                                                      
+      "debug/alignment_cosine_raw": alignment_cosine.mean(),                                
+      "debug/alignment_reward_base": alignment_reward_base.mean(),                          
+      "debug/heading_error_deg": torch.rad2deg(heading_error).abs().mean(),                 
+                                                                                            
+      # 行為指標                                                                            
+      "debug/angular_velocity_abs": omega_z.abs().mean(),  # 絕對角速度                     
+      "debug/angular_velocity_sign_changes": sign_change_count,  # 符號變化次數             
+  }                                                                                         
+                                                                                            
+  權重校正建議                                                                              
+                                                                                            
+  目標：正常控制時 penalty 約佔總 reward 的 5-10%                                           
+                                                                                            
+  - 如果 action_diff_angular 均值 > 0.3 且蛇行持續 → 增大權重到 -1.2                        
+  - 如果 action_diff_angular 均值 < 0.1 且行為過於僵硬 → 減小權重到 -0.5                    
+  - 當前 -0.8 是中等值，需要根據實際數據調整                                                
+                                                                                            
+  ---                                                                                       
+  3. 最小變更實驗設計（Run A/B/C）                                                          
+                                                                                            
+  實驗矩陣                                                                                  
+  ┌────────────┬───────────────────────┬──────────────────────┬────────────────────────────┐
+  │    Run     │ 新 Reward (alignment  │    新 Obs (ω_z +     │            說明            │
+  │            │     + smoothness)     │    heading_error)    │                            │
+  ├────────────┼───────────────────────┼──────────────────────┼────────────────────────────┤
+  │ A          │ ❌                    │ ✅                   │ 僅新增觀測（baseline       │
+  │            │                       │                      │ reward）                   │
+  ├────────────┼───────────────────────┼──────────────────────┼────────────────────────────┤
+  │ B          │ ✅                    │ ❌                   │ 僅新增獎勵（原觀測維度）   │
+  ├────────────┼───────────────────────┼──────────────────────┼────────────────────────────┤
+  │ C          │ ✅                    │ ✅                   │ 完整修改                   │
+  ├────────────┼───────────────────────┼──────────────────────┼────────────────────────────┤
+  │ (baseline) │ ❌                    │ ❌                   │ 當前 Phase 2.5（對照組）   │
+  └────────────┴───────────────────────┴──────────────────────┴────────────────────────────┘
+  Run A：僅新增觀測                                                                         
+                                                                                            
+  修改：                                                                                    
+  - 新增 angular_velocity, heading_error 觀測                                               
+  - 獎勵保持原有（無 alignment, 無 action_smoothness）                                      
+                                                                                            
+  預期曲線：                                                                                
+  - entropy：可能略降（更多信息可用）                                                       
+  - reward/total：與 baseline 相近                                                          
+  - policy_loss：可能更穩定（梯度更清晰）                                                   
+                                                                                            
+  預期 play 行為：                                                                          
+  - 蛇行可能略微改善（策略可感知角速度）                                                    
+  - 但無對齊激勵，仍會出現「一邊轉一邊走」                                                  
+  - 假設：觀測貢獻約 20-30% 的改善                                                          
+                                                                                            
+  Run B：僅新增獎勵                                                                         
+                                                                                            
+  修改：                                                                                    
+  - 新增 alignment, action_smoothness 獎勵                                                  
+  - 觀測維度保持原有（無新增）                                                              
+                                                                                            
+  預期曲線：                                                                                
+  - reward/alignment：應逐步上升                                                            
+  - reward/action_smoothness：應接近 0（負懲罰變小）                                        
+  - entropy：應穩定下降                                                                     
+                                                                                            
+  預期 play 行為：                                                                          
+  - 蛇行應明顯改善（獎勵直接懲罰擺動）                                                      
+  - 但缺乏角速度感知，可能出現延遲修正                                                      
+  - 假設：獎勵貢獻約 50-60% 的改善                                                          
+                                                                                            
+  Run C：完整修改                                                                           
+                                                                                            
+  修改：                                                                                    
+  - 同時新增獎勵和觀測（當前 Phase 2.5 的完整修改）                                         
+                                                                                            
+  預期曲線：                                                                                
+  - reward/alignment：上升最快                                                              
+  - reward/action_smoothness：最接近 0                                                      
+  - entropy：下降最快且穩定                                                                 
+  - goal_reached_rate：應提升（路徑更短）                                                   
+                                                                                            
+  預期 play 行為：                                                                          
+  - 蛇行應基本消除                                                                          
+  - 機器人應先轉向、再直線前進                                                              
+  - 假設：觀測 + 獎勵協同效應帶來 80-90% 改善                                               
+                                                                                            
+  實驗配置檔案                                                                              
+                                                                                            
+  # Run A: cfg/charge_env_cfg_v2_5_exp_a.py                                                 
+  class RewardsCfgV2_5_ExpA(RewardsCfgV2):                                                  
+      # 使用原有獎勵，不加 alignment 和 action_smoothness                                   
+      pass                                                                                  
+                                                                                            
+  class ObservationsCfgV2_5_ExpA(ObservationsCfgV2_5):                                      
+      # 使用新觀測（包含 angular_velocity, heading_error）                                  
+      pass                                                                                  
+                                                                                            
+  # Run B: cfg/charge_env_cfg_v2_5_exp_b.py                                                 
+  class RewardsCfgV2_5_ExpB(RewardsCfgV2_5):                                                
+      # 使用新獎勵                                                                          
+      pass                                                                                  
+                                                                                            
+  class ObservationsCfgV2_5_ExpB(ObservationsCfgV2):                                        
+      # 使用原觀測（不包含新增的 3 維）                                                     
+      pass                                                                                  
+                                                                                            
+  驗證 Checklist                                                                            
+  ┌────────────────────────────────────┬──────────────────┬────────────┬────────────┐       
+  │                指標                │    Run A 預期    │ Run B 預期 │ Run C 預期 │       
+  ├────────────────────────────────────┼──────────────────┼────────────┼────────────┤       
+  │ 蛇行幅度 (角速度 RMS)              │ 略降             │ 明顯降     │ 最低       │       
+  ├────────────────────────────────────┼──────────────────┼────────────┼────────────┤       
+  │ 路徑效率 (path_length / goal_dist) │ ~1.3             │ ~1.2       │ ~1.1       │       
+  ├────────────────────────────────────┼──────────────────┼────────────┼────────────┤       
+  │ alignment_cosine 均值              │ ~0.7             │ ~0.8       │ ~0.9       │       
+  ├────────────────────────────────────┼──────────────────┼────────────┼────────────┤       
+  │ action_diff_angular 均值           │ ~0.25            │ ~0.15      │ ~0.10      │       
+  ├────────────────────────────────────┼──────────────────┼────────────┼────────────┤       
+  │ entropy 最終值                     │ 與 baseline 相近 │ 下降       │ 下降最多   │       
+  └────────────────────────────────────┴──────────────────┴────────────┴────────────┘       
+  ---                                                                                       
+  4. Warm-Start 方案（處理新增 3 維 obs）                                                   
+                                                                                            
+  問題描述                                                                                  
+                                                                                            
+  原觀測維度：N                                                                             
+  新觀測維度：N + 3（新增 angular_velocity: 1, heading_error: 2）                           
+                                                                                            
+  直接 resume 會導致：                                                                      
+  RuntimeError: size mismatch for actor.0.weight: copying a param with shape                
+  [256, N] from checkpoint, the shape in current model is [256, N+3].                       
+                                                                                            
+  方案 (ii)：擴充第一層權重拷貝（推薦）                                                     
+                                                                                            
+  原理：將舊權重複製到新網絡，新增維度的權重初始化為 0                                      
+                                                                                            
+  優點：                                                                                    
+  - 保留已學習的特徵提取能力                                                                
+  - 新維度初始為 0，不會破壞已有行為                                                        
+  - 訓練初期可以快速利用新觀測                                                              
+                                                                                            
+  實現步驟                                                                                  
+                                                                                            
+  Step 1: 創建轉換腳本 scripts/tools/expand_checkpoint.py                                   
+                                                                                            
+  #!/usr/bin/env python3                                                                    
+  """擴充 checkpoint 以支持新增觀測維度                                                     
+                                                                                            
+  使用方法：                                                                                
+      python expand_checkpoint.py \                                                         
+          --input /path/to/old_model.pt \                                                   
+          --output /path/to/expanded_model.pt \                                             
+          --old_obs_dim 129 \                                                               
+          --new_obs_dim 132 \                                                               
+          --new_dims_indices [75, 76, 77]  # 新維度插入位置                                 
+  """                                                                                       
+  import argparse                                                                           
+  import torch                                                                              
+                                                                                            
+  def expand_checkpoint(input_path, output_path, old_dim, new_dim, new_indices):            
+      """擴充 checkpoint 的第一層權重"""                                                    
+      checkpoint = torch.load(input_path, map_location='cpu')                               
+                                                                                            
+      # 獲取模型狀態                                                                        
+      if 'model_state_dict' in checkpoint:                                                  
+          state_dict = checkpoint['model_state_dict']                                       
+      else:                                                                                 
+          state_dict = checkpoint                                                           
+                                                                                            
+      # 需要擴充的層（Actor 和 Critic 的第一層）                                            
+      layers_to_expand = [                                                                  
+          'actor.0.weight',                                                                 
+          'critic.0.weight',                                                                
+      ]                                                                                     
+                                                                                            
+      for layer_name in layers_to_expand:                                                   
+          if layer_name not in state_dict:                                                  
+              print(f"Warning: {layer_name} not found, skipping")                           
+              continue                                                                      
+                                                                                            
+          old_weight = state_dict[layer_name]  # [out_features, old_dim]                    
+          out_features = old_weight.shape[0]                                                
+                                                                                            
+          # 創建新權重（初始化為 0）                                                        
+          new_weight = torch.zeros(out_features, new_dim)                                   
+                                                                                            
+          # 計算舊維度到新維度的映射                                                        
+          old_idx = 0                                                                       
+          for new_idx in range(new_dim):                                                    
+              if new_idx in new_indices:                                                    
+                  # 新增維度，保持 0                                                        
+                  pass                                                                      
+              else:                                                                         
+                  # 舊維度，複製權重                                                        
+                  new_weight[:, new_idx] = old_weight[:, old_idx]                           
+                  old_idx += 1                                                              
+                                                                                            
+          state_dict[layer_name] = new_weight                                               
+          print(f"Expanded {layer_name}: [{out_features}, {old_dim}] -> [{out_features},    
+  {new_dim}]")                                                                              
+                                                                                            
+      # 保存擴充後的 checkpoint                                                             
+      if 'model_state_dict' in checkpoint:                                                  
+          checkpoint['model_state_dict'] = state_dict                                       
+      else:                                                                                 
+          checkpoint = state_dict                                                           
+                                                                                            
+      torch.save(checkpoint, output_path)                                                   
+      print(f"Saved expanded checkpoint to {output_path}")                                  
+                                                                                            
+  if __name__ == "__main__":                                                                
+      parser = argparse.ArgumentParser()                                                    
+      parser.add_argument("--input", required=True)                                         
+      parser.add_argument("--output", required=True)                                        
+      parser.add_argument("--old_obs_dim", type=int, required=True)                         
+      parser.add_argument("--new_obs_dim", type=int, required=True)                         
+      parser.add_argument("--new_dims_indices", type=str, required=True,                    
+                          help="JSON list of indices, e.g. '[75,76,77]'")                   
+      args = parser.parse_args()                                                            
+                                                                                            
+      import json                                                                           
+      new_indices = set(json.loads(args.new_dims_indices))                                  
+                                                                                            
+      expand_checkpoint(args.input, args.output,                                            
+                        args.old_obs_dim, args.new_obs_dim, new_indices)                    
+                                                                                            
+  Step 2: 確定新維度的插入位置                                                              
+                                                                                            
+  查看 ObservationsCfgV2_5 的觀測順序：                                                     
+  1. lidar_scan:     72 dims                                                                
+  2. speed:           2 dims                                                                
+  3. angular_velocity: 1 dim  ← 新增 (index 74)                                             
+  4. goal_position:   2 dims                                                                
+  5. goal_distance:   1 dim                                                                 
+  6. heading_error:   2 dims  ← 新增 (index 79, 80)                                         
+  7. time_remaining:  1 dim                                                                 
+  8. alive:           1 dim                                                                 
+  9. obstacles:      50 dims                                                                
+  10. actions:        2 dims                                                                
+                                                                                            
+  Step 3: 執行轉換                                                                          
+                                                                                            
+  # 計算維度                                                                                
+  # 舊：72 + 2 + 2 + 1 + 1 + 1 + 50 + 2 = 131                                               
+  # 新：72 + 2 + 1 + 2 + 1 + 2 + 1 + 1 + 50 + 2 = 134                                       
+                                                                                            
+  python scripts/tools/expand_checkpoint.py \                                               
+      --input logs/rsl_rl/charge_navigation_phase2_5/model_latest.pt \                      
+      --output logs/rsl_rl/charge_navigation_phase2_5/model_expanded.pt \                   
+      --old_obs_dim 131 \                                                                   
+      --new_obs_dim 134 \                                                                   
+      --new_dims_indices "[74, 79, 80]"                                                     
+                                                                                            
+  Step 4: 使用擴充後的 checkpoint 繼續訓練                                                  
+                                                                                            
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \                         
+      --task Isaac-Navigation-Charge-v2.5 \                                                 
+      --num_envs 128 \                                                                      
+      --resume \                                                                            
+      --load_run "logs/rsl_rl/charge_navigation_phase2_5" \                                 
+      --checkpoint "model_expanded.pt"                                                      
+                                                                                            
+  替代方案 (i)：Adapter 方案                                                                
+                                                                                            
+  如果需要更精細的控制，可以在網絡中加入 adapter 層：                                       
+                                                                                            
+  class AdapterMLP(nn.Module):                                                              
+      """將新觀測映射到與舊觀測相容的空間"""                                                
+      def __init__(self, new_obs_dim, old_obs_dim, hidden_dim=64):                          
+          super().__init__()                                                                
+          self.adapter = nn.Sequential(                                                     
+              nn.Linear(new_obs_dim, hidden_dim),                                           
+              nn.ELU(),                                                                     
+              nn.Linear(hidden_dim, old_obs_dim),                                           
+          )                                                                                 
+          # 初始化為近似恆等映射（對舊維度）                                                
+          nn.init.zeros_(self.adapter[-1].weight)                                           
+          nn.init.zeros_(self.adapter[-1].bias)                                             
+                                                                                            
+      def forward(self, x):                                                                 
+          return self.adapter(x)                                                            
+                                                                                            
+  此方案需要修改 rsl_rl 的網絡結構，較為侵入性，不推薦除非有特殊需求。                      
+                                                                                            
+  ---                                                                                       
+  5. Change Log (Markdown)                                                                  
+                                                                                            
+  # Charge Navigation - Phase 2.5 蛇行修正                                                  
+                                                                                            
+  ## [v2.5.1] - 2024-XX-XX - 蛇行行為修正                                                   
+                                                                                            
+  ### 問題診斷                                                                              
+                                                                                            
+  | 現象 | 原因分析 |                                                                       
+  |------|---------|                                                                        
+  | Agent 呈現蛇行/擺動行為 | 缺少 Heading Alignment Reward |                               
+  | 不直線朝目標前進 | 缺少 Action Smoothness Penalty |                                     
+  | entropy 下降後回升 | 觀測中缺少角速度資訊 |                                             
+                                                                                            
+  ### 新增功能                                                                              
+                                                                                            
+  #### 獎勵函數                                                                             
+  | 函數 | 檔案 | 權重 | 說明 |                                                             
+  |-----|------|------|------|                                                              
+  | `alignment_reward` | goal_rewards.py | +2.5 | 車頭對準目標方向獎勵 |                    
+  | `action_rate_penalty` | motion_rewards.py | -0.8 | 動作變化率懲罰（角速度 ×2.0） |      
+                                                                                            
+  #### 觀測函數                                                                             
+  | 函數 | 檔案 | 維度 | 說明 |                                                             
+  |-----|------|------|------|                                                              
+  | `base_angular_velocity_z` | functions.py | 1 | 角速度 ω_z |                             
+  | `heading_error_to_goal` | functions.py | 2 | [sin(θ), cos(θ)] 朝向誤差 |                
+                                                                                            
+  ### 修改檔案                                                                              
+                                                                                            
+  mdp/rewards/motion_rewards.py     # 新增 action_rate_penalty                              
+  mdp/rewards/init.py           # 導出新函數                                                
+  mdp/observations/functions.py     # 新增 2 個觀測函數                                     
+  mdp/observations/init.py      # 導出新函數                                                
+  cfg/charge_env_cfg_v2_5.py        # 更新 Reward/Obs 配置                                  
+                                                                                            
+  ### 權重調整                                                                              
+                                                                                            
+  | 獎勵項 | 原權重 | 新權重 | 變更原因 |                                                   
+  |-------|-------|-------|---------|                                                       
+  | `alignment` | - | **+2.5** | 新增：對齊優先 |                                           
+  | `action_smoothness` | - | **-0.8** | 新增：平滑控制 |                                   
+  | `distance_to_goal` | 5.0 | **3.0** | 降低：讓 alignment 優先 |                          
+  | `safe_navigation` | 0.5 | **0.4** | 微調 |                                              
+  | `speed_control` | 0.5 | **0.4** | 微調 |                                                
+                                                                                            
+  ### 風險點                                                                                
+                                                                                            
+  | 風險 | 等級 | 緩解措施 |                                                                
+  |-----|------|---------|                                                                  
+  | `cos(θ)` 小角度梯度消失 | 🟡 中 | 監控 `heading_error_deg`，必要時改用混合獎勵 |        
+  | `action_smoothness` 權重過大導致僵硬 | 🟡 中 | 監控 `action_diff_angular`，動態調整權重 
+  |                                                                                         
+  | 新增 3 維 obs 無法直接 resume | 🔴 高 | 使用 `expand_checkpoint.py` 轉換 |              
+  | alignment 與 progress 競爭 | 🟡 中 | 確保 alignment ≥ progress 權重 |                   
+                                                                                            
+  ### 驗證結果                                                                              
+                                                                                            
+  | 指標 | 預期值 | 實際值 | 狀態 |                                                         
+  |-----|-------|-------|------|                                                            
+  | 蛇行幅度 (ω_z RMS) | < 0.3 rad/s | ___ | ⬜ |                                           
+  | 路徑效率 | < 1.2 | ___ | ⬜ |                                                           
+  | alignment_cosine 均值 | > 0.85 | ___ | ⬜ |                                             
+  | action_diff_angular 均值 | < 0.15 | ___ | ⬜ |                                          
+  | goal_reached_rate | > 80% | ___ | ⬜ |                                                  
+  | entropy 穩定性 | 不回升 | ___ | ⬜ |                                                    
+                                                                                            
+  ### W&B Logging 新增指標                                                                  
+                                                                                            
+  ```python                                                                                 
+  # 需要在 train.py 或 reward 計算處添加                                                    
+  "debug/action_rate_penalty_raw"                                                           
+  "debug/action_diff_linear"                                                                
+  "debug/action_diff_angular"                                                               
+  "debug/alignment_cosine_raw"                                                              
+  "debug/heading_error_deg"                                                                 
+  "debug/angular_velocity_abs"                                                              
+                                                                                            
+  使用說明                                                                                  
+                                                                                            
+  從頭訓練（推薦）                                                                          
+                                                                                            
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \                         
+      --task Isaac-Navigation-Charge-v2.5 \                                                 
+      --num_envs 128                                                                        
+                                                                                            
+  從舊 checkpoint 繼續（需轉換）                                                            
+                                                                                            
+  # Step 1: 轉換 checkpoint                                                                 
+  python scripts/tools/expand_checkpoint.py \                                               
+      --input <old_checkpoint> \                                                            
+      --output <expanded_checkpoint> \                                                      
+      --old_obs_dim 131 --new_obs_dim 134 \                                                 
+      --new_dims_indices "[74,79,80]"                                                       
+                                                                                            
+  # Step 2: 繼續訓練                                                                        
+  ./isaaclab.sh -p scripts/reinforcement_learning/rsl_rl/train.py \                         
+      --task Isaac-Navigation-Charge-v2.5 \                                                 
+      --resume --checkpoint <expanded_checkpoint>                                           
+                                                                                            
+  TODO                                                                                      
+                                                                                            
+  - 實施 Run A/B/C 對照實驗                                                                 
+  - 根據實驗結果調整 alignment 公式（考慮混合 cos + θ²）                                    
+  - 校正 action_smoothness 權重                                                             
+  - 驗證 warm-start 方案有效性                                                              
+                                                                                            
+  ---                                                                                       
+                                                                                            
+  如需我協助實作 `expand_checkpoint.py` 腳本或 Run A/B/C 的實驗配置檔案，請告知。           
+                                                                                            
+✻ Worked for 2m 7s                       

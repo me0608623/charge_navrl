@@ -354,7 +354,7 @@ class GoalCommand(CommandTerm):
             # 檢查 4：per-env 迷宮牆壁（確保目標不在牆壁內或過近）
             # ------------------------------------------------------------------------
             clear_of_walls = ~check_wall_proximity_perenv(
-                candidate_goals_local, wall_c, wall_s, wall_m, 0.5  # 目標離牆 >= 0.5m
+                candidate_goals_local, wall_c, wall_s, wall_m, wall_safe_margin
             )
 
             # ------------------------------------------------------------------------

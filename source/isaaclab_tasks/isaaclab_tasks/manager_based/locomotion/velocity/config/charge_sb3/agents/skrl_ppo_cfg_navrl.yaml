@@ -1,0 +1,176 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ==============================================================================
+# SKRL PPO 配置 - NavRL 風格架構
+# ==============================================================================
+# 完整對齊 NavRL 論文的網路架構：
+#
+# https://github.com/Zhefan-Xu/NavRL
+# NavRL: Learning Safe Flight in Dynamic Environments (IEEE RA-L 2025)
+#
+# ═══════════════════════════════════════════════════════════════════════════
+#                             網路架構
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 觀測空間結構：
+#   LiDAR (72)     - 靜態障礙物距離 → CNN Encoder → 128 維
+#   State (8)      - 機器人狀態 → 直接使用
+#   Dynamic (0)    - 動態障礙物 → MLP Encoder → 64 維
+#
+# Feature Fusion:
+#   Concat(CNN_128, State_8, Dynamic_64) → 200 維 → Shared_MLP [256, 256]
+#
+# Actor/Critic:
+#   Shared Features (256) → Actor Head → Action (2)
+#   Shared Features (256) → Critic Head → Value (1)
+#
+# ═══════════════════════════════════════════════════════════════════════════
+#                            CNN 架構 (LiDAR)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Input:  (batch, 1, 72, 1) - LiDAR 距離掃描
+# Layer1: Conv2d(4, kernel=[5,3], padding=[2,1]) → ELU
+# Layer2: Conv2d(16, kernel=[5,3], stride=[2,1], padding=[2,1]) → ELU
+# Layer3: Conv2d(16, kernel=[5,3], stride=[2,2], padding=[2,1]) → ELU
+# Output: Flatten → Linear(128) → LayerNorm(128)
+#
+# ═══════════════════════════════════════════════════════════════════════════
+#                         觀測空間維度 (AAC)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Policy (Actor):  80 維 (LiDAR 72 + State 8) - 無特權資訊
+# Critic:          80 維 (Phase 0 無動態障礙物)
+# 動作空間:        Box(-1, 1, (2,)) - [前進速度, 旋轉速度]
+# ==============================================================================
+
+seed: 42
+
+# ==============================================================================
+# 模型配置 (Models)
+# ==============================================================================
+models:
+  separate: True  # Actor 和 Critic 使用分離的參數（AAC 架構）
+
+  # 策略網路 (Actor) - NavRL CNN 架構
+  policy:
+    class: navrl_models.NavRLPolicy
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -20.0
+    max_log_std: 2.0
+    initial_log_std: 0.0
+    # 網路架構參數
+    lidar_dim: 72        # LiDAR 射線數量
+    state_dim: 8         # 狀態維度 (goal pos 3 + goal dist 1 + velocity 2 + time 1 + alive 1)
+    dynamic_dim: 0       # 動態障礙物 (Phase 0 無)
+    shared_dim: 256      # Shared encoder 輸出維度
+
+  # 價值網路 (Critic) - NavRL CNN 架構
+  value:
+    class: navrl_models.NavRLValue
+    clip_actions: False
+    # 網路架構參數 (與 Policy 相同)
+    lidar_dim: 72
+    state_dim: 8
+    dynamic_dim: 0
+    shared_dim: 256
+
+# ==============================================================================
+# 經驗回放記憶體 (Memory)
+# ==============================================================================
+memory:
+  class: RandomMemory
+  memory_size: -1  # 自動確定（等於 agent:rollouts）
+
+# ==============================================================================
+# PPO Agent 配置
+# ==============================================================================
+agent:
+  class: PPO
+
+  # 訓練參數
+  rollouts: 128              # 每次更新前收集的步數
+  learning_epochs: 5         # 每次更新的訓練輪數
+  mini_batches: 4            # 小批次數量
+
+  # PPO 超參數
+  discount_factor: 0.99      # 折扣因子
+  lambda: 0.95               # GAE lambda 參數
+  learning_rate: !!float 5e-5
+  learning_rate_scheduler: KLAdaptiveLR
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.008
+
+  # 預處理器
+  state_preprocessor: RunningStandardScaler
+  state_preprocessor_kwargs: null
+  value_preprocessor: null
+  value_preprocessor_kwargs: null
+
+  # 隨機步數（預熱）
+  random_timesteps: 0
+  learning_starts: 0
+
+  # 梯度裁剪
+  grad_norm_clip: 0.5
+
+  # PPO 裁剪
+  ratio_clip: 0.2
+  value_clip: 0.2
+  clip_predicted_values: True
+
+  # 損失係數
+  entropy_loss_scale: 0.005  # 熵係數（探索）
+  value_loss_scale: 1.0      # 價值損失係數
+
+  # KL 散度閾值
+  kl_threshold: 0.0
+
+  # 獎勵整形
+  rewards_shaper_scale: 1.0
+
+  # 時間限制啟動
+  time_limit_bootstrap: False
+
+  # 實驗配置
+  experiment:
+    directory: "charge_navrl"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+# ==============================================================================
+# 訓練器配置 (Trainer)
+# ==============================================================================
+trainer:
+  class: SequentialTrainer
+  timesteps: 5000            # 對應約 5M env-steps (1024 envs)
+  environment_info: log
+
+# ==============================================================================
+# 訓練建議
+# ==============================================================================
+#
+# 預期指標：
+#   - 成功率：> 95%
+#   - 平均獎勵：持續上升
+#   - 碰撞率：< 5%
+#
+# 訓練時間：
+#   - 256 envs: 約 20-30 分鐘
+#   - 512 envs: 約 15-20 分鐘
+#   - 1024 envs: 約 10-15 分鐘
+#
+# 與原 IsaacLab 架構的差異：
+#   原架構:             NavRL 架構:
+#   ------------------- ------------------------------------
+#   MLP [512,256,128]   CNN (LiDAR) → 128
+#                       MLP (Dynamic) → 64
+#                       Concat → MLP [256, 256]
+#
+# 優勢：
+#   - CNN 能更好地捕捉 LiDAR 的空間結構
+#   - 模態化設計便於擴展
+#   - 與 NavRL 論文完全對齊

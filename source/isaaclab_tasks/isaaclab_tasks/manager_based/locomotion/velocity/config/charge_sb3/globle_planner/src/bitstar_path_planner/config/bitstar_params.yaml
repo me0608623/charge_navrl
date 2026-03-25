@@ -1,0 +1,16 @@
+bitstar_path_planner:
+  ros__parameters:
+    # Planning parameters
+    max_iterations: 5000          # Maximum iterations for BIT* algorithm
+    max_batch_size: 100           # Number of samples per batch
+    goal_radius: 0.5              # Radius for goal region (meters)
+    rewire_radius: 2.0            # Maximum radius for rewiring (meters)
+    goal_bias: 0.05               # Probability of sampling goal directly (0.0-1.0)
+    
+    # Frame parameters
+    map_frame: "map"               # Map frame ID
+    
+    # Performance tuning
+    # Increase max_iterations for complex environments
+    # Increase rewire_radius for faster convergence (but slower per iteration)
+    # Increase goal_bias for faster goal finding (but less exploration)

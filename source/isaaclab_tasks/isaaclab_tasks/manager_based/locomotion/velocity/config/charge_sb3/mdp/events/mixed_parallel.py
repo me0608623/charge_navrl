@@ -1,0 +1,459 @@
+"""混合平行環境事件函數
+
+實作混合平行環境課程學習策略，在同一批次中訓練不同難度的環境：
+- 20% empty environments (無障礙物)
+- 50% static obstacles (靜態障礙物)
+- 30% dynamic obstacles (動態障礙物)
+
+這取代了傳統的分階段課程學習，讓 Agent 同時學習處理各種難度。
+"""
+
+from __future__ import annotations
+
+import math
+import torch
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from isaaclab.envs import ManagerBasedRLEnv
+
+# 從 mdp.core 導入狀態管理功能
+from ..core import (
+    get_obstacle_num as _get_obstacle_num,
+    get_obstacle_sizes as _get_obstacle_sizes,
+)
+
+
+def randomize_obstacles_by_difficulty(
+    env,
+    env_ids,
+    # 難度分佈參數
+    empty_ratio: float = 0.2,      # 20% 空環境（無障礙物）
+    static_ratio: float = 0.5,     # 50% 靜態障礙物
+    dynamic_ratio: float = 0.3,    # 30% 動態障礙物
+    # 障礙物配置
+    num_obstacles_static: int = 5,   # 靜態環境的障礙物數量
+    num_obstacles_dynamic: int = 8,  # 動態環境的障礙物數量
+    max_obstacles: int = 10,         # 場景中最大障礙物數量
+    # 移動參數（僅動態環境使用）
+    speed_range: float = 0.5,
+    min_speed: float = 0.05,
+    # 碰撞檢查參數
+    min_robot_distance: float = 1.5,
+    min_goal_distance: float = 1.0,
+    min_obstacle_spacing: float = 1.0,
+    max_spawn_attempts: int = 50,
+    boundary: float = 7.5,  # Phase 0 房間半徑 8m，留 0.5m 邊距
+    # Active density masking: fraction of dynamic obstacles that are active
+    active_obstacle_ratio: float = 1.0,
+    # 🔥 Debug 模式
+    debug: bool = False,
+):
+    """混合平行環境障礙物隨機化事件（論文核心亮點實作）
+
+    在同一個批次中建立不同難度的混合場景：
+    - Group 1 (Empty, 20%): 所有障礙物 Z = -10.0，速度 V = 0.0
+    - Group 2 (Static, 50%): 前 num_obstacles_static 個障礙物 Z = 0.5，速度 V = 0.0
+    - Group 3 (Dynamic, 30%): 前 num_obstacles_dynamic 個障礙物 Z = 0.5，隨機速度
+
+    🔥 關鍵實現：
+    1. 使用 PyTorch Tensor 操作，避免 Python for 迴圈遍歷環境
+    2. 切片邏輯：split1 = int(0.2 * N), split2 = int(0.7 * N)
+    3. 地底遮蔽：Z < 0 的障礙物在 Critic 觀測中被設為 0.0
+
+    Args:
+        env: 環境實例
+        env_ids: 需要重置的環境 ID 列表
+        empty_ratio: 空環境比例（默認 0.2 = 20%）
+        static_ratio: 靜態障礙物比例（默認 0.5 = 50%）
+        dynamic_ratio: 動態障礙物比例（默認 0.3 = 30%）
+        num_obstacles_static: 靜態環境的障礙物數量
+        num_obstacles_dynamic: 動態環境的障礙物數量
+        max_obstacles: 場景中最大障礙物數量（用於觀測 padding）
+        speed_range: 動態障礙物最大速度 (m/s)
+        min_speed: 動態障礙物最小速度 (m/s)
+        min_robot_distance: 障礙物與機器人最小距離 (m)
+        min_goal_distance: 障礙物與目標最小距離 (m)
+        min_obstacle_spacing: 障礙物之間最小距離 (m)
+        max_spawn_attempts: 每個障礙物最大嘗試生成次數
+        boundary: 場景邊界（米）
+    """
+    # ========================================================================
+    # 參數處理與初始化
+    # ========================================================================
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    elif not isinstance(env_ids, torch.Tensor):
+        env_ids = torch.tensor(env_ids, device=env.device, dtype=torch.long)
+
+    N = len(env_ids)  # 重置環境的數量
+    device = env.device
+
+    # ========================================================================
+    # 🔥 DEBUG: 確認事件被觸發
+    # ========================================================================
+    if debug:
+        print(f"[DEBUG] randomize_obstacles_by_difficulty CALLED!")
+        print(f"[DEBUG]   - Resetting {N} environments")
+        print(f"[DEBUG]   - env_ids: {env_ids[:10].tolist() if len(env_ids) > 10 else env_ids.tolist()}{'...' if len(env_ids) > 10 else ''}")
+
+    # 初始化障礙物元數據
+    num_obstacles = getattr(env, "_num_obstacles", None)
+    if num_obstacles is None:
+        num_obstacles = _get_obstacle_num()
+        env._num_obstacles = num_obstacles
+
+    if not hasattr(env, "_obstacle_sizes"):
+        env._obstacle_sizes = _get_obstacle_sizes()
+
+    # 初始化障礙物速度緩存 [num_envs, max_obstacles, 2]
+    if not hasattr(env, "_obstacle_velocities") or env._obstacle_velocities.shape[1] != max_obstacles:
+        env._obstacle_velocities = torch.zeros(env.num_envs, max_obstacles, 2, device=device)
+
+    # 初始化環境難度標記
+    if not hasattr(env, "_env_difficulty"):
+        env._env_difficulty = torch.zeros(env.num_envs, device=device, dtype=torch.long)
+    if not hasattr(env, "_env_num_visible_obstacles"):
+        env._env_num_visible_obstacles = torch.zeros(env.num_envs, device=device, dtype=torch.long)
+
+    # Initialize active obstacle mask (for density masking)
+    if not hasattr(env, "_obstacle_active_mask"):
+        env._obstacle_active_mask = torch.ones(
+            env.num_envs, max_obstacles, device=device, dtype=torch.bool
+        )
+
+    # ========================================================================
+    # 第一步：按比例分配難度級別（probabilistic，適用於任意 N）
+    # ========================================================================
+    # 使用隨機採樣而非確定性切分，避免 N 較小時整數截斷導致比例失真
+    # （例如 N=1 時 int(0.2*1)=0, int(0.7*1)=0 → 全部變 dynamic）
+    rand = torch.rand(N, device=device)
+    difficulty = torch.where(
+        rand < empty_ratio,
+        torch.zeros(N, device=device, dtype=torch.long),
+        torch.where(
+            rand < empty_ratio + static_ratio,
+            torch.ones(N, device=device, dtype=torch.long),
+            torch.full((N,), 2, device=device, dtype=torch.long),
+        )
+    )
+
+    # 🔥 DEBUG: 顯示分配結果
+    if debug:
+        n_empty = (difficulty == 0).sum().item()
+        n_static = (difficulty == 1).sum().item()
+        n_dynamic = (difficulty == 2).sum().item()
+        print(f"[DEBUG] Difficulty assignment (N={N}): "
+              f"Empty={n_empty} ({n_empty/N*100:.1f}%), "
+              f"Static={n_static} ({n_static/N*100:.1f}%), "
+              f"Dynamic={n_dynamic} ({n_dynamic/N*100:.1f}%)")
+
+    # 記錄每個環境的難度級別
+    env._env_difficulty[env_ids] = difficulty
+
+    # ========================================================================
+    # 第三步：獲取機器人和目標位置（用於碰撞檢查）
+    # ========================================================================
+    robot_pos_xy = env.scene["robot"].data.root_pos_w[env_ids, :2]
+
+    try:
+        goal_pos = env.command_manager.get_command("goal_command")
+        goal_pos_xy = goal_pos[env_ids, :2]
+        has_goal = True
+    except (AttributeError, KeyError, IndexError):
+        goal_pos_xy = None
+        has_goal = False
+
+    # 獲取環境原點（用於將局部座標轉換為世界座標）
+    env_origins = env.scene.env_origins[env_ids]  # [N, 3]
+
+    # ========================================================================
+    # 第四步：批量準備障礙物位置和速度張量
+    # ========================================================================
+    # 場景參數
+    safe_margin = 1.5
+    spawn_range = boundary - safe_margin
+    HIDDEN_Z = -10.0
+    VISIBLE_Z = 0.5
+
+    # 定義 4 個象限（用於分層採樣，確保障礙物分布均勻）
+    quadrants = [
+        (0.3, spawn_range, 0.3, spawn_range),      # 第一象限
+        (-spawn_range, -0.3, 0.3, spawn_range),    # 第二象限
+        (-spawn_range, -0.3, -spawn_range, -0.3),  # 第三象限
+        (0.3, spawn_range, -spawn_range, -0.3),    # 第四象限
+    ]
+
+    # 創建難度掩碼
+    is_empty = (difficulty == 0)
+    is_static = (difficulty == 1)
+    is_dynamic = (difficulty == 2)
+
+    # ========================================================================
+    # Active density masking for dynamic environments
+    # ========================================================================
+    num_dyn = is_dynamic.sum().item()
+    if num_dyn > 0 and active_obstacle_ratio < 1.0:
+        num_active = max(1, int(num_obstacles_dynamic * active_obstacle_ratio))
+        # Random scores to select which obstacles are active per dynamic env
+        rand_scores = torch.rand(num_dyn, num_obstacles_dynamic, device=device)
+        _, active_indices = rand_scores.topk(num_active, dim=1)
+        # Build full-width mask [num_dyn, max_obstacles]
+        dyn_active_mask = torch.zeros(num_dyn, max_obstacles, device=device, dtype=torch.bool)
+        dyn_active_mask.scatter_(1, active_indices, True)
+        dyn_env_ids_local = torch.arange(N, device=device)[is_dynamic]
+        env._obstacle_active_mask[env_ids[dyn_env_ids_local]] = dyn_active_mask
+    else:
+        # All obstacles active (default)
+        env._obstacle_active_mask[env_ids[is_dynamic]] = True
+
+    # ========================================================================
+    # 第五步：遍歷所有障礙物，設置位置和速度
+    # ========================================================================
+    for i in range(max_obstacles):
+        obstacle_name = f"obstacle_{i}"
+        # 🔥 修正：InteractiveScene 只支援 scene["name"]，不支援 hasattr/getattr
+        try:
+            obstacle = env.scene[obstacle_name]
+        except KeyError:
+            continue
+
+        # -------------------------------------------------------------------
+        # 根據障礙物索引 i 和難度級別決定可見性
+        # 🔥 關鍵修正：基於障礙物索引 i 判斷可見性，而非環境索引
+        # -------------------------------------------------------------------
+        # Empty 環境：所有障礙物都隱藏
+        # Static 環境：只有前 num_obstacles_static 個障礙物可見
+        # Dynamic 環境：只有前 num_obstacles_dynamic 個障礙物可見
+
+        should_show_in_static = (i < num_obstacles_static)
+        # Active density masking: use per-env mask for dynamic environments
+        should_show_in_dynamic = env._obstacle_active_mask[env_ids, i]  # [N] tensor
+
+        # 計算可見性掩碼
+        visible_mask = (is_static & should_show_in_static) | (is_dynamic & should_show_in_dynamic)
+
+        # 準備位置張量 [N, 3]
+        pos = torch.zeros(N, 3, device=device, dtype=torch.float32)
+        quat = torch.zeros(N, 4, device=device, dtype=torch.float32)
+        quat[:, 0] = 1.0  # 單位四元數
+
+        # 設置 Z 座標（隱藏或可見）
+        pos[:, 2] = torch.where(visible_mask,
+                                torch.full((N,), VISIBLE_Z, device=device),
+                                torch.full((N,), HIDDEN_Z, device=device))
+
+        # 🔥 DEBUG: 顯示 Z 座標分配（僅顯示第一個障礙物）
+        if debug and i == 0:
+            num_visible = visible_mask.sum().item()
+            print(f"[DEBUG] obstacle_{i} Z assignment: {num_visible}/{N} visible at Z={VISIBLE_Z}, {N-num_visible} hidden at Z={HIDDEN_Z}")
+
+        # -------------------------------------------------------------------
+        # 對可見的障礙物進行隨機位置採樣（含碰撞檢查）
+        # -------------------------------------------------------------------
+        if visible_mask.any():
+            # 獲取此障礙物應該在的象限
+            quadrant_idx = i % 4
+            x_min, x_max, y_min, y_max = quadrants[quadrant_idx]
+
+            # 生成隨機 XY 座標（局部座標）
+            rand_x = torch.rand(N, device=device) * (x_max - x_min) + x_min
+            rand_y = torch.rand(N, device=device) * (y_max - y_min) + y_min
+
+            pos[:, 0] = rand_x
+            pos[:, 1] = rand_y
+
+            # 碰撞檢查（拒絕採樣）
+            needs_resample = visible_mask.clone()
+
+            for attempt in range(max_spawn_attempts):
+                if not needs_resample.any():
+                    break
+
+                # 檢查與機器人的距離
+                dist_to_robot = torch.norm(pos[:, :2] - robot_pos_xy, dim=1)
+                valid_robot = dist_to_robot >= min_robot_distance
+
+                # 檢查與目標的距離
+                if has_goal:
+                    dist_to_goal = torch.norm(pos[:, :2] - goal_pos_xy, dim=1)
+                    valid_goal = dist_to_goal >= min_goal_distance
+                else:
+                    valid_goal = torch.ones(N, dtype=torch.bool, device=device)
+
+                # 檢查與其他已放置障礙物的距離
+                valid_obstacles = torch.ones(N, dtype=torch.bool, device=device)
+                for j in range(i):
+                    other_name = f"obstacle_{j}"
+                    try:
+                        other_obstacle = env.scene[other_name]
+                        other_pos = other_obstacle.data.root_pos_w[env_ids, :2]
+                        dist_to_other = torch.norm(pos[:, :2] - other_pos, dim=1)
+                        valid_obstacles &= dist_to_other >= min_obstacle_spacing
+                    except KeyError:
+                        pass
+
+                # 綜合判斷
+                all_valid = valid_robot & valid_goal & valid_obstacles & needs_resample
+                needs_resample = needs_resample & ~all_valid
+
+                # 對無效位置重新採樣
+                if needs_resample.any():
+                    num_resample = needs_resample.sum().item()
+                    new_x = torch.rand(num_resample, device=device) * (x_max - x_min) + x_min
+                    new_y = torch.rand(num_resample, device=device) * (y_max - y_min) + y_min
+                    pos[needs_resample, 0] = new_x
+                    pos[needs_resample, 1] = new_y
+
+            # 降級策略：最終仍失敗的位置使用隨機座標
+            if needs_resample.any():
+                num_failed = needs_resample.sum().item()
+                fallback_x = torch.rand(num_failed, device=device) * (2 * spawn_range) - spawn_range
+                fallback_y = torch.rand(num_failed, device=device) * (2 * spawn_range) - spawn_range
+                pos[needs_resample, 0] = fallback_x
+                pos[needs_resample, 1] = fallback_y
+
+        # -------------------------------------------------------------------
+        # 🔥 關鍵修正：加上環境原點（轉換為世界座標）
+        # -------------------------------------------------------------------
+        # 只有可見的障礙物需要加上環境原點
+        # 隱藏的障礙物保持在 (0, 0, -10.0) 相對於環境中心
+        world_pos = pos.clone()
+        world_pos[visible_mask, :2] += env_origins[visible_mask, :2]
+
+        # -------------------------------------------------------------------
+        # 設置障礙物速度（僅動態環境的可見障礙物）
+        # -------------------------------------------------------------------
+        vel = torch.zeros(N, 6, device=device, dtype=torch.float32)  # [vx, vy, vz, wx, wy, wz]
+
+        # 只有動態環境且可見的障礙物才需要速度
+        should_have_velocity = is_dynamic & visible_mask
+
+        if should_have_velocity.any():
+            num_vel = should_have_velocity.sum().item()
+            # 生成隨機速度（XY 平面）
+            angle = torch.rand(num_vel, device=device) * 2.0 * math.pi - math.pi
+            speed = torch.rand(num_vel, device=device) * (speed_range - min_speed) + min_speed
+
+            vel[should_have_velocity, 0] = speed * torch.cos(angle)  # vx
+            vel[should_have_velocity, 1] = speed * torch.sin(angle)  # vy
+
+        # 更新速度緩存（只用於觀測函數）
+        env._obstacle_velocities[env_ids, i, :] = vel[:, :2]
+
+        # -------------------------------------------------------------------
+        # 🔥 關鍵修正：寫入物理引擎（位置 + 速度）
+        # -------------------------------------------------------------------
+        if debug and i == 0:
+            print(f"[DEBUG] Writing obstacle_{i} to sim:")
+            print(f"[DEBUG]   - world_pos shape: {world_pos.shape}")
+            print(f"[DEBUG]   - world_pos Z range: [{world_pos[:, 2].min().item():.2f}, {world_pos[:, 2].max().item():.2f}]")
+            print(f"[DEBUG]   - env_ids: {env_ids[:10].tolist() if len(env_ids) > 10 else env_ids.tolist()}{'...' if len(env_ids) > 10 else ''}")
+
+        obstacle.write_root_pose_to_sim(
+            torch.cat([world_pos, quat], dim=-1),
+            env_ids=env_ids,
+        )
+        obstacle.write_root_velocity_to_sim(vel, env_ids=env_ids)
+
+        # 🔥 DEBUG: 驗證寫入後的位置
+        if debug and i < 3:
+            num_vis = visible_mask.sum().item()
+            z_vals = world_pos[:, 2]
+            print(f"[DEBUG] obstacle_{i}: visible={num_vis}/{N}, "
+                  f"Z_written=[{z_vals.min().item():.1f}, {z_vals.max().item():.1f}], "
+                  f"type={type(obstacle).__name__}")
+            if num_vis > 0:
+                vis_xy = world_pos[visible_mask, :2]
+                print(f"[DEBUG]   visible XY range: "
+                      f"X=[{vis_xy[:,0].min().item():.2f}, {vis_xy[:,0].max().item():.2f}], "
+                      f"Y=[{vis_xy[:,1].min().item():.2f}, {vis_xy[:,1].max().item():.2f}]")
+            # 回讀 data buffer 驗證（write_root_pose_to_sim 會同步更新 data buffer）
+            read_back_pos = obstacle.data.root_pos_w[env_ids, :3]
+            rb_z_min = read_back_pos[:, 2].min().item()
+            rb_z_max = read_back_pos[:, 2].max().item()
+            print(f"[DEBUG]   read-back Z from data buffer: [{rb_z_min:.1f}, {rb_z_max:.1f}]")
+            # 比較寫入值和回讀值
+            z_diff = (world_pos[:, 2] - read_back_pos[:, 2]).abs().max().item()
+            if z_diff > 0.01:
+                print(f"[DEBUG]   ⚠️ WARNING: Z mismatch! max_diff={z_diff:.3f}")
+                print(f"[DEBUG]   ⚠️ write_root_pose_to_sim may not be working correctly!")
+            else:
+                print(f"[DEBUG]   ✓ Z values match (diff={z_diff:.6f})")
+
+    # ========================================================================
+    # 第六步：記錄每個環境的可見障礙物數量
+    # ========================================================================
+    # 使用張量操作，避免 Python for 循環
+    # Compute per-env active counts for dynamic envs from the mask
+    dynamic_active_counts = env._obstacle_active_mask[env_ids].sum(dim=1).long()  # [N]
+    env._env_num_visible_obstacles[env_ids] = torch.where(
+        is_empty,
+        torch.zeros(N, device=device, dtype=torch.long),
+        torch.where(
+            is_static,
+            torch.full((N,), num_obstacles_static, device=device, dtype=torch.long),
+            dynamic_active_counts,
+        )
+    )
+
+    # 🔥 DEBUG: 最終統計
+    if debug:
+        num_empty = is_empty.sum().item()
+        num_static = is_static.sum().item()
+        num_dynamic = is_dynamic.sum().item()
+        print(f"[DEBUG] === SUMMARY ===")
+        print(f"[DEBUG] Empty environments: {num_empty}")
+        print(f"[DEBUG] Static environments: {num_static} ({num_obstacles_static} obstacles each)")
+        print(f"[DEBUG] Dynamic environments: {num_dynamic} ({num_obstacles_dynamic} obstacles each)")
+        print(f"[DEBUG] =================")
+
+
+def get_env_difficulty(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    """獲取環境難度級別
+
+    Args:
+        env: 環境實例
+        env_ids: 環境 ID 列表，None 表示所有環境
+
+    Returns:
+        難度級別張量：0=empty, 1=static, 2=dynamic
+    """
+    if env_ids is None:
+        env_ids = slice(None)  # 所有環境
+
+    if not hasattr(env, "_env_difficulty"):
+        # 默认全部為 static
+        return torch.zeros(env.num_envs if env_ids is None else len(env_ids),
+                          device=env.device, dtype=torch.long)
+
+    return env._env_difficulty[env_ids]
+
+
+def get_env_num_visible_obstacles(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    """獲取環境的可見障礙物數量
+
+    Args:
+        env: 環境實例
+        env_ids: 環境 ID 列表，None 表示所有環境
+
+    Returns:
+        可見障礙物數量張量
+    """
+    if env_ids is None:
+        env_ids = slice(None)
+
+    if not hasattr(env, "_env_num_visible_obstacles"):
+        # 默認全部障礙物可見
+        num_obstacles = getattr(env, "_num_obstacles", _get_obstacle_num())
+        return torch.full((env.num_envs if env_ids is None else len(env_ids),),
+                         num_obstacles, device=env.device, dtype=torch.long)
+
+    return env._env_num_visible_obstacles[env_ids]
+
+
+__all__ = [
+    "randomize_obstacles_by_difficulty",
+    "get_env_difficulty",
+    "get_env_num_visible_obstacles",
+]

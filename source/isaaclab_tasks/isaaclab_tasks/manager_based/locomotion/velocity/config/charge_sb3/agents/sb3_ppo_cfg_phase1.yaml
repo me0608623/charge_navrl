@@ -1,0 +1,95 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ==============================================================================
+# Stable Baselines 3 PPO 配置 - Phase 1: 內牆結構導航
+# ==============================================================================
+# Phase 1 特點：
+#   - 16x16m 房間，四面有牆
+#   - 內部有 U 型牆（死胡同）
+#   - 內部有隔間牆（需要找門口）
+#   - 無動態障礙物
+#   - 需要學會繞路策略
+# ==============================================================================
+
+# ==================== 基礎配置 ====================
+seed: 42
+n_timesteps: !!float 1e7
+# Phase 1 總訓練步數：10,000,000 步
+# 靜態障礙物導航，通常 10M 步足夠收斂
+# 建議監控成功率，>85% 可提前停止
+
+policy: 'MlpPolicy'
+
+# ==================== PPO 算法參數 ====================
+n_steps: 128
+# 🔥 修復：從 24 提高到 128
+# 原問題：24 steps ÷ 50Hz = 0.48秒，軌跡太短
+# 後果：U型牆、隔間等需要遠見，短軌跡無法學會繞路
+# 修復後：128 steps ÷ 50Hz = 2.56秒，足夠判斷繞路策略
+
+n_minibatches: 4
+gae_lambda: 0.95
+gamma: 0.99
+n_epochs: 6
+vf_coef: 1.0
+
+# 🔥 Phase 1：高熵係數（高探索）
+ent_coef: 0.003
+# 說明：
+#   - Phase 1 需要探索不同路徑來繞過牆壁
+#   - U 型牆需要學會進入後返回
+#   - 隔間需要學會找門口
+#   - 0.003 平衡探索與收斂速度
+# 訓練後期：可以降低到 0.002 加速收斂
+
+learning_rate: !!float 8e-5
+# Phase 1：略低學習率（比 Phase 0 更穩定）
+# 複雜環境需要更穩定的訓練
+
+clip_range: !!float 0.18
+# Phase 1：略微收緊 clipping
+# 更保守的更新，保護已學會的繞路策略
+
+max_grad_norm: 0.9
+# Phase 1：略微收緊梯度裁剪
+
+# ==================== 策略網絡架構 ====================
+policy_kwargs:
+  activation_fn: 'nn.ELU'
+  net_arch: [512, 256, 128]
+  optimizer_kwargs:
+    eps: !!float 1e-8
+  ortho_init: False
+
+# ==================== 觀測歸一化 ====================
+normalize_input: True
+normalize_value: False
+clip_obs: 10.0
+
+# ==================== Phase 1 訓練建議 ====================
+# 預期指標：
+#   - 成功率：> 85%
+#   - 能夠繞過 U 型牆
+#   - 能夠找到並穿過門口
+#
+# 訓練時間：4-5 小時（RTX 3090, 256 envs）
+#
+# 關鍵監控：
+#   - success_rate：應該持續上升
+#   - Episode_Termination/collision：應該逐漸下降
+#   - Episode_Reward/velocity_toward_goal：應該保持高位
+#
+# 常見問題：
+#   問題：機器人卡在 U 型牆裡出來
+#   解決：增加 velocity_toward_goal 權重，或調整 lookahead_distance
+#
+#   問題：機器人總是撞牆找門口
+#   解決：增加 lidar_clearance_reward 權重
+#
+#   問題：成功率停留在 50-60%
+#   解決：
+#     1. 增加 ent_coef 到 0.005
+#     2. 增加訓練步數到 5e7
+#     3. 降低 learning_rate 到 5e-5

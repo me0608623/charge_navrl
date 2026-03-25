@@ -1,0 +1,16 @@
+run_id,date,git_rev,seed,phase,curriculum_on,reward_variant,shield_mode,v_gate_mode,progress_gate_mode,gap_reward,dynamic_safety_mode,num_envs,total_timesteps,status,log_path,checkpoint_path,best_SR,best_CR,best_TO,notes
+baseline_s1_ne512,2026-03-22,8592a4e77a,1,1,yes,navrl_dense,none,baseline,baseline,off,n/a,512,234375,completed,runs/baseline_s1_ne512/logs/metrics.csv,runs/baseline_s1_ne512/checkpoint/best_agent.pt,see_csv,see_csv,see_csv,Full baseline run with NavRL dense rewards
+abl1_vgate-floor_s1_ne512,2026-03-23,8592a4e77a,1,1,yes,navrl_dense,none,floor,baseline,off,n/a,512,234375,partial(195/1831),runs/abl1_vgate-floor_s1_ne512/logs/metrics.csv,,see_csv,see_csv,see_csv,v_gate_floor=0.2 — training in progress
+abl1_vgate-softer_s1_ne512,,,,1,yes,navrl_dense,none,softer,baseline,off,n/a,512,234375,pending,,,,,,d_attenuate 1.0→0.6
+abl2_progress-baseline_s1_ne512,,,,1,yes,navrl_dense,none,baseline,baseline,off,n/a,512,234375,pending,,,,,,Same as baseline (control group for family 2)
+abl2_progress-delayed_neg_s1_ne512,,,,1,yes,navrl_dense,none,baseline,delayed_negative,off,n/a,512,234375,pending,,,,,,d_danger 0.8→0.55
+abl2_progress-weaken_neg_s1_ne512,,,,1,yes,navrl_dense,none,baseline,weaken_negative,off,n/a,512,234375,pending,,,,,,negative_scale 0.5→0.2
+abl3_gap-off_s1_ne512,,,,1,yes,navrl_dense,none,baseline,baseline,off,n/a,512,234375,pending,,,,,,Control group for gap family
+abl3_gap-heading_w1.0_s1_ne512,,,,1,yes,navrl_dense,none,baseline,baseline,heading_w1.0,n/a,512,234375,pending,,,,,,heading_to_gap weight=1.0
+abl3_gap-heading_w2.0_s1_ne512,,,,1,yes,navrl_dense,none,baseline,baseline,heading_w2.0,n/a,512,234375,pending,,,,,,heading_to_gap weight=2.0
+abl3_gap-clearance_w1.0_s1_ne512,,,,1,yes,navrl_dense,none,baseline,baseline,clearance_w1.0,n/a,512,234375,pending,,,,,,forward_clearance weight=1.0
+abl3_gap-clearance_w2.0_s1_ne512,,,,1,yes,navrl_dense,none,baseline,baseline,clearance_w2.0,n/a,512,234375,pending,,,,,,forward_clearance weight=2.0
+abl4_shield-off_s1_ne512,,,,1,yes,navrl_dense,none,baseline,baseline,off,n/a,512,234375,pending,,,,,,Control group for shield family
+abl4_shield-soft_s1_ne512,,,,1,yes,navrl_dense,soft,baseline,baseline,off,n/a,512,234375,pending,,,,,,Soft speed reduction near obstacles
+abl4_shield-hard_s1_ne512,,,,1,yes,navrl_dense,hard,baseline,baseline,off,n/a,512,234375,pending,,,,,,Hard v=0 near obstacles
+ground_v1_s1_ne512,,,,1,yes,navrl_ground_v1,none,n/a,n/a,off,log_distance,512,234375,pending,,,,,,NavRL-Ground v1 full reward redesign

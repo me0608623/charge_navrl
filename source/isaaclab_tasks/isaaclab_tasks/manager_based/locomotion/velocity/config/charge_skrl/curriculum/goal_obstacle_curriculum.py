@@ -735,6 +735,7 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
         cmd = env.command_manager.get_term("goal_command")
         cmd.cfg.num_goals = cfg["num_goals"]
         cmd.cfg.ranges.distance = cfg["goal_distance"]
+        cmd.cfg.num_obstacles = cfg["num_obstacles_static"] + cfg["num_obstacles_dynamic"]
     except Exception:
         pass
 

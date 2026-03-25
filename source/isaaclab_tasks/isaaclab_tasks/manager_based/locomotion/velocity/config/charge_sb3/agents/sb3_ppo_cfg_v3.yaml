@@ -1,0 +1,91 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+# ==============================================================================
+# Stable Baselines 3 PPO 配置 for Charge 導航任務 - Phase 3 (目標距離課程）
+# ==============================================================================
+# 此配置專為 Phase 3 設計，學習可變目標距離導航
+# 適配觀測空間：131 維（lidar 72 + speed 2 + goal_pos 2 + goal_dist 1 + time 1 + alive 1 + obstacles 50 + actions 2）
+# 適配動作空間：2 維（linear_speed, angular_speed）範圍 [-1, 1]
+# ==============================================================================
+
+# ==================== 基礎配置 ====================
+seed: 42
+n_timesteps: !!float 5e7
+# 總訓練步數：50,000,000 步（完整訓練）
+# Phase 3 特點：目標距離可變（2-15 米），需要更多時間適應
+
+policy: 'MlpPolicy'
+
+# ==================== PPO 算法參數 ====================
+n_steps: 24
+n_minibatches: 4
+gae_lambda: 0.95
+gamma: 0.99
+n_epochs: 8
+vf_coef: 1.0
+# Phase 3：增加到 8 個 epoch（最大訓練次數，最穩定）
+
+ent_coef: 0.0015
+# 🔥 Phase 3：維持適度探索（已調整：0.0001 → 0.0015）
+# 原因：複雜導航任務仍需探索，避免局部最優
+# 說明：
+#   - 0.0015 平衡探索與利用
+#   - 目標距離可變，需要嘗試不同策略
+
+learning_rate: !!float 3e-5
+# Phase 3：進一步降低學習率（從 1e-4 到 3e-5）
+# 原因：Phase 3 最複雜，需要最穩定的訓練
+
+clip_range: !!float 0.1
+# Phase 3：收緊 clipping（從 0.2 到 0.1）
+# 原因：極度保守的更新，鎖住已學會的策略
+# 效果：新舊策略比率被限制在 [0.9, 1.1]，避免破壞已學會的策略
+
+# ==================== 策略網絡架構 ====================
+policy_kwargs:
+  activation_fn: 'nn.ELU'
+  net_arch: [512, 256, 128]
+  optimizer_kwargs:
+    eps: !!float 1e-8
+  ortho_init: False
+
+# ==================== 梯度裁剪 ====================
+max_grad_norm: 0.5
+# Phase 3：收緊梯度裁剪（從 1.0 到 0.5）
+# 原因：最激進的梯度控制，確保訓練穩定性
+
+# ==================== 觀測歸一化 ====================
+normalize_input: True
+normalize_value: True
+clip_obs: 10.0
+
+# ==================== Phase 3 特定配置 ====================
+# Phase 3 訓練建議：
+# 1. 預期成功率：> 80%（無障礙物，但目標距離可變）
+# 2. 預期訓練時間：6-8 小時（RTX 3090）
+# 3. 關鍵監控指標：
+#    - success_rate_by_distance：不同目標距離的成功率
+#    - avg_episode_length：平均 episode 長度（距離越長，應該越長）
+#    - goal_distance_distribution：目標距離分佈（應該覆蓋 2-15 米）
+
+# 課程學習監控：
+# - 目標距離應該隨成功率自動調整
+# - 成功率 > 80%：增加目標距離
+# - 成功率 < 50%：減少目標距離
+# - 目標距離範圍：2-15 米
+
+# 常見問題和解決方案：
+# 問題：遠距離目標（>10 米）成功率很低
+# 解決方案：
+#   1. 增加 n_epochs 到 10（更多訓練次數）
+#   2. 降低 learning_rate 到 1e-5（更穩定）
+#   3. 檢查課程學習策略是否正確調整距離
+#
+# 問題：策略在短距離目標（<3 米）表現不穩定
+# 解決方案：
+#   1. 增加 ent_coef 到 0.0005（更多探索）
+#   2. 收鬆 clip_range 到 0.15（更靈活）
+#   3. 從 Phase 2 的檢查點恢復訓練
