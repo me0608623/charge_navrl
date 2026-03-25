@@ -414,7 +414,7 @@ def reset_root_state_fixed_per_env(
         # 牆壁 + 障礙物 proximity 拒絕採樣
         # agent 必須離牆壁和障礙物都至少 SPAWN_SAFE_DIST
         # ----------------------------------------------------------------
-        SPAWN_SAFE_DIST = 2.0  # 離牆壁和障礙物至少 2m
+        SPAWN_SAFE_DIST = 1.0  # 離牆壁和障礙物至少 1m
 
         pos_xy = pos_samples[:, :2].clone()
         x_range = pos_ranges[0]  # (min, max) for x
