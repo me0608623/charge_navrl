@@ -69,6 +69,7 @@ from ..mdp.observations.obs_functions import (
 from ..mdp.rewards import (
     reaching_goal,
     collision_occurred,
+    collision_contact_occurred,
 )
 from ..mdp.rewards.potential_based_rewards import (
     potential_progress_reward,
@@ -113,7 +114,7 @@ ROBOT_BODY_RADIUS = 0.35  # 實際機器人半徑 [m]
 GOAL_REACH_THRESHOLD = ROBOT_BODY_RADIUS
 COLLISION_BUFFER = 0.10  # 安全裕量：縮減以釋放窄道可行駛空間 [m]
 COLLISION_THRESHOLD = round(ROBOT_BODY_RADIUS + COLLISION_BUFFER, 2)  # 0.45m
-MAX_OBSTACLES = 20
+MAX_OBSTACLES = 100  # 場景最大障礙物 entity 數量（實際使用由 event params 控制）
 
 
 # ============================================================================
@@ -144,7 +145,7 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
     # VLP-16 LiDAR: 16 channels, 360 horizontal, 1.0 deg res, max 20m
     lidar = MultiMeshRayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/charger_rover_urdf5/base_link",
-        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 0.5)),
+        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 1.6)),
         ray_alignment="yaw",
         pattern_cfg=patterns.LidarPatternCfg(
             channels=16,
@@ -237,9 +238,11 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
                 init_state=AssetBaseCfg.InitialStateCfg(pos=pos),
             ))
 
-        # 10 個混合障礙物（初始隱藏在 Z = -10.0）
+        # 100 個障礙物（循環 10 種外觀，初始隱藏在 Z = -10.0）
+        # 實際使用數量由 event params 的 num_obstacles_static/dynamic 控制
+        # 觀測只取 Top-K=10 最近的（obs 維度不變 60D）
         HIDDEN_Z = -10.0
-        obstacle_configs = [
+        _obstacle_templates = [
             {"type": "cuboid", "size": (0.5, 0.5, 1.2), "color": (0.8, 0.2, 0.2)},
             {"type": "cylinder", "radius": 0.3, "height": 1.0, "color": (0.8, 0.8, 0.2)},
             {"type": "cuboid", "size": (0.7, 0.7, 1.4), "color": (0.2, 0.4, 0.8)},
@@ -253,7 +256,8 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
         ]
 
         obstacle_sizes: list[float] = []
-        for i, cfg in enumerate(obstacle_configs):
+        for i in range(MAX_OBSTACLES):
+            cfg = _obstacle_templates[i % len(_obstacle_templates)]
             if cfg["type"] == "cuboid":
                 spawn_cfg = sim_utils.CuboidCfg(
                     size=cfg["size"],
@@ -278,7 +282,7 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
             ))
             obstacle_sizes.append(size_scalar)
 
-        set_obstacle_metadata(10, obstacle_sizes)
+        set_obstacle_metadata(MAX_OBSTACLES, obstacle_sizes)
 
 
 # ============================================================================
@@ -418,7 +422,7 @@ class ObservationsCfgVLP16:
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
                 "top_k": 10,
-                "max_obstacles": 10,
+                "max_obstacles": MAX_OBSTACLES,
                 "max_distance": 8.0,
                 "v_max": 1.5,
                 "wall_occlusion": True,
@@ -491,7 +495,7 @@ class ObservationsCfgVLP16:
             params={
                 "robot_cfg": SceneEntityCfg("robot"),
                 "top_k": 10,
-                "max_obstacles": 10,
+                "max_obstacles": MAX_OBSTACLES,
                 "max_distance": 8.0,
                 "v_max": 1.5,
                 "wall_occlusion": True,
@@ -616,9 +620,11 @@ class TerminationsCfgVLP16:
         func=robot_tipped_over,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
+    # PhysX contact sensor 碰撞偵測（取代 LiDAR distance threshold）
+    # contact_sensor filter = Obstacle_.*，物理碰撞 100% 可靠
     collision = DoneTerm(
-        func=collision_occurred,
-        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        func=collision_contact_occurred,
+        params={"sensor_cfg": SceneEntityCfg("contact_sensor")},
     )
     # AABB 牆壁碰撞偵測（LiDAR collision 的互補安全網）
     wall_collision = DoneTerm(
