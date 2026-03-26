@@ -1037,3 +1037,21 @@ class RewardsCfgVLP16NavRLGroundV6(RewardsCfgVLP16NavRLGroundV3):
         params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
         weight=-50.0,
     )
+
+
+# ============================================================================
+# NavRL-Ground v7: 碰撞成本遞增（死亡機制優先）
+# ============================================================================
+
+@configclass
+class RewardsCfgVLP16NavRLGroundV7(RewardsCfgVLP16NavRLGroundV6):
+    """NavRL-Ground v7: 碰撞成本遞增。
+
+    前期 collision=-5（靠死亡機制學避障），後期由 curriculum 遞增到 -80。
+    B6 降為 3G 7S 2D（降低 Stage 5→6 難度跳躍）。
+    """
+    collision_ground = RewTerm(
+        func=collision_terminal_penalty,
+        params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
+        weight=-5.0,
+    )

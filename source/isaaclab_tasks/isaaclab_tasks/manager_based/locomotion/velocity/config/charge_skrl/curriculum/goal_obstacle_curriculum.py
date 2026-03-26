@@ -428,50 +428,56 @@ CURRICULUM_CONFIGS = {
         "clear_window_on_promote": True,
         "open_ended": True,  # 標記此版本使用 open-ended 模式
         "stages": [
-            # B1: goal_open — 純導航
+            # B1: goal_open — 純導航 (collision=-5, 前期靠死亡機制)
             _make_stage(6, 0, 0, 0, 0, 0.990, 45, 1.00,
                         upgrade_sr=0.85, upgrade_max_cr=1.0, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=50,
                         downgrade_sr=0.0, downgrade_min_cr=1.0, downgrade_min_to=1.0,
                         name="B1_goal_open",
                         reward_weights={"goal_velocity": 5.0, "goal_progress": 6.0,
-                                        "static_safety": 0.0, "dynamic_safety": 0.0}),
-            # B2: goal_sparse_static
+                                        "static_safety": 0.0, "dynamic_safety": 0.0,
+                                        "collision_ground": -5}),
+            # B2: goal_sparse_static (collision=-5)
             _make_stage(5, 2, 0, 0, 0, 0.992, 50, 0.60,
                         upgrade_sr=0.82, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=60,
                         downgrade_sr=0.30, downgrade_min_cr=1.0, downgrade_min_to=0.80,
                         name="B2_sparse_static",
                         reward_weights={"goal_velocity": 5.0, "goal_progress": 5.8,
-                                        "static_safety": 0.2, "dynamic_safety": 0.0}),
-            # B3: static_light
+                                        "static_safety": 0.2, "dynamic_safety": 0.0,
+                                        "collision_ground": -5}),
+            # B3: static_light (collision=-5)
             _make_stage(4, 4, 0, 0, 0, 0.993, 55, 0.40,
                         upgrade_sr=0.80, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=70,
                         name="B3_static_light",
                         reward_weights={"goal_velocity": 4.8, "goal_progress": 5.5,
-                                        "static_safety": 0.4, "dynamic_safety": 0.0}),
-            # B4: static_medium
+                                        "static_safety": 0.4, "dynamic_safety": 0.0,
+                                        "collision_ground": -5}),
+            # B4: static_medium (collision=-5)
             _make_stage(3, 6, 0, 0, 0, 0.994, 60, 0.25,
                         upgrade_sr=0.78, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=85,
                         name="B4_static_medium",
                         reward_weights={"goal_velocity": 4.5, "goal_progress": 5.0,
-                                        "static_safety": 0.6, "dynamic_safety": 0.0}),
-            # B5: dynamic_intro
+                                        "static_safety": 0.6, "dynamic_safety": 0.0,
+                                        "collision_ground": -5}),
+            # B5: dynamic_intro (collision=-10, 開始加重)
             _make_stage(3, 6, 2, 0, 0, 0.995, 68, 0.10,
                         upgrade_sr=0.75, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=100,
                         name="B5_dynamic_intro",
                         reward_weights={"goal_velocity": 4.0, "goal_progress": 4.5,
-                                        "static_safety": 0.8, "dynamic_safety": 0.3}),
-            # B6: dynamic_bridge — open-ended 入口
-            _make_stage(2, 8, 3, 0, 0, 0.996, 75, 0.0,
+                                        "static_safety": 0.8, "dynamic_safety": 0.3,
+                                        "collision_ground": -10}),
+            # B6: dynamic_bridge (collision=-20, 3G 7S 2D — 降低難度跳躍)
+            _make_stage(3, 7, 2, 0, 0, 0.996, 75, 0.0,
                         upgrade_sr=0.72, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=115,
                         name="B6_dynamic_bridge",
                         reward_weights={"goal_velocity": 3.5, "goal_progress": 4.0,
-                                        "static_safety": 1.0, "dynamic_safety": 0.5}),
+                                        "static_safety": 1.0, "dynamic_safety": 0.5,
+                                        "collision_ground": -20}),
         ],
     },
 }
@@ -596,8 +602,11 @@ def _apply_open_ended(env, level: int):
     env.cfg.episode_length_s = cfg["episode_length_s"]
     env._target_discount_factor = cfg["gamma"]
 
-    # Reward weights
+    # Reward weights (含碰撞成本遞增)
     rw = _open_ended_reward_weights(level)
+    # 碰撞成本遞增: -30 + level * -5, cap at -80
+    collision_w = max(-80, -30 + level * -5)
+    rw["collision_ground"] = collision_w
     try:
         rm = env.reward_manager
         for term_name, weight in rw.items():
@@ -616,7 +625,8 @@ def _apply_open_ended(env, level: int):
         f"[OpenEnded] Level {level}: "
         f"{cfg['num_goals']}G {cfg['num_obstacles_static']}S+{cfg['num_obstacles_dynamic']}D "
         f"walls=0 ep={cfg['episode_length_s']:.0f}s γ={cfg['gamma']:.4f} "
-        f"speed={cfg['speed_range']:.2f} boundary={cfg['boundary']:.1f}",
+        f"speed={cfg['speed_range']:.2f} boundary={cfg['boundary']:.1f} "
+        f"collision_w={collision_w}",
         flush=True,
     )
 

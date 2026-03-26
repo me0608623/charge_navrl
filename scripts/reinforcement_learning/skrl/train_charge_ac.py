@@ -111,8 +111,8 @@ parser.add_argument("--use_cadn", action="store_true", default=False,
 
 # --- NavRL-Ground v1 reward mode ---
 parser.add_argument("--reward_mode", type=str, default="current",
-                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4", "navrl_ground_v5", "navrl_ground_v6"],
-                    help="Reward mode: current / v1-v5 / v6(open-ended, front_block=0.4)")
+                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4", "navrl_ground_v5", "navrl_ground_v6", "navrl_ground_v7"],
+                    help="Reward mode: current / v1-v6 / v7(v6+碰撞成本遞增)")
 parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
                     choices=["log_distance", "closing_risk"],
                     help="Dynamic safety reward mode")
@@ -631,6 +631,29 @@ def _apply_ablation_overrides(env_cfg, args_cli):
             f"w: goal={r.reaching_goal.weight} coll={r.collision_ground.weight} "
             f"alive={r.alive.weight} ss_front={r.static_safety.params['a_front_block']} | "
             f"ds_mode={args_cli.dynamic_safety_mode}"
+        )
+        changed = True
+
+    # --- reward_mode: navrl_ground_v7 (v6 + 碰撞成本遞增, collision=-5 基礎) ---
+    if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v7":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            RewardsCfgVLP16NavRLGroundV7,
+        )
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV7()
+
+        r = env_cfg.rewards
+        r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+
+        if args_cli.goal_vel_use_soft_gate:
+            r.goal_velocity.params["use_soft_gate"] = True
+            r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
+
+        print(
+            f"[REWARD_MODE] navrl_ground_v7 (碰撞遞增: -5→-80) | "
+            f"w: goal={r.reaching_goal.weight} coll_base={r.collision_ground.weight} "
+            f"alive={r.alive.weight} ss_front={r.static_safety.params['a_front_block']} | "
+            f"ds_mode={args_cli.dynamic_safety_mode} | "
+            f"collision 由 curriculum 動態調整"
         )
         changed = True
 
