@@ -1049,7 +1049,14 @@ class RewardsCfgVLP16NavRLGroundV7(RewardsCfgVLP16NavRLGroundV6):
 
     前期 collision=-5（靠死亡機制學避障），後期由 curriculum 遞增到 -80。
     B6 降為 3G 7S 2D（降低 Stage 5→6 難度跳躍）。
+    smooth_w_coeff: 1.0→0.6（降低角速度懲罰，讓繞行轉向更自由）。
     """
+    smoothness = RewTerm(
+        func=_ground_smooth,
+        params={"smooth_v_coeff": 1.0, "smooth_w_coeff": 0.6},
+        weight=-0.1,
+    )
+
     collision_ground = RewTerm(
         func=collision_terminal_penalty,
         params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
