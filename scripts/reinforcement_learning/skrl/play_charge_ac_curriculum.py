@@ -67,10 +67,26 @@ parser.add_argument("--num_walls", type=int, default=None, help="Number of inter
 parser.add_argument("--max_steps", type=int, default=1600, help="Max steps in --no_curriculum mode.")
 parser.add_argument("--camera", type=str, default="top", choices=["top", "follow", "side"],
                     help="Camera view.")
+parser.add_argument("--use_cadn", action="store_true", default=False,
+                    help="Use PerBranchCADN normalizer (required when checkpoint was trained with CADN).")
 
 # AppLauncher args (--headless, --device, etc.)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+# --- Play 模式渲染最佳化 ---
+if not args_cli.headless:
+    if args_cli.rendering_mode is None or args_cli.rendering_mode == "balanced":
+        args_cli.rendering_mode = "performance"
+    if not getattr(args_cli, "enable_cameras", False):
+        args_cli.enable_cameras = True
+    extra_kit = " ".join([
+        "--/rtx/indirectDiffuse/enabled=true",
+        "--/rtx/shadows/enabled=false",
+        "--/app/asyncRendering=true",
+        "--/app/asyncRenderingLowLatency=true",
+    ])
+    args_cli.kit_args = f"{args_cli.kit_args} {extra_kit}" if args_cli.kit_args else extra_kit
 
 # Launch sim
 app_launcher = AppLauncher(args_cli)
@@ -229,6 +245,10 @@ def main():
     # Play mode: goal/robot 離牆壁/邊界至少 1.0m
     env_cfg.commands.goal_command.wall_safe_margin = 1.0
 
+    # Play 模式: render_interval 折衷（每 action 渲染 5 幀 ~25 FPS）
+    if not args_cli.headless:
+        env_cfg.sim.render_interval = 4
+
     if use_curriculum:
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
             _apply_stage, _load_stages,
@@ -282,27 +302,35 @@ def main():
         n_w = args_cli.num_walls if args_cli.num_walls is not None else 4
         has_obs = (n_s + n_d) > 0
 
-        # Compute obstacle ratios
-        if has_obs:
-            total_obs = n_s + n_d
-            s_ratio = round(n_s / total_obs, 2)
-            d_ratio = round(1.0 - s_ratio, 2)
-            empty_ratio = 0.0
+        # 障礙物分配: 同時有 static + dynamic → mixed 模式
+        if n_s > 0 and n_d > 0:
+            obs_params = {
+                "empty_ratio": 0.0, "static_ratio": 0.0, "dynamic_ratio": 0.0,
+                "mixed_ratio": 1.0,
+                "num_obstacles_static": n_s, "num_obstacles_dynamic": n_d,
+            }
+        elif n_d > 0:
+            obs_params = {
+                "empty_ratio": 0.0, "static_ratio": 0.0, "dynamic_ratio": 1.0,
+                "num_obstacles_static": 0, "num_obstacles_dynamic": n_d,
+            }
+        elif n_s > 0:
+            obs_params = {
+                "empty_ratio": 0.0, "static_ratio": 1.0, "dynamic_ratio": 0.0,
+                "num_obstacles_static": n_s, "num_obstacles_dynamic": 0,
+            }
         else:
-            s_ratio, d_ratio, empty_ratio = 0.0, 0.0, 1.0
+            obs_params = {
+                "empty_ratio": 1.0, "static_ratio": 0.0, "dynamic_ratio": 0.0,
+                "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
+            }
 
-        max_obs = max(n_s, n_d, 10)  # 至少 10，或取 static/dynamic 中較大的
+        max_obs = max(n_s + n_d, 10)
+        obs_params["max_obstacles"] = max_obs
         for evt_attr in ["randomize_obstacles", "randomize_obstacles_startup"]:
             evt_term = getattr(env_cfg.events, evt_attr, None)
             if evt_term is not None:
-                evt_term.params.update({
-                    "empty_ratio": empty_ratio,
-                    "static_ratio": s_ratio,
-                    "dynamic_ratio": d_ratio,
-                    "num_obstacles_static": n_s,
-                    "num_obstacles_dynamic": n_d,
-                    "max_obstacles": max_obs,
-                })
+                evt_term.params.update(obs_params)
         # 同步 move_dynamic_obstacles 的 max_obstacles
         move_evt = getattr(env_cfg.events, "move_dynamic_obstacles", None)
         if move_evt is not None:
@@ -374,6 +402,14 @@ def main():
     # --- Setup agent ---
     agent_cfg["trainer"]["close_environment_at_exit"] = False
     runner = Runner(env, agent_cfg)
+
+    # CADN: replace state_preprocessor before loading checkpoint
+    if args_cli.use_cadn:
+        from cadn import PerBranchCADN
+        cadn = PerBranchCADN(device=env.device)
+        runner.agent._state_preprocessor = cadn
+        runner.agent.checkpoint_modules["state_preprocessor"] = cadn
+        print("[INFO] CADN normalizer enabled")
 
     checkpoint_path = args_cli.checkpoint
     if checkpoint_path:
