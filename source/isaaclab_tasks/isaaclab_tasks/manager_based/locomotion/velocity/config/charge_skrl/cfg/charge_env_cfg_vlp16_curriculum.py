@@ -160,10 +160,9 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
             ),
         ]
 
-        # 100 個障礙物（循環外觀模板，初始隱藏在 Z = -10.0）
-        # 前 50 個: 靜態外觀（混合色系）
-        # 後 50 個: 動態外觀（深紅色，較高 2.0m+，易辨識）
-        MAX_OBS = 100
+        # 30 個障礙物（循環外觀模板，初始隱藏在 Z = -10.0）
+        # open-ended 最大需求: static(20) + dynamic(5) = 25, 留 5 餘裕
+        MAX_OBS = 30
         HIDDEN_Z = -10.0
         _static_tpl = [
             {"type": "cuboid", "size": (0.5, 0.5, 1.2), "color": (0.8, 0.2, 0.2)},
