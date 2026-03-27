@@ -6,10 +6,12 @@ from .module_entropy import (
     compute_module_entropy,
     classify_module_entropy,
 )
+from .reward_space_logger import RewardSpaceLogger
 
 __all__ = [
     "ModuleEntropyMonitor",
     "compute_grad_norm",
     "compute_module_entropy",
     "classify_module_entropy",
+    "RewardSpaceLogger",
 ]

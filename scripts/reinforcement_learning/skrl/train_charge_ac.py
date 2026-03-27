@@ -969,6 +969,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print(f"[INFO] AblationMetricsLogger enabled for task: {task_name}")
             except Exception as e:
                 print(f"[WARN] AblationMetricsLogger failed to init: {e}")
+
+            # Reward space logger (always enabled with ablation_logger)
+            try:
+                from diagnostics import RewardSpaceLogger
+                log_dir = getattr(trainer, "_csv_path", None)
+                if log_dir:
+                    log_dir = str(Path(log_dir).parent)
+                trainer.reward_space_logger = RewardSpaceLogger(env, output_dir=log_dir)
+                print(f"[INFO] RewardSpaceLogger enabled (CSV: {trainer.reward_space_logger._csv_path})")
+            except Exception as e:
+                print(f"[WARN] RewardSpaceLogger failed to init: {e}")
     else:
         runner = Runner(env, agent_cfg)
         trainer = None

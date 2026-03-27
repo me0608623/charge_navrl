@@ -84,6 +84,7 @@ class WandBSequentialTrainer(SequentialTrainer):
         self.console_summary_logger = console_summary_logger
         self.debug_logger = debug_logger
         self.ablation_logger = None  # Set externally for NavRL0* tasks
+        self.reward_space_logger = None  # Set externally for reward space logging
         self._initial_timestamp = None
         self._last_log_time = None
 
@@ -530,6 +531,11 @@ class WandBSequentialTrainer(SequentialTrainer):
 
             # reset environments
             if terminated.any() or truncated.any():
+                # Finalize episodes for reward space logger
+                if self.reward_space_logger is not None:
+                    done_mask = (terminated | truncated).squeeze(-1) if (terminated | truncated).dim() > 1 else (terminated | truncated)
+                    reset_ids = torch.nonzero(done_mask).squeeze(-1)
+                    self.reward_space_logger.finalize_episodes(reset_env_ids=reset_ids, infos=infos)
                 with torch.no_grad():
                     states, infos = self.env.reset()
             else:
@@ -571,6 +577,11 @@ class WandBSequentialTrainer(SequentialTrainer):
                     self.debug_logger.step(actions, rewards, terminated, truncated, infos)
                 if self.ablation_logger is not None:
                     self.ablation_logger.step(actions, rewards, terminated, truncated, infos)
+                if self.reward_space_logger is not None:
+                    # Extract LiDAR from observation (139D: ego(4) + goal(2) + lidar(72) + obs(60) + time(1))
+                    # LiDAR is at indices [6:78]
+                    lidar_72 = next_states[..., 6:78] if next_states.dim() > 2 else next_states[None, 6:78]
+                    self.reward_space_logger.step(env_ids=torch.arange(self.env.num_envs, device=self.env.device), lidar_72=lidar_72)
 
                 # 保存tracking_data（在record_transition清空之前）
                 tracking_data_snapshot = self._capture_tracking_data(single_agent=True)
@@ -685,6 +696,13 @@ class WandBSequentialTrainer(SequentialTrainer):
                         {k: [v] for k, v in abl_metrics.items()}
                     )
 
+                # Reward Space 指標：每個 rollout 統計
+                if self.reward_space_logger is not None:
+                    rs_metrics = self.reward_space_logger.get_rollout_metrics()
+                    tracking_data_snapshot.update(
+                        {k: [v] for k, v in rs_metrics.items()}
+                    )
+
                 # Module Entropy 指標：flush 累積的 mini-batch 數據，取平均後注入
                 if self._module_entropy_monitor is not None:
                     try:
@@ -717,6 +735,11 @@ class WandBSequentialTrainer(SequentialTrainer):
 
             # reset environments
             if terminated.any() or truncated.any():
+                # Finalize episodes for reward space logger
+                if self.reward_space_logger is not None:
+                    done_mask = (terminated | truncated).squeeze(-1) if (terminated | truncated).dim() > 1 else (terminated | truncated)
+                    reset_ids = torch.nonzero(done_mask).squeeze(-1)
+                    self.reward_space_logger.finalize_episodes(reset_env_ids=reset_ids, infos=infos)
                 with torch.no_grad():
                     states, infos = self.env.reset()
             else:
@@ -1067,6 +1090,11 @@ class WandBSequentialTrainer(SequentialTrainer):
 
             # reset environments
             if terminated.any() or truncated.any():
+                # Finalize episodes for reward space logger
+                if self.reward_space_logger is not None:
+                    done_mask = (terminated | truncated).squeeze(-1) if (terminated | truncated).dim() > 1 else (terminated | truncated)
+                    reset_ids = torch.nonzero(done_mask).squeeze(-1)
+                    self.reward_space_logger.finalize_episodes(reset_env_ids=reset_ids, infos=infos)
                 with torch.no_grad():
                     states, infos = self.env.reset()
             else:
