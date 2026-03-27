@@ -18,6 +18,36 @@ if TYPE_CHECKING:
 
 
 # ============================================================================
+# Ablation 參數（由 CLI 設定）
+# ============================================================================
+
+_ablation_ss_scale = 1.0  # safety 權重縮放因子 (1.0=v8 baseline, 0.6=lower, 1.4=raise)
+
+
+def set_ablation_params(ss_lower_mode: str | None = None, ss_raise: bool = False):
+    """設定 Ablation Family 5 參數。
+
+    Args:
+        ss_lower_mode: "aggressive" (ss*0.6), "moderate" (ss*0.8), None (不調整)
+        ss_raise: True (ss*1.4), False (不調整)
+    """
+    global _ablation_ss_scale
+    if ss_lower_mode == "aggressive":
+        _ablation_ss_scale = 0.6
+    elif ss_lower_mode == "moderate":
+        _ablation_ss_scale = 0.8
+    elif ss_raise:
+        _ablation_ss_scale = 1.4
+    else:
+        _ablation_ss_scale = 1.0
+
+
+def _apply_ss_scale(value: float) -> float:
+    """套用 safety 權重縮放因子，保留 2 位小數。"""
+    return round(value * _ablation_ss_scale, 2)
+
+
+# ============================================================================
 # Curriculum Version Configs — 資料驅動
 # ============================================================================
 
@@ -535,12 +565,16 @@ def _open_ended_reward_weights(level: int) -> dict:
 
     v8 修正: 降低 safety 上限、提高 velocity 下限。
     確保 (ss+ds)/goal < 30%，防止安全 reward 搶走核心主導。
+
+    Ablation 5: 可透過 set_ablation_params() 調整 safety 權重。
     """
+    base_ss = min(0.5, 0.3 + 0.02 * level)
+    base_ds = min(0.4, 0.2 + 0.02 * level)
     return {
-        "goal_velocity": max(3.5, 4.0 - 0.05 * level),    # v7: max(2.5, 3.5-0.08*l)
-        "goal_progress": max(3.5, 4.0 - 0.05 * level),    # v7: max(3.0, 4.0-0.08*l)
-        "static_safety": min(0.5, 0.3 + 0.02 * level),    # v7: min(1.2, 1.0+0.05*l)
-        "dynamic_safety": min(0.4, 0.2 + 0.02 * level),   # v7: min(1.0, 0.5+0.05*l)
+        "goal_velocity": max(3.5, 4.0 - 0.05 * level),
+        "goal_progress": max(3.5, 4.0 - 0.05 * level),
+        "static_safety": _apply_ss_scale(base_ss),
+        "dynamic_safety": _apply_ss_scale(base_ds),
     }
 
 
@@ -1157,16 +1191,23 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
     # --- Stage-dependent reward weights ---
     rw = cfg.get("reward_weights")
     if rw is not None:
+        # Ablation 5: 套用 safety 權重縮放因子
+        rw_scaled = {}
+        for term_name, weight in rw.items():
+            if term_name in ("static_safety", "dynamic_safety"):
+                rw_scaled[term_name] = _apply_ss_scale(weight)
+            else:
+                rw_scaled[term_name] = weight
         try:
             rm = env.reward_manager
-            for term_name, weight in rw.items():
+            for term_name, weight in rw_scaled.items():
                 try:
                     tc = rm.get_term_cfg(term_name)
                     tc.weight = weight
                     rm.set_term_cfg(term_name, tc)
                 except Exception:
                     pass
-            weights_str = " ".join(f"{k}={v}" for k, v in rw.items())
+            weights_str = " ".join(f"{k}={v}" for k, v in rw_scaled.items())
             print(f"[Curriculum] Stage {stage} reward weights: {weights_str}", flush=True)
         except Exception:
             pass

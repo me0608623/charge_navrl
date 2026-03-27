@@ -139,6 +139,13 @@ parser.add_argument("--curriculum_version", type=str, default=None,
 parser.add_argument("--no_walls", action="store_true", default=False,
                     help="移除所有內牆（保留外牆），所有 stage 的 min/max_walls=0")
 
+# --- Ablation Family 5: v8 safety balance ---
+parser.add_argument("--ss_lower_mode", type=str, default=None,
+                    choices=["aggressive", "moderate"],
+                    help="Ablation 5: 進一步降低 safety 權重 (aggressive: ss-40%, moderate: ss-20%)")
+parser.add_argument("--ss_raise_mode", action="store_true", default=False,
+                    help="Ablation 5: 提高 safety 權重 (ss+40%)")
+
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 
@@ -702,6 +709,18 @@ def _apply_ablation_overrides(env_cfg, args_cli):
                 stage_cfg["max_walls"] = 0
             print(f"[NO_WALLS] 所有 stage 的 min/max_walls 已設為 0（保留外牆）")
             changed = True
+
+    # --- Ablation 5: safety 權重調整 ---
+    ss_lower = getattr(args_cli, 'ss_lower_mode', None)
+    ss_raise = getattr(args_cli, 'ss_raise_mode', False)
+    if ss_lower or ss_raise:
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
+            set_ablation_params,
+        )
+        set_ablation_params(ss_lower_mode=ss_lower, ss_raise=ss_raise)
+        mode_str = f"ss_lower={ss_lower}" if ss_lower else f"ss_raise={ss_raise}"
+        print(f"[ABLATION_5] Safety 權重調整: {mode_str}")
+        changed = True
 
     if not changed:
         print("[ABLATION] baseline (no overrides)")
