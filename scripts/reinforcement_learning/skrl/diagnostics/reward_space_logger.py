@@ -143,38 +143,30 @@ class RewardSpaceLogger:
 
         Args:
             env_ids: 本次更新的 env 索引 [M]
-            lidar_72: LiDAR 72-bin 距離 [N, 72] 或 [B, N, 72]
+            lidar_72: LiDAR 72-bin 距離 [N, 72] 或 [M, 72]
         """
-        # 移除多餘的 batch 維度 (如果來自 unsqueeze(0))
-        if lidar_72.dim() == 3 and lidar_72.shape[0] == 1:
-            lidar_72 = lidar_72.squeeze(0)
+        # Debug-only 驗證 (python -O 時移除)
+        assert lidar_72.dim() == 2, f"lidar_72 必須是 2D [N, 72]，實際: {lidar_72.shape}"
+        assert lidar_72.shape[-1] == self.NUM_LIDAR_BINS, f"lidar_72 bins 維度必須是 {self.NUM_LIDAR_BINS}，實際: {lidar_72.shape[-1]}"
 
-        # 驗證輸入形狀
-        if lidar_72.dim() != 2:
-            raise ValueError(f"lidar_72 必須是 2D tensor [N, 72]，實際: {lidar_72.shape}")
-        if lidar_72.shape[1] != self.NUM_LIDAR_BINS:
-            raise ValueError(f"lidar_72 最後維度必須是 {self.NUM_LIDAR_BINS}，實際: {lidar_72.shape[1]}")
-
-        # 處理 lidar_72 形狀
+        # 根據 lidar_72 形狀確定要更新的 env IDs
         if lidar_72.shape[0] == self._num_envs:
-            # 全部 env
-            active_lidar = lidar_72
+            # 全部 env — 使用連續索引
             active_ids = torch.arange(self._num_envs, device=self._device)
         else:
-            # 部分 env (env_ids)
-            active_lidar = lidar_72
+            # 部分 env — 使用傳入的 env_ids
             active_ids = env_ids
 
         if active_ids.numel() == 0:
             return
 
-        # 1. 計算 lidar_min (全局最小) — 對 LiDAR bins 維度取 min
-        lidar_min = active_lidar.amin(dim=-1)  # [M]
+        # 1. 計算 lidar_min (對 bins 維度取 min)
+        lidar_min = lidar_72.amin(dim=-1)  # [N]
 
         # 2. 計算 d_front (前方扇區最近 5 bins 平均)
-        front_sector = active_lidar[:, self._front_start : self._front_end]  # [M, 12]
+        front_sector = lidar_72[:, self._front_start : self._front_end]  # [N, 12]
         k = min(self.FRONT_NEAREST_K, front_sector.shape[1])
-        d_front = torch.topk(front_sector, k=k, dim=-1, largest=False).values.mean(dim=-1)  # [M]
+        d_front = torch.topk(front_sector, k=k, dim=-1, largest=False).values.mean(dim=-1)  # [N]
 
         # 3. 計算 flags
         collision_flag = lidar_min <= self.COLLISION_THRESHOLD  # [M] bool
