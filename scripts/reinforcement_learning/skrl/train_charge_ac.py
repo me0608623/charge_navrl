@@ -974,7 +974,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             try:
                 from diagnostics import RewardSpaceLogger
                 # 使用訓練 run 的 logs 目錄
-                import os
                 log_dir = os.path.join(os.path.dirname(env.cfg.log_dir), "reward_space") if hasattr(env.cfg, "log_dir") else "logs/reward_space"
                 trainer.reward_space_logger = RewardSpaceLogger(env, output_dir=log_dir)
                 print(f"[INFO] RewardSpaceLogger enabled (CSV: {trainer.reward_space_logger._csv_path})")
