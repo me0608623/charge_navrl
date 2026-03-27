@@ -581,8 +581,6 @@ class WandBSequentialTrainer(SequentialTrainer):
                     # Extract LiDAR from observation (139D: ego(4) + goal(2) + lidar(72) + obs(60) + time(1))
                     # LiDAR is at indices [6:78]
                     lidar_72 = next_states[..., 6:78]
-                    if lidar_72.dim() == 2:
-                        lidar_72 = lidar_72.unsqueeze(0)  # [num_envs, 72] -> [1, num_envs, 72]
                     self.reward_space_logger.step(env_ids=torch.arange(self.env.num_envs, device=self.env.device), lidar_72=lidar_72)
 
                 # 保存tracking_data（在record_transition清空之前）
