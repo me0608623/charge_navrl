@@ -973,9 +973,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # Reward space logger (always enabled with ablation_logger)
             try:
                 from diagnostics import RewardSpaceLogger
-                log_dir = getattr(trainer, "_csv_path", None)
-                if log_dir:
-                    log_dir = str(Path(log_dir).parent)
+                # 使用訓練 run 的 logs 目錄
+                import os
+                log_dir = os.path.join(os.path.dirname(env.cfg.log_dir), "reward_space") if hasattr(env.cfg, "log_dir") else "logs/reward_space"
                 trainer.reward_space_logger = RewardSpaceLogger(env, output_dir=log_dir)
                 print(f"[INFO] RewardSpaceLogger enabled (CSV: {trainer.reward_space_logger._csv_path})")
             except Exception as e:
