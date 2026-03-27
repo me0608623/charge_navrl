@@ -446,13 +446,13 @@ CURRICULUM_CONFIGS = {
                         reward_weights={"goal_velocity": 5.0, "goal_progress": 5.8,
                                         "static_safety": 0.2, "dynamic_safety": 0.0,
                                         "collision_ground": -5}),
-            # B3: static_light (collision=-5)
+            # B3: static_light (collision=-5, ss 降低確保 goal 主導)
             _make_stage(4, 4, 0, 0, 0, 0.993, 55, 0.40,
                         upgrade_sr=0.80, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=70,
                         name="B3_static_light",
                         reward_weights={"goal_velocity": 4.8, "goal_progress": 5.5,
-                                        "static_safety": 0.4, "dynamic_safety": 0.0,
+                                        "static_safety": 0.3, "dynamic_safety": 0.0,
                                         "collision_ground": -5}),
             # B4: static_medium (collision=-5)
             _make_stage(3, 6, 0, 0, 0, 0.994, 60, 0.25,
@@ -460,23 +460,23 @@ CURRICULUM_CONFIGS = {
                         upgrade_min_dyn_sr=0.0, min_stage_updates=85,
                         name="B4_static_medium",
                         reward_weights={"goal_velocity": 4.5, "goal_progress": 5.0,
-                                        "static_safety": 0.6, "dynamic_safety": 0.0,
+                                        "static_safety": 0.4, "dynamic_safety": 0.0,
                                         "collision_ground": -5}),
-            # B5: dynamic_intro (collision=-10, 開始加重)
+            # B5: dynamic_intro (collision=-10, vel 提高保持前進主導)
             _make_stage(3, 6, 2, 0, 0, 0.995, 68, 0.10,
                         upgrade_sr=0.75, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=100,
                         name="B5_dynamic_intro",
-                        reward_weights={"goal_velocity": 4.0, "goal_progress": 4.5,
-                                        "static_safety": 0.8, "dynamic_safety": 0.3,
+                        reward_weights={"goal_velocity": 4.5, "goal_progress": 4.5,
+                                        "static_safety": 0.5, "dynamic_safety": 0.2,
                                         "collision_ground": -10}),
-            # B6: dynamic_bridge (collision=-20, 3G 7S 2D — 降低難度跳躍)
+            # B6: dynamic_bridge (collision=-20, 3G 7S 2D, ss+ds 壓低)
             _make_stage(3, 7, 2, 0, 0, 0.996, 75, 0.0,
                         upgrade_sr=0.72, upgrade_max_cr=0.35, upgrade_max_to=0.25,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=115,
                         name="B6_dynamic_bridge",
-                        reward_weights={"goal_velocity": 3.5, "goal_progress": 4.0,
-                                        "static_safety": 1.0, "dynamic_safety": 0.5,
+                        reward_weights={"goal_velocity": 4.0, "goal_progress": 4.0,
+                                        "static_safety": 0.5, "dynamic_safety": 0.3,
                                         "collision_ground": -20}),
         ],
     },
@@ -531,12 +531,16 @@ def _open_ended_params(level: int) -> dict:
 
 
 def _open_ended_reward_weights(level: int) -> dict:
-    """difficulty_level → reward 權重映射。"""
+    """difficulty_level → reward 權重映射。
+
+    v8 修正: 降低 safety 上限、提高 velocity 下限。
+    確保 (ss+ds)/goal < 30%，防止安全 reward 搶走核心主導。
+    """
     return {
-        "goal_velocity": max(2.5, 3.5 - 0.08 * level),
-        "goal_progress": max(3.0, 4.0 - 0.08 * level),
-        "static_safety": min(1.2, 1.0 + 0.05 * level),
-        "dynamic_safety": min(1.0, 0.5 + 0.05 * level),
+        "goal_velocity": max(3.5, 4.0 - 0.05 * level),    # v7: max(2.5, 3.5-0.08*l)
+        "goal_progress": max(3.5, 4.0 - 0.05 * level),    # v7: max(3.0, 4.0-0.08*l)
+        "static_safety": min(0.5, 0.3 + 0.02 * level),    # v7: min(1.2, 1.0+0.05*l)
+        "dynamic_safety": min(0.4, 0.2 + 0.02 * level),   # v7: min(1.0, 0.5+0.05*l)
     }
 
 

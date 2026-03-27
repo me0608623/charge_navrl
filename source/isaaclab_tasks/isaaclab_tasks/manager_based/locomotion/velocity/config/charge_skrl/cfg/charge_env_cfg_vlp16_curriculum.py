@@ -160,9 +160,9 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
             ),
         ]
 
-        # 30 個障礙物（循環外觀模板，初始隱藏在 Z = -10.0）
-        # open-ended 最大需求: static(20) + dynamic(5) = 25, 留 5 餘裕
-        MAX_OBS = 30
+        # 100 個障礙物（循環外觀模板，初始隱藏在 Z = -10.0）
+        # play --no_curriculum 可自由設定 --num_static/--num_dynamic
+        MAX_OBS = 100
         HIDDEN_Z = -10.0
         _static_tpl = [
             {"type": "cuboid", "size": (0.5, 0.5, 1.2), "color": (0.8, 0.2, 0.2)},
@@ -176,17 +176,9 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
             {"type": "cuboid", "size": (0.55, 0.55, 1.1), "color": (0.9, 0.9, 0.9)},
             {"type": "cylinder", "radius": 0.28, "height": 1.1, "color": (0.3, 0.3, 0.3)},
         ]
-        _dynamic_tpl = [
-            {"type": "cylinder", "radius": 0.3, "height": 2.0, "color": (0.7, 0.0, 0.0)},
-            {"type": "cylinder", "radius": 0.35, "height": 2.2, "color": (0.6, 0.0, 0.0)},
-            {"type": "cylinder", "radius": 0.25, "height": 2.0, "color": (0.8, 0.0, 0.0)},
-            {"type": "cylinder", "radius": 0.32, "height": 2.1, "color": (0.65, 0.05, 0.05)},
-            {"type": "cylinder", "radius": 0.28, "height": 2.0, "color": (0.75, 0.0, 0.0)},
-        ]
-
         obstacle_sizes: list[float] = []
         for i in range(MAX_OBS):
-            cfg = _static_tpl[i % len(_static_tpl)] if i < 50 else _dynamic_tpl[(i - 50) % len(_dynamic_tpl)]
+            cfg = _static_tpl[i % len(_static_tpl)]
             if cfg["type"] == "cuboid":
                 spawn_cfg = sim_utils.CuboidCfg(
                     size=cfg["size"],
@@ -1060,3 +1052,19 @@ class RewardsCfgVLP16NavRLGroundV7(RewardsCfgVLP16NavRLGroundV6):
         params={"sensor_cfg": SceneEntityCfg("lidar"), "threshold": COLLISION_THRESHOLD},
         weight=-5.0,
     )
+
+
+# ============================================================================
+# NavRL-Ground v8: 修正 safety/goal 比例失衡
+# ss+ds weight 降低 + goal_velocity 下限提高
+# ============================================================================
+
+@configclass
+class RewardsCfgVLP16NavRLGroundV8(RewardsCfgVLP16NavRLGroundV7):
+    """NavRL-Ground v8: 修正 (ss+ds)/goal 比例失衡。
+
+    v7 問題: Stage 6 的 (ss+ds)/goal=112%，安全 reward 超過核心。
+    v8 修正: 降低 safety weight 上限 + 提高 goal_velocity 下限。
+    目標: (ss+ds)/goal < 30%。
+    """
+    pass  # 所有修改在 curriculum 的 reward_weights 中完成

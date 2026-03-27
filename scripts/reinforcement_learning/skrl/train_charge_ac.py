@@ -111,8 +111,8 @@ parser.add_argument("--use_cadn", action="store_true", default=False,
 
 # --- NavRL-Ground v1 reward mode ---
 parser.add_argument("--reward_mode", type=str, default="current",
-                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4", "navrl_ground_v5", "navrl_ground_v6", "navrl_ground_v7"],
-                    help="Reward mode: current / v1-v6 / v7(v6+碰撞成本遞增)")
+                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3", "navrl_ground_v4", "navrl_ground_v5", "navrl_ground_v6", "navrl_ground_v7", "navrl_ground_v8"],
+                    help="Reward mode: current / v1-v7 / v8(v7+safety降低+vel提高)")
 parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
                     choices=["log_distance", "closing_risk"],
                     help="Dynamic safety reward mode")
@@ -654,6 +654,28 @@ def _apply_ablation_overrides(env_cfg, args_cli):
             f"alive={r.alive.weight} ss_front={r.static_safety.params['a_front_block']} | "
             f"ds_mode={args_cli.dynamic_safety_mode} | "
             f"collision 由 curriculum 動態調整"
+        )
+        changed = True
+
+    # --- reward_mode: navrl_ground_v8 (v7 + safety降低 + vel提高) ---
+    if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v8":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            RewardsCfgVLP16NavRLGroundV8,
+        )
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV8()
+
+        r = env_cfg.rewards
+        r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+
+        if args_cli.goal_vel_use_soft_gate:
+            r.goal_velocity.params["use_soft_gate"] = True
+            r.goal_velocity.params["gate_beta"] = args_cli.goal_vel_gate_beta
+
+        print(
+            f"[REWARD_MODE] navrl_ground_v8 (safety↓ vel↑ 修正比例失衡) | "
+            f"w: goal={r.reaching_goal.weight} coll_base={r.collision_ground.weight} | "
+            f"ss/ds weight 由 curriculum 控制 (上限 ss=0.5 ds=0.4) | "
+            f"vel 下限=3.5"
         )
         changed = True
 
