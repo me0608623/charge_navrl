@@ -56,6 +56,7 @@ class AblationMetricsLogger:
         self._progress_near_obs = []
         self._v_toward_near_obs = []
         self._speed_near_obs = []
+        self._speed_all_values = []
         self._d_safe_values = []
         self._front_clearance_values = []
         self._episode_lengths_at_collision = []
@@ -69,6 +70,21 @@ class AblationMetricsLogger:
         # Shield (從 action term 讀取)
         self._shield_stats_collected = False
 
+        # --- 新增: 障礙物密度診斷 ---
+        # B: 路徑效率 (per-env)
+        self._prev_pos = None
+        self._distance_traveled = torch.zeros(N, device=device)
+        self._initial_goal_dist = torch.zeros(N, device=device)
+        self._path_efficiency_values = []
+        # C: 局部障礙密度 (LiDAR bins < 2m proxy)
+        self._local_density_values = []
+        # D: 動態障礙遭遇率
+        self._dynamic_encounter_steps = 0
+        # A: 碰撞類型分類
+        self._collision_static_count = 0
+        self._collision_dynamic_count = 0
+        self._collision_total_count = 0
+
     def step(self, actions, rewards, terminated, truncated, infos):
         """每 env.step() 後呼叫。快速 GPU 操作，不做 CPU sync。"""
         env = self._env
@@ -81,6 +97,7 @@ class AblationMetricsLogger:
         robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)
         robot_vel = torch.nan_to_num(robot.data.root_lin_vel_w[:, :2], nan=0.0)
         speed = torch.norm(robot_vel, dim=-1)  # [N]
+        self._speed_all_values.append(speed.mean().item())
 
         # Goal position
         if hasattr(env, "_local_goal_world") and env._local_goal_world is not None:
@@ -175,12 +192,71 @@ class AblationMetricsLogger:
         # 精確版需要 bin-level 操作，這裡用 d_safe 近似
         self._front_clearance_values.append(d_safe.mean().item())
 
+        # === B. 路徑效率 ===
+        if self._prev_pos is not None:
+            delta = torch.norm(robot_pos - self._prev_pos, dim=1)
+            self._distance_traveled += delta
+        else:
+            # 首次 step: 記錄初始 goal 距離
+            self._initial_goal_dist = goal_dist.clone()
+        self._prev_pos = robot_pos.clone()
+
+        # === C. 局部障礙密度 (LiDAR bins < 2m 數量) ===
+        try:
+            self._local_density_values.append(
+                (dists_2d < 2.0).float().sum(dim=1).mean().item()
+            )
+        except Exception:
+            pass
+
+        # === D. 動態障礙遭遇率 ===
+        try:
+            obs_vel = getattr(env, "_obstacle_velocities", None)
+            if obs_vel is not None:
+                # 找有速度的障礙 (dynamic)
+                vel_mag = torch.norm(obs_vel[:, :, :2], dim=-1)  # [N, num_obs]
+                is_dynamic = vel_mag > 0.05  # speed > 0.05 m/s = dynamic
+                if is_dynamic.any():
+                    # 計算 robot 到每個障礙的距離
+                    all_obs_pos = torch.zeros_like(obs_vel[:, :, :2])
+                    num_obs = min(obs_vel.shape[1], 100)
+                    for i in range(num_obs):
+                        obs_name = f"obstacle_{i}"
+                        if obs_name in env.scene.keys():
+                            p = env.scene[obs_name].data.root_pos_w
+                            if p[:, 2].mean() > 0:  # visible
+                                all_obs_pos[:, i] = torch.nan_to_num(p[:, :2], nan=999.0)
+                            else:
+                                all_obs_pos[:, i] = 999.0
+                        else:
+                            all_obs_pos[:, i] = 999.0
+                    dists_to_obs = torch.norm(
+                        all_obs_pos - robot_pos.unsqueeze(1), dim=-1
+                    )  # [N, num_obs]
+                    # 只看 dynamic 障礙, 非 dynamic 設為遠距
+                    dists_to_obs[~is_dynamic] = 999.0
+                    min_dyn_dist = dists_to_obs.min(dim=1).values  # [N]
+                    self._dynamic_encounter_steps += (min_dyn_dist < 1.5).sum().item()
+        except Exception:
+            pass
+
         # === 14-15. Episode length at termination ===
         if done.any():
             ep_lens = env.episode_length_buf[done].float()
             self._episode_lengths_all.extend(ep_lens.cpu().tolist())
 
-            # 區分碰撞 vs 其他
+            # B: 路徑效率 — episode 結束時計算
+            init_dist = self._initial_goal_dist[done]
+            traveled = self._distance_traveled[done]
+            valid = init_dist > 1.0  # 至少 1m 才計算
+            if valid.any():
+                efficiency = traveled[valid] / init_dist[valid]
+                self._path_efficiency_values.extend(efficiency.clamp(max=10.0).cpu().tolist())
+            # reset per-env trackers
+            self._distance_traveled[done] = 0.0
+            self._initial_goal_dist[done] = goal_dist[done]
+
+            # 區分碰撞 vs 其他 + A: 碰撞類型分類
             try:
                 tm = env.termination_manager
                 for name in tm._term_names:
@@ -190,6 +266,33 @@ class AblationMetricsLogger:
                         if coll_done.any():
                             coll_lens = ep_lens[coll_done]
                             self._episode_lengths_at_collision.extend(coll_lens.cpu().tolist())
+                            # A: 碰撞類型 — 找碰撞時最近障礙是 static 還是 dynamic
+                            n_coll = coll_done.sum().item()
+                            self._collision_total_count += n_coll
+                            obs_vel = getattr(env, "_obstacle_velocities", None)
+                            if obs_vel is not None:
+                                done_indices = torch.where(done)[0]
+                                coll_indices = done_indices[coll_done]
+                                for idx in coll_indices:
+                                    idx_i = idx.item()
+                                    min_dist = 999.0
+                                    nearest_is_dynamic = False
+                                    for oi in range(min(obs_vel.shape[1], 100)):
+                                        obs_name = f"obstacle_{oi}"
+                                        if obs_name not in env.scene.keys():
+                                            continue
+                                        p = env.scene[obs_name].data.root_pos_w[idx_i]
+                                        if p[2] < 0:
+                                            continue
+                                        d = torch.norm(p[:2] - robot_pos[idx_i]).item()
+                                        if d < min_dist:
+                                            min_dist = d
+                                            v = torch.norm(obs_vel[idx_i, oi, :2]).item()
+                                            nearest_is_dynamic = v > 0.05
+                                    if nearest_is_dynamic:
+                                        self._collision_dynamic_count += 1
+                                    else:
+                                        self._collision_static_count += 1
                         break
             except Exception:
                 pass
@@ -220,6 +323,9 @@ class AblationMetricsLogger:
                 float(np.min(self._d_safe_values)) if self._d_safe_values else 0.0
             ),
             "behavior/danger_zone_ratio": self._danger_zone_steps / total,
+            "behavior/speed_avg": (
+                float(np.mean(self._speed_all_values)) if self._speed_all_values else 0.0
+            ),
             "behavior/speed_near_obstacle": (
                 float(np.mean(self._speed_near_obs)) if self._speed_near_obs else 0.0
             ),
@@ -231,6 +337,20 @@ class AblationMetricsLogger:
             ),
             "behavior/collision_episode_length": (
                 float(np.mean(self._episode_lengths_at_collision)) if self._episode_lengths_at_collision else 0.0
+            ),
+            # 新增: 障礙物密度診斷
+            "behavior/path_efficiency": (
+                float(np.mean(self._path_efficiency_values)) if self._path_efficiency_values else 0.0
+            ),
+            "behavior/local_obstacle_density": (
+                float(np.mean(self._local_density_values)) if self._local_density_values else 0.0
+            ),
+            "behavior/dynamic_encounter_ratio": self._dynamic_encounter_steps / total,
+            "behavior/collision_static_ratio": (
+                self._collision_static_count / max(self._collision_total_count, 1)
+            ),
+            "behavior/collision_dynamic_ratio": (
+                self._collision_dynamic_count / max(self._collision_total_count, 1)
             ),
         }
 
@@ -261,6 +381,7 @@ class AblationMetricsLogger:
         self._progress_near_obs.clear()
         self._v_toward_near_obs.clear()
         self._speed_near_obs.clear()
+        self._speed_all_values.clear()
         self._d_safe_values.clear()
         self._front_clearance_values.clear()
         self._episode_lengths_at_collision.clear()
@@ -268,3 +389,10 @@ class AblationMetricsLogger:
         self._v_toward_sign_history.clear()
         self._sign_changes_total = 0
         self._sign_checks_total = 0
+        # 新增指標 reset
+        self._path_efficiency_values.clear()
+        self._local_density_values.clear()
+        self._dynamic_encounter_steps = 0
+        self._collision_static_count = 0
+        self._collision_dynamic_count = 0
+        self._collision_total_count = 0

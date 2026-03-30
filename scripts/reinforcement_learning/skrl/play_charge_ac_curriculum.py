@@ -50,8 +50,8 @@ from isaaclab.app import AppLauncher
 # CLI Arguments
 # ============================================================================
 parser = argparse.ArgumentParser(description="Play trained Charge VLP16 Curriculum AC agent.")
-parser.add_argument("--task", type=str, default="Isaac-Navigation-Charge-VLP16-Curriculum",
-                    help="Task name (used for gym.make).")
+parser.add_argument("--task", type=str, default="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL",
+                    help="Task name (used for gym.make). 預設 NavRL 與訓練一致。")
 parser.add_argument("--num_envs", type=int, default=6, help="Number of environments.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--start_stage", type=int, default=1, help="Starting curriculum stage (1-8).")
@@ -69,6 +69,12 @@ parser.add_argument("--camera", type=str, default="top", choices=["top", "follow
                     help="Camera view.")
 parser.add_argument("--use_cadn", action="store_true", default=False,
                     help="Use PerBranchCADN normalizer (required when checkpoint was trained with CADN).")
+parser.add_argument("--diagnostic", action="store_true", default=False,
+                    help="每步印出 env[0] 的 obs/action 詳細診斷（除錯用）。")
+parser.add_argument("--deterministic", action="store_true", default=False,
+                    help="使用 argmax（確定性動作）取代 sample，排除隨機抽樣造成的振盪。")
+parser.add_argument("--cadn_online", action="store_true", default=False,
+                    help="Play 時讓 CADN 持續更新 stats（train=True），避免凍結 stats 導致速度振盪。")
 
 # AppLauncher args (--headless, --device, etc.)
 AppLauncher.add_app_launcher_args(parser)
@@ -348,6 +354,7 @@ def main():
         print(f"\n{'='*70}")
         print(f"  Charge VLP16 — Fixed Play Mode (no curriculum)")
         print(f"{'='*70}")
+        print(f"  Task:            {args_cli.task}")
         print(f"  Envs:            {args_cli.num_envs}")
         print(f"  Static obs:      {n_s}")
         print(f"  Dynamic obs:     {n_d}")
@@ -355,6 +362,14 @@ def main():
         print(f"  Max steps:       {args_cli.max_steps}")
         print(f"  Checkpoint:      {args_cli.checkpoint or 'Auto-detect'}")
         print(f"  Camera:          {args_cli.camera}")
+        print(f"  CADN:            {args_cli.use_cadn}")
+        print(f"  Diagnostic:      {args_cli.diagnostic}")
+        # OOD 警告
+        total_obs = n_s + n_d
+        if total_obs > 30:
+            print(f"  {'─'*56}")
+            print(f"  [WARN] {total_obs} obstacles 可能超出訓練分布")
+            print(f"  [HINT] 建議先用 --num_static 8 --num_dynamic 3 驗證基本功能")
         print(f"{'='*70}\n")
 
     # Camera
@@ -405,11 +420,15 @@ def main():
 
     # CADN: replace state_preprocessor before loading checkpoint
     if args_cli.use_cadn:
-        from cadn import PerBranchCADN
-        cadn = PerBranchCADN(device=env.device)
+        try:
+            from cadn import PerBranchCADN
+            cadn = PerBranchCADN(device=env.device)
+        except (ImportError, ModuleNotFoundError):
+            from cadn_preprocessor import CurriculumAwareDualRateNormalizer
+            cadn = CurriculumAwareDualRateNormalizer(size=139, device=env.device)
         runner.agent._state_preprocessor = cadn
         runner.agent.checkpoint_modules["state_preprocessor"] = cadn
-        print("[INFO] CADN normalizer enabled")
+        print(f"[INFO] CADN normalizer enabled: {type(cadn).__name__}")
 
     checkpoint_path = args_cli.checkpoint
     if checkpoint_path:
@@ -429,6 +448,49 @@ def main():
         print("[WARN] No checkpoint — running random policy!")
 
     runner.agent.set_running_mode("eval")
+
+    # --- CADN Verification ---
+    if args_cli.use_cadn:
+        cadn_mod = runner.agent._state_preprocessor
+        if hasattr(cadn_mod, '_per_branch') and cadn_mod._per_branch:
+            for bname, branch in [("state", cadn_mod.branch_state),
+                                   ("lidar", cadn_mod.branch_lidar),
+                                   ("obstacle", cadn_mod.branch_obstacle)]:
+                init = branch._initialized.item()
+                mu_rng = f"[{branch.mu_f.min():.3f}, {branch.mu_f.max():.3f}]"
+                var_rng = f"[{branch.var_f.min():.4f}, {branch.var_f.max():.4f}]"
+                drift = branch.get_drift()
+                print(f"  CADN {bname:>8}: init={init} mu_f={mu_rng} var_f={var_rng} drift={drift:.4f}")
+
+    # --- Deterministic action monkey-patch ---
+    if args_cli.deterministic:
+        print("[INFO] Deterministic mode: using argmax instead of sample")
+        import types
+        _orig_policy_act = runner.agent.policy.act
+
+        def _deterministic_act(self_policy, inputs, role=""):
+            net_output, outputs = self_policy.compute(inputs, role)
+            # Split logits and take argmax per category
+            nvec = self_policy.action_space.nvec.tolist()
+            splits = torch.split(net_output, nvec, dim=-1)
+            actions = torch.stack([s.argmax(dim=-1) for s in splits], dim=-1)
+            # Compute log_prob for diagnostics
+            dists = [torch.distributions.Categorical(logits=s) for s in splits]
+            log_prob = torch.stack(
+                [d.log_prob(a) for d, a in zip(dists, torch.unbind(actions, dim=-1))],
+                dim=-1,
+            ).sum(dim=-1, keepdim=True)
+            outputs["net_output"] = net_output
+            return actions, log_prob, outputs
+        runner.agent.policy.act = types.MethodType(_deterministic_act, runner.agent.policy)
+
+    # --- CADN online mode: let stats adapt during play ---
+    if args_cli.use_cadn and args_cli.cadn_online:
+        _orig_preproc = runner.agent._state_preprocessor
+        def _online_preproc(states, **kwargs):
+            return _orig_preproc(states, train=True, **kwargs)
+        runner.agent._state_preprocessor = _online_preproc
+        print("[INFO] CADN online mode: stats will update during play (train=True)")
 
     # --- Unwrap to get the real ManagerBasedRLEnv for _apply_stage ---
     raw_env = env.unwrapped
@@ -548,11 +610,97 @@ def main():
     else:
         # ── Fixed mode: single configuration, run max_steps ──
         counts = {"success": 0, "collision": 0, "timeout": 0}
+        diag = args_cli.diagnostic
+        # 診斷用累積器
+        _diag_zero_act_count = 0  # center(9,9) action 次數
+        _diag_speed_sum = 0.0
+        _diag_step_count = 0
 
         print(f"  Running {args_cli.max_steps} steps... (Ctrl+C to stop)\n")
 
         try:
             obs, _ = env.reset()
+
+            # ── 一次性診斷: Step 0 obs pipeline 比對 ──
+            if diag:
+                try:
+                    o = obs[0]
+                    print(f"  [DIAG] ═══ Step 0 Obs Pipeline (env[0]) ═══")
+                    print(f"  [DIAG] Raw obs shape: {obs.shape} dtype: {obs.dtype}")
+                    print(f"  [DIAG] ego[0:4]   = [{o[0]:.3f}, {o[1]:.3f}, {o[2]:.3f}, {o[3]:.3f}]")
+                    print(f"  [DIAG] goal[4:6]  = [{o[4]:.3f}, {o[5]:.3f}]")
+                    print(f"  [DIAG] lidar[6:78]  min={o[6:78].min():.4f} mean={o[6:78].mean():.4f} max={o[6:78].max():.4f}")
+                    print(f"  [DIAG] obs[78:138]  non-zero slots={int((o[78:138].reshape(10,6).abs().sum(1) > 0.01).sum())}/10")
+                    print(f"  [DIAG] time[138]  = {o[138]:.4f}")
+                    if args_cli.use_cadn:
+                        cadn_mod = runner.agent._state_preprocessor
+                        n = cadn_mod(obs[:1])[0]
+                        print(f"  [DIAG] CADN ego   = [{n[0]:.2f}, {n[1]:.2f}, {n[2]:.2f}, {n[3]:.2f}]")
+                        print(f"  [DIAG] CADN goal  = [{n[4]:.2f}, {n[5]:.2f}]")
+                        print(f"  [DIAG] CADN lidar min={n[6:78].min():.2f} mean={n[6:78].mean():.2f} max={n[6:78].max():.2f}")
+                        print(f"  [DIAG] CADN obs   min={n[78:138].min():.2f} mean={n[78:138].mean():.2f} max={n[78:138].max():.2f}")
+                        print(f"  [DIAG] CADN time  = {n[138]:.2f}")
+                    print(f"  [DIAG] ════════��═════════════════════════════")
+                except Exception as e:
+                    print(f"  [DIAG] Step 0 pipeline error: {e}")
+
+            # ── LOGIT 診斷函數 ──
+            def _logit_diagnostic(obs_t, label=""):
+                """直接呼叫 policy.compute() 檢視 raw logits + action distribution."""
+                try:
+                    import torch.nn.functional as F
+                    cadn_mod = runner.agent._state_preprocessor
+                    preprocessed = cadn_mod(obs_t)
+                    net_output, _ = runner.agent.policy.compute(
+                        {"states": preprocessed}, role="policy"
+                    )
+                    # net_output: [N, 38] = [19 linear, 19 angular]
+                    logits_lin = net_output[0, :19]
+                    logits_ang = net_output[0, 19:]
+                    probs_lin = F.softmax(logits_lin, dim=0)
+                    probs_ang = F.softmax(logits_ang, dim=0)
+
+                    # 分區統計: reverse(0-8), stop(9), forward(10-18)
+                    p_rev = probs_lin[:9].sum().item()
+                    p_stop = probs_lin[9].item()
+                    p_fwd = probs_lin[10:].sum().item()
+                    p_left = probs_ang[:9].sum().item()
+                    p_str = probs_ang[9].item()
+                    p_right = probs_ang[10:].sum().item()
+
+                    argmax_lin = logits_lin.argmax().item()
+                    argmax_ang = logits_ang.argmax().item()
+
+                    h_lin = -(probs_lin * probs_lin.log()).sum().item()
+                    h_ang = -(probs_ang * probs_ang.log()).sum().item()
+                    h_max = torch.log(torch.tensor(19.0)).item()
+
+                    print(f"  [LOGIT] {label}")
+                    print(f"  [LOGIT]   lin logits: min={logits_lin.min():.3f} max={logits_lin.max():.3f} "
+                          f"range={logits_lin.max()-logits_lin.min():.3f} | "
+                          f"argmax={argmax_lin} ({'REV' if argmax_lin < 9 else 'STOP' if argmax_lin == 9 else 'FWD'})")
+                    print(f"  [LOGIT]   ang logits: min={logits_ang.min():.3f} max={logits_ang.max():.3f} "
+                          f"range={logits_ang.max()-logits_ang.min():.3f} | "
+                          f"argmax={argmax_ang} ({'L' if argmax_ang < 9 else 'STR' if argmax_ang == 9 else 'R'})")
+                    print(f"  [LOGIT]   lin probs: REV={p_rev:.1%} STOP={p_stop:.1%} FWD={p_fwd:.1%}")
+                    print(f"  [LOGIT]   ang probs: LEFT={p_left:.1%} STR={p_str:.1%} RIGHT={p_right:.1%}")
+                    print(f"  [LOGIT]   H_lin={h_lin:.3f}/{h_max:.3f}({h_lin/h_max*100:.0f}%) "
+                          f"H_ang={h_ang:.3f}/{h_max:.3f}({h_ang/h_max*100:.0f}%) "
+                          f"H_total={h_lin+h_ang:.3f}/{2*h_max:.3f}({(h_lin+h_ang)/(2*h_max)*100:.0f}%)")
+
+                    # 6 envs 的 argmax 一覽
+                    all_logits = net_output  # [N, 38]
+                    all_argmax_lin = all_logits[:, :19].argmax(dim=1)
+                    all_argmax_ang = all_logits[:, 19:].argmax(dim=1)
+                    print(f"  [LOGIT]   all envs argmax: "
+                          f"lin={all_argmax_lin.tolist()} ang={all_argmax_ang.tolist()}")
+                except Exception as e:
+                    print(f"  [LOGIT] error: {e}")
+                    import traceback; traceback.print_exc()
+
+            if diag:
+                _logit_diagnostic(obs, label="Step 0 (after reset)")
+
             for step in range(args_cli.max_steps):
                 with torch.no_grad():
                     actions = runner.agent.act(obs, timestep=0, timesteps=0)[0]
@@ -560,15 +708,157 @@ def main():
                 global_step += 1
                 _count_episodes(raw_env, counts)
 
-                if (step + 1) % 200 == 0:
+                # ── 診斷數據收集 ──
+                try:
+                    robot = raw_env.scene["robot"]
+                    robot_vel = robot.data.root_lin_vel_w[:, :2]
+                    speed = torch.norm(robot_vel, dim=-1)
+                    _diag_speed_sum += speed.mean().item()
+                    _diag_step_count += 1
+
+                    # Action 分析: MultiDiscrete [19,19], center = [9,9]
+                    if actions.dim() == 1:
+                        # flat index → [lin, ang]
+                        act_lin = actions // 19
+                        act_ang = actions % 19
+                    else:
+                        act_lin = actions[:, 0] if actions.shape[-1] >= 2 else actions[:, 0]
+                        act_ang = actions[:, 1] if actions.shape[-1] >= 2 else actions[:, 0]
+                    is_center = (act_lin == 9) & (act_ang == 9)
+                    _diag_zero_act_count += is_center.sum().item()
+
+                    # LiDAR d_safe
+                    sensor = raw_env.scene.sensors["lidar"]
+                    sensor_pos = sensor.data.pos_w[:, :2]
+                    hits = sensor.data.ray_hits_w[:, :, :2]
+                    dists = torch.norm(hits - sensor_pos.unsqueeze(1), dim=-1)
+                    dists = torch.nan_to_num(dists, nan=20.0, posinf=20.0)
+                    d_safe_min = dists.min(dim=1).values.mean().item()
+                except Exception:
+                    d_safe_min = -1.0
+
+                # ── --diagnostic: 每步 env[0] 詳細 ──
+                if diag and step < 200:
+                    try:
+                        o = obs[0] if obs.dim() > 1 else obs
+                        lidar_slice = o[6:78]
+                        obs_slice = o[78:138].reshape(10, 6)
+                        obs_nonzero = (obs_slice.abs().sum(dim=1) > 0.01).sum().item()
+                        lin_i = act_lin[0].item() if act_lin.dim() > 0 else act_lin.item()
+                        ang_i = act_ang[0].item() if act_ang.dim() > 0 else act_ang.item()
+
+                        # CADN-normalized obs for env[0]
+                        cadn_info = ""
+                        if args_cli.use_cadn:
+                            try:
+                                cadn_mod = runner.agent._state_preprocessor
+                                norm_obs = cadn_mod(obs[:1])
+                                n = norm_obs[0]
+                                cadn_info = (
+                                    f" | CADN: state=[{n[0]:.1f},{n[1]:.1f},{n[2]:.1f},{n[3]:.1f}]"
+                                    f" goal=[{n[4]:.1f},{n[5]:.1f}]"
+                                    f" lidar=[{n[6:78].min():.1f},{n[6:78].mean():.1f},{n[6:78].max():.1f}]"
+                                )
+                            except Exception:
+                                pass
+
+                        # Policy entropy (confidence measure)
+                        entropy_info = ""
+                        try:
+                            ent = runner.agent.policy.get_entropy()
+                            if ent.numel() > 0:
+                                entropy_info = f" | H={ent[0].item():.2f}"
+                        except Exception:
+                            pass
+
+                        # Per-env0 d_safe
+                        d0 = dists[0].min().item() if dists.shape[0] > 0 else -1.0
+
+                        print(
+                            f"  [DIAG] step={step:>4} "
+                            f"lidar: min={lidar_slice.min():.3f} mean={lidar_slice.mean():.3f} | "
+                            f"obs_slots={obs_nonzero}/10 | "
+                            f"act=[{lin_i},{ang_i}] | "
+                            f"speed={speed[0]:.3f} d0_safe={d0:.2f}"
+                            f"{cadn_info}{entropy_info}"
+                        )
+                        # 每 10 步: 障礙物世界位置 vs obs 中位置 (驗證 obs 正確性)
+                        if step % 10 == 0:
+                            try:
+                                rob = raw_env.scene["robot"]
+                                rob_pos = rob.data.root_pos_w[0, :2]
+                                rob_quat = rob.data.root_quat_w[0]
+                                env_orig = raw_env.scene.env_origins[0, :2]
+                                rob_local = rob_pos - env_orig
+
+                                # Top-3 nearest obstacle world pos
+                                near_obs_info = []
+                                for oi in range(min(25, 100)):
+                                    try:
+                                        oe = raw_env.scene[f"obstacle_{oi}"]
+                                        op = oe.data.root_pos_w[0]
+                                        if op[2] > 0:  # visible
+                                            dist_to_rob = torch.norm(op[:2] - rob_pos).item()
+                                            near_obs_info.append((oi, dist_to_rob, op[:2].tolist()))
+                                    except (KeyError, IndexError):
+                                        break
+                                near_obs_info.sort(key=lambda x: x[1])
+
+                                # obs 中前 3 slot 的 body-frame pos
+                                obs_bf = obs_slice[:3]  # [3, 6]: px,py,vx,vy,r,m
+                                obs_str = " | ".join(
+                                    f"({obs_bf[j,0]:.2f},{obs_bf[j,1]:.2f} r={obs_bf[j,4]:.2f} m={obs_bf[j,5]:.0f})"
+                                    for j in range(3)
+                                )
+
+                                near_str = " | ".join(
+                                    f"obs_{n[0]}:d={n[1]:.1f}m@({n[2][0]:.1f},{n[2][1]:.1f})"
+                                    for n in near_obs_info[:3]
+                                )
+
+                                # Termination check
+                                term_info = ""
+                                try:
+                                    tm = raw_env.termination_manager
+                                    for tn in tm._term_names:
+                                        buf = tm.get_term(tn)
+                                        if buf is not None and buf[0].item():
+                                            term_info = f" TERM={tn}"
+                                except Exception:
+                                    pass
+
+                                print(
+                                    f"  [OBS-CHECK] step={step} "
+                                    f"robot=({rob_local[0]:.1f},{rob_local[1]:.1f}) "
+                                    f"near=[{near_str}] "
+                                    f"obs_bf=[{obs_str}]{term_info}"
+                                )
+                            except Exception as e2:
+                                if step == 0:
+                                    print(f"  [OBS-CHECK] error: {e2}")
+
+                    except Exception as e:
+                        if step == 0:
+                            print(f"  [DIAG] error: {e}")
+
+                # ── 每 50 步摘要 ──
+                if (step + 1) % 50 == 0:
                     elapsed = time.time() - global_start
                     total_ep = sum(counts.values())
-                    if total_ep > 0:
-                        sr = counts["success"] / total_ep * 100
-                        cr = counts["collision"] / total_ep * 100
-                        tr = counts["timeout"] / total_ep * 100
-                        print(f"  Step {step+1:>5} | {elapsed:.0f}s | "
-                              f"Ep={total_ep} SR={sr:.1f}% CR={cr:.1f}% TO={tr:.1f}%")
+                    sr = counts["success"] / total_ep * 100 if total_ep > 0 else 0
+                    cr = counts["collision"] / total_ep * 100 if total_ep > 0 else 0
+                    tr = counts["timeout"] / total_ep * 100 if total_ep > 0 else 0
+                    avg_spd = _diag_speed_sum / max(_diag_step_count, 1)
+                    total_acts = _diag_step_count * args_cli.num_envs
+                    zero_pct = _diag_zero_act_count / max(total_acts, 1) * 100
+                    print(
+                        f"  Step {step+1:>5} | {elapsed:.0f}s | "
+                        f"Ep={total_ep} SR={sr:.0f}% CR={cr:.0f}% TO={tr:.0f}% | "
+                        f"speed={avg_spd:.2f} d_safe={d_safe_min:.2f} | "
+                        f"zero_act={zero_pct:.0f}%"
+                    )
+                    if diag:
+                        _logit_diagnostic(obs, label=f"Step {step+1}")
 
         except KeyboardInterrupt:
             print("\n[INFO] Stopped by user")

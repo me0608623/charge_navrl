@@ -518,15 +518,23 @@ CURRICULUM_CONFIGS = {
 # ============================================================================
 
 def _open_ended_params(level: int) -> dict:
-    """difficulty_level → 場景參數映射。level=0 從 B6 延續。"""
-    static_count = min(20, 8 + level)
-    dynamic_count = min(5, 3 + level // 3)
+    """difficulty_level → 場景參數映射。level=0 從 B6 延續。
+
+    障礙物: total = min(100, 11 + level*3), dynamic 比例從 27% 漸增到 40%
+    L0=11(8S+3D), L10=41(28S+13D), L20=71(45S+26D), L30=100(60S+40D)
+    """
+    # 障礙物: 總數線性增長，dynamic 比例漸增
+    total_obs = min(100, 11 + level * 3)
+    dyn_ratio = min(0.40, 0.27 + 0.005 * level)
+    dynamic_count = int(total_obs * dyn_ratio)
+    static_count = total_obs - dynamic_count
+
     goal_count = 1 if level >= 2 else 2
     episode_length_s = min(95, 75 + level * 2)
     gamma = min(0.998, 0.996 + level * 0.0002)
 
-    # 達到物件數上限後 (level≈12+)，透過隨機性增加難度
-    beyond = max(0, level - 12)
+    # 物件數到頂後 (L30+)，透過隨機性增加難度
+    beyond = max(0, level - 30)
     dynamic_speed_scale = min(1.4, 1.0 + 0.03 * beyond)
     spawn_compactness = min(1.3, 1.0 + 0.02 * beyond)
     goal_distance_scale = min(1.25, 1.0 + 0.02 * beyond)
@@ -579,13 +587,25 @@ def _open_ended_reward_weights(level: int) -> dict:
 
 
 def _open_ended_target_sr(level: int) -> float:
-    return max(0.58, 0.72 - 0.01 * level)
+    """升級 SR 門檻 — 固定 80%（文獻共識：navigation 任務標準門檻）。"""
+    return 0.80
 
 def _open_ended_target_cr(level: int) -> float:
-    return min(0.28, 0.18 + 0.01 * level)
+    """升級 CR 上限 — 固定 15%（碰撞是嚴重失敗，需嚴格控制）。"""
+    return 0.15
 
 def _open_ended_target_to(level: int) -> float:
-    return 0.30
+    """升級 TO 上限 — 固定 20%。"""
+    return 0.20
+
+def _open_ended_min_stage_updates(level: int) -> int:
+    """open-ended level → min_stage_updates（rollout cycles）。
+
+    歷史數據: metrics 在 window 填滿 (6 cycles) 後即穩定達標。
+    前期多留 buffer（場景初次改變需適應），後期收斂到下限。
+    下限 8 ≈ 剛好填滿 window + min_stage_episodes。
+    """
+    return max(8, 20 - level)
 
 
 def _apply_open_ended(env, level: int):
@@ -787,8 +807,23 @@ def goal_obstacle_curriculum(
     current_stage = state["stage"]
     stage_cfg = STAGES[current_stage]
 
+    # DEBUG: 每 50000 episodes 輸出完整狀態
+    if state["total_episodes"] % 50000 < env.num_envs:
+        print(
+            f"\n[DEBUG Curriculum State] "
+            f"episodes={state['total_episodes']} stage={current_stage} "
+            f"mode={state.get('curriculum_mode')} level={state.get('difficulty_level')} "
+            f"is_oe={state.get('is_open_ended')} pass={state['upgrade_pass_count']}/{upgrade_pass_required} "
+            f"cooldown={state.get('cooldown_remaining')} window={len(window)}/{effective_window}",
+            flush=True,
+        )
+
     approx_rollout_cycles = state["stage_episodes"] // max(env.num_envs, 1)
-    min_stage_updates = stage_cfg.get("min_stage_updates", 0)
+    # open-ended 模式使用自適應 min_stage_updates（前期長、後期短）
+    if state.get("curriculum_mode") == "open_ended":
+        min_stage_updates = _open_ended_min_stage_updates(state.get("difficulty_level", 0))
+    else:
+        min_stage_updates = stage_cfg.get("min_stage_updates", 0)
 
     can_transition = (
         len(window) >= effective_window
@@ -838,6 +873,15 @@ def goal_obstacle_curriculum(
             cooldown = state.get("cooldown_remaining", 0)
             cooldown_size = max(2000, env.num_envs * 4)
 
+            # DEBUG: 每 10000 episodes 輸出一次狀態
+            if state["total_episodes"] % 10000 < env.num_envs:
+                print(
+                    f"[DEBUG OpenEnded] mode={state.get('curriculum_mode')} level={level} "
+                    f"pass={state['upgrade_pass_count']}/{upgrade_pass_required} "
+                    f"cooldown={cooldown} SR={success_rate:.3f} CR={collision_rate:.3f} TO={timeout_rate:.3f}",
+                    flush=True,
+                )
+
             # Cooldown 遞減
             new_episodes = state["stage_episodes"]  # 本 level 的 episode 數
             if cooldown > 0:
@@ -850,6 +894,14 @@ def goal_obstacle_curriculum(
                 sr_ok = success_rate > t_sr
                 cr_ok = collision_rate < t_cr
                 to_ok = timeout_rate < t_to
+
+                # DEBUG: 輸出升級條件檢查
+                if state["total_episodes"] % 10000 < env.num_envs:
+                    print(
+                        f"[DEBUG OpenEnded Check] t_sr={t_sr:.2f} t_cr={t_cr:.2f} t_to={t_to:.2f} "
+                        f"sr_ok={sr_ok} cr_ok={cr_ok} to_ok={to_ok}",
+                        flush=True,
+                    )
 
                 if sr_ok and cr_ok and to_ok:
                     state["upgrade_pass_count"] += 1
@@ -908,6 +960,7 @@ def goal_obstacle_curriculum(
             t_to = _open_ended_target_to(level)
             return {
                 "stage": float(MAX_STAGE + level),  # bootstrap stages + level
+                "difficulty_level": float(level),
                 "stage_name": oe_cfg["name"],
                 "success_rate": success_rate,
                 "collision_rate": collision_rate,
@@ -941,6 +994,15 @@ def goal_obstacle_curriculum(
         to_ok = timeout_rate < up_to
         dyn_ok = dynamic_sr > up_dyn_sr if (up_dyn_sr > 0 and len(dyn_outcomes) > 0) else True
         all_pass = sr_ok and cr_ok and to_ok and dyn_ok
+
+        # DEBUG: 每 10000 episodes 輸出 bootstrap 狀態
+        if state["total_episodes"] % 10000 < env.num_envs:
+            print(
+                f"[DEBUG Bootstrap] mode={state.get('curriculum_mode')} stage={current_stage}/{MAX_STAGE} "
+                f"is_oe={state.get('is_open_ended')} pass={state['upgrade_pass_count']}/{upgrade_pass_required} "
+                f"all_pass={all_pass} SR={success_rate:.3f} CR={collision_rate:.3f} TO={timeout_rate:.3f}",
+                flush=True,
+            )
 
         if all_pass and current_stage < MAX_STAGE:
             state["upgrade_pass_count"] += 1
@@ -976,6 +1038,14 @@ def goal_obstacle_curriculum(
                 )
         elif all_pass and current_stage == MAX_STAGE and state.get("is_open_ended"):
             # Bootstrap 最後一級達標 → 進入 open-ended
+            # DEBUG: 每 10000 episodes 輸出 MAX_STAGE 分支檢查
+            if state["total_episodes"] % 10000 < env.num_envs:
+                print(
+                    f"[DEBUG MAX_STAGE branch] stage={current_stage}==MAX_STAGE={MAX_STAGE} "
+                    f"is_oe={state.get('is_open_ended')} all_pass={all_pass} "
+                    f"pass_before={state['upgrade_pass_count']}",
+                    flush=True,
+                )
             state["upgrade_pass_count"] += 1
             if state["upgrade_pass_count"] >= upgrade_pass_required:
                 state["curriculum_mode"] = "open_ended"
@@ -1050,12 +1120,45 @@ def goal_obstacle_curriculum(
                     _debug_log(f"▼ 降級({reason})", old, current_stage)
                     stage_cfg = STAGES[current_stage]
 
+    # open-ended 模式：回報正確的 stage (= MAX_STAGE + difficulty_level)
+    if state.get("curriculum_mode") == "open_ended":
+        level = state.get("difficulty_level", 0)
+        oe_cfg = _open_ended_params(level)
+        t_sr = _open_ended_target_sr(level)
+        t_cr = _open_ended_target_cr(level)
+        t_to = _open_ended_target_to(level)
+        return {
+            "stage": float(MAX_STAGE + level),
+            "difficulty_level": float(level),
+            "stage_name": oe_cfg["name"],
+            "success_rate": success_rate,
+            "collision_rate": collision_rate,
+            "timeout_rate": timeout_rate,
+            "dynamic_sr": dynamic_sr,
+            "num_goals": float(oe_cfg["num_goals"]),
+            "num_obstacles_static": float(oe_cfg["num_obstacles_static"]),
+            "num_obstacles_dynamic": float(oe_cfg["num_obstacles_dynamic"]),
+            "min_walls": 0.0, "max_walls": 0.0,
+            "gamma": float(oe_cfg["gamma"]),
+            "episode_length_s": float(oe_cfg["episode_length_s"]),
+            "num_episodes": float(state["total_episodes"]),
+            "stage_episodes": float(state["stage_episodes"]),
+            "window_fill": float(len(window)) / float(effective_window),
+            "upgrade_pass_count": float(state["upgrade_pass_count"]),
+            "approx_rollout_cycles": float(approx_rollout_cycles),
+            "upgrade_sr_target": t_sr, "upgrade_cr_target": t_cr, "upgrade_to_target": t_to,
+            "sr_gap": success_rate - t_sr,
+            "cr_gap": t_cr - collision_rate,
+            "to_gap": t_to - timeout_rate,
+        }
+
     up_sr_target = stage_cfg["upgrade_sr"]
     up_cr_target = stage_cfg["upgrade_max_cr"]
     up_to_target = stage_cfg["upgrade_max_to"]
 
     return {
         "stage": float(current_stage),
+        "difficulty_level": 0.0,
         "stage_name": stage_cfg.get("name", ""),
         "success_rate": success_rate,
         "collision_rate": collision_rate,

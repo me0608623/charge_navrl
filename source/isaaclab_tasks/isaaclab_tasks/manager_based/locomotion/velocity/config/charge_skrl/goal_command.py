@@ -202,9 +202,16 @@ class GoalCommand(CommandTerm):
         # 獲取配置參數
         wall_boundary = self.cfg.wall_boundary
         wall_safe_margin = self.cfg.wall_safe_margin
-        obstacle_safe_distance = self.cfg.obstacle_safe_distance
-        max_attempts = self.cfg.max_resample_attempts
         num_obstacles = self.cfg.num_obstacles
+        max_attempts = self.cfg.max_resample_attempts
+
+        # 障礙物越密集 → 自動縮小安全距離，避免找不到合法位置
+        base_safe_dist = self.cfg.obstacle_safe_distance
+        if num_obstacles > 30:
+            # 30→0.8, 50→0.6, 70→0.5, 100→0.5
+            obstacle_safe_distance = max(0.5, base_safe_dist - 0.01 * (num_obstacles - 30))
+        else:
+            obstacle_safe_distance = base_safe_dist
         
         # 獲取環境原點（每個環境的座標偏移）
         env_origins = self._env.scene.env_origins[env_ids_tensor, :2]  # [num_envs, 2]
@@ -265,10 +272,14 @@ class GoalCommand(CommandTerm):
         # ------------------------------------------------------------------------
         # 初始化：標記哪些環境還需要生成有效目標
         needs_resample = torch.ones(num_envs, device=self.device, dtype=torch.bool)
-        
+
         # 儲存候選目標位置（環境局部座標系）
         candidate_goals_local = torch.zeros(num_envs, 2, device=self.device)
-        
+
+        # 追蹤每個 env 歷史最佳候選（離障礙物最遠的）
+        best_goals_local = torch.zeros(num_envs, 2, device=self.device)
+        best_min_clearance = torch.full((num_envs,), -1.0, device=self.device)
+
         for attempt in range(max_attempts):
             # 找出還需要重新採樣的環境
             resample_mask = needs_resample
@@ -361,16 +372,41 @@ class GoalCommand(CommandTerm):
             # 綜合判斷：所有條件都滿足
             # ------------------------------------------------------------------------
             valid_goals = within_walls & clear_of_obstacles & clear_of_robot & clear_of_walls
-            
+
+            # 追蹤歷史最佳候選（即使不合法，也記錄離障礙物最遠的位置）
+            if all_obstacles is not None:
+                goal_exp = candidate_goals_local.unsqueeze(1)  # [N, 1, 2]
+                dists = torch.norm(goal_exp - all_obstacles, dim=2)  # [N, num_obs]
+                if all_obstacle_radii is not None:
+                    dists = dists - all_obstacle_radii.unsqueeze(0)  # 扣除半徑
+                min_clearance = dists.min(dim=1).values  # [N]
+            else:
+                min_clearance = torch.full((num_envs,), 999.0, device=self.device)
+            # 在邊界內 & 離機器人夠遠的候選才有資格當 best
+            eligible = within_walls & clear_of_robot
+            improved = eligible & (min_clearance > best_min_clearance)
+            best_goals_local[improved] = candidate_goals_local[improved]
+            best_min_clearance[improved] = min_clearance[improved]
+
             # 更新需要重新採樣的環境
             needs_resample = needs_resample & (~valid_goals)
-        
+
         # ------------------------------------------------------------------------
-        # 最終處理：如果還有環境沒有找到有效目標，放寬條件
+        # 最終處理：如果還有環境沒有找到有效目標，使用最佳候選
         # ------------------------------------------------------------------------
         if needs_resample.any():
-            # 對於無法找到有效目標的環境，只確保在牆壁邊界內
+            n_failed = needs_resample.sum().item()
             failed_envs = needs_resample
+            # 使用歷史最佳候選（離障礙物最遠的位置）而非最後一次隨機位置
+            has_best = failed_envs & (best_min_clearance >= 0)
+            best_clr = best_min_clearance[has_best].min().item() if has_best.any() else -1
+            print(f"[WARN] Goal resample fallback: {n_failed}/{num_envs} envs "
+                  f"failed after {max_attempts} attempts. "
+                  f"Using best candidate (min clearance={best_clr:.2f}m, "
+                  f"safe_dist={obstacle_safe_distance:.2f}m)")
+            if has_best.any():
+                candidate_goals_local[has_best] = best_goals_local[has_best]
+            # 兜底: clamp 到邊界內
             candidate_goals_local[failed_envs, 0] = torch.clamp(
                 candidate_goals_local[failed_envs, 0],
                 -valid_boundary, valid_boundary
@@ -617,9 +653,9 @@ class GoalCommandCfg(CommandTermCfg):
     # 障礙物安全距離（米）
     # 目標與任何障礙物中心的最小距離
 
-    max_resample_attempts: int = 50
+    max_resample_attempts: int = 200
     # 最大重試次數
-    # 如果連續 N 次生成的目標都不合法，則放寬條件或使用最後一次生成的位置
+    # 密集障礙物場景需要更多嘗試；fallback 使用歷史最佳候選（離障礙最遠的位置）
 
     num_obstacles: int = 10
     # 障礙物數量（用於碰撞檢查）
