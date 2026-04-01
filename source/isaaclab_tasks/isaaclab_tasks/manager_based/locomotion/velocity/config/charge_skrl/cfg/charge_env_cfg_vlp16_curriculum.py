@@ -252,10 +252,10 @@ class EventCfgVLP16Curriculum:
         params={
             "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
             "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
-            "max_obstacles": 100, "speed_range": 1.2, "min_speed": 0.3,
+            "max_obstacles": 50, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
-            "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
+            "boundary": 9.5, "active_obstacle_ratio": 1.0, "debug": False,
         },
     )
 
@@ -278,10 +278,10 @@ class EventCfgVLP16Curriculum:
         params={
             "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
             "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
-            "max_obstacles": 100, "speed_range": 1.2, "min_speed": 0.3,
+            "max_obstacles": 50, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
-            "boundary": 9.5, "active_obstacle_ratio": 0.25, "debug": False,
+            "boundary": 9.5, "active_obstacle_ratio": 1.0, "debug": False,
         },
     )
 
@@ -320,7 +320,7 @@ class EventCfgVLP16Curriculum:
         params={
             "move_dt": 0.2, "speed_min": 0.3, "speed_max": 1.2,
             "goal_reach_threshold": 0.5, "speed_resample_steps": 10,
-            "area_limit": 8.0, "max_obstacles": 100, "bound_limit": 9.0,
+            "area_limit": 8.0, "max_obstacles": 50, "bound_limit": 9.0,
         },
     )
 
@@ -758,7 +758,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "body_radius": ROBOT_BODY_RADIUS,
-            "max_obstacles": 100,
+            "max_obstacles": 50,
             "mode": "log_distance",
             "risk_sigma": 1.0,
             "b_log": 1.0,
@@ -883,7 +883,7 @@ class RewardsCfgVLP16NavRLGroundV2(RewardsCfgVLP16NavRLGround):
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "body_radius": ROBOT_BODY_RADIUS,
-            "max_obstacles": 100,
+            "max_obstacles": 50,
             "mode": "log_distance",
             "risk_sigma": 2.0,        # 1.0→2.0: 更平緩的衰減，0.5m clearance 從 61%→78%
             "b_log": 1.0,
@@ -956,7 +956,7 @@ class RewardsCfgVLP16NavRLGroundV3(RewardsCfgVLP16NavRLGroundV2):
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "body_radius": ROBOT_BODY_RADIUS,
-            "max_obstacles": 100,
+            "max_obstacles": 50,
             "mode": "log_distance",
             "risk_sigma": 2.0,
             "b_log": 1.0,

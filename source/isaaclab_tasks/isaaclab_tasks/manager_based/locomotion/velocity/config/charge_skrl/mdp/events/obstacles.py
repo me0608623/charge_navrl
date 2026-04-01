@@ -703,6 +703,32 @@ def move_obstacles_vectorized(
         num_obstacles = _get_obstacle_num()
     N = min(num_obstacles, max_obstacles)
 
+    # 優化: mixed mode 中只需處理動態障礙物 (index >= num_static)
+    # 靜態障礙物不移動，不需要 GATHER/SCATTER
+    num_static_mixed = getattr(env, "_num_obstacles_static_mixed", 0)
+    all_mixed = hasattr(env, "_env_difficulty") and (env._env_difficulty[dyn_env_ids] == 3).all()
+    if all_mixed and num_static_mixed > 0 and num_static_mixed < N:
+        # 只處理 index [num_static_mixed, N) 的動態障礙物
+        dyn_start = num_static_mixed
+        N_eff = N - dyn_start
+    else:
+        dyn_start = 0
+        N_eff = N
+
+    # 首次進入時印出效能參數
+    _move_call_key = f"_move_debug_printed_{N}_{N_eff}_{dyn_start}"
+    if not getattr(env, _move_call_key, False):
+        diff_counts = {}
+        for d_val in [0, 1, 2, 3]:
+            diff_counts[d_val] = (difficulty == d_val).sum().item()
+        print(f"[MoveOpt] ★ move_obstacles_vectorized: "
+              f"N={N} dyn_start={dyn_start} N_eff={N_eff} "
+              f"D_envs={D}/{len(env_ids)} "
+              f"difficulty={{empty:{diff_counts[0]} static:{diff_counts[1]} "
+              f"dynamic:{diff_counts[2]} mixed:{diff_counts[3]}}} "
+              f"→ {N_eff} write_root_pose_to_sim calls/step")
+        setattr(env, _move_call_key, True)
+
     # ------------------------------------------------------------------
     # Lazy-init persistent state
     # ------------------------------------------------------------------
@@ -738,56 +764,67 @@ def move_obstacles_vectorized(
     env._obstacle_step_counter[dyn_env_ids] += 1
 
     # ------------------------------------------------------------------
-    # Phase 1: GATHER — read per-asset state into [D, N, ...] tensors
+    # Phase 1: GATHER — read per-asset state into [D, N_eff, ...] tensors
+    # Only read dynamic obstacles (skip static ones in mixed mode)
     # ------------------------------------------------------------------
-    all_pos = torch.zeros(D, N, 3, device=device)
-    all_quat = torch.zeros(D, N, 4, device=device)
+    # Lazy-build obstacle object cache for dynamic-only range
+    cache_key = (dyn_start, N)
+    if not hasattr(env, "_obstacle_cache") or getattr(env, "_obstacle_cache_key", None) != cache_key:
+        env._obstacle_cache = []
+        for i in range(dyn_start, N):
+            name = f"obstacle_{i}"
+            env._obstacle_cache.append(
+                env.scene[name] if name in env.scene.keys() else None
+            )
+        env._obstacle_cache_key = cache_key
+
+    all_pos = torch.zeros(D, N_eff, 3, device=device)
+    all_quat = torch.zeros(D, N_eff, 4, device=device)
     all_quat[:, :, 0] = 1.0  # default identity quaternion
 
-    for i in range(N):
-        obstacle_name = f"obstacle_{i}"
-        if obstacle_name not in env.scene.keys():
+    for i, obstacle in enumerate(env._obstacle_cache):
+        if obstacle is None:
             continue
-        obstacle = env.scene[obstacle_name]
         all_pos[:, i, :] = obstacle.data.root_pos_w[dyn_env_ids, :3]
         if hasattr(obstacle.data, "root_quat_w"):
             all_quat[:, i, :] = obstacle.data.root_quat_w[dyn_env_ids, :4]
 
     # ------------------------------------------------------------------
     # Phase 2: COMPUTE — fully vectorized, zero for-loops
+    # Tensors are [D, N_eff] where N_eff = dynamic-only obstacles
     # ------------------------------------------------------------------
     env_origins = env.scene.env_origins[dyn_env_ids]  # [D, 3]
 
     # Visibility: Z > 0 means the obstacle is active
-    visible = all_pos[:, :, 2] > 0.0  # [D, N]
+    visible = all_pos[:, :, 2] > 0.0  # [D, N_eff]
 
     # World → local position
-    local_xy = all_pos[:, :, :2] - env_origins[:, None, :2]  # [D, N, 2]
+    local_xy = all_pos[:, :, :2] - env_origins[:, None, :2]  # [D, N_eff, 2]
 
-    # Slice goals and speeds for dynamic envs
-    goals = env._obstacle_goals_local[dyn_env_ids, :N, :]  # [D, N, 2] LOCAL frame
-    speeds = env._obstacle_goal_speeds[dyn_env_ids, :N]     # [D, N]
-    step_counts = env._obstacle_step_counter[dyn_env_ids, :N]  # [D, N]
+    # Slice goals and speeds for dynamic-only range [dyn_start:N]
+    goals = env._obstacle_goals_local[dyn_env_ids, dyn_start:N, :]  # [D, N_eff, 2]
+    speeds = env._obstacle_goal_speeds[dyn_env_ids, dyn_start:N]     # [D, N_eff]
+    step_counts = env._obstacle_step_counter[dyn_env_ids, dyn_start:N]  # [D, N_eff]
 
     # Direction to goal (both in LOCAL frame — the critical bug fix)
-    direction = goals - local_xy  # [D, N, 2]
-    dist_to_goal = torch.norm(direction, dim=2).clamp(min=1e-6)  # [D, N]
-    direction_unit = direction / dist_to_goal.unsqueeze(2)  # [D, N, 2]
+    direction = goals - local_xy  # [D, N_eff, 2]
+    dist_to_goal = torch.norm(direction, dim=2).clamp(min=1e-6)  # [D, N_eff]
+    direction_unit = direction / dist_to_goal.unsqueeze(2)  # [D, N_eff, 2]
 
     # Velocity = normalized direction * speed
-    vel = direction_unit * speeds.unsqueeze(2)  # [D, N, 2]
+    vel = direction_unit * speeds.unsqueeze(2)  # [D, N_eff, 2]
 
     # Zero velocity for invisible obstacles
     vel[~visible] = 0.0
 
-    # Mixed mode (difficulty == 3): 只移動 index >= num_obstacles_static 的障礙物
-    # 前 num_obstacles_static 個是靜態的，不應該移動
-    if hasattr(env, "_env_difficulty"):
+    # Mixed mode vel zeroing: already handled by dyn_start optimization
+    # (static obstacles are excluded from the tensor entirely)
+    # For non-all-mixed cases, still need the old logic:
+    if not all_mixed and hasattr(env, "_env_difficulty"):
         mixed_envs = (env._env_difficulty[dyn_env_ids] == 3)  # [D]
         if mixed_envs.any():
             num_static = getattr(env, "_num_obstacles_static_mixed", 0)
-            if num_static > 0 and num_static < N:
-                # 對 mixed env 的前 num_static 個障礙物清零速度
+            if num_static > 0 and num_static < N_eff:
                 vel[mixed_envs, :num_static, :] = 0.0
 
     # Position update (world frame, only visible)
@@ -795,10 +832,10 @@ def move_obstacles_vectorized(
 
     # Internal maze wall bounce: revert displacement if new position is inside a wall
     wall_c, wall_s = get_wall_tensors(device)
-    local_new = all_pos[:, :, :2] - env_origins[:, None, :2]  # [D, N, 2]
+    local_new = all_pos[:, :, :2] - env_origins[:, None, :2]  # [D, N_eff, 2]
     in_wall = check_wall_proximity_batch(
         local_new.reshape(-1, 2), wall_c, wall_s, 0.3
-    ).reshape(D, N) & visible
+    ).reshape(D, N_eff) & visible
 
     if in_wall.any():
         # Undo displacement and reverse velocity
@@ -811,46 +848,47 @@ def move_obstacles_vectorized(
     )
 
     # For reflected obstacles, sample new LOCAL-frame goals
-    reflected = reflected_x | reflected_y  # [D, N]
+    reflected = reflected_x | reflected_y  # [D, N_eff]
     num_reflected = reflected.sum().item()
     if num_reflected > 0:
-        # Generate new goals within a smaller range (bound_limit - 1.0) to avoid immediate re-trigger
         goal_range = bound_limit - 1.0
-        new_goals = torch.zeros(D, N, 2, device=device)
-        new_goals[:, :, 0] = torch.rand(D, N, device=device) * 2 * goal_range - goal_range
-        new_goals[:, :, 1] = torch.rand(D, N, device=device) * 2 * goal_range - goal_range
+        new_goals = torch.zeros(D, N_eff, 2, device=device)
+        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
+        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
         goals[reflected] = new_goals[reflected]
 
     # Goal reaching: where dist_to_goal < threshold, sample new LOCAL goals
-    reached = visible & (dist_to_goal < goal_reach_threshold)  # [D, N]
+    reached = visible & (dist_to_goal < goal_reach_threshold)  # [D, N_eff]
     num_reached = reached.sum().item()
     if num_reached > 0:
         goal_range = bound_limit - 1.0
-        new_goals = torch.zeros(D, N, 2, device=device)
-        new_goals[:, :, 0] = torch.rand(D, N, device=device) * 2 * goal_range - goal_range
-        new_goals[:, :, 1] = torch.rand(D, N, device=device) * 2 * goal_range - goal_range
+        new_goals = torch.zeros(D, N_eff, 2, device=device)
+        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
+        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
         goals[reached] = new_goals[reached]
 
     # Speed resampling every speed_resample_steps
-    should_resample = visible & (step_counts % speed_resample_steps == 0)  # [D, N]
+    should_resample = visible & (step_counts % speed_resample_steps == 0)  # [D, N_eff]
     num_resample = should_resample.sum().item()
     if num_resample > 0:
-        new_speeds = torch.rand(D, N, device=device) * (speed_max - speed_min) + speed_min
+        new_speeds = torch.rand(D, N_eff, device=device) * (speed_max - speed_min) + speed_min
         speeds[should_resample] = new_speeds[should_resample]
 
-    # Write back goals and speeds to persistent state
-    env._obstacle_goals_local[dyn_env_ids, :N, :] = goals
-    env._obstacle_goal_speeds[dyn_env_ids, :N] = speeds
+    # Write back goals and speeds to persistent state (offset by dyn_start)
+    env._obstacle_goals_local[dyn_env_ids, dyn_start:N, :] = goals
+    env._obstacle_goal_speeds[dyn_env_ids, dyn_start:N] = speeds
 
-    # Write back velocity cache (for observations)
-    env._obstacle_velocities[dyn_env_ids, :N, :] = vel
+    # Write back velocity cache: full width, zero for static, dynamic at offset
+    if dyn_start > 0:
+        env._obstacle_velocities[dyn_env_ids, :dyn_start, :] = 0.0
+    env._obstacle_velocities[dyn_env_ids, dyn_start:N, :] = vel
 
     # ------------------------------------------------------------------
-    # Phase 3: SCATTER — write [D, N, ...] tensors back to per-asset sim
+    # Phase 3: SCATTER — write [D, N_eff, ...] tensors back to per-asset sim
+    # Only writes dynamic obstacles (skip static ones entirely)
     # ------------------------------------------------------------------
-    for i in range(N):
-        obstacle_name = f"obstacle_{i}"
-        if obstacle_name not in env.scene.keys():
+    for i, obstacle in enumerate(env._obstacle_cache):
+        if obstacle is None:
             continue
         pose = torch.cat([all_pos[:, i, :], all_quat[:, i, :]], dim=-1)  # [D, 7]
-        env.scene[obstacle_name].write_root_pose_to_sim(pose, env_ids=dyn_env_ids)
+        obstacle.write_root_pose_to_sim(pose, env_ids=dyn_env_ids)

@@ -114,7 +114,7 @@ ROBOT_BODY_RADIUS = 0.35  # 實際機器人半徑 [m]
 GOAL_REACH_THRESHOLD = ROBOT_BODY_RADIUS
 COLLISION_BUFFER = 0.10  # 安全裕量：縮減以釋放窄道可行駛空間 [m]
 COLLISION_THRESHOLD = round(ROBOT_BODY_RADIUS + COLLISION_BUFFER, 2)  # 0.45m
-MAX_OBSTACLES = 100  # 場景最大障礙物 entity 數量（實際使用由 event params 控制）
+MAX_OBSTACLES = 50  # 場景最大障礙物 entity 數量（實際使用由 event params 控制）
 
 
 # ============================================================================
@@ -682,7 +682,7 @@ class EventCfgVLP16:
             "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.0, "max_spawn_attempts": 50,
-            "boundary": 7.5, "active_obstacle_ratio": 0.25, "debug": False,
+            "boundary": 7.5, "active_obstacle_ratio": 1.0, "debug": False,
         },
     )
 
@@ -695,7 +695,7 @@ class EventCfgVLP16:
             "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.0, "max_spawn_attempts": 50,
-            "boundary": 7.5, "active_obstacle_ratio": 0.25, "debug": False,
+            "boundary": 7.5, "active_obstacle_ratio": 1.0, "debug": False,
         },
     )
 
@@ -819,7 +819,7 @@ class EventCfgVLP16Phase2(EventCfgVLP16):
             "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.0, "max_spawn_attempts": 50,
-            "boundary": 7.5, "active_obstacle_ratio": 0.25, "debug": False,
+            "boundary": 7.5, "active_obstacle_ratio": 1.0, "debug": False,
         },
     )
 
@@ -832,7 +832,7 @@ class EventCfgVLP16Phase2(EventCfgVLP16):
             "max_obstacles": 10, "speed_range": 1.2, "min_speed": 0.3,
             "min_robot_distance": 1.5, "min_goal_distance": 1.0,
             "min_obstacle_spacing": 1.0, "max_spawn_attempts": 50,
-            "boundary": 7.5, "active_obstacle_ratio": 0.25, "debug": False,
+            "boundary": 7.5, "active_obstacle_ratio": 1.0, "debug": False,
         },
     )
 

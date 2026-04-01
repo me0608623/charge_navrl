@@ -75,6 +75,11 @@ parser.add_argument("--deterministic", action="store_true", default=False,
                     help="使用 argmax（確定性動作）取代 sample，排除隨機抽樣造成的振盪。")
 parser.add_argument("--cadn_online", action="store_true", default=False,
                     help="Play 時讓 CADN 持續更新 stats（train=True），避免凍結 stats 導致速度振盪。")
+parser.add_argument("--match_level", type=int, default=None,
+                    help="自動套用 open_ended 指定 level 的完整訓練參數（goal_distance, boundary, "
+                         "obstacle ratios, episode_length 等）。用法: --match_level 30 = 對齊 L30 訓練環境。")
+parser.add_argument("--episode_length", type=float, default=None,
+                    help="覆寫 episode 長度 (秒)。不指定時: --match_level 自動設定，否則用 env 預設。")
 
 # AppLauncher args (--headless, --device, etc.)
 AppLauncher.add_app_launcher_args(parser)
@@ -229,7 +234,7 @@ def find_latest_checkpoint():
 def main():
     import math
 
-    use_curriculum = not args_cli.no_curriculum
+    use_curriculum = not args_cli.no_curriculum and args_cli.match_level is None
 
     # --- Load env config ---
     from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
@@ -301,6 +306,80 @@ def main():
         env_cfg.commands.goal_command.ranges.distance = s1["goal_distance"]
         env_cfg.commands.goal_command.ranges.angle = (-math.pi, math.pi)
 
+    elif args_cli.match_level is not None:
+        # --- Match Training Level mode: replicate exact open_ended L{N} params ---
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
+            _open_ended_params,
+        )
+        ml = args_cli.match_level
+        oe = _open_ended_params(ml)
+
+        # Apply obstacle ratios exactly as training curriculum does
+        obs_params = {
+            "empty_ratio": oe["empty_ratio"],
+            "static_ratio": oe["static_ratio"],
+            "dynamic_ratio": oe["dynamic_ratio"],
+            "num_obstacles_static": oe["num_obstacles_static"],
+            "num_obstacles_dynamic": oe["num_obstacles_dynamic"],
+            "boundary": oe["boundary"],
+            # active_obstacle_ratio stays at config default (0.25) — same as training
+        }
+        for evt_attr in ["randomize_obstacles", "randomize_obstacles_startup"]:
+            evt_term = getattr(env_cfg.events, evt_attr, None)
+            if evt_term is not None:
+                evt_term.params.update(obs_params)
+
+        # Dynamic obstacle speed
+        move_evt = getattr(env_cfg.events, "move_dynamic_obstacles", None)
+        if move_evt is not None:
+            move_evt.params["speed_max"] = oe["speed_range"]
+
+        # Walls (open_ended = no walls)
+        wall_evt = getattr(env_cfg.events, "randomize_wall_positions", None)
+        if wall_evt is not None:
+            n_w = args_cli.num_walls if args_cli.num_walls is not None else oe["max_walls"]
+            wall_evt.params["min_walls"] = oe["min_walls"] if args_cli.num_walls is None else n_w
+            wall_evt.params["max_walls"] = n_w
+
+        # Goal command
+        env_cfg.commands.goal_command.num_goals = oe["num_goals"]
+        env_cfg.commands.goal_command.num_obstacles = (
+            oe["num_obstacles_static"] + oe["num_obstacles_dynamic"]
+        )
+        env_cfg.commands.goal_command.ranges.distance = oe["goal_distance"]
+        env_cfg.commands.goal_command.ranges.angle = (-math.pi, math.pi)
+
+        # Episode length (match training unless explicitly overridden)
+        ep_len = args_cli.episode_length if args_cli.episode_length is not None else oe["episode_length_s"]
+        env_cfg.episode_length_s = ep_len
+
+        # Compute actual visible obstacle count for display
+        n_s_cfg = oe["num_obstacles_static"]
+        n_d_cfg = oe["num_obstacles_dynamic"]
+        if oe["dynamic_ratio"] > 0:
+            # active_obstacle_ratio=0.25 (config default), only applies to dynamic mode
+            est_visible = max(1, int(n_d_cfg * 0.25))
+            vis_note = f"~{est_visible} visible (active_ratio=0.25)"
+        else:
+            est_visible = n_s_cfg
+            vis_note = f"{est_visible} visible"
+
+        print(f"\n{'='*70}")
+        print(f"  Charge VLP16 — Match Training Level L{ml}")
+        print(f"{'='*70}")
+        print(f"  Task:            {args_cli.task}")
+        print(f"  Envs:            {args_cli.num_envs}")
+        print(f"  Config S/D:      {n_s_cfg}S + {n_d_cfg}D = {n_s_cfg + n_d_cfg} total")
+        print(f"  Actual visible:  {vis_note}")
+        print(f"  Goal distance:   {oe['goal_distance']}")
+        print(f"  Boundary:        {oe['boundary']}m")
+        print(f"  Episode length:  {ep_len}s ({int(ep_len / (env_cfg.sim.dt * env_cfg.decimation))} steps)")
+        print(f"  Walls:           {oe['min_walls']}~{n_w}")
+        print(f"  Speed range:     {oe['speed_range']:.1f}")
+        print(f"  Checkpoint:      {args_cli.checkpoint or 'Auto-detect'}")
+        print(f"  CADN:            {args_cli.use_cadn}")
+        print(f"{'='*70}\n")
+
     else:
         # --- Fixed mode: user-specified obstacles/walls ---
         n_s = args_cli.num_static
@@ -350,6 +429,10 @@ def main():
         env_cfg.commands.goal_command.num_obstacles = n_s + n_d
         env_cfg.commands.goal_command.ranges.distance = (2.0, 14.0)
         env_cfg.commands.goal_command.ranges.angle = (-math.pi, math.pi)
+
+        # Episode length override
+        if args_cli.episode_length is not None:
+            env_cfg.episode_length_s = args_cli.episode_length
 
         print(f"\n{'='*70}")
         print(f"  Charge VLP16 — Fixed Play Mode (no curriculum)")

@@ -48,6 +48,10 @@ class RewardSpaceLogger:
     COLLISION_THRESHOLD = 0.45  # m
     FRONT_WARN_DIST = 1.2  # m
 
+    # 反正規化常數 (obs 空間是 (raw - r_robot) / r_max)
+    R_MAX = 20.0   # LiDAR max range (m)
+    R_ROBOT = 0.35  # body radius subtracted in obs (m)
+
     # Front arc 配置
     FRONT_HALF_ANGLE_DEG = 30.0  # ±30°
     FRONT_NEAREST_K = 5  # 取前方最近 5 bins 平均
@@ -143,7 +147,7 @@ class RewardSpaceLogger:
 
         Args:
             env_ids: 本次更新的 env 索引 [M]
-            lidar_72: LiDAR 72-bin 距離 [N, 72] 或 [M, 72]
+            lidar_72: LiDAR 72-bin 正規化距離 [N, 72] 或 [M, 72]（範圍 [0,1]，自動反正規化為米）
         """
         # Debug-only 驗證 (python -O 時移除)
         assert lidar_72.dim() == 2, f"lidar_72 必須是 2D [N, 72]，實際: {lidar_72.shape}"
@@ -160,11 +164,14 @@ class RewardSpaceLogger:
         if active_ids.numel() == 0:
             return
 
+        # 0. 反正規化: obs = (raw - r_robot) / r_max → raw = obs * r_max + r_robot
+        lidar_meters = lidar_72 * self.R_MAX + self.R_ROBOT  # [N, 72] meters
+
         # 1. 計算 lidar_min (對 bins 維度取 min)
-        lidar_min = lidar_72.amin(dim=-1)  # [N]
+        lidar_min = lidar_meters.amin(dim=-1)  # [N] meters
 
         # 2. 計算 d_front (前方扇區最近 5 bins 平均)
-        front_sector = lidar_72[:, self._front_start : self._front_end]  # [N, 12]
+        front_sector = lidar_meters[:, self._front_start : self._front_end]  # [N, 12]
         k = min(self.FRONT_NEAREST_K, front_sector.shape[1])
         d_front = torch.topk(front_sector, k=k, dim=-1, largest=False).values.mean(dim=-1)  # [N]
 

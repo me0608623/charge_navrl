@@ -229,20 +229,25 @@ def _compute_dead_neuron_ratio(model: nn.Module, sample_states: torch.Tensor) ->
 
 
 def _compute_erank(model: nn.Module) -> float:
-    """最後一個 Linear 層的 weight matrix effective rank。
+    """Linear 層 weight matrix 的 effective rank。
 
     eRank = exp(H(p)), p_k = σ_k / Σσ
     eRank 下降 → 特徵坍塌 (Kumar et al., ICLR 2021)
-    """
-    last_linear = None
-    for module in model.modules():
-        if isinstance(module, nn.Linear):
-            last_linear = module
 
-    if last_linear is None:
+    注意: 對 scalar-output 模型 (如 Critic)，最後一層 [1, N] 永遠 rank=1，
+    改用倒數第二層以獲得有意義的量測。
+    """
+    linear_layers = [m for m in model.modules() if isinstance(m, nn.Linear)]
+    if not linear_layers:
         return 0.0
 
-    W = last_linear.weight.data  # [out, in]
+    target = linear_layers[-1]
+    # scalar-output (e.g. critic Linear(32,1)) → weight [1,32] → SVD 只有 1 奇異值
+    # 改用 penultimate layer 取得有意義的 eRank
+    if target.weight.shape[0] == 1 and len(linear_layers) >= 2:
+        target = linear_layers[-2]
+
+    W = target.weight.data  # [out, in]
     try:
         S = torch.linalg.svdvals(W.float())  # [min(out, in)]
         S = S[S > 1e-10]

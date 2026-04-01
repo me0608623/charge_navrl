@@ -230,8 +230,42 @@ def randomize_obstacles_by_difficulty(
 
     # ========================================================================
     # 第五步：遍歷所有障礙物，設置位置和速度
+    # 優化: 只遍歷實際需要的障礙物數量，而非全局 max_obstacles(100)
+    # 超出範圍的障礙物只在首次或數量變更時隱藏一次
     # ========================================================================
-    for i in range(max_obstacles):
+    num_used = max(num_obstacles_static, num_obstacles_dynamic, num_obstacles_mixed)
+    # 隱藏超出範圍的障礙物（只在首次或數量變更時執行）
+    prev_used = getattr(env, "_spawn_num_used", max_obstacles)
+    if num_used < prev_used:
+        num_to_hide = prev_used - num_used
+        print(f"[SpawnOpt] Hiding obstacles [{num_used}..{prev_used}) "
+              f"({num_to_hide} assets, prev={prev_used} → now={num_used})")
+        hidden_pos = torch.zeros(N, 7, device=device)
+        hidden_pos[:, 3] = 1.0  # quat w
+        hidden_pos[:, 2] = -10.0  # Z = hidden
+        hidden_vel = torch.zeros(N, 6, device=device)
+        for i in range(num_used, prev_used):
+            try:
+                obs_entity = env.scene[f"obstacle_{i}"]
+                obs_entity.write_root_pose_to_sim(hidden_pos, env_ids=env_ids)
+                obs_entity.write_root_velocity_to_sim(hidden_vel, env_ids=env_ids)
+                env._obstacle_velocities[env_ids, i, :] = 0.0
+            except KeyError:
+                print(f"[SpawnOpt] obstacle_{i} not in scene, stopping hide loop")
+                break
+    elif num_used != prev_used:
+        print(f"[SpawnOpt] num_used increased: {prev_used} → {num_used}")
+    # 首次呼叫時印出優化資訊
+    if not hasattr(env, "_spawn_num_used"):
+        print(f"[SpawnOpt] ★ Spawn loop: {num_used}/{max_obstacles} obstacles "
+              f"(S={num_obstacles_static} D={num_obstacles_dynamic} M={num_obstacles_mixed}) "
+              f"→ {max_obstacles - num_used} GPU writes saved per reset")
+    env._spawn_num_used = num_used
+
+    # 預快取已放置障礙物的 XY 座標，避免 O(n²) scene lookups
+    placed_pos_cache = torch.zeros(num_used, N, 2, device=device)
+
+    for i in range(num_used):
         obstacle_name = f"obstacle_{i}"
         # 🔥 修正：InteractiveScene 只支援 scene["name"]，不支援 hasattr/getattr
         try:
@@ -312,17 +346,13 @@ def randomize_obstacles_by_difficulty(
                 else:
                     valid_goal = torch.ones(N, dtype=torch.bool, device=device)
 
-                # 檢查與其他已放置障礙物的距離
+                # 檢查與其他已放置障礙物的距離（使用快取，避免 scene lookups）
                 valid_obstacles = torch.ones(N, dtype=torch.bool, device=device)
-                for j in range(i):
-                    other_name = f"obstacle_{j}"
-                    try:
-                        other_obstacle = env.scene[other_name]
-                        other_pos = other_obstacle.data.root_pos_w[env_ids, :2]
-                        dist_to_other = torch.norm(pos[:, :2] - other_pos, dim=1)
-                        valid_obstacles &= dist_to_other >= min_obstacle_spacing
-                    except KeyError:
-                        pass
+                if i > 0:
+                    # placed_pos_cache[:i] shape: [i, N, 2]
+                    diffs = pos[:, :2].unsqueeze(0) - placed_pos_cache[:i]  # [i, N, 2]
+                    dists = torch.norm(diffs, dim=2)  # [i, N]
+                    valid_obstacles = (dists >= min_obstacle_spacing).all(dim=0)  # [N]
 
                 # 檢查與牆壁的距離（障礙物不應在牆壁內部或太近）
                 # pos[:, :2] 是局部座標（尚未加 env_origins）
@@ -347,6 +377,9 @@ def randomize_obstacles_by_difficulty(
                 fallback_y = torch.rand(num_failed, device=device) * (2 * spawn_range) - spawn_range
                 pos[needs_resample, 0] = fallback_x
                 pos[needs_resample, 1] = fallback_y
+
+        # 快取此障礙物的局部 XY（用於後續障礙物的碰撞檢查）
+        placed_pos_cache[i] = pos[:, :2]
 
         # -------------------------------------------------------------------
         # 🔥 關鍵修正：加上環境原點（轉換為世界座標）

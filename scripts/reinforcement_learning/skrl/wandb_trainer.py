@@ -159,6 +159,31 @@ class WandBSequentialTrainer(SequentialTrainer):
         self._health_monitor = None
         self._setup_health_monitor()
 
+        # Dynamic Critic Gradient Limiter
+        self._critic_grad_limiter = None
+
+    def setup_critic_grad_limiter(self, k: float = 2.0) -> None:
+        """初始化動態 Critic 梯度限制器。外部呼叫（從 train_charge_ac.py）。
+
+        限制 critic gradient norm <= k * EMA(actor gradient norm)。
+        k=0 表示不啟用。
+        """
+        if k <= 0:
+            return
+        try:
+            from diagnostics.critic_grad_limiter import CriticGradLimiter
+            agent = self.agents if self.num_simultaneous_agents == 1 else self.agents[0]
+            self._critic_grad_limiter = CriticGradLimiter(
+                policy_model=agent.policy,
+                value_model=agent.value,
+                k=k,
+            )
+            print(f"[INFO] Critic Gradient Limiter initialized (k={k}, "
+                  f"critic_grad <= {k}x EMA(actor_grad))", flush=True)
+        except Exception as e:
+            print(f"[WARNING] Critic Gradient Limiter init failed: {e}", flush=True)
+            self._critic_grad_limiter = None
+
     def _setup_module_entropy_monitor(self) -> None:
         """初始化 Module Entropy 監控器。
 
@@ -195,9 +220,16 @@ class WandBSequentialTrainer(SequentialTrainer):
                 # 先執行原始 unscale（AMP 反縮放）
                 result = original_unscale(optimizer, *args, **kwargs)
                 # unscale 完成後，梯度已是真實尺度，clip 尚未執行 → 最佳測量時機
+                # 1. Module entropy: 量測原始梯度比例
                 if self._module_entropy_monitor is not None:
                     try:
                         self._module_entropy_monitor.step()
+                    except Exception:
+                        pass
+                # 2. Critic gradient limiter: 量測後限制 critic 梯度幅度
+                if self._critic_grad_limiter is not None:
+                    try:
+                        self._critic_grad_limiter.step()
                     except Exception:
                         pass
                 return result
@@ -213,11 +245,13 @@ class WandBSequentialTrainer(SequentialTrainer):
             self._module_entropy_monitor = None
 
     def _setup_health_monitor(self) -> None:
-        """初始化 Training Health Monitor (Tier 1-2 診斷指標)。
+        """初始化 Training Health Monitor (Tier 1-2 診斷指標) + PPO Internal Diagnostics。
 
         指標分兩類：
         1. 從 PPO memory (returns, values) 計算: explained_variance, td_error
         2. 從 model weights/activations 計算: dead_neuron, erank, weight_mag
+        3. 從 PPO update 後真實 forward pass 計算: real_kl, real_clip_fraction,
+           per-action advantage, context-conditioned analysis
         """
         try:
             from diagnostics.training_health import TrainingHealthMonitor
@@ -228,37 +262,85 @@ class WandBSequentialTrainer(SequentialTrainer):
                 compute_tier2_every=5,
             )
 
+            # PPO Internal Diagnostics (真實 ratio / KL / per-action advantage)
+            try:
+                from diagnostics.ppo_internal_diag import PPOInternalDiagnostics
+                self._ppo_diag = PPOInternalDiagnostics(
+                    ratio_clip=getattr(agent, '_ratio_clip', 0.2),
+                )
+                print("[INFO] PPO Internal Diagnostics initialized", flush=True)
+            except Exception as e:
+                print(f"[WARNING] PPO Internal Diagnostics init failed: {e}", flush=True)
+                self._ppo_diag = None
+
             # Monkey-patch agent._update 來攔截 PPO 內部數據
             original_update = agent._update
             monitor = self._health_monitor
+            ppo_diag = self._ppo_diag
+            trainer_ref = self  # capture for closure
 
             def _hooked_update(timestep, timesteps):
                 result = original_update(timestep, timesteps)
-                # PPO update 完成後，從 memory 取 returns 和 values 計算 EV
+                # PPO update 完成後，policy weights 已更新
                 try:
                     import torch
                     mem = agent.memory
-                    returns = mem.get_tensor_by_name("returns")  # [T, 1]
-                    values = mem.get_tensor_by_name("values")    # [T, 1]
-                    log_prob = mem.get_tensor_by_name("log_prob")  # [T, 1]
-                    states = mem.get_tensor_by_name("states")    # [T, obs_dim]
+                    returns = mem.get_tensor_by_name("returns")
+                    values = mem.get_tensor_by_name("values")
+                    old_log_prob = mem.get_tensor_by_name("log_prob")
+                    states = mem.get_tensor_by_name("states")
+
                     if returns is not None and values is not None:
-                        # 用整個 rollout 的 returns/values 計算 explained variance
+                        # ── Fix: 用更新後的 policy 重算 new_log_prob ──
+                        # Memory 中的 states 已經被 SKRL 在 record_transition 時 preprocess 過
+                        actions = mem.get_tensor_by_name("actions")
+                        # Flatten [rollouts, envs, dim] → [rollouts*envs, dim]
+                        if states.dim() == 3:
+                            R, E, D = states.shape
+                            states_flat = states.reshape(R * E, D)
+                            actions_flat = actions.reshape(R * E, -1)
+                            old_log_prob = old_log_prob.reshape(R * E, -1)
+                            returns = returns.reshape(R * E, -1)
+                            values = values.reshape(R * E, -1)
+                        else:
+                            states_flat = states
+                            actions_flat = actions
+                        with torch.no_grad():
+                            _, new_log_prob, _ = agent.policy.act(
+                                {"states": states_flat, "taken_actions": actions_flat},
+                                role="policy",
+                            )
+
                         monitor.on_ppo_batch(
                             sampled_returns=returns,
                             predicted_values=values,
-                            old_log_prob=log_prob if log_prob is not None else torch.zeros_like(returns),
-                            new_log_prob=log_prob if log_prob is not None else torch.zeros_like(returns),
-                            sampled_states=states,
+                            old_log_prob=old_log_prob if old_log_prob is not None else torch.zeros_like(returns),
+                            new_log_prob=new_log_prob,
+                            sampled_states=states_flat,
                         )
                 except Exception:
                     pass
+
+                # ── PPO Internal Diagnostics ──
+                if ppo_diag is not None:
+                    try:
+                        # Pass base_env for env-side coverage diagnostics (C2/C3)
+                        try:
+                            _base_env = trainer_ref._get_base_env()
+                        except Exception:
+                            _base_env = None
+                        diag_metrics = ppo_diag.compute(agent, base_env=_base_env)
+                        # Store for flush at rollout boundary
+                        agent._ppo_diag_metrics = diag_metrics
+                    except Exception:
+                        pass
+
                 return result
 
             agent._update = _hooked_update
 
             print("[INFO] Training Health monitor initialized "
-                  "(Tier 1-2: EV, dead_neuron, erank, weight_mag)",
+                  "(Tier 1-2: EV, dead_neuron, erank, weight_mag + PPO internal diag)",
                   flush=True)
         except Exception as e:
             print(f"[WARNING] Training Health monitor init failed: {e}", flush=True)
@@ -719,6 +801,25 @@ class WandBSequentialTrainer(SequentialTrainer):
                         health_data = self._health_monitor.flush()
                         tracking_data_snapshot.update(
                             {k: [v] for k, v in health_data.items()}
+                        )
+                    except Exception:
+                        pass
+
+                # PPO Internal Diagnostics: flush per-rollout
+                agent = self.agents if self.num_simultaneous_agents == 1 else self.agents[0]
+                ppo_diag_data = getattr(agent, '_ppo_diag_metrics', None)
+                if ppo_diag_data:
+                    tracking_data_snapshot.update(
+                        {k: [v] for k, v in ppo_diag_data.items()}
+                    )
+                    agent._ppo_diag_metrics = None
+
+                # Critic Gradient Limiter 指標：flush clip rate/ratio
+                if self._critic_grad_limiter is not None:
+                    try:
+                        cgl_data = self._critic_grad_limiter.flush()
+                        tracking_data_snapshot.update(
+                            {k: [v] for k, v in cgl_data.items()}
                         )
                     except Exception:
                         pass

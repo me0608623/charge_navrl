@@ -520,11 +520,11 @@ CURRICULUM_CONFIGS = {
 def _open_ended_params(level: int) -> dict:
     """difficulty_level → 場景參數映射。level=0 從 B6 延續。
 
-    障礙物: total = min(100, 11 + level*3), dynamic 比例從 27% 漸增到 40%
-    L0=11(8S+3D), L10=41(28S+13D), L20=71(45S+26D), L30=100(60S+40D)
+    障礙物: total = min(50, 11 + level*3), dynamic 比例從 27% 漸增到 40%
+    L0=11(8S+3D), L10=41(28S+13D), L13=50(32S+18D, cap)
     """
-    # 障礙物: 總數線性增長，dynamic 比例漸增
-    total_obs = min(100, 11 + level * 3)
+    # 障礙物: 總數線性增長，dynamic 比例漸增（上限 50 = MAX_OBSTACLES）
+    total_obs = min(50, 11 + level * 3)
     dyn_ratio = min(0.40, 0.27 + 0.005 * level)
     dynamic_count = int(total_obs * dyn_ratio)
     static_count = total_obs - dynamic_count
@@ -539,15 +539,25 @@ def _open_ended_params(level: int) -> dict:
     spawn_compactness = min(1.3, 1.0 + 0.02 * beyond)
     goal_distance_scale = min(1.25, 1.0 + 0.02 * beyond)
 
-    # 有動態障礙時：100% dynamic ratio（含 static subset）
-    if dynamic_count > 0:
+    # 有動態障礙 → mixed mode（靜態不動 + 動態移動）
+    # 注意：dynamic_ratio=1.0 會讓所有障礙物都移動，不區分靜態/動態
+    # mixed_ratio=1.0 才能正確區分：i < num_static 靜止，i >= num_static 移動
+    if dynamic_count > 0 and static_count > 0:
+        empty_ratio = 0.0
+        static_ratio = 0.0
+        dynamic_ratio = 0.0
+        mixed_ratio = 1.0
+    elif dynamic_count > 0:
+        # 純動態（無靜態）→ dynamic mode OK
         empty_ratio = 0.0
         static_ratio = 0.0
         dynamic_ratio = 1.0
+        mixed_ratio = 0.0
     else:
         empty_ratio = 0.0
         static_ratio = 1.0
         dynamic_ratio = 0.0
+        mixed_ratio = 0.0
 
     return {
         "name": f"OE_L{level}",
@@ -557,6 +567,7 @@ def _open_ended_params(level: int) -> dict:
         "empty_ratio": empty_ratio,
         "static_ratio": static_ratio,
         "dynamic_ratio": dynamic_ratio,
+        "mixed_ratio": mixed_ratio,
         "min_walls": 0,
         "max_walls": 0,
         "episode_length_s": float(episode_length_s),
@@ -630,12 +641,19 @@ def _apply_open_ended(env, level: int):
                 ec.params["empty_ratio"] = cfg["empty_ratio"]
                 ec.params["static_ratio"] = cfg["static_ratio"]
                 ec.params["dynamic_ratio"] = cfg["dynamic_ratio"]
+                ec.params["mixed_ratio"] = cfg.get("mixed_ratio", 0.0)
                 ec.params["num_obstacles_static"] = cfg["num_obstacles_static"]
                 ec.params["num_obstacles_dynamic"] = cfg["num_obstacles_dynamic"]
                 ec.params["boundary"] = cfg["boundary"]
                 evt.set_term_cfg(name, ec)
             except Exception:
                 continue
+        # 更新 env._num_obstacles 讓 move_obstacles_vectorized 的 for loop
+        # 只跑實際用量（N），不跑全局 max_obstacles(100)
+        env._num_obstacles = cfg["num_obstacles_static"] + cfg["num_obstacles_dynamic"]
+        # 清除 obstacle cache，讓 move_obstacles_vectorized 下次重建
+        if hasattr(env, "_obstacle_cache"):
+            del env._obstacle_cache
         # 動態速度
         try:
             ec = evt.get_term_cfg("move_dynamic_obstacles")
@@ -1271,11 +1289,16 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
                 ec.params["empty_ratio"] = cfg["empty_ratio"]
                 ec.params["static_ratio"] = cfg["static_ratio"]
                 ec.params["dynamic_ratio"] = cfg["dynamic_ratio"]
+                ec.params["mixed_ratio"] = cfg.get("mixed_ratio", 0.0)
                 ec.params["num_obstacles_static"] = cfg["num_obstacles_static"]
                 ec.params["num_obstacles_dynamic"] = cfg["num_obstacles_dynamic"]
                 evt.set_term_cfg(name, ec)
             except Exception:
                 continue
+        # 同步 env._num_obstacles 讓 move_obstacles for loop 只跑實際用量
+        env._num_obstacles = cfg["num_obstacles_static"] + cfg["num_obstacles_dynamic"]
+        if hasattr(env, "_obstacle_cache"):
+            del env._obstacle_cache
     except Exception:
         pass
 
