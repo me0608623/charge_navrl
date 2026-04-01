@@ -49,9 +49,10 @@ agent:
   # Phase 1: 0.990（100步視野），Phase 4b: 0.998（500步視野）
   discount_factor: 0.990
 
-  # v9 (diag_v7): 0.95→0.80 — diag_v6 顯示 advantage raw std 從 1.08→0.08
-  # GAE 視野過長平滑掉短期 action distinction；0.80 在 γ=0.99 下有效視野 ≈ 5 步
-  lambda: 0.80
+  # v10 (diag_v8): 回到 0.95 — diag_v7 驗證 λ=0.80 反而加劇 advantage 壓平
+  # λ=0.80 adv_raw_std=0.012 vs λ=0.95(v6) adv_raw_std=0.15（低 12 倍）
+  # 原因：短 GAE 視野讓 Critic 更容易學準短期 return → advantage 更快歸零
+  lambda: 0.95
 
   # v6: KLAdaptiveLR → LinearLR — KL adaptive 在 786K batch 下完全失效
   # v4 (max=3e-4) 和 v5 (max=1.5e-4) 都全程鎖死 max，KL 始終落在不動區

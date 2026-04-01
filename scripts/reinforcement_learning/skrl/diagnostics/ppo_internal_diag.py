@@ -258,8 +258,26 @@ class PPOInternalDiagnostics:
 
                 # Advantage before normalization ≈ returns - values
                 adv_raw = ret_flat - val_flat
+                adv_raw_std = adv_raw.std().item()
                 m["diag/advantage_raw_mean"] = adv_raw.mean().item()
-                m["diag/advantage_raw_std"] = adv_raw.std().item()
+                m["diag/advantage_raw_std"] = adv_raw_std
+
+                # ── Std floor diagnostics ──
+                _ADV_MIN_STD = 0.1
+                adv_std_after = max(adv_raw_std, _ADV_MIN_STD)
+                m["diag/adv_std_before_clamp"] = adv_raw_std
+                m["diag/adv_std_after_clamp"] = adv_std_after
+                m["diag/adv_clamp_triggered"] = 1.0 if adv_raw_std < _ADV_MIN_STD else 0.0
+
+                # Normalized advantage stats (what the actor actually sees)
+                adv_norm = adv.view(-1)  # already normalized from memory
+                m["diag/adv_norm_mean"] = adv_norm.mean().item()
+                m["diag/adv_norm_std"] = adv_norm.std().item()
+
+                # fwd - retreat advantage gap
+                fwd_adv_m = m.get("diag/adv_fwd_mean", 0)
+                ret_adv_m = m.get("diag/adv_retreat_mean", 0)
+                m["diag/fwd_minus_retreat_adv"] = fwd_adv_m - ret_adv_m
 
                 # Effective horizon from gamma
                 # gamma is stored on agent
@@ -337,7 +355,12 @@ class PPOInternalDiagnostics:
                       f"horizon_GAE={m.get('diag/effective_horizon_gae',0):.0f}",
                       flush=True)
                 print(f"  Advantage raw: mean={m.get('diag/advantage_raw_mean',0):.4f} "
-                      f"std={m.get('diag/advantage_raw_std',0):.4f}",
+                      f"std={m.get('diag/advantage_raw_std',0):.4f} "
+                      f"clamp={'YES' if m.get('diag/adv_clamp_triggered',0) > 0 else 'no'} "
+                      f"(before={m.get('diag/adv_std_before_clamp',0):.4f} "
+                      f"after={m.get('diag/adv_std_after_clamp',0):.4f})",
+                      flush=True)
+                print(f"  fwd-retreat gap: {m.get('diag/fwd_minus_retreat_adv',0):+.4f}",
                       flush=True)
                 print(f"  Logit std: lin={m.get('diag/logit_linear_std',0):.4f} "
                       f"ang={m.get('diag/logit_angular_std',0):.4f}",
