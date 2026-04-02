@@ -39,8 +39,8 @@ agent:
 
   rollouts: 128
 
-  # v9 (diag_v7): 6→3 — diag_v6 顯示 KL=0.47, clip=83%, ratio max=89
-  # PPO 更新過度劇烈，梯度步從 96→48 次/rollout
+  # v12 (diag_v9b): 4→3 — v9 在 OE 階段 KL 飆到 0.77（目標<0.3）
+  # v9 用 epochs=4 + LR=1e-4 到 OE L7 但 KL 偏高；降 1 epoch 壓 KL ~25%
   learning_epochs: 3
 
   mini_batches: 16      # 8→16: 更小 batch → 更多梯度步
@@ -59,13 +59,13 @@ agent:
   # 改用線性衰減：1e-4 → 3e-5
   # 注意：SKRL 每個 PPO update 呼叫 step() × learning_epochs 次
   # total_iters = (timesteps / rollouts) × learning_epochs = 1831 × 6 = 10986
-  # v9 (diag_v7): 1e-4→5e-5 — 配合 learning_epochs 3，降低每步更新幅度
-  learning_rate: !!float 5e-5
+  # v11 (diag_v9): 回到 1e-4 — diag_v8 驗證 floor 可控制 KL，LR=5e-5 太慢
+  learning_rate: !!float 1e-4
 
   learning_rate_scheduler: "__import__('torch').optim.lr_scheduler.LinearLR"
   learning_rate_scheduler_kwargs:
     start_factor: 1.0
-    end_factor: 0.3           # 5e-5 → 1.5e-5
+    end_factor: 0.3           # 1e-4 → 3e-5
     total_iters: 5493         # = 1831 × 3 (learning_epochs)，覆蓋完整訓練
 
   state_preprocessor: RunningStandardScaler
