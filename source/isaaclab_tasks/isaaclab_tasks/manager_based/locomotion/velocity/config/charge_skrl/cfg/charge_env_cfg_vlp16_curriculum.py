@@ -715,7 +715,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "v_max": 1.0,
             "min_goal_dist": 0.5,
             "use_soft_gate": True,
-            "gate_beta": 0.2,
+            "gate_beta": 0.0,  # v10: danger zone 不給 forward reward
             "gate_dmin": 0.6,
             "gate_dmax": 2.0,
         },
@@ -731,7 +731,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "bottom_k": 10,
             "progress_clip": 1.0,
             "use_soft_scale": True,
-            "scale_gamma": 0.3,
+            "scale_gamma": 0.0,  # v10: danger zone 不給 progress reward
             "scale_dmin": 0.5,
             "scale_dmax": 2.0,
         },

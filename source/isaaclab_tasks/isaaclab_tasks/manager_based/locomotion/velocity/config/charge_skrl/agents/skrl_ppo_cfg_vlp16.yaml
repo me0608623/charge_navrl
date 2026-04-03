@@ -100,6 +100,11 @@ agent:
 
   kl_threshold: 0.0
 
+  # v10: KL penalty in loss — prevent policy drift at high-difficulty stages
+  # Schulman 2017 variant 1: loss += kl_coeff * E[(r-1) - log(r)]
+  # v9b KL drifted 0.34→1.41 unchecked; this adds gradient-level constraint
+  kl_coeff: 0.3
+
   rewards_shaper_scale: 1.0
 
   time_limit_bootstrap: True
