@@ -107,7 +107,9 @@ agent:
 
   rewards_shaper_scale: 1.0
 
-  time_limit_bootstrap: True
+  # v12: True→False — bootstrap 讓 timeout return=V(s)>0，Critic 學到「停>走」
+  # 改 False 讓 timeout return=0，timeout 不再是安全選擇
+  time_limit_bootstrap: False
 
   experiment:
     directory: "charge_vlp16"
