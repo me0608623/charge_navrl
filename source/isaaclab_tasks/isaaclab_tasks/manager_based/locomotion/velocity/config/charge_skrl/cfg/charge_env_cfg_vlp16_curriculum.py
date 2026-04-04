@@ -715,7 +715,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "v_max": 1.0,
             "min_goal_dist": 0.5,
             "use_soft_gate": True,
-            "gate_beta": 0.05,  # v11: 保留 5% forward reward 防 timeout 退化 (v10=0.0 太激進)
+            "gate_beta": 0.15,  # v13: 0.05→0.15 讓 danger zone net reward 為正 (goal 3.3 > safety 2.5)
             "gate_dmin": 0.6,
             "gate_dmax": 2.0,
         },
@@ -731,7 +731,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "bottom_k": 10,
             "progress_clip": 1.0,
             "use_soft_scale": True,
-            "scale_gamma": 0.05,  # v11: 保留 5% progress reward 防 timeout 退化 (v10=0.0 太激進)
+            "scale_gamma": 0.15,  # v13: 0.05→0.15 同上
             "scale_dmin": 0.5,
             "scale_dmax": 2.0,
         },
