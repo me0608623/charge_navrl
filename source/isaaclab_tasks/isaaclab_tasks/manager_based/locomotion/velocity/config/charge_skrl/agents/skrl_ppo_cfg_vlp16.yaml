@@ -62,11 +62,10 @@ agent:
   # v11 (diag_v9): 回到 1e-4 — diag_v8 驗證 floor 可控制 KL，LR=5e-5 太慢
   learning_rate: !!float 1e-4
 
-  learning_rate_scheduler: "__import__('torch').optim.lr_scheduler.LinearLR"
-  learning_rate_scheduler_kwargs:
-    start_factor: 1.0
-    end_factor: 0.3           # 1e-4 → 3e-5
-    total_iters: 5493         # = 1831 × 3 (learning_epochs)，覆蓋完整訓練
+  # v14: constant LR — v12 在 Stage 11 SR 因 LR 衰減而退化 (79→70%)
+  # LR 衰減讓 agent 無法適應 OE 隨機場景。改為固定 1e-4。
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs: {}
 
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null

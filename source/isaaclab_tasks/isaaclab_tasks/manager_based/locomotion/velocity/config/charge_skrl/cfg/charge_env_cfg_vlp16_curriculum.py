@@ -715,7 +715,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "v_max": 1.0,
             "min_goal_dist": 0.5,
             "use_soft_gate": True,
-            "gate_beta": 0.15,  # v13: 0.05→0.15 讓 danger zone net reward 為正 (goal 3.3 > safety 2.5)
+            "gate_beta": 0.05,  # v14: 回到 v12 的 0.05 (v13 的 0.15 KL 太高)
             "gate_dmin": 0.6,
             "gate_dmax": 2.0,
         },
@@ -731,7 +731,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "bottom_k": 10,
             "progress_clip": 1.0,
             "use_soft_scale": True,
-            "scale_gamma": 0.15,  # v13: 0.05→0.15 同上
+            "scale_gamma": 0.05,  # v14: 回到 v12 的 0.05
             "scale_dmin": 0.5,
             "scale_dmax": 2.0,
         },
