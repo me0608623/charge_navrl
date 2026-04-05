@@ -368,7 +368,7 @@ def dump_training_params(
     lines.append("")
     lines.append("  # ── Per-env-type metrics (rolling window) ──")
     lines.append("  # 分場景成功/碰撞/超時率，需 _env_difficulty tensor 存在")
-    for env_type in ["empty", "static", "dynamic"]:
+    for env_type in ["empty", "static", "dynamic", "mixed"]:
         lines.append(f"  - eval/success_rate_{env_type}")
         lines.append(f"  - eval/collision_rate_{env_type}")
         lines.append(f"  - eval/timeout_rate_{env_type}")

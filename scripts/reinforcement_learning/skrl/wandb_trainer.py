@@ -132,6 +132,7 @@ class WandBSequentialTrainer(SequentialTrainer):
             0: [],  # empty
             1: [],  # static
             2: [],  # dynamic
+            3: [],  # mixed (static+dynamic, used in OE stages)
         }
         # Fix 5: Lazy-init termination name→index mapping for per-env bool access
         self._term_name_to_idx: Optional[dict] = None
@@ -1086,8 +1087,8 @@ class WandBSequentialTrainer(SequentialTrainer):
             metrics["perf/total_episodes"] = self._episode_count
             metrics["perf/episode_length"] = self._episode_length_sum / self._episode_count
 
-        # Per-env-type metrics (Phase 2)
-        type_names = {0: "empty", 1: "static", 2: "dynamic"}
+        # Per-env-type metrics (Phase 2) — includes mixed (type 3) for OE stages
+        type_names = {0: "empty", 1: "static", 2: "dynamic", 3: "mixed"}
         for type_id, type_name in type_names.items():
             buf = self._per_type_results.get(type_id, [])
             if len(buf) >= 10:  # only report with sufficient data
