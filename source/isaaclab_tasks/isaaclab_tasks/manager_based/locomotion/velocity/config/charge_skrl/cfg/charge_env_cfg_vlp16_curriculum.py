@@ -715,7 +715,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "v_max": 1.0,
             "min_goal_dist": 0.5,
             "use_soft_gate": True,
-            "gate_beta": 0.05,  # v14: 回到 v12 的 0.05 (v13 的 0.15 KL 太高)
+            "gate_beta": 0.15,  # v15: 0.05→0.15 搭配 kl_coeff=0.1 應能控制 KL
             "gate_dmin": 0.6,
             "gate_dmax": 2.0,
         },
@@ -731,7 +731,7 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
             "bottom_k": 10,
             "progress_clip": 1.0,
             "use_soft_scale": True,
-            "scale_gamma": 0.05,  # v14: 回到 v12 的 0.05
+            "scale_gamma": 0.15,  # v15: 同上
             "scale_dmin": 0.5,
             "scale_dmax": 2.0,
         },
@@ -773,10 +773,11 @@ class RewardsCfgVLP16NavRLGround(RewardsCfgVLP16Curriculum):
         weight=-0.05,
     )
 
+    # v15: -0.1→-0.2 搭配 bootstrap=True，讓 timeout 有 V(s) 但每步扣更多
     time_penalty = RewTerm(
         func=per_step_time_penalty,
         params={},
-        weight=-0.1,
+        weight=-0.2,
     )
 
     # --- 沿用的終端 reward ---

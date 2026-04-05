@@ -62,10 +62,12 @@ agent:
   # v11 (diag_v9): 回到 1e-4 — diag_v8 驗證 floor 可控制 KL，LR=5e-5 太慢
   learning_rate: !!float 1e-4
 
-  # v14: constant LR — v12 在 Stage 11 SR 因 LR 衰減而退化 (79→70%)
-  # LR 衰減讓 agent 無法適應 OE 隨機場景。改為固定 1e-4。
-  learning_rate_scheduler: null
-  learning_rate_scheduler_kwargs: {}
+  # v15: 恢復 LinearLR decay（v14 constant LR 更差）
+  learning_rate_scheduler: "__import__('torch').optim.lr_scheduler.LinearLR"
+  learning_rate_scheduler_kwargs:
+    start_factor: 1.0
+    end_factor: 0.3
+    total_iters: 5493
 
   state_preprocessor: RunningStandardScaler
   state_preprocessor_kwargs: null
@@ -102,13 +104,16 @@ agent:
   # v10: KL penalty in loss — prevent policy drift at high-difficulty stages
   # Schulman 2017 variant 1: loss += kl_coeff * E[(r-1) - log(r)]
   # v9b KL drifted 0.34→1.41 unchecked; this adds gradient-level constraint
-  kl_coeff: 0.3
+  # v15: 0.3→0.1 — 研究顯示 robotics PPO 典型 KL coeff 0.0~0.05
+  # 0.3 過度約束 policy，阻止適應高難度場景
+  kl_coeff: 0.1
 
   rewards_shaper_scale: 1.0
 
-  # v12: True→False — bootstrap 讓 timeout return=V(s)>0，Critic 學到「停>走」
-  # 改 False 讓 timeout return=0，timeout 不再是安全選擇
-  time_limit_bootstrap: False
+  # v15: 恢復 True — bootstrap=False 讓 V(s) 系統性低估（Pardo 2018）
+  # timeout 30% 的 return 被壓到 0 → Critic 低估密集場景 → 負向循環
+  # 搭配 time_penalty -0.2 讓 timeout 不划算但 V(s) 不為零
+  time_limit_bootstrap: True
 
   experiment:
     directory: "charge_vlp16"
