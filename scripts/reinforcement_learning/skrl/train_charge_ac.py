@@ -99,6 +99,16 @@ parser.add_argument("--gap_reward_type", type=str, default="heading",
                     help="Gap reward type")
 parser.add_argument("--gap_reward_weight", type=float, default=5.0,
                     help="Gap reward weight")
+# --- Directional Gate (v16) ---
+parser.add_argument("--directional_gate", action="store_true", default=False,
+                    help="v16: 方向性 gate — 只看目標方向 cone 的 LiDAR，側面/後方障礙不壓制 goal attraction")
+parser.add_argument("--gate_cone_half_bins", type=int, default=6,
+                    help="Directional gate cone 半寬 (bins)。6=±30° (5°/bin)")
+parser.add_argument("--gate_cone_bottom_k", type=int, default=3,
+                    help="Directional gate cone 內取最近 k 條 ray 平均")
+parser.add_argument("--gate_omni_blend", type=float, default=0.2,
+                    help="Directional gate: 混合 omnidirectional 信號比例 (0=純方向性, 1=退化為全局)")
+
 parser.add_argument("--use_safety_shield", action="store_true", default=False,
                     help="Enable safety shield on actions (speed limiting near obstacles)")
 parser.add_argument("--shield_mode", type=str, default="soft",
@@ -489,6 +499,26 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         print(f"[ABLATION] safety_shield: mode={mode}")
         changed = True
 
+    # --- directional gate (通用：不依賴 reward_mode) ---
+    if args_cli.directional_gate:
+        _dir_params = {
+            "cone_half_bins": args_cli.gate_cone_half_bins,
+            "cone_bottom_k": args_cli.gate_cone_bottom_k,
+            "omni_blend": args_cli.gate_omni_blend,
+        }
+        gv = getattr(rewards, 'goal_velocity', None)
+        if gv is not None:
+            gv.params["directional_gate"] = True
+            gv.params.update(_dir_params)
+        gp = getattr(rewards, 'goal_progress', None)
+        if gp is not None:
+            gp.params["directional_scale"] = True
+            gp.params.update(_dir_params)
+        if gv or gp:
+            print(f"[ABLATION] directional_gate: cone=±{args_cli.gate_cone_half_bins}bins "
+                  f"bottom_k={args_cli.gate_cone_bottom_k} blend={args_cli.gate_omni_blend}")
+            changed = True
+
     # --- reward_mode: navrl_ground_v1 ---
     if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v1":
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
@@ -512,13 +542,28 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         r.goal_progress.params["scale_gamma"] = args_cli.progress_scale_gamma
         r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
 
+        # 方向性 gate 覆蓋
+        if args_cli.directional_gate:
+            for term_name, dir_key in [("goal_velocity", "directional_gate"), ("goal_progress", "directional_scale")]:
+                term = getattr(r, term_name, None)
+                if term is not None:
+                    term.params[dir_key] = True
+                    term.params["cone_half_bins"] = args_cli.gate_cone_half_bins
+                    term.params["cone_bottom_k"] = args_cli.gate_cone_bottom_k
+                    term.params["omni_blend"] = args_cli.gate_omni_blend
+
+        dir_tag = ""
+        if args_cli.directional_gate:
+            dir_tag = (f" | dir_gate: cone=±{args_cli.gate_cone_half_bins}bins "
+                       f"bottom_k={args_cli.gate_cone_bottom_k} blend={args_cli.gate_omni_blend}")
+
         print(
             f"[REWARD_MODE] navrl_ground_v1 | "
             f"w: goal={args_cli.w_goal} vel={args_cli.w_vel} prog={args_cli.w_prog} "
             f"ss={args_cli.w_ss} ds={args_cli.w_ds} smooth={args_cli.w_smooth} "
             f"time={args_cli.w_time} collision={args_cli.w_collision} | "
             f"beta={args_cli.goal_vel_gate_beta} gamma={args_cli.progress_scale_gamma} "
-            f"ds_mode={args_cli.dynamic_safety_mode}"
+            f"ds_mode={args_cli.dynamic_safety_mode}{dir_tag}"
         )
         changed = True
 

@@ -62,6 +62,105 @@ def _get_goal_pos(env):
     return env.command_manager.get_command("goal_command")[:, :2]
 
 
+def _get_d_goal_direction(
+    env,
+    sensor_cfg,
+    robot_cfg,
+    body_radius: float = 0.35,
+    num_bins: int = 72,
+    cone_half_bins: int = 6,
+    cone_bottom_k: int = 3,
+) -> torch.Tensor:
+    """計算 goal 方向 cone 內的 LiDAR clearance [N]。
+
+    只看「朝目標方向」的 LiDAR bins，忽略側面/後方障礙。
+    用於方向性 gate — 避免全場障礙物都壓制 goal attraction。
+
+    Args:
+        cone_half_bins: cone 半寬 (bins)。6 bins × 5° = ±30°
+        cone_bottom_k: cone 內取最近 k 條 ray 平均
+    Returns:
+        [N] d_goal_dir — goal 方向 cone 內的安全餘裕
+    """
+    from isaaclab.assets import Articulation
+
+    robot: Articulation = env.scene[robot_cfg.name]
+    device = env.device
+    N = env.num_envs
+
+    # --- LiDAR bins [N, 72] ---
+    distances = _get_lidar_2d_distances(env, sensor_cfg)  # [N, num_rays]
+    num_rays = distances.shape[1]
+    rays_per_bin = num_rays // num_bins
+
+    if rays_per_bin > 1:
+        trimmed = distances[:, :num_bins * rays_per_bin]
+        binned = trimmed.reshape(N, num_bins, rays_per_bin).min(dim=2).values
+    else:
+        binned = distances[:, :num_bins]  # [N, 72]
+
+    # --- Goal direction in robot body frame ---
+    robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)
+    goal_pos = _get_goal_pos(env)
+    diff = goal_pos - robot_pos
+    goal_dist = torch.norm(diff, dim=1, keepdim=True).clamp(min=1e-6)
+    goal_dir_w = diff / goal_dist  # [N, 2] world frame unit vector
+
+    # Robot yaw → body frame rotation
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))  # [N]
+    cos_y, sin_y = torch.cos(yaw), torch.sin(yaw)
+
+    # Goal direction → body frame
+    gx_b = goal_dir_w[:, 0] * cos_y + goal_dir_w[:, 1] * sin_y
+    gy_b = -goal_dir_w[:, 0] * sin_y + goal_dir_w[:, 1] * cos_y
+
+    # Goal angle → bin index
+    # LiDAR convention: bin 0 = -180°, bin 36 = 0° (正前方)
+    goal_angle = torch.atan2(gy_b, gx_b)  # [N], range [-π, π]
+    goal_bin = ((goal_angle / (2 * 3.14159265) * num_bins) + num_bins // 2).long() % num_bins
+
+    # --- Extract cone bins per environment ---
+    offsets = torch.arange(-cone_half_bins, cone_half_bins + 1, device=device)  # [2*half+1]
+    cone_indices = (goal_bin.unsqueeze(1) + offsets.unsqueeze(0)) % num_bins  # [N, cone_width]
+
+    # Gather cone bins
+    cone_dists = torch.gather(binned, 1, cone_indices)  # [N, cone_width]
+
+    # Bottom-k within cone
+    k = min(cone_bottom_k, cone_dists.shape[1])
+    d_cone = torch.topk(cone_dists, k=k, dim=1, largest=False).values.mean(dim=1)  # [N]
+
+    return (d_cone - body_radius).clamp(min=1e-4)
+
+
+def _compute_effective_d_safe(
+    env, sensor_cfg, robot_cfg,
+    body_radius: float, bottom_k: int,
+    directional: bool, cone_half_bins: int, cone_bottom_k: int, omni_blend: float,
+) -> torch.Tensor:
+    """計算 gate 用的 effective d_safe — 方向性或全局。
+
+    directional=True 時:
+        d_effective = (1 - omni_blend) * d_goal_dir + omni_blend * d_omnidirectional
+    directional=False 時:
+        d_effective = d_omnidirectional (原行為)
+    """
+    d_omni = _get_d_safe(env, sensor_cfg, body_radius, bottom_k)
+
+    if not directional:
+        return d_omni
+
+    d_dir = _get_d_goal_direction(
+        env, sensor_cfg, robot_cfg,
+        body_radius=body_radius,
+        cone_half_bins=cone_half_bins,
+        cone_bottom_k=cone_bottom_k,
+    )
+    return (1.0 - omni_blend) * d_dir + omni_blend * d_omni
+
+
 # ============================================================================
 # 1. Goal Velocity Reward — soft gate, 永不歸零
 # ============================================================================
@@ -78,17 +177,22 @@ def goal_velocity_reward(
     gate_beta: float = 0.2,
     gate_dmin: float = 0.6,
     gate_dmax: float = 2.0,
+    # --- 方向性 gate 參數 ---
+    directional_gate: bool = False,
+    cone_half_bins: int = 6,
+    cone_bottom_k: int = 3,
+    omni_blend: float = 0.2,
 ) -> torch.Tensor:
     """朝目標方向的速度獎勵 — soft gate 永不完全關閉。
 
     Math:
         v_toward = dot(vel_2d, goal_dir)
         raw = clamp(v_toward / v_max, -1, 1)
-        soft_gate = beta + (1-beta) * clamp((d_safe - dmin)/(dmax - dmin), 0, 1)
+        soft_gate = beta + (1-beta) * clamp((d_eff - dmin)/(dmax - dmin), 0, 1)
         reward = raw * soft_gate * (goal_dist > min_goal_dist)
 
-    與舊版差異：soft_gate 最低 = beta (0.2)，永不歸零。
-    舊版 v_gate 在 d_safe < 1.0 時 = 0（完全關閉 goal attraction）。
+    directional_gate=True 時，d_eff 只看目標方向 ±cone 的 LiDAR，
+    側面/後方障礙不會壓制 goal attraction。
 
     Returns: [N] in [-1, 1]
     """
@@ -109,9 +213,15 @@ def goal_velocity_reward(
     raw = raw * far_enough
 
     if use_soft_gate:
-        d_safe = _get_d_safe(env, sensor_cfg, body_radius, bottom_k)
+        d_eff = _compute_effective_d_safe(
+            env, sensor_cfg, robot_cfg,
+            body_radius=body_radius, bottom_k=bottom_k,
+            directional=directional_gate,
+            cone_half_bins=cone_half_bins, cone_bottom_k=cone_bottom_k,
+            omni_blend=omni_blend,
+        )
         gate = gate_beta + (1.0 - gate_beta) * (
-            (d_safe - gate_dmin) / (gate_dmax - gate_dmin + 1e-6)
+            (d_eff - gate_dmin) / (gate_dmax - gate_dmin + 1e-6)
         ).clamp(0.0, 1.0)
         raw = raw * gate
 
@@ -133,16 +243,20 @@ def goal_progress_reward(
     scale_gamma: float = 0.3,
     scale_dmin: float = 0.5,
     scale_dmax: float = 2.0,
+    # --- 方向性 scale 參數 ---
+    directional_scale: bool = False,
+    cone_half_bins: int = 6,
+    cone_bottom_k: int = 3,
+    omni_blend: float = 0.2,
 ) -> torch.Tensor:
     """PBRS 進度獎勵 — soft scale, 永不翻負。
 
     Math:
         progress = clamp(d_prev - d_curr, -clip, clip)
-        scale = gamma + (1-gamma) * clamp((d_safe - dmin)/(dmax - dmin), 0, 1)
+        scale = gamma + (1-gamma) * clamp((d_eff - dmin)/(dmax - dmin), 0, 1)
         reward = progress * scale
 
-    與舊版差異：scale 最低 = gamma (0.3)，永不翻負。
-    舊版 safe_progress 在 d_safe < 0.8 時 gate = -0.5（前進扣分、撤退加分）。
+    directional_scale=True 時，d_eff 只看目標方向 ±cone 的 LiDAR。
 
     Returns: [N] in [-1, 1]
     """
@@ -165,9 +279,15 @@ def goal_progress_reward(
     env._prev_goal_dist_ground = d_curr.clone()
 
     if use_soft_scale:
-        d_safe = _get_d_safe(env, sensor_cfg, body_radius, bottom_k)
+        d_eff = _compute_effective_d_safe(
+            env, sensor_cfg, robot_cfg,
+            body_radius=body_radius, bottom_k=bottom_k,
+            directional=directional_scale,
+            cone_half_bins=cone_half_bins, cone_bottom_k=cone_bottom_k,
+            omni_blend=omni_blend,
+        )
         scale = scale_gamma + (1.0 - scale_gamma) * (
-            (d_safe - scale_dmin) / (scale_dmax - scale_dmin + 1e-6)
+            (d_eff - scale_dmin) / (scale_dmax - scale_dmin + 1e-6)
         ).clamp(0.0, 1.0)
         progress = progress * scale
 
@@ -431,4 +551,6 @@ __all__ = [
     "dynamic_safety_reward",
     "control_smoothness_penalty",
     "alive_reward",
+    "_get_d_goal_direction",
+    "_compute_effective_d_safe",
 ]
