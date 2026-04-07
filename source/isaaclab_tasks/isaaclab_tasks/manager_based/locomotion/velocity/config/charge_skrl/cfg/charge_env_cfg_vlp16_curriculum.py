@@ -211,13 +211,13 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
 # ============================================================================
 @configclass
 class CommandsCfgVLP16Curriculum:
-    """課程命令：Phase 1 初始 8 goals，距離 2-6m（v18: 從 13m 縮短）"""
+    """課程命令：Phase 1 初始 8 goals，全場均勻分布 2-13m（v19 還原）"""
     goal_command = MultiGoalCommandCfg(
         asset_name="robot",
         resampling_time_range=(1e9, 1e9),
         debug_vis=True,
         ranges=GoalCommandCfg.Ranges(
-            distance=(2.0, 6.0),
+            distance=(2.0, 13.0),
             angle=(-math.pi, math.pi),
         ),
         wall_boundary=9.5,

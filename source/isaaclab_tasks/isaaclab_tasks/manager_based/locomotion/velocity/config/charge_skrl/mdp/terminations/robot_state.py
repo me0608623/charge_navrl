@@ -224,3 +224,84 @@ def wall_collision_termination(
         )
 
     return result
+
+
+_obs_collision_diag_count = 0
+
+
+def obstacle_collision_geometric(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg,
+    collision_distance: float = 0.9,
+    max_obstacles: int = 50,
+) -> torch.Tensor:
+    """幾何式障礙物碰撞偵測 — 不依賴 contact sensor force。
+
+    Bug 修復: 原本依賴 ``collision_contact_occurred`` 透過 PhysX contact
+    sensor 的 force_matrix_w 判定碰撞，但因為障礙物是 ``kinematic_enabled=True``
+    且透過 ``write_root_pose_to_sim`` teleport 移動，PhysX 經常不產生足夠
+    的接觸力 (< 0.1 N)，導致明顯穿透卻 CR=0%。
+
+    判定邏輯：robot 中心 與 obstacle 中心 的距離 < collision_distance：
+
+        碰撞 ⇔ ‖robot_pos - obs_pos‖ < collision_distance
+
+    預設 collision_distance = 0.9m **與真實 LiDAR 最小偵測距離匹配**：
+    比 0.9m 近的障礙物，真實感測器看不到 → robot 無法反應 → 視為碰撞失敗。
+    這比「物理重疊」更保守，能讓 sim 訓練的 policy 在真實機器人上更安全。
+
+    隱藏障礙物 (Z ≤ 0) 自動排除。
+
+    Args:
+        env:                Isaac Lab 環境實例
+        asset_cfg:          機器人 SceneEntityCfg
+        collision_distance: 中心距離碰撞門檻 (m)，預設 0.9（= 真實 LiDAR 盲區）
+        max_obstacles:      場景中障礙物 entity 的最大編號
+
+    Returns:
+        shape [num_envs] bool tensor，True = 碰撞 (任一障礙物進入 0.9m 內)
+    """
+    global _obs_collision_diag_count
+
+    robot = env.scene[asset_cfg.name]
+    robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)  # [N, 2]
+    N = robot_pos.shape[0]
+    device = robot_pos.device
+
+    overlap = torch.zeros(N, dtype=torch.bool, device=device)
+    threshold_sq = collision_distance ** 2  # 用平方避免 sqrt
+
+    for i in range(max_obstacles):
+        name = f"obstacle_{i}"
+        if name not in env.scene.keys():
+            continue
+
+        obs_entity = env.scene[name]
+        pos_w = obs_entity.data.root_pos_w  # [N, 3]
+        pos_xy = torch.nan_to_num(pos_w[:, :2], nan=0.0)
+
+        # 隱藏障礙物 (Z ≤ 0，例如 z=-10) → 跳過
+        visible = pos_w[:, 2] > 0.0
+
+        # 中心距離平方 vs threshold 平方（避免 sqrt 計算）
+        delta = pos_xy - robot_pos
+        dist_sq = (delta * delta).sum(dim=1)
+
+        hit = visible & (dist_sq < threshold_sq)
+        overlap = overlap | hit
+
+    # 一次性診斷（第 1 次呼叫，確認有抓到障礙物）
+    _obs_collision_diag_count += 1
+    if _obs_collision_diag_count == 1:
+        n_obs_in_scene = sum(
+            1 for i in range(max_obstacles)
+            if f"obstacle_{i}" in env.scene.keys()
+        )
+        print(
+            f"[obstacle_collision_geometric] entities={n_obs_in_scene}/{max_obstacles} "
+            f"collision_distance={collision_distance:.2f}m (中心距離) "
+            f"hits_step1={int(overlap.sum().item())}/{N}",
+            flush=True,
+        )
+
+    return overlap

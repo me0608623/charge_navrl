@@ -63,6 +63,8 @@ from .terminations import (
     robot_tipped_over,
     robot_flying,
     physics_explosion,
+    wall_collision_termination,
+    obstacle_collision_geometric,
 )
 
 # ============================================================================
@@ -132,6 +134,8 @@ __all__ = [
     "robot_tipped_over",
     "robot_flying",
     "physics_explosion",
+    "wall_collision_termination",
+    "obstacle_collision_geometric",
     # 事件
     "reset_obstacles",
     "move_obstacles_vectorized",

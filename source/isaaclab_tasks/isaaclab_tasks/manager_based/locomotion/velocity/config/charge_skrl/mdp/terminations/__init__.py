@@ -9,6 +9,7 @@ from .robot_state import (
     robot_flying,
     physics_explosion,
     wall_collision_termination,
+    obstacle_collision_geometric,
 )
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "robot_flying",
     "physics_explosion",
     "wall_collision_termination",
+    "obstacle_collision_geometric",
 ]

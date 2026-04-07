@@ -50,6 +50,8 @@ def lidar_vlp16_to_2d_bins(
     num_bins: int = 72,
     r_max: float = 20.0,
     r_robot: float = 0.3,
+    r_min: float = 0.0,
+    z_filter: float = 0.0,
     # Point cloud corruption (Sim-to-Real domain randomization)
     displacement_std: float = 0.0,
     hole_rate: float = 0.0,
@@ -94,6 +96,11 @@ def lidar_vlp16_to_2d_bins(
         num_bins:         最終輸出的角度區間數 (預設 72 = 5° 解析度)
         r_max:            最大探測距離 (m)
         r_robot:          車體半徑 (m)
+        r_min:            ★ 真實 LiDAR 最小偵測距離 (m)，0=關閉
+                          模擬實際感測器盲區。距離 < r_min 的命中 → r_max
+                          (例如真實 VLP-16 的 0.9m 盲區)
+        z_filter:         ★ Z 軸過濾門檻 (m)，0=關閉
+                          忽略高度差超過此值的命中 (排除隱藏障礙物 z=-10 鬼影)
         displacement_std: 個別射線距離高斯雜訊標準差 (m)，0=關閉
         hole_rate:        射線隨機遺失機率 (→ r_max)，0=關閉
         distractor_rate:  虛假近距離讀數機率，0=關閉
@@ -121,6 +128,24 @@ def lidar_vlp16_to_2d_bins(
     dist_2d = torch.norm(hits_xy - sensor_xy, dim=-1)  # [N, total_rays]
 
     # ==========================================================
+    # Step 0: Z-filter — 排除 Z 異常的命中（修復 Bug B「鬼影」問題）
+    #
+    # 隱藏障礙物 (z=-10) 投影到 2D 後會偽裝成「近距離物體」，
+    # 造成 lidar.min 永遠 ≈ 0。此處用 sensor_z ± z_filter 過濾掉。
+    # ==========================================================
+    if z_filter > 0:
+        sensor_z = sensor_pos[:, 2:3].unsqueeze(1)  # [N, 1, 1]
+        hit_z = hit_points[:, :, 2:3]                # [N, total_rays, 1]
+        z_diff = (hit_z - sensor_z).abs().squeeze(-1)  # [N, total_rays]
+        # 高度差超過 z_filter 的命中視為無效 → r_max
+        invalid_z = z_diff > z_filter
+        dist_2d = torch.where(
+            invalid_z,
+            torch.tensor(r_max, device=device, dtype=dist_2d.dtype),
+            dist_2d,
+        )
+
+    # ==========================================================
     # Step 1: Clipping
     #   inf / NaN / 超過 r_max → 截斷為 r_max
     # ==========================================================
@@ -130,6 +155,22 @@ def lidar_vlp16_to_2d_bins(
         torch.tensor(r_max, device=device, dtype=dist_2d.dtype),
     )
     dist_2d = torch.clamp(dist_2d, max=r_max)
+
+    # ==========================================================
+    # Step 1.1: 真實 LiDAR Min Range — 模擬感測器盲區
+    #
+    # 真實 VLP-16 / RPLidar 等雷達都有「最小偵測距離」，
+    # 比這個距離更近的物體 → 雷達看不到 (no return / NaN)。
+    # 設 r_min=0.9 對應實測值，讓 sim 與真實感測器一致。
+    # 對策：將距離 < r_min 的命中視為「無偵測」→ 設為 r_max。
+    # ==========================================================
+    if r_min > 0:
+        too_close = dist_2d < r_min
+        dist_2d = torch.where(
+            too_close,
+            torch.tensor(r_max, device=device, dtype=dist_2d.dtype),
+            dist_2d,
+        )
 
     # ==========================================================
     # Step 1.5: Point Cloud Corruption (Sim-to-Real)

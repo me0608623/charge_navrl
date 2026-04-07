@@ -90,6 +90,7 @@ from ..mdp.terminations import (
     robot_tipped_over,
     physics_explosion,
     wall_collision_termination,
+    obstacle_collision_geometric,
 )
 
 # 事件
@@ -406,6 +407,8 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
+                "r_min": 0.9,         # ★ 真實 VLP-16 / RPLidar 最小偵測距離
+                "z_filter": 0.5,      # ★ 過濾 z 異常命中（隱藏障礙物 z=-10 鬼影）
                 "displacement_std": 0.02,
                 "hole_rate": 0.005,
                 "distractor_rate": 0.002,
@@ -479,6 +482,8 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
+                "r_min": 0.9,         # ★ 真實 VLP-16 / RPLidar 最小偵測距離
+                "z_filter": 0.5,      # ★ 過濾 z 異常命中（隱藏障礙物 z=-10 鬼影）
                 "displacement_std": 0.02,
                 "hole_rate": 0.005,
                 "distractor_rate": 0.002,
@@ -620,8 +625,10 @@ class TerminationsCfgVLP16:
         func=robot_tipped_over,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
-    # PhysX contact sensor 碰撞偵測（取代 LiDAR distance threshold）
-    # contact_sensor filter = Obstacle_.*，物理碰撞 100% 可靠
+    # PhysX contact sensor 碰撞偵測（保留作為補充偵測）
+    # 注意: 障礙物為 kinematic_enabled=True + write_root_pose_to_sim teleport
+    # 移動時，PhysX 經常不產生足夠接觸力 (< 0.1 N)，導致 CR 嚴重低估。
+    # 真正的碰撞偵測由下方的 obstacle_collision_geometric 負責 (Bug A 修復)。
     collision = DoneTerm(
         func=collision_contact_occurred,
         params={"sensor_cfg": SceneEntityCfg("contact_sensor")},
@@ -630,6 +637,17 @@ class TerminationsCfgVLP16:
     wall_collision = DoneTerm(
         func=wall_collision_termination,
         params={"asset_cfg": SceneEntityCfg("robot"), "threshold": COLLISION_THRESHOLD},
+    )
+    # ★ Bug A 修復: 幾何式障礙物碰撞偵測 (取代 contact sensor 偵測 kinematic 障礙物)
+    # 中心距離 < 0.9m 即視為碰撞（與真實 LiDAR 最小偵測距離匹配）
+    # 比 0.9m 近的物體真實 lidar 看不到 → robot 無法反應 → 視為失敗
+    obstacle_collision = DoneTerm(
+        func=obstacle_collision_geometric,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "collision_distance": 0.9,  # 中心距離門檻 = 真實 LiDAR 盲區
+            "max_obstacles": MAX_OBSTACLES,
+        },
     )
     # Fix 2: 物理引擎爆炸檢測
     physics_explosion = DoneTerm(

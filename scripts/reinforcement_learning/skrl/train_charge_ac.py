@@ -151,6 +151,10 @@ parser.add_argument("--no_walls", action="store_true", default=False,
 parser.add_argument("--no_domain_randomization", action="store_true", default=False,
                     help="關閉所有 domain randomization (physics, sensor noise, external force, "
                          "robot 初始位置/速度隨機化)。Obstacle/goal layout 不受影響。")
+parser.add_argument("--lidar_no_noise", action="store_true", default=False,
+                    help="關閉 LiDAR 觀測函數內建的所有合成噪聲 (displacement_std, hole_rate, "
+                         "distractor_rate, Unoise)。用於訓練「真正無噪聲」對照組。"
+                         "搭配 --no_domain_randomization 使用以獲得 zero-noise baseline。")
 
 # --- Ablation Family 5: v8 safety balance ---
 parser.add_argument("--ss_lower_mode", type=str, default=None,
@@ -758,31 +762,58 @@ def _apply_ablation_overrides(env_cfg, args_cli):
             print(f"[NO_WALLS] 所有 stage 的 min/max_walls 已設為 0（保留外牆）")
             changed = True
 
-    # --- no_domain_randomization: 關閉所有 DR 相關 events ---
+    # --- no_domain_randomization: 只關閉 physics/sensor/force DR event ---
+    # 注意: 不動 reset_base 的 pose/velocity range —— 那是 scene initialization 必須的
+    # spread，把它收成 (0,0) 會讓所有 robot 在同一點 spawn 並導致物理問題（v18 教訓）
     if getattr(args_cli, 'no_domain_randomization', False):
         events = getattr(env_cfg, 'events', None)
         if events is not None:
-            # 1) 關閉 domain_randomization event 的所有 sub-flags
             dr = getattr(events, 'domain_randomization', None)
             if dr is not None:
                 dr.params["enable_physics"] = False
                 dr.params["enable_sensor_noise"] = False
                 dr.params["enable_external_force"] = False
                 print(f"[NO_DR] domain_randomization event: physics/sensor_noise/external_force = False")
+                print(f"[NO_DR] reset_base 保留原樣（pose/velocity range 不動）")
+        changed = True
 
-            # 2) 收斂 reset_base 的 pose/velocity range（僅 yaw 仍隨機，避免所有 env 同初始）
-            rb = getattr(events, 'reset_base', None)
-            if rb is not None:
-                rb.params["pose_range"] = {
-                    "x": (0.0, 0.0),
-                    "y": (0.0, 0.0),
-                    "yaw": (-3.14, 3.14),  # 保留 yaw 隨機，否則 env 完全同步
-                }
-                rb.params["velocity_range"] = {
-                    "x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
-                    "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
-                }
-                print(f"[NO_DR] reset_base: pose=(0,0), velocity=0, yaw 仍隨機")
+    # --- lidar_no_noise: 關閉 LiDAR 觀測函數內建的所有 noise ---
+    # 修復 Bug B: lidar_vlp16_to_2d_bins 預設帶 displacement_std=0.02 + hole_rate=0.005
+    # + distractor_rate=0.002 + Unoise(±0.02)，導致 lidar.min 永遠 ≈ 0（因為每幀都有
+    # ~11 個假近距離 distractor），policy 學不到正確的近距離 obstacle 訊號。
+    if getattr(args_cli, 'lidar_no_noise', False):
+        obs_root = getattr(env_cfg, 'observations', None)
+        if obs_root is not None:
+            cleared_terms = []
+            # 遍歷所有 obs group (policy / critic / shared)
+            for group_name in dir(obs_root):
+                if group_name.startswith('_'):
+                    continue
+                group = getattr(obs_root, group_name, None)
+                if group is None or not hasattr(group, '__dict__'):
+                    continue
+                for term_name in dir(group):
+                    if term_name.startswith('_'):
+                        continue
+                    term = getattr(group, term_name, None)
+                    if term is None or not hasattr(term, 'params'):
+                        continue
+                    # 只處理 LiDAR observation terms
+                    if 'lidar' not in term_name.lower():
+                        continue
+                    params = term.params
+                    if 'displacement_std' in params:
+                        params['displacement_std'] = 0.0
+                    if 'hole_rate' in params:
+                        params['hole_rate'] = 0.0
+                    if 'distractor_rate' in params:
+                        params['distractor_rate'] = 0.0
+                    # 移除 ObsTerm 上的 Unoise 包裝
+                    if hasattr(term, 'noise'):
+                        term.noise = None
+                    cleared_terms.append(f"{group_name}.{term_name}")
+            print(f"[NO_LIDAR_NOISE] LiDAR observation noise disabled: {cleared_terms}")
+            print(f"[NO_LIDAR_NOISE] displacement_std=0, hole_rate=0, distractor_rate=0, Unoise=None")
         changed = True
 
     # --- Ablation 5: safety 權重調整 ---

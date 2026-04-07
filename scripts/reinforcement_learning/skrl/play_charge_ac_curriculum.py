@@ -80,6 +80,12 @@ parser.add_argument("--match_level", type=int, default=None,
                          "obstacle ratios, episode_length 等）。用法: --match_level 30 = 對齊 L30 訓練環境。")
 parser.add_argument("--episode_length", type=float, default=None,
                     help="覆寫 episode 長度 (秒)。不指定時: --match_level 自動設定，否則用 env 預設。")
+parser.add_argument("--no_domain_randomization", action="store_true", default=False,
+                    help="關閉 domain_randomization event (physics/sensor_noise/external_force)。"
+                         "對齊訓練時的 --no_domain_randomization。")
+parser.add_argument("--lidar_no_noise", action="store_true", default=False,
+                    help="關閉 LiDAR 觀測函數內建合成噪聲 (displacement/hole/distractor/Unoise)。"
+                         "對齊訓練時的 --lidar_no_noise。")
 
 # AppLauncher args (--headless, --device, etc.)
 AppLauncher.add_app_launcher_args(parser)
@@ -259,6 +265,50 @@ def main():
     # Play 模式: render_interval 折衷（每 action 渲染 5 幀 ~25 FPS）
     if not args_cli.headless:
         env_cfg.sim.render_interval = 4
+
+    # ========================================================================
+    # 對齊訓練 flag — Bug A/B 修復後的乾淨環境
+    # ========================================================================
+    # --- no_domain_randomization: 關閉 physics/sensor_noise/external_force ---
+    if args_cli.no_domain_randomization:
+        events = getattr(env_cfg, "events", None)
+        if events is not None:
+            dr = getattr(events, "domain_randomization", None)
+            if dr is not None:
+                dr.params["enable_physics"] = False
+                dr.params["enable_sensor_noise"] = False
+                dr.params["enable_external_force"] = False
+                print("[NO_DR] domain_randomization event: physics/sensor_noise/external_force = False")
+
+    # --- lidar_no_noise: 關閉 LiDAR 觀測函數內建噪聲 ---
+    if args_cli.lidar_no_noise:
+        obs_root = getattr(env_cfg, "observations", None)
+        if obs_root is not None:
+            cleared = []
+            for group_name in dir(obs_root):
+                if group_name.startswith("_"):
+                    continue
+                group = getattr(obs_root, group_name, None)
+                if group is None or not hasattr(group, "__dict__"):
+                    continue
+                for term_name in dir(group):
+                    if term_name.startswith("_") or "lidar" not in term_name.lower():
+                        continue
+                    term = getattr(group, term_name, None)
+                    if term is None or not hasattr(term, "params"):
+                        continue
+                    params = term.params
+                    if "displacement_std" in params:
+                        params["displacement_std"] = 0.0
+                    if "hole_rate" in params:
+                        params["hole_rate"] = 0.0
+                    if "distractor_rate" in params:
+                        params["distractor_rate"] = 0.0
+                    if hasattr(term, "noise"):
+                        term.noise = None
+                    cleared.append(f"{group_name}.{term_name}")
+            print(f"[NO_LIDAR_NOISE] LiDAR observation noise disabled: {cleared}")
+            print(f"[NO_LIDAR_NOISE] displacement_std=0, hole_rate=0, distractor_rate=0, Unoise=None")
 
     if use_curriculum:
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
