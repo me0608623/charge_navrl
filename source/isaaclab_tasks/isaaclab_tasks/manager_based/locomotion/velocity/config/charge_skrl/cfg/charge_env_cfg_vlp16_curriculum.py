@@ -211,13 +211,13 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
 # ============================================================================
 @configclass
 class CommandsCfgVLP16Curriculum:
-    """課程命令：Phase 1 初始 8 goals，全場均勻分布 2-13m"""
+    """課程命令：Phase 1 初始 8 goals，距離 2-6m（v18: 從 13m 縮短）"""
     goal_command = MultiGoalCommandCfg(
         asset_name="robot",
         resampling_time_range=(1e9, 1e9),
         debug_vis=True,
         ranges=GoalCommandCfg.Ranges(
-            distance=(2.0, 13.0),
+            distance=(2.0, 6.0),
             angle=(-math.pi, math.pi),
         ),
         wall_boundary=9.5,
@@ -1068,4 +1068,10 @@ class RewardsCfgVLP16NavRLGroundV8(RewardsCfgVLP16NavRLGroundV7):
     v8 修正: 降低 safety weight 上限 + 提高 goal_velocity 下限。
     目標: (ss+ds)/goal < 30%。
     """
-    pass  # 所有修改在 curriculum 的 reward_weights 中完成
+    # 修正: V2 把 time_penalty 重設為 0，V3-V7 繼承了 0
+    # 恢復 V1 的 -0.2，搭配 bootstrap=True 讓 timeout 有代價
+    time_penalty = RewTerm(
+        func=per_step_time_penalty,
+        params={},
+        weight=-0.2,
+    )

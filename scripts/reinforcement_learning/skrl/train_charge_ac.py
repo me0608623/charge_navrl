@@ -148,6 +148,9 @@ parser.add_argument("--curriculum_version", type=str, default=None,
                     help="Curriculum version (default: use task config's baseline_v1)")
 parser.add_argument("--no_walls", action="store_true", default=False,
                     help="移除所有內牆（保留外牆），所有 stage 的 min/max_walls=0")
+parser.add_argument("--no_domain_randomization", action="store_true", default=False,
+                    help="關閉所有 domain randomization (physics, sensor noise, external force, "
+                         "robot 初始位置/速度隨機化)。Obstacle/goal layout 不受影響。")
 
 # --- Ablation Family 5: v8 safety balance ---
 parser.add_argument("--ss_lower_mode", type=str, default=None,
@@ -754,6 +757,33 @@ def _apply_ablation_overrides(env_cfg, args_cli):
                 stage_cfg["max_walls"] = 0
             print(f"[NO_WALLS] 所有 stage 的 min/max_walls 已設為 0（保留外牆）")
             changed = True
+
+    # --- no_domain_randomization: 關閉所有 DR 相關 events ---
+    if getattr(args_cli, 'no_domain_randomization', False):
+        events = getattr(env_cfg, 'events', None)
+        if events is not None:
+            # 1) 關閉 domain_randomization event 的所有 sub-flags
+            dr = getattr(events, 'domain_randomization', None)
+            if dr is not None:
+                dr.params["enable_physics"] = False
+                dr.params["enable_sensor_noise"] = False
+                dr.params["enable_external_force"] = False
+                print(f"[NO_DR] domain_randomization event: physics/sensor_noise/external_force = False")
+
+            # 2) 收斂 reset_base 的 pose/velocity range（僅 yaw 仍隨機，避免所有 env 同初始）
+            rb = getattr(events, 'reset_base', None)
+            if rb is not None:
+                rb.params["pose_range"] = {
+                    "x": (0.0, 0.0),
+                    "y": (0.0, 0.0),
+                    "yaw": (-3.14, 3.14),  # 保留 yaw 隨機，否則 env 完全同步
+                }
+                rb.params["velocity_range"] = {
+                    "x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0),
+                    "roll": (0.0, 0.0), "pitch": (0.0, 0.0), "yaw": (0.0, 0.0),
+                }
+                print(f"[NO_DR] reset_base: pose=(0,0), velocity=0, yaw 仍隨機")
+        changed = True
 
     # --- Ablation 5: safety 權重調整 ---
     ss_lower = getattr(args_cli, 'ss_lower_mode', None)

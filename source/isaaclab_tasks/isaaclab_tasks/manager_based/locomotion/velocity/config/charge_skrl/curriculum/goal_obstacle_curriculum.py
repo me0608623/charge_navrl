@@ -77,7 +77,7 @@ def _make_stage(
     stage = {
         "name": name,
         "num_goals": num_goals,
-        "goal_distance": (2.0, 13.0),
+        "goal_distance": (2.0, 6.0),
         "num_obstacles_static": n_static,
         "num_obstacles_dynamic": n_dynamic,
         "empty_ratio": empty_ratio,
@@ -572,7 +572,7 @@ def _open_ended_params(level: int) -> dict:
         "max_walls": 0,
         "episode_length_s": float(episode_length_s),
         "gamma": gamma,
-        "goal_distance": (3.0, min(13.0, 8.0 * goal_distance_scale)),
+        "goal_distance": (2.0, min(6.0, 5.0 * goal_distance_scale)),
         # 進階難度參數
         "speed_range": 1.2 * dynamic_speed_scale,
         "boundary": max(5.5, 7.5 / spawn_compactness),
