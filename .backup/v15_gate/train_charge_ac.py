@@ -99,16 +99,6 @@ parser.add_argument("--gap_reward_type", type=str, default="heading",
                     help="Gap reward type")
 parser.add_argument("--gap_reward_weight", type=float, default=5.0,
                     help="Gap reward weight")
-# --- Directional Gate (v16) ---
-parser.add_argument("--directional_gate", action="store_true", default=False,
-                    help="v16: 方向性 gate — 只看目標方向 cone 的 LiDAR，側面/後方障礙不壓制 goal attraction")
-parser.add_argument("--gate_cone_half_bins", type=int, default=6,
-                    help="Directional gate cone 半寬 (bins)。6=±30° (5°/bin)")
-parser.add_argument("--gate_cone_bottom_k", type=int, default=3,
-                    help="Directional gate cone 內取最近 k 條 ray 平均")
-parser.add_argument("--gate_omni_blend", type=float, default=0.2,
-                    help="Directional gate: 混合 omnidirectional 信號比例 (0=純方向性, 1=退化為全局)")
-
 parser.add_argument("--use_safety_shield", action="store_true", default=False,
                     help="Enable safety shield on actions (speed limiting near obstacles)")
 parser.add_argument("--shield_mode", type=str, default="soft",
@@ -148,29 +138,6 @@ parser.add_argument("--curriculum_version", type=str, default=None,
                     help="Curriculum version (default: use task config's baseline_v1)")
 parser.add_argument("--no_walls", action="store_true", default=False,
                     help="移除所有內牆（保留外牆），所有 stage 的 min/max_walls=0")
-parser.add_argument("--no_domain_randomization", action="store_true", default=False,
-                    help="關閉所有 domain randomization (physics, sensor noise, external force, "
-                         "robot 初始位置/速度隨機化)。Obstacle/goal layout 不受影響。")
-parser.add_argument("--lidar_no_noise", action="store_true", default=False,
-                    help="關閉 LiDAR 觀測函數內建的所有合成噪聲 (displacement_std, hole_rate, "
-                         "distractor_rate, Unoise)。用於訓練「真正無噪聲」對照組。"
-                         "搭配 --no_domain_randomization 使用以獲得 zero-noise baseline。")
-parser.add_argument("--reward_speed_v05", action="store_true", default=False,
-                    help="調整 reward 鼓勵 speed=0.5 m/s 目標 (方案 A): "
-                         "goal_velocity ×3, static_safety ×0.375, time_penalty -0.2→-0.6。"
-                         "解決 v20 出現的 over-cautious slow 行為 (speed=0.06)。")
-
-# --- M1.4 ds rebalance: 修 v05 monkey-patch 漏洞 + 提高 closing_risk 訊號強度 ---
-parser.add_argument("--ds_weight_boost", type=float, default=1.0,
-                    help="OE 階段 dynamic_safety reward weight 倍率 (M1.4)。"
-                         "預設 1.0=不變。建議 3.0 補回 v05 monkey-patch 漏掉的 ds 同步 boost。"
-                         "v21 後實測：v05 把 goal_velocity ×3 但沒調 ds → ds effective 只佔 0.31% of goal_velocity。")
-parser.add_argument("--risk_sigma", type=float, default=None,
-                    help="dynamic_safety closing_risk 的 sigma (m)。預設 None = 使用 config 值。"
-                         "建議 1.2 (vs V3 的 2.0) → 1m clearance risk 從 60% → 43%，更聚焦近距離。")
-parser.add_argument("--b_risk", type=float, default=None,
-                    help="dynamic_safety closing_risk 內部的 b_risk 倍率。預設 None = 使用 config 值。"
-                         "建議 2.0 (vs V3 的 1.0) → closing_rate 訊號 2x。")
 
 # --- Ablation Family 5: v8 safety balance ---
 parser.add_argument("--ss_lower_mode", type=str, default=None,
@@ -522,26 +489,6 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         print(f"[ABLATION] safety_shield: mode={mode}")
         changed = True
 
-    # --- directional gate (通用：不依賴 reward_mode) ---
-    if args_cli.directional_gate:
-        _dir_params = {
-            "cone_half_bins": args_cli.gate_cone_half_bins,
-            "cone_bottom_k": args_cli.gate_cone_bottom_k,
-            "omni_blend": args_cli.gate_omni_blend,
-        }
-        gv = getattr(rewards, 'goal_velocity', None)
-        if gv is not None:
-            gv.params["directional_gate"] = True
-            gv.params.update(_dir_params)
-        gp = getattr(rewards, 'goal_progress', None)
-        if gp is not None:
-            gp.params["directional_scale"] = True
-            gp.params.update(_dir_params)
-        if gv or gp:
-            print(f"[ABLATION] directional_gate: cone=±{args_cli.gate_cone_half_bins}bins "
-                  f"bottom_k={args_cli.gate_cone_bottom_k} blend={args_cli.gate_omni_blend}")
-            changed = True
-
     # --- reward_mode: navrl_ground_v1 ---
     if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v1":
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
@@ -565,28 +512,13 @@ def _apply_ablation_overrides(env_cfg, args_cli):
         r.goal_progress.params["scale_gamma"] = args_cli.progress_scale_gamma
         r.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
 
-        # 方向性 gate 覆蓋
-        if args_cli.directional_gate:
-            for term_name, dir_key in [("goal_velocity", "directional_gate"), ("goal_progress", "directional_scale")]:
-                term = getattr(r, term_name, None)
-                if term is not None:
-                    term.params[dir_key] = True
-                    term.params["cone_half_bins"] = args_cli.gate_cone_half_bins
-                    term.params["cone_bottom_k"] = args_cli.gate_cone_bottom_k
-                    term.params["omni_blend"] = args_cli.gate_omni_blend
-
-        dir_tag = ""
-        if args_cli.directional_gate:
-            dir_tag = (f" | dir_gate: cone=±{args_cli.gate_cone_half_bins}bins "
-                       f"bottom_k={args_cli.gate_cone_bottom_k} blend={args_cli.gate_omni_blend}")
-
         print(
             f"[REWARD_MODE] navrl_ground_v1 | "
             f"w: goal={args_cli.w_goal} vel={args_cli.w_vel} prog={args_cli.w_prog} "
             f"ss={args_cli.w_ss} ds={args_cli.w_ds} smooth={args_cli.w_smooth} "
             f"time={args_cli.w_time} collision={args_cli.w_collision} | "
             f"beta={args_cli.goal_vel_gate_beta} gamma={args_cli.progress_scale_gamma} "
-            f"ds_mode={args_cli.dynamic_safety_mode}{dir_tag}"
+            f"ds_mode={args_cli.dynamic_safety_mode}"
         )
         changed = True
 
@@ -777,177 +709,6 @@ def _apply_ablation_overrides(env_cfg, args_cli):
                 stage_cfg["max_walls"] = 0
             print(f"[NO_WALLS] 所有 stage 的 min/max_walls 已設為 0（保留外牆）")
             changed = True
-
-    # --- no_domain_randomization: 只關閉 physics/sensor/force DR event ---
-    # 注意: 不動 reset_base 的 pose/velocity range —— 那是 scene initialization 必須的
-    # spread，把它收成 (0,0) 會讓所有 robot 在同一點 spawn 並導致物理問題（v18 教訓）
-    if getattr(args_cli, 'no_domain_randomization', False):
-        events = getattr(env_cfg, 'events', None)
-        if events is not None:
-            dr = getattr(events, 'domain_randomization', None)
-            if dr is not None:
-                dr.params["enable_physics"] = False
-                dr.params["enable_sensor_noise"] = False
-                dr.params["enable_external_force"] = False
-                print(f"[NO_DR] domain_randomization event: physics/sensor_noise/external_force = False")
-                print(f"[NO_DR] reset_base 保留原樣（pose/velocity range 不動）")
-        changed = True
-
-    # --- reward_speed_v05: 方案 A reward 調整鼓勵 v=0.5 m/s ---
-    # v20 訓練後發現 agent settled at speed=0.06 m/s，原因:
-    # 1. goal_velocity weight 太低 (4.5)
-    # 2. static_safety log clearance 太強 (0.4) — 慢速 + 遠離障礙物 = 大正獎勵
-    # 3. time_penalty 太弱 (-0.2) — 慢速沒有顯著代價
-    # 修復: ×3 goal_velocity, ×0.375 static_safety, time_penalty -0.6
-    if getattr(args_cli, 'reward_speed_v05', False):
-        # 1) 修改全域 time_penalty
-        rewards = getattr(env_cfg, 'rewards', None)
-        if rewards is not None and hasattr(rewards, 'time_penalty'):
-            rewards.time_penalty.weight = -0.6
-            print("[REWARD_SPEED_V05] time_penalty weight: -0.2 → -0.6")
-
-        # 2) 修改 bootstrap stages 的 reward_weights
-        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
-            CURRICULUM_CONFIGS,
-        )
-        cv_key = cv or "open_ended_v1"
-        if cv_key in CURRICULUM_CONFIGS:
-            stages = CURRICULUM_CONFIGS[cv_key]["stages"]
-            for stage_cfg in stages:
-                rw = stage_cfg.get("reward_weights")
-                if rw is None:
-                    continue
-                if "goal_velocity" in rw:
-                    rw["goal_velocity"] = round(rw["goal_velocity"] * 3.0, 2)
-                if "static_safety" in rw:
-                    rw["static_safety"] = round(rw["static_safety"] * 0.375, 3)
-            print(f"[REWARD_SPEED_V05] {len(stages)} bootstrap stages: "
-                  f"goal_velocity ×3, static_safety ×0.375")
-
-        # 3) Monkey-patch _open_ended_reward_weights for OE stages
-        # 注意: 不能用 `import ... as _curr_mod`，因為 module 與內部函數同名衝突
-        # 改用 importlib.import_module() 強制取得 module 物件
-        import importlib
-        _curr_mod = importlib.import_module(
-            "isaaclab_tasks.manager_based.locomotion.velocity.config."
-            "charge_skrl.curriculum.goal_obstacle_curriculum"
-        )
-        _orig_oe_weights = _curr_mod._open_ended_reward_weights
-
-        def _patched_oe_weights(level: int) -> dict:
-            rw = _orig_oe_weights(level)
-            rw["goal_velocity"] = round(rw.get("goal_velocity", 4.0) * 3.0, 2)
-            rw["static_safety"] = round(rw.get("static_safety", 0.4) * 0.375, 3)
-            return rw
-
-        _curr_mod._open_ended_reward_weights = _patched_oe_weights
-        print(f"[REWARD_SPEED_V05] OE stages: _open_ended_reward_weights monkey-patched")
-        print(f"[REWARD_SPEED_V05] 目標 speed ≈ 0.4-0.6 m/s, 預期 SR ≈ 88-92%")
-        changed = True
-
-    # --- M1.4: ds rebalance (修 v05 monkey-patch 漏洞 + 提高 closing_risk 訊號) ---
-    # 背景: v21 實測證實 closing_risk mode 已啟用 (line 731)，但 effective ds weight
-    # 只佔 goal_velocity 的 0.31%，因為 v05 把 goal_velocity ×3 卻沒同步調 ds。
-    # M1.4 修復: ds_weight_boost (OE weight scale) + risk_sigma (sharper field) +
-    #            b_risk (stronger closing signal)。
-    # 預期 effective ds weight 從 0.31% → ~3-5%，足以讓 PPO 學到 predictive avoidance。
-    _need_ds_patch = (
-        args_cli.ds_weight_boost != 1.0
-        or args_cli.risk_sigma is not None
-        or args_cli.b_risk is not None
-    )
-    if _need_ds_patch:
-        rewards = getattr(env_cfg, 'rewards', None)
-        if rewards is not None and hasattr(rewards, 'dynamic_safety'):
-            r = rewards
-            ds_params = r.dynamic_safety.params
-            # 1) 套用 risk_sigma override
-            if args_cli.risk_sigma is not None:
-                old_sigma = ds_params.get("risk_sigma", "?")
-                ds_params["risk_sigma"] = args_cli.risk_sigma
-                print(f"[M1.4_DS] risk_sigma: {old_sigma} → {args_cli.risk_sigma}")
-            # 2) 套用 b_risk override
-            if args_cli.b_risk is not None:
-                old_b = ds_params.get("b_risk", "?")
-                ds_params["b_risk"] = args_cli.b_risk
-                print(f"[M1.4_DS] b_risk: {old_b} → {args_cli.b_risk}")
-            # 3) 套用 OE weight boost (chained on top of v05 patch if exists)
-            if args_cli.ds_weight_boost != 1.0:
-                import importlib as _il
-                _curr_mod_m14 = _il.import_module(
-                    "isaaclab_tasks.manager_based.locomotion.velocity.config."
-                    "charge_skrl.curriculum.goal_obstacle_curriculum"
-                )
-                _orig_oe_for_ds = _curr_mod_m14._open_ended_reward_weights
-                _ds_boost = args_cli.ds_weight_boost
-
-                def _patched_oe_with_ds(level: int) -> dict:
-                    rw = _orig_oe_for_ds(level)
-                    rw["dynamic_safety"] = round(
-                        rw.get("dynamic_safety", 0.4) * _ds_boost, 3
-                    )
-                    return rw
-
-                _curr_mod_m14._open_ended_reward_weights = _patched_oe_with_ds
-                print(f"[M1.4_DS] OE dynamic_safety weight boost ×{_ds_boost} (chained)")
-
-                # 4) 也套用到 bootstrap stages (B5+, dynamic_safety > 0)
-                from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
-                    CURRICULUM_CONFIGS,
-                )
-                _cv_key = cv or "open_ended_v1"
-                if _cv_key in CURRICULUM_CONFIGS:
-                    _stages = CURRICULUM_CONFIGS[_cv_key]["stages"]
-                    _patched_count = 0
-                    for stage_cfg in _stages:
-                        rw = stage_cfg.get("reward_weights")
-                        if rw is None or "dynamic_safety" not in rw:
-                            continue
-                        if rw["dynamic_safety"] > 0:
-                            rw["dynamic_safety"] = round(rw["dynamic_safety"] * _ds_boost, 3)
-                            _patched_count += 1
-                    print(f"[M1.4_DS] {_patched_count} bootstrap stages: dynamic_safety ×{_ds_boost}")
-            print(f"[M1.4_DS] M1.4 ds rebalance applied. 預期 ds effective weight ↑ 4-10x")
-            changed = True
-
-    # --- lidar_no_noise: 關閉 LiDAR 觀測函數內建的所有 noise ---
-    # 修復 Bug B: lidar_vlp16_to_2d_bins 預設帶 displacement_std=0.02 + hole_rate=0.005
-    # + distractor_rate=0.002 + Unoise(±0.02)，導致 lidar.min 永遠 ≈ 0（因為每幀都有
-    # ~11 個假近距離 distractor），policy 學不到正確的近距離 obstacle 訊號。
-    if getattr(args_cli, 'lidar_no_noise', False):
-        obs_root = getattr(env_cfg, 'observations', None)
-        if obs_root is not None:
-            cleared_terms = []
-            # 遍歷所有 obs group (policy / critic / shared)
-            for group_name in dir(obs_root):
-                if group_name.startswith('_'):
-                    continue
-                group = getattr(obs_root, group_name, None)
-                if group is None or not hasattr(group, '__dict__'):
-                    continue
-                for term_name in dir(group):
-                    if term_name.startswith('_'):
-                        continue
-                    term = getattr(group, term_name, None)
-                    if term is None or not hasattr(term, 'params'):
-                        continue
-                    # 只處理 LiDAR observation terms
-                    if 'lidar' not in term_name.lower():
-                        continue
-                    params = term.params
-                    if 'displacement_std' in params:
-                        params['displacement_std'] = 0.0
-                    if 'hole_rate' in params:
-                        params['hole_rate'] = 0.0
-                    if 'distractor_rate' in params:
-                        params['distractor_rate'] = 0.0
-                    # 移除 ObsTerm 上的 Unoise 包裝
-                    if hasattr(term, 'noise'):
-                        term.noise = None
-                    cleared_terms.append(f"{group_name}.{term_name}")
-            print(f"[NO_LIDAR_NOISE] LiDAR observation noise disabled: {cleared_terms}")
-            print(f"[NO_LIDAR_NOISE] displacement_std=0, hole_rate=0, distractor_rate=0, Unoise=None")
-        changed = True
 
     # --- Ablation 5: safety 權重調整 ---
     ss_lower = getattr(args_cli, 'ss_lower_mode', None)

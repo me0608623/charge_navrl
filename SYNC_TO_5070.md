@@ -1,82 +1,58 @@
-# Sync To 5070
+# Sync To 5070 — v21
 
 ## Runtime Repo Path
-```
 /home/aa/IsaacLab
-```
 
 ## Branch Name
-```
-charge_skrl/abl
-```
+exp/v21-reward-speed-v05
 
 ## Commit Hash
-```
-d453150fa4
-```
-
-## Commit Message
-```
-feat: OE 障礙物擴展到 100 + 診斷指標 + console 速度顯示
-
-Key changes:
-- _open_ended_params(): total=min(100, 11+level*3), dyn_ratio 27%→40%
-- 升級門檻固定 SR>80%, CR<15%, TO<20%
-- difficulty_level 加入 WandB
-- ablation_metrics: +5 指標 (collision_type, path_efficiency, local_density, dynamic_encounter, speed_avg)
-- console_summary: OE-L{N} 顯示 + 門檻對比 + Agent 速度區塊
-- goal_command: 高密度障礙自動縮小 goal safe distance
-- play_charge_ac_curriculum: diagnostic/deterministic/cadn_online flags
-```
+6d69226a299ee5a6631d1e7b27934a5b10c8ffdd
 
 ## Included Files
-| 檔案 | 改動摘要 |
-|------|----------|
-| `goal_obstacle_curriculum.py` | OE 障礙物公式擴展到 100 + 固定門檻 + difficulty_level WandB |
-| `ablation_metrics.py` | 新增 5 診斷指標 (collision_type, path_efficiency, local_density, dynamic_encounter, speed_avg) |
-| `console_summary.py` | OE-L{N} 顯示 + 門檻對比 + Agent 速度區塊 |
-| `play_charge_ac_curriculum.py` | diagnostic/deterministic/cadn_online flags |
-| `goal_command.py` | 高密度障礙自動縮小 goal safe distance |
+- `scripts/reinforcement_learning/skrl/train_charge_ac.py` — 新增 `--reward_speed_v05` flag 與 handler，monkey-patch `_open_ended_reward_weights`
 
 ## Excluded Files
-| 模式 | 原因 |
-|------|------|
-| `.claude/` | Claude Code 設定 |
-| `logs/`, `wandb/` | 訓練輸出 |
-| `*.pt` | checkpoint |
-| `__pycache__/` | Python 快取 |
-| `TRAINING_SNAPSHOT_*.md` | 本機快照 |
+- `.director-mode/changelog.jsonl` — Director mode 本地 state
+- `SYNC_TO_5070.md` — 此文件本身（會在 push 時重新生成）
+- `.backup/` — 本地備份目錄 (v15_gate)
 
-## Exact Training Command (5070)
+## v21 實驗結果摘要
 
+使用 `best_agent.pt` (agent_58590, Level 5 checkpoint) 評估：
+
+| 環境 | SR | CR | TO | speed |
+|------|-----|-----|-----|-------|
+| Stage 8 (8s+3d) | **89.7%** | 10.3% | 0% | **0.74 m/s** |
+| Level 5 (19s+7d) | **78.0%** | 21.9% | 0.1% | **0.72 m/s** |
+
+對比 v20 baseline:
+- speed: 0.06 → 0.74 (**12x 提升**)
+- Stage 8 SR: 79% → 89.7% (+10.7pp)
+- 升 6 個 Open Ended levels (Level 1→6)
+- KL converged to 0.98 (peak 2.39)
+
+## Exact Training Command
 ```bash
 PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_charge_ac.py \
   --task Isaac-Navigation-Charge-VLP16-Curriculum-NavRL \
-  --reward_mode navrl_ground_v8 \
-  --curriculum_version open_ended_v1 \
-  --dynamic_safety_mode closing_risk \
-  --no_walls --use_cadn \
-  --run_name rw_groundv8_openendedv1__seed1_nowalls_5070 \
-  --seed 1 --num_envs 6144 --headless
+  --reward_mode navrl_ground_v8 --curriculum_version open_ended_v1 \
+  --dynamic_safety_mode closing_risk --no_walls \
+  --no_domain_randomization --lidar_no_noise --reward_speed_v05 \
+  --run_name rw_groundv8_openendedv1__seed1_nowalls_true_control_speed05_v21_5070 \
+  --seed 1 --num_envs 6144 --headless --directional_gate
 ```
 
 ## Notes for 5070
-
-### 環境確認
-- Python: 3.11 (env_isaaclab)
-- Isaac Sim: 5.1
-- CUDA: 13.0
+- 必須帶 `--reward_speed_v05` flag 才能套用 reward 修改（goal_velocity ×3, static_safety ×0.375, time_penalty -0.6）
+- 必須帶 `--no_domain_randomization --lidar_no_noise` 維持對照組「無噪音」性質
 - USD 已在 repo 內 (`assets/usd/charge/charge.usd`)
-- `wandb login` 需在 5070 單獨設定
-
-### 同步指令
-```bash
-cd /home/aa/IsaacLab
-git fetch charge_skrl
-git checkout charge_skrl/abl
-```
+- 預計 6h 內可達 SR ~85%, speed ~0.74 m/s
+- 預計 10h 內升到 Open Ended Level 5+
+- 預計總訓練時間 ~24h 達 234375 steps
 
 ## Push Result
-- **Remote**: `charge_skrl`
-- **Branch**: `abl`
-- **Status**: ✅ 已同步 (HEAD = d453150fa4)
+- Remote: charge_skrl (git@github.com:me0608623/charge_skrl.git)
+- Branch: exp/v21-reward-speed-v05
+- Status: success
+- HEAD: 6d69226a299ee5a6631d1e7b27934a5b10c8ffdd

@@ -86,6 +86,21 @@ parser.add_argument("--no_domain_randomization", action="store_true", default=Fa
 parser.add_argument("--lidar_no_noise", action="store_true", default=False,
                     help="關閉 LiDAR 觀測函數內建合成噪聲 (displacement/hole/distractor/Unoise)。"
                          "對齊訓練時的 --lidar_no_noise。")
+parser.add_argument("--use_safety_shield", action="store_true", default=False,
+                    help="啟用 distance-based safety shield (LiDAR proximity)。"
+                         "M1.1 baseline: 對齊舊 distance shield。")
+parser.add_argument("--use_vo_shield", action="store_true", default=False,
+                    help="啟用 VO (Velocity Obstacle) shield — M1.2 NavRL-style 預測式 shield。"
+                         "用 obstacle velocity 預測未來碰撞並做角速度 evasion。")
+parser.add_argument("--shield_mode", type=str, default="soft",
+                    choices=["none", "soft", "hard"],
+                    help="Shield 模式: soft=線性降速+evasion, hard=severity>0.7 強制 v=0。")
+parser.add_argument("--vo_horizon", type=float, default=1.0,
+                    help="VO prediction horizon (秒)。預設 1.0 (匹配 robot stopping distance)。")
+parser.add_argument("--vo_safety_radius", type=float, default=0.45,
+                    help="VO safety radius (m)。預設 0.45 = body_radius 0.35 + buffer 0.10。")
+parser.add_argument("--vo_evade_gain", type=float, default=1.0,
+                    help="VO angular evasion gain。1.0 = severity=1 時用 max angular velocity 全速 turn。")
 
 # AppLauncher args (--headless, --device, etc.)
 AppLauncher.add_app_launcher_args(parser)
@@ -265,6 +280,56 @@ def main():
     # Play 模式: render_interval 折衷（每 action 渲染 5 幀 ~25 FPS）
     if not args_cli.headless:
         env_cfg.sim.render_interval = 4
+
+    # ========================================================================
+    # M1.1/M1.2 Safety shield 注入
+    #   --use_safety_shield  → distance-based (M1.1 baseline)
+    #   --use_vo_shield      → VO velocity-obstacle (M1.2 NavRL-style)
+    # ========================================================================
+    if args_cli.use_safety_shield or args_cli.use_vo_shield:
+        import math as _math
+        from isaaclab.utils import configclass as _configclass
+        BODY_R = 0.35
+        _shield_mode = args_cli.shield_mode
+
+        if args_cli.use_vo_shield:
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.actions.vo_safety_shield import (
+                VOShieldedDiscreteDifferentialDriveActionCfg,
+            )
+
+            @_configclass
+            class _ShieldedActions:
+                diff_drive = VOShieldedDiscreteDifferentialDriveActionCfg(
+                    asset_name="robot", debug_vis=False, num_bins=19,
+                    max_linear_velocity=1.0, max_linear_accel=0.5,
+                    max_angular_vel=0.25 * _math.pi,
+                    shield_mode=_shield_mode,
+                    shield_d_danger=0.55, shield_d_safe=1.2,
+                    sensor_name="lidar", body_radius=BODY_R,
+                    vo_horizon=args_cli.vo_horizon,
+                    vo_safety_radius=args_cli.vo_safety_radius,
+                    vo_evade_gain=args_cli.vo_evade_gain,
+                )
+            env_cfg.actions = _ShieldedActions()
+            print(f"[M1.2 VO_SHIELD] mode={_shield_mode} horizon={args_cli.vo_horizon}s "
+                  f"safety_r={args_cli.vo_safety_radius}m evade_gain={args_cli.vo_evade_gain}")
+        else:
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.actions.safety_shield import (
+                ShieldedDiscreteDifferentialDriveActionCfg,
+            )
+
+            @_configclass
+            class _ShieldedActions:
+                diff_drive = ShieldedDiscreteDifferentialDriveActionCfg(
+                    asset_name="robot", debug_vis=False, num_bins=19,
+                    max_linear_velocity=1.0, max_linear_accel=0.5,
+                    max_angular_vel=0.25 * _math.pi,
+                    shield_mode=_shield_mode,
+                    shield_d_danger=0.55, shield_d_safe=1.2,
+                    sensor_name="lidar", body_radius=BODY_R,
+                )
+            env_cfg.actions = _ShieldedActions()
+            print(f"[M1.1 SHIELD] distance-based mode={_shield_mode}")
 
     # ========================================================================
     # 對齊訓練 flag — Bug A/B 修復後的乾淨環境

@@ -407,7 +407,7 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.9,         # ★ 真實 VLP-16 / RPLidar 最小偵測距離
+                "r_min": 0.5,         # ★ 真實 LiDAR 最小偵測距離（v23 校準：0.9→0.5，更貼近 collision 門檻 0.45m）
                 "z_filter": 0.5,      # ★ 過濾 z 異常命中（隱藏障礙物 z=-10 鬼影）
                 "displacement_std": 0.02,
                 "hole_rate": 0.005,
@@ -482,7 +482,7 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.9,         # ★ 真實 VLP-16 / RPLidar 最小偵測距離
+                "r_min": 0.5,         # ★ 真實 LiDAR 最小偵測距離（v23 校準：0.9→0.5，更貼近 collision 門檻 0.45m）
                 "z_filter": 0.5,      # ★ 過濾 z 異常命中（隱藏障礙物 z=-10 鬼影）
                 "displacement_std": 0.02,
                 "hole_rate": 0.005,
