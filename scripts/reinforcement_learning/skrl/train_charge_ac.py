@@ -155,6 +155,10 @@ parser.add_argument("--lidar_no_noise", action="store_true", default=False,
                     help="關閉 LiDAR 觀測函數內建的所有合成噪聲 (displacement_std, hole_rate, "
                          "distractor_rate, Unoise)。用於訓練「真正無噪聲」對照組。"
                          "搭配 --no_domain_randomization 使用以獲得 zero-noise baseline。")
+parser.add_argument("--reward_speed_v05", action="store_true", default=False,
+                    help="調整 reward 鼓勵 speed=0.5 m/s 目標 (方案 A): "
+                         "goal_velocity ×3, static_safety ×0.375, time_penalty -0.2→-0.6。"
+                         "解決 v20 出現的 over-cautious slow 行為 (speed=0.06)。")
 
 # --- Ablation Family 5: v8 safety balance ---
 parser.add_argument("--ss_lower_mode", type=str, default=None,
@@ -775,6 +779,58 @@ def _apply_ablation_overrides(env_cfg, args_cli):
                 dr.params["enable_external_force"] = False
                 print(f"[NO_DR] domain_randomization event: physics/sensor_noise/external_force = False")
                 print(f"[NO_DR] reset_base 保留原樣（pose/velocity range 不動）")
+        changed = True
+
+    # --- reward_speed_v05: 方案 A reward 調整鼓勵 v=0.5 m/s ---
+    # v20 訓練後發現 agent settled at speed=0.06 m/s，原因:
+    # 1. goal_velocity weight 太低 (4.5)
+    # 2. static_safety log clearance 太強 (0.4) — 慢速 + 遠離障礙物 = 大正獎勵
+    # 3. time_penalty 太弱 (-0.2) — 慢速沒有顯著代價
+    # 修復: ×3 goal_velocity, ×0.375 static_safety, time_penalty -0.6
+    if getattr(args_cli, 'reward_speed_v05', False):
+        # 1) 修改全域 time_penalty
+        rewards = getattr(env_cfg, 'rewards', None)
+        if rewards is not None and hasattr(rewards, 'time_penalty'):
+            rewards.time_penalty.weight = -0.6
+            print("[REWARD_SPEED_V05] time_penalty weight: -0.2 → -0.6")
+
+        # 2) 修改 bootstrap stages 的 reward_weights
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.goal_obstacle_curriculum import (
+            CURRICULUM_CONFIGS,
+        )
+        cv_key = cv or "open_ended_v1"
+        if cv_key in CURRICULUM_CONFIGS:
+            stages = CURRICULUM_CONFIGS[cv_key]["stages"]
+            for stage_cfg in stages:
+                rw = stage_cfg.get("reward_weights")
+                if rw is None:
+                    continue
+                if "goal_velocity" in rw:
+                    rw["goal_velocity"] = round(rw["goal_velocity"] * 3.0, 2)
+                if "static_safety" in rw:
+                    rw["static_safety"] = round(rw["static_safety"] * 0.375, 3)
+            print(f"[REWARD_SPEED_V05] {len(stages)} bootstrap stages: "
+                  f"goal_velocity ×3, static_safety ×0.375")
+
+        # 3) Monkey-patch _open_ended_reward_weights for OE stages
+        # 注意: 不能用 `import ... as _curr_mod`，因為 module 與內部函數同名衝突
+        # 改用 importlib.import_module() 強制取得 module 物件
+        import importlib
+        _curr_mod = importlib.import_module(
+            "isaaclab_tasks.manager_based.locomotion.velocity.config."
+            "charge_skrl.curriculum.goal_obstacle_curriculum"
+        )
+        _orig_oe_weights = _curr_mod._open_ended_reward_weights
+
+        def _patched_oe_weights(level: int) -> dict:
+            rw = _orig_oe_weights(level)
+            rw["goal_velocity"] = round(rw.get("goal_velocity", 4.0) * 3.0, 2)
+            rw["static_safety"] = round(rw.get("static_safety", 0.4) * 0.375, 3)
+            return rw
+
+        _curr_mod._open_ended_reward_weights = _patched_oe_weights
+        print(f"[REWARD_SPEED_V05] OE stages: _open_ended_reward_weights monkey-patched")
+        print(f"[REWARD_SPEED_V05] 目標 speed ≈ 0.4-0.6 m/s, 預期 SR ≈ 88-92%")
         changed = True
 
     # --- lidar_no_noise: 關閉 LiDAR 觀測函數內建的所有 noise ---
