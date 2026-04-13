@@ -690,17 +690,17 @@ def ppo_update_continuous(policy, value_fn, buffer, optimizer, epochs, mini_batc
 # Isaac Lab reward term → Warp Drive metric name 映射
 _REWARD_TERM_MAP = {
     # charge (spot) 相關
-    "reaching_goal":            "charge goal reward",
-    "velocity_to_goal":         "charge goal reward",       # 累加到 goal reward
-    "safe_progress":            "charge dynamic reward",    # WD: spot dynamic reward
-    "safety_log_distance":      "charge dynamic obstacle reward",
-    "near_obstacle_penalty":    "charge static obstacle reward",
+    "reaching_goal":            "charge goal reward expected value",
+    "velocity_to_goal":         "charge goal reward expected value",       # 累加到 goal reward
+    "safe_progress":            "charge dynamic reward expected value",    # WD: spot dynamic reward
+    "safety_log_distance":      "charge dynamic obstacle reward expected value",
+    "near_obstacle_penalty":    "charge static obstacle reward expected value",
     "collision_terminal":       "charge hit penalty",
-    "time_penalty":             "charge floor reward",      # WD: spot floor reward (存活懲罰)
-    "velocity_too_low":         "charge floor reward",
+    "time_penalty":             "charge floor reward expected value",      # WD: spot floor reward (存活懲罰)
+    "velocity_too_low":         "charge floor reward expected value",
     "acceleration_penalty":     "charge action penalty",
     "angular_velocity_penalty": "charge action penalty",
-    "potential_progress":       "charge dynamic reward",
+    "potential_progress":       "charge dynamic reward expected value",
 }
 
 
@@ -900,15 +900,15 @@ class MetricsCollector:
 
         # Per-episode mean reward by component (WD: divided by num_spot=1)
         if self._completed_goal_reward:
-            m["charge goal reward"] = np.mean(self._completed_goal_reward)
+            m["charge goal reward expected value"] = np.mean(self._completed_goal_reward)
         if self._completed_wall_hit_reward:
-            m["charge static obstacle reward"] = np.mean(self._completed_wall_hit_reward)
+            m["charge static obstacle reward expected value"] = np.mean(self._completed_wall_hit_reward)
         if self._completed_obs_hit_reward:
-            m["charge dynamic obstacle reward"] = np.mean(self._completed_obs_hit_reward)
+            m["charge dynamic obstacle reward expected value"] = np.mean(self._completed_obs_hit_reward)
         if self._completed_floor_reward:
-            m["charge floor reward"] = np.mean(self._completed_floor_reward)
+            m["charge floor reward expected value"] = np.mean(self._completed_floor_reward)
         if self._completed_action_reward:
-            m["charge dynamic reward"] = np.mean(self._completed_action_reward)
+            m["charge dynamic reward expected value"] = np.mean(self._completed_action_reward)
 
         # Also log Isaac Lab env reward terms (if env provides them)
         for wd_name, vals in self._wd_metrics.items():
