@@ -475,24 +475,22 @@ def compute_wd_charge_reward(
     cost_operate: float,
     rl_fps: float = 5.0,
     cost_turn_rate: float = 0.5,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute Warp Drive style sparse reward for charge agent.
 
     Uses termination_manager per-term buffers to detect goal_reached vs collision.
 
-    Args:
-        env_unwrapped: unwrapped ManagerBasedRLEnv
-        actions: [N, 2] MultiDiscrete actions (linear_idx, angular_idx)
-        terminated: [N, 1] bool tensor
-        truncated: [N, 1] bool tensor
-        penalty_hit: collision penalty (negative, per-phase)
-        reward_get_goal: goal reaching reward (positive, typically 40)
-        cost_operate: per-second action cost (Phase 1: 0.03, others: 0)
-        rl_fps: env control frequency (Hz), 5 for Isaac Lab (dt=0.2s)
-        cost_turn_rate: WD spot_cost_turn_rate_with_acc_x (0.5)
-
     Returns:
-        [N] reward tensor
+        (reward, breakdown) where breakdown contains per-component tensors:
+          - goal_reward: [N] goal reaching reward (WD: car goal reward)
+          - wall_hit_reward: [N] wall/static collision penalty (WD: car static obstacle reward)
+          - obs_hit_reward: [N] dynamic obstacle collision penalty (WD: car dynamic obstacle reward)
+          - floor_reward: [N] always 0 for flat terrain (WD: car floor reward)
+          - action_reward: [N] action cost (WD: car dynamic reward / cost_operate)
+          - goal_reached: [N] bool
+          - wall_collision: [N] bool
+          - obs_collision: [N] bool
+          - other_death: [N] bool (tipped/explosion)
     """
     N = terminated.shape[0]
     device = terminated.device
@@ -501,9 +499,11 @@ def compute_wd_charge_reward(
     terminated_flat = terminated.squeeze(-1).bool() if terminated.dim() > 1 else terminated.bool()
     truncated_flat = truncated.squeeze(-1).bool() if truncated.dim() > 1 else truncated.bool()
 
-    # --- Detect goal_reached vs collision from termination_manager ---
+    # --- Detect goal_reached vs collision type from termination_manager ---
     goal_reached = torch.zeros(N, dtype=torch.bool, device=device)
-    collision = torch.zeros(N, dtype=torch.bool, device=device)
+    wall_collision = torch.zeros(N, dtype=torch.bool, device=device)
+    obs_collision = torch.zeros(N, dtype=torch.bool, device=device)
+    other_death = torch.zeros(N, dtype=torch.bool, device=device)
 
     try:
         tm = env_unwrapped.termination_manager
@@ -513,36 +513,67 @@ def compute_wd_charge_reward(
                 continue
             if "goal_reached" in name or "reaching_goal" in name:
                 goal_reached = goal_reached | buf.bool()
+            elif "wall_collision" in name:
+                wall_collision = wall_collision | buf.bool()
+            elif "obstacle_collision" in name:
+                obs_collision = obs_collision | buf.bool()
             elif "collision" in name:
-                # Catches: collision (contact), wall_collision, obstacle_collision
-                collision = collision | buf.bool()
+                # Generic collision — attribute to obstacle if not wall
+                obs_collision = obs_collision | buf.bool()
             elif "tipped" in name or "explosion" in name or "flying" in name:
-                # 翻倒/物理爆炸/飛起 = WD 的 death，也給 penalty
-                collision = collision | buf.bool()
+                other_death = other_death | buf.bool()
     except (AttributeError, RuntimeError):
-        # Fallback: terminated & not truncated = collision (conservative)
-        collision = terminated_flat & ~truncated_flat
+        # Fallback
+        obs_collision = terminated_flat & ~truncated_flat
+
+    any_collision = wall_collision | obs_collision | other_death
+
+    # --- Per-component reward ---
+    goal_reward = torch.zeros(N, device=device)
+    wall_hit_reward = torch.zeros(N, device=device)
+    obs_hit_reward = torch.zeros(N, device=device)
+    action_reward = torch.zeros(N, device=device)
 
     # Goal reached: +reward_get_goal
-    reward[goal_reached] += reward_get_goal
+    goal_reward[goal_reached] = reward_get_goal
+    reward += goal_reward
 
-    # Collision (any type): +penalty_hit (negative)
-    reward[collision] += penalty_hit
+    # Wall/static collision: penalty (WD: car static obstacle reward)
+    wall_hit_reward[wall_collision] = penalty_hit
+    reward += wall_hit_reward
+
+    # Obstacle/dynamic collision: penalty (WD: car dynamic obstacle reward)
+    obs_hit_reward[obs_collision & ~wall_collision] = penalty_hit
+    reward += obs_hit_reward
+
+    # Other death (tipped/explosion): penalty
+    other_hit = other_death & ~wall_collision & ~obs_collision
+    reward[other_hit] += penalty_hit
 
     # --- Action cost (WD: only meaningful when cost_operate > 0, typically Phase 1) ---
     if cost_operate > 0 and actions is not None:
         cost_per_step = cost_operate / rl_fps
-        # Normalize actions: center index=9, range 0-18
-        nomal_acc = (actions[:, 0].float() - 9.0).abs() / 9.0   # [N]
-        nomal_turn = (actions[:, 1].float() - 9.0).abs() / 9.0  # [N]
-        # WD formula: cost * (1-|acc/max|)² + cost * turn_rate * (1-|turn/max|)²
-        # Higher when NOT moving → encourages exploration in Phase 1
-        action_cost = cost_per_step * (1.0 - nomal_acc) ** 2
-        action_cost = action_cost + cost_per_step * cost_turn_rate * (1.0 - nomal_turn) ** 2
+        nomal_acc = (actions[:, 0].float() - 9.0).abs() / 9.0
+        nomal_turn = (actions[:, 1].float() - 9.0).abs() / 9.0
+        action_reward = cost_per_step * (1.0 - nomal_acc) ** 2
+        action_reward = action_reward + cost_per_step * cost_turn_rate * (1.0 - nomal_turn) ** 2
         alive = ~terminated_flat
-        reward[alive] += action_cost[alive]
+        action_reward = action_reward * alive.float()
+        reward += action_reward
 
-    return reward
+    breakdown = {
+        "goal_reward": goal_reward,              # WD: car goal reward
+        "wall_hit_reward": wall_hit_reward,      # WD: car static obstacle reward
+        "obs_hit_reward": obs_hit_reward,        # WD: car dynamic obstacle reward
+        "floor_reward": torch.zeros(N, device=device),  # WD: car floor reward (0 for flat)
+        "action_reward": action_reward,          # WD: car dynamic reward (action cost)
+        "goal_reached": goal_reached,
+        "wall_collision": wall_collision,
+        "obs_collision": obs_collision,
+        "other_death": other_death,
+    }
+
+    return reward, breakdown
 
 
 # ============================================================================
@@ -692,6 +723,21 @@ class MetricsCollector:
         self._ep_length = torch.zeros(num_envs, device=device)
         self._ep_steps_alive = torch.zeros(num_envs, device=device)  # 存活步數
 
+        # --- Per-env WD reward decomposition accumulators ---
+        # 每個 env 的 episode 內累加各 reward 分量，episode 結束時記錄
+        self._ep_goal_reward = torch.zeros(num_envs, device=device)
+        self._ep_wall_hit_reward = torch.zeros(num_envs, device=device)
+        self._ep_obs_hit_reward = torch.zeros(num_envs, device=device)
+        self._ep_floor_reward = torch.zeros(num_envs, device=device)
+        self._ep_action_reward = torch.zeros(num_envs, device=device)
+
+        # --- Completed episode reward decomposition ---
+        self._completed_goal_reward: list[float] = []
+        self._completed_wall_hit_reward: list[float] = []
+        self._completed_obs_hit_reward: list[float] = []
+        self._completed_floor_reward: list[float] = []
+        self._completed_action_reward: list[float] = []
+
         # --- Completed episode stats ---
         self._completed_rewards: list[float] = []
         self._completed_lengths: list[float] = []
@@ -722,16 +768,26 @@ class MetricsCollector:
 
     def step(self, obs, reward, done, info,
              obs_obs: torch.Tensor | None = None,
-             obs_actions: torch.Tensor | None = None):
+             obs_actions: torch.Tensor | None = None,
+             reward_breakdown: dict[str, torch.Tensor] | None = None):
         """Record one env step.
 
         Args:
             obs_obs: [E, N, 9] obstacle observations (for obstacle metrics)
             obs_actions: [E, N, 2] obstacle actions (for speed metrics)
+            reward_breakdown: dict from compute_wd_charge_reward (per-component tensors)
         """
         self._ep_reward += reward.reshape(-1)
         self._ep_length += 1.0
         self._ep_steps_alive += (1.0 - done.reshape(-1).float())
+
+        # --- Accumulate WD reward decomposition ---
+        if reward_breakdown is not None:
+            self._ep_goal_reward += reward_breakdown["goal_reward"]
+            self._ep_wall_hit_reward += reward_breakdown["wall_hit_reward"]
+            self._ep_obs_hit_reward += reward_breakdown["obs_hit_reward"]
+            self._ep_floor_reward += reward_breakdown["floor_reward"]
+            self._ep_action_reward += reward_breakdown["action_reward"]
 
         # --- Parse info["log"] ---
         if "log" in info:
@@ -790,6 +846,12 @@ class MetricsCollector:
                 self._completed_rewards.append(self._ep_reward[idx].item())
                 self._completed_lengths.append(self._ep_length[idx].item())
                 self._completed_alive.append(self._ep_steps_alive[idx].item())
+                # WD reward decomposition per completed episode
+                self._completed_goal_reward.append(self._ep_goal_reward[idx].item())
+                self._completed_wall_hit_reward.append(self._ep_wall_hit_reward[idx].item())
+                self._completed_obs_hit_reward.append(self._ep_obs_hit_reward[idx].item())
+                self._completed_floor_reward.append(self._ep_floor_reward[idx].item())
+                self._completed_action_reward.append(self._ep_action_reward[idx].item())
                 self._total_eps += 1
                 # dies_at_birth: episode ended within 2 steps
                 if self._ep_length[idx].item() <= 2:
@@ -797,54 +859,118 @@ class MetricsCollector:
             self._ep_reward[ids] = 0.0
             self._ep_length[ids] = 0.0
             self._ep_steps_alive[ids] = 0.0
+            self._ep_goal_reward[ids] = 0.0
+            self._ep_wall_hit_reward[ids] = 0.0
+            self._ep_obs_hit_reward[ids] = 0.0
+            self._ep_floor_reward[ids] = 0.0
+            self._ep_action_reward[ids] = 0.0
 
     def get_gamma(self):
         return self._curriculum_info.get("gamma", None)
 
-    def collect(self) -> dict[str, float]:
-        """Collect all metrics in Warp Drive naming convention."""
+    def collect(self, penalty_hit: float = -5.0, reward_get_goal: float = 40.0,
+                cost_operate: float = 0.0, episode_length: float = 300.0,
+                num_goals: int = 1) -> dict[str, float]:
+        """Collect all metrics in Warp Drive naming convention.
+
+        WD 論文指標完全對齊:
+          - car goal reward: 到達目標的 reward 期望值
+          - car static obstacle reward: 撞牆 penalty 期望值 (VR_Spot-Map)
+          - car dynamic obstacle reward: 撞障礙物 penalty 期望值 (VR_Spot-Obs)
+          - car floor reward: 地板 reward (flat terrain = 0)
+          - car dynamic reward: action cost 期望值
+          - car hit probability: 碰撞率 (p_Spot-Obs + p_Spot-Map)
+          - car time survive expected value: 存活 reward 期望值 (WD 公式)
+          - car time action expected value: action cost 期望值 (WD 公式)
+
+        Args:
+            penalty_hit: current phase collision penalty (for WD expected value formula)
+            reward_get_goal: current phase goal reward
+            cost_operate: current phase action cost
+            episode_length: current phase episode length in steps
+            num_goals: current phase number of goals
+        """
         m: dict[str, float] = {}
         eps = 1e-8
         te = self._total_eps + eps
 
         # ==============================================================
-        # A) charge (=spot) loss — 由 training loop 外部注入
-        #    這裡只放 reward/event 指標
+        # B1: WD reward decomposition (from compute_wd_charge_reward breakdown)
         # ==============================================================
 
-        # --- B1: charge (spot) per-agent reward decomposition ---
+        # Per-episode mean reward by component (WD: divided by num_spot=1)
+        if self._completed_goal_reward:
+            m["charge goal reward"] = np.mean(self._completed_goal_reward)
+        if self._completed_wall_hit_reward:
+            m["charge static obstacle reward"] = np.mean(self._completed_wall_hit_reward)
+        if self._completed_obs_hit_reward:
+            m["charge dynamic obstacle reward"] = np.mean(self._completed_obs_hit_reward)
+        if self._completed_floor_reward:
+            m["charge floor reward"] = np.mean(self._completed_floor_reward)
+        if self._completed_action_reward:
+            m["charge dynamic reward"] = np.mean(self._completed_action_reward)
+
+        # Also log Isaac Lab env reward terms (if env provides them)
         for wd_name, vals in self._wd_metrics.items():
             if vals:
-                m[wd_name] = np.mean(vals)
+                m.setdefault(wd_name, np.mean(vals))
 
-        # --- B1: charge event stats ---
-        # WD: spot hit probability
+        # ==============================================================
+        # B1: Event stats (碰撞率分解)
+        # ==============================================================
+
+        # WD: car hit probability = total collision / total episodes
         m["charge hit probability"] = self._collision / te
-        # WD: spot dies at birth probability
+        # WD: car dies at birth probability
         m["charge dies at birth probability"] = self._first_step_deaths / te
 
-        # --- Detailed collision breakdown (Isaac Lab specific) ---
+        # 碰撞分解: 靜態 (wall) vs 動態 (obstacle)
+        # WD 論文: p_Spot-Map = wall collision rate, p_Spot-Obs = obstacle collision rate
         m["charge wall collision rate"] = self._wall_collision / te
         m["charge obstacle collision rate"] = self._obstacle_collision / te
 
-        # --- B1: task results ---
+        # VR (vulnerability ratio): 各碰撞類型佔總碰撞的比例
+        total_col = self._collision + eps
+        m["charge VR wall"] = self._wall_collision / total_col        # VR_Spot-Map
+        m["charge VR obstacle"] = self._obstacle_collision / total_col  # VR_Spot-Obs
+
         # WD: goal remain probability (1 - goals_reached/total)
         if self._total_eps > 0:
             m["goal remain probability"] = 1.0 - self._goal_reached / te
 
-        # --- B1: charge time-based expected values ---
-        if self._completed_lengths:
-            avg_len = np.mean(self._completed_lengths)
-            # WD: spot time survive expected value
-            m["charge time survive expected value"] = np.mean(self._completed_alive)
-            # WD: spot time goal remain probability
-            if self._total_eps > 0:
-                m["charge time goal remain probability"] = 1.0 - self._goal_reached / te
-            # WD: spot time action expected value (= avg episode reward / avg length)
-            if avg_len > 0:
-                m["charge time action expected value"] = np.mean(self._completed_rewards) / avg_len
+        # ==============================================================
+        # B1: WD time-based expected values (原始公式)
+        #
+        # WD spot time survive expected value =
+        #   (num_goals * (1 - goal_remain) * reward_get_goal
+        #    + (hit_prob - dies_at_birth + 0.0001) * penalty_hit) / num_spot
+        #
+        # WD spot time action expected value =
+        #   (1 - dies_at_birth) * episode_length * cost_operate
+        # ==============================================================
 
-        # --- Standard episode stats ---
+        hit_prob = self._collision / te
+        dies_at_birth = self._first_step_deaths / te
+        goal_remain = 1.0 - self._goal_reached / te if self._total_eps > 0 else 1.0
+
+        # Survive expected value (WD 公式)
+        m["charge time survive expected value"] = (
+            num_goals * (1 - goal_remain) * reward_get_goal
+            + (hit_prob - dies_at_birth + 0.0001) * penalty_hit
+        )  # num_spot=1, so no division
+
+        # Action expected value (WD 公式)
+        m["charge time action expected value"] = (
+            (1 - dies_at_birth) * episode_length * cost_operate
+        )
+
+        # Goal remain probability (time-based, same as non-time for single-policy)
+        m["charge time goal remain probability"] = goal_remain
+
+        # ==============================================================
+        # Standard episode stats
+        # ==============================================================
+
         if self._completed_rewards:
             m["charge/reward_mean"] = np.mean(self._completed_rewards)
             m["charge/reward_max"] = np.max(self._completed_rewards)
@@ -859,11 +985,6 @@ class MetricsCollector:
 
         # --- Goal agent metrics ---
         m["goal/reached_count"] = self._goal_reached
-        # WD: goal spot reward (how much reward goal causes charge to get)
-        # → approximated by reaching_goal reward term
-        rg = self._reward_terms.get("reaching_goal", [])
-        if rg:
-            m["goal charge reward"] = np.mean(rg)
 
         # --- Obstacle agent metrics ---
         m["obstacle/collision_count"] = self._collision
@@ -888,6 +1009,11 @@ class MetricsCollector:
         self._completed_rewards.clear()
         self._completed_lengths.clear()
         self._completed_alive.clear()
+        self._completed_goal_reward.clear()
+        self._completed_wall_hit_reward.clear()
+        self._completed_obs_hit_reward.clear()
+        self._completed_floor_reward.clear()
+        self._completed_action_reward.clear()
         self._goal_reached = 0
         self._collision = 0
         self._wall_collision = 0
@@ -1238,7 +1364,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             env_reward_flat = reward.squeeze(-1)  # Isaac Lab env reward (for logging)
 
             # Warp Drive style sparse reward (for PPO training)
-            reward_flat = compute_wd_charge_reward(
+            reward_flat, reward_breakdown = compute_wd_charge_reward(
                 env.unwrapped, actions, terminated, truncated,
                 _spot_penalty_hit, _spot_reward_get_goal, _spot_cost_operate,
             )
@@ -1265,7 +1391,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # --- 5. Metrics ---
             metrics.step(obs, reward, done, info,
-                         obs_obs=obs_obs, obs_actions=obs_act.reshape(num_envs, N_obs, 2))
+                         obs_obs=obs_obs, obs_actions=obs_act.reshape(num_envs, N_obs, 2),
+                         reward_breakdown=reward_breakdown)
 
             # --- 6. Update states ---
             rnn_state.update(new_hidden)
@@ -1430,7 +1557,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         elapsed = time.time() - iter_start
         total_steps = (iteration + 1) * RL
         fps = num_envs * RL / elapsed
-        wd = metrics.collect()
+        # Episode length in steps (from curriculum episode_length_s / dt)
+        _ep_len_s = metrics._curriculum_info.get("episode_length_s", 60.0)
+        _ep_len_steps = _ep_len_s / 0.2  # dt=0.2s
+        _num_goals = int(metrics._curriculum_info.get("num_goals", 1))
+        wd = metrics.collect(
+            penalty_hit=_spot_penalty_hit, reward_get_goal=_spot_reward_get_goal,
+            cost_operate=_spot_cost_operate, episode_length=_ep_len_steps,
+            num_goals=_num_goals,
+        )
 
         if (iteration + 1) % args_cli.log_interval == 0 or iteration == 0:
             stage = wd.get("curriculum/stage", 0)
