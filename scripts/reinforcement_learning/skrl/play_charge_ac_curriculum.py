@@ -102,6 +102,26 @@ parser.add_argument("--vo_safety_radius", type=float, default=0.45,
 parser.add_argument("--vo_evade_gain", type=float, default=1.0,
                     help="VO angular evasion gain。1.0 = severity=1 時用 max angular velocity 全速 turn。")
 
+# --- Reward / env config alignment (must match training flags) ---
+parser.add_argument("--reward_mode", type=str, default="current",
+                    choices=["current", "navrl_ground_v1", "navrl_ground_v2", "navrl_ground_v3",
+                             "navrl_ground_v4", "navrl_ground_v5", "navrl_ground_v6",
+                             "navrl_ground_v7", "navrl_ground_v8"],
+                    help="Reward mode — 必須與訓練時一致，影響 env cfg 中的 reward terms。")
+parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
+                    choices=["log_distance", "closing_risk"],
+                    help="Dynamic safety reward mode (must match training).")
+parser.add_argument("--directional_gate", action="store_true", default=False,
+                    help="v16: 方向性 gate — 必須與訓練時一致。")
+parser.add_argument("--gate_cone_half_bins", type=int, default=6,
+                    help="Directional gate cone 半寬 (bins)。")
+parser.add_argument("--gate_cone_bottom_k", type=int, default=3,
+                    help="Directional gate cone 內取最近 k 條 ray 平均")
+parser.add_argument("--gate_omni_blend", type=float, default=0.2,
+                    help="Directional gate: omnidirectional 混合比例")
+parser.add_argument("--reward_speed_v05", action="store_true", default=False,
+                    help="reward 調整鼓勵 v=0.5 — 必須與訓練時一致。")
+
 # AppLauncher args (--headless, --device, etc.)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -273,6 +293,41 @@ def main():
 
     # Disable training curriculum (we control stage transitions or use fixed config)
     env_cfg.curriculum = None
+
+    # ========================================================================
+    # Reward / env config alignment — 對齊訓練時的 CLI flags
+    # ========================================================================
+    if getattr(args_cli, 'reward_mode', 'current') == "navrl_ground_v8":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            RewardsCfgVLP16NavRLGroundV8,
+        )
+        env_cfg.rewards = RewardsCfgVLP16NavRLGroundV8()
+        env_cfg.rewards.dynamic_safety.params["mode"] = args_cli.dynamic_safety_mode
+        print(f"[PLAY] reward_mode=navrl_ground_v8, ds_mode={args_cli.dynamic_safety_mode}")
+
+    if args_cli.directional_gate:
+        rewards = env_cfg.rewards
+        _dir_params = {
+            "cone_half_bins": args_cli.gate_cone_half_bins,
+            "cone_bottom_k": args_cli.gate_cone_bottom_k,
+            "omni_blend": args_cli.gate_omni_blend,
+        }
+        gv = getattr(rewards, 'goal_velocity', None)
+        if gv is not None:
+            gv.params["directional_gate"] = True
+            gv.params.update(_dir_params)
+        gp = getattr(rewards, 'goal_progress', None)
+        if gp is not None:
+            gp.params["directional_scale"] = True
+            gp.params.update(_dir_params)
+        print(f"[PLAY] directional_gate: cone=±{args_cli.gate_cone_half_bins}bins "
+              f"bottom_k={args_cli.gate_cone_bottom_k} blend={args_cli.gate_omni_blend}")
+
+    if getattr(args_cli, 'reward_speed_v05', False):
+        rewards = env_cfg.rewards
+        if hasattr(rewards, 'time_penalty'):
+            rewards.time_penalty.weight = -0.6
+            print("[PLAY] reward_speed_v05: time_penalty → -0.6")
 
     # Play mode: goal/robot 離牆壁/邊界至少 1.0m
     env_cfg.commands.goal_command.wall_safe_margin = 1.0

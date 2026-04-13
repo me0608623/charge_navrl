@@ -144,7 +144,7 @@ parser.add_argument("--goal_vel_use_soft_gate", action="store_true", default=Fal
 
 # --- Curriculum version ---
 parser.add_argument("--curriculum_version", type=str, default=None,
-                    choices=["baseline_v1", "goal_first_v1", "goal_first_v2", "goal_first_v3", "open_ended_v1"],
+                    choices=["baseline_v1", "goal_first_v1", "goal_first_v2", "goal_first_v3", "open_ended_v1", "navrl_hybrid", "navrl_hybrid_dense"],
                     help="Curriculum version (default: use task config's baseline_v1)")
 parser.add_argument("--no_walls", action="store_true", default=False,
                     help="移除所有內牆（保留外牆），所有 stage 的 min/max_walls=0")
@@ -178,6 +178,9 @@ parser.add_argument("--ss_lower_mode", type=str, default=None,
                     help="Ablation 5: 進一步降低 safety 權重 (aggressive: ss-40%, moderate: ss-20%)")
 parser.add_argument("--ss_raise_mode", action="store_true", default=False,
                     help="Ablation 5: 提高 safety 權重 (ss+40%)")
+parser.add_argument("--model_variant", type=str, default="maxpool",
+                    choices=["maxpool", "attention", "heterogeneous"],
+                    help="obstacle encoder variant. 'maxpool' (v2), 'attention' (v24 dynamic-only), 'heterogeneous' (v25 HEIGHT full: LiDAR tokens + dynamic + type/angular emb)")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -1008,6 +1011,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] Run name: {run_info}")
     log_dir = os.path.join(log_root_path, run_info)
 
+    # --- v24/v25: model variant override ---
+    _mv = getattr(args_cli, "model_variant", "maxpool")
+    if _mv in ("attention", "heterogeneous"):
+        try:
+            models_cfg = agent_cfg["models"]
+            if _mv == "attention":
+                policy_cls = "vlp16_models.VLP16AttentionPolicy"
+                value_cls = "vlp16_models.VLP16AttentionValue"
+                tag = "v24"
+            else:  # heterogeneous
+                policy_cls = "vlp16_models.VLP16HeterogeneousPolicy"
+                value_cls = "vlp16_models.VLP16HeterogeneousValue"
+                tag = "v25"
+            for role in ("policy", "value"):
+                if role in models_cfg and "class" in models_cfg[role]:
+                    old = models_cfg[role]["class"]
+                    if "VLP16DiscretePolicy" in old or "VLP16AttentionPolicy" in old:
+                        models_cfg[role]["class"] = policy_cls
+                    elif "VLP16Value" in old or "VLP16AttentionValue" in old:
+                        models_cfg[role]["class"] = value_cls
+                    print(f"[{tag}] models.{role}.class: {old} → {models_cfg[role]['class']}")
+        except Exception as e:
+            print(f"[model_variant] WARN: failed to override model class: {e}")
+
     # --- 消融實驗: CLI → env_cfg 覆蓋 (在 config dump 前，gym.make 前) ---
     _apply_ablation_overrides(env_cfg, args_cli)
 
@@ -1238,7 +1265,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     checkpoint_agent = runner.agent
     if args_cli.checkpoint is not None:
         print(f"[INFO] Loading model checkpoint from: {args_cli.checkpoint}")
-        checkpoint_agent.load(args_cli.checkpoint)
+        if getattr(args_cli, "model_variant", "maxpool") == "attention":
+            # v24: partial warm-start — skip attention_encoder.* keys (randomly init)
+            import torch as _torch
+            ckpt = _torch.load(args_cli.checkpoint, map_location=runner.agent.device, weights_only=False)
+            loaded_modules = []
+            for mod_name, mod in runner.agent.checkpoint_modules.items():
+                if mod_name not in ckpt:
+                    print(f"[v24 warm-start] skip '{mod_name}' (not in checkpoint)")
+                    continue
+                state = ckpt[mod_name]
+                if not hasattr(mod, "load_state_dict"):
+                    print(f"[v24 warm-start] skip '{mod_name}' (no load_state_dict)")
+                    continue
+                try:
+                    result = mod.load_state_dict(state, strict=False)
+                    print(
+                        f"[v24 warm-start] '{mod_name}': loaded "
+                        f"(missing={len(result.missing_keys)}, unexpected={len(result.unexpected_keys)})"
+                    )
+                    loaded_modules.append(mod_name)
+                except Exception as e:
+                    print(f"[v24 warm-start] WARN '{mod_name}' load failed: {e}")
+            print(f"[v24 warm-start] partial load complete. modules loaded: {loaded_modules}")
+        else:
+            checkpoint_agent.load(args_cli.checkpoint)
 
     # ── 訓練啟動摘要 ──
     r = env_cfg.rewards

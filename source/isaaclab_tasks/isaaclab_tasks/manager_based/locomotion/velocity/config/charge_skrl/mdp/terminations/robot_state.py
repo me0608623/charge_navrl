@@ -269,7 +269,9 @@ def obstacle_collision_geometric(
     device = robot_pos.device
 
     overlap = torch.zeros(N, dtype=torch.bool, device=device)
-    threshold_sq = collision_distance ** 2  # 用平方避免 sqrt
+
+    # Per-env per-obstacle collision radii (from obs_size_rand randomization)
+    has_per_obs_radii = hasattr(env, "_obstacle_radii")
 
     for i in range(max_obstacles):
         name = f"obstacle_{i}"
@@ -287,6 +289,12 @@ def obstacle_collision_geometric(
         delta = pos_xy - robot_pos
         dist_sq = (delta * delta).sum(dim=1)
 
+        # Use per-env per-obstacle threshold if available, else fixed scalar
+        if has_per_obs_radii and i < env._obstacle_radii.shape[1]:
+            threshold_sq = env._obstacle_radii[:, i] ** 2  # [N]
+        else:
+            threshold_sq = collision_distance ** 2
+
         hit = visible & (dist_sq < threshold_sq)
         overlap = overlap | hit
 
@@ -297,9 +305,13 @@ def obstacle_collision_geometric(
             1 for i in range(max_obstacles)
             if f"obstacle_{i}" in env.scene.keys()
         )
+        radii_info = ""
+        if has_per_obs_radii:
+            r = env._obstacle_radii
+            radii_info = f" per_obs_radii=[{r.min():.2f}, {r.max():.2f}]"
         print(
             f"[obstacle_collision_geometric] entities={n_obs_in_scene}/{max_obstacles} "
-            f"collision_distance={collision_distance:.2f}m (中心距離) "
+            f"collision_distance={collision_distance:.2f}m (fallback){radii_info} "
             f"hits_step1={int(overlap.sum().item())}/{N}",
             flush=True,
         )

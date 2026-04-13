@@ -74,3 +74,6 @@ tests/
 **/tactile_record/*
 **/gelsight_r15_data/*
 source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge/paper/
+
+# Warp Drive reference (local only)
+new_warp_drive/
