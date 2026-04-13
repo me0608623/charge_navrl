@@ -653,6 +653,9 @@ def move_obstacles_vectorized(
 ):
     """Vectorized goal-directed obstacle movement with correct geofencing.
 
+    When obstacle policy is active, this function is bypassed —
+    obstacle motion is controlled by the learnable policy in train_rnn_car.py.
+
     Three-phase architecture:
       Phase 1 (GATHER): Read per-asset state into batched tensors [D, N, ...].
       Phase 2 (COMPUTE): Fully vectorized movement, geofencing, goal logic.
@@ -677,6 +680,10 @@ def move_obstacles_vectorized(
         max_obstacles: Maximum obstacle count in scene.
         bound_limit: Geofencing half-width in local frame.
     """
+    # Guard: obstacle policy active → skip scripted motion
+    if getattr(env, '_obstacle_policy_active', False):
+        return
+
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
     elif isinstance(env_ids, (list, tuple)):

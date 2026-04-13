@@ -1,0 +1,368 @@
+"""
+Modular RNN Models — 移植自 Warp Drive CustomModuleConnected
+
+核心設計 (來源: new_warp_drive/custom_envs/module_connected.py):
+  1. PreprocessRNN: FC → RNN → concat → middle FC → predict head
+  2. Gradient detach: preprocess output 傳給 RL head 前切斷梯度
+  3. Auxiliary loss: RNN 只被 LiDAR prediction loss 訓練，PPO 不訓練 RNN
+  4. RL head: 只看 detached features，PPO 只訓練 head
+
+架構 (WD-aligned):
+  Obs (139D env output, 只用 79D)
+    → LidarStateExtractor (LiDAR Conv1d 64D + StateMLP 32D = 96D)
+    → PreprocessRNN (FC→RNN→concat→FC = 12D) + .detach()
+    → cat(79D_obs, 12D_preprocess) = 91D
+    → PolicyHead (91→256→256→256→512→38)
+    → ValueHead (91→256→256→256→512→512→1)
+
+WD 對齊參數:
+  - RNN type: vanilla RNN (not GRU)
+  - module_connect_dim (preprocess_dim): 12
+  - memory_dim (hidden_dim): 30
+  - PolicyHead: [256, 256, 256, 512]
+  - ValueHead: [256, 256, 256, 512, 512]
+
+不依賴 obs60 (MOT features) — 部署可行。
+"""
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+# ============================================================================
+# Observation layout (from 139D env output — 只用 79D)
+# ============================================================================
+
+EGO_START, EGO_END = 0, 4        # accel + vel + omega + radius
+GOAL_START, GOAL_END = 4, 6      # waypoint (x, y)
+LIDAR_START, LIDAR_END = 6, 78   # 72 bins
+OBS_START, OBS_END = 78, 138     # SKIP — not used
+TIME_START, TIME_END = 138, 139  # remaining ratio
+
+STATE_DIM = 7     # ego(4) + goal(2) + time(1)
+LIDAR_DIM = 72
+USED_OBS_DIM = 79  # 4 + 2 + 72 + 1
+NUM_BINS = 19
+TOTAL_LOGITS = NUM_BINS * 2  # 38
+
+
+# ============================================================================
+# 2-Branch Feature Extractor (no obs60)
+# ============================================================================
+
+class LidarStateExtractor(nn.Module):
+    """2-branch extractor: LiDAR Conv1d (64D) + StateMLP (32D) = 96D.
+
+    不使用 obs60 — 直接從 139D env obs 中取 LiDAR 和 state 部分。
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Branch 1: LiDAR Conv1d
+        self.lidar_conv = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+        )
+        self.lidar_pool = nn.AdaptiveMaxPool1d(1)
+        self.lidar_proj = nn.Linear(64, 64)
+        self.lidar_ln = nn.LayerNorm(64)
+
+        # Branch 2: State MLP (ego + goal + time = 7D)
+        self.state_mlp = nn.Sequential(
+            nn.Linear(STATE_DIM, 32),
+            nn.ReLU(),
+            nn.Linear(32, 32),
+            nn.ReLU(),
+        )
+        self.state_ln = nn.LayerNorm(32)
+
+    @property
+    def output_dim(self):
+        return 96  # 64 + 32
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            obs: [B, 139] raw env observation (取 79D subset)
+        Returns:
+            [B, 96] feature embedding
+        """
+        lidar = obs[:, LIDAR_START:LIDAR_END].unsqueeze(1)   # [B, 1, 72]
+        lidar = self.lidar_conv(lidar)                        # [B, 64, 18]
+        lidar = self.lidar_pool(lidar).squeeze(-1)            # [B, 64]
+        lidar = self.lidar_ln(self.lidar_proj(lidar))         # [B, 64]
+
+        ego = obs[:, EGO_START:EGO_END]                       # [B, 4]
+        goal = obs[:, GOAL_START:GOAL_END]                     # [B, 2]
+        time_feat = obs[:, TIME_START:TIME_END]                # [B, 1]
+        state_7d = torch.cat([ego, goal, time_feat], dim=-1)  # [B, 7]
+        state = self.state_ln(self.state_mlp(state_7d))       # [B, 32]
+
+        return torch.cat([lidar, state], dim=-1)              # [B, 96]
+
+
+# ============================================================================
+# Preprocess RNN Module (WD: vanilla RNN, not GRU)
+# ============================================================================
+
+class PreprocessRNN(nn.Module):
+    """模組化 RNN — 移植自 Warp Drive module_connected.py。
+
+    WD 原始設計:
+      FC_front(96→48) → RNN(48→30) → concat(rnn_out, fc_out)
+      → FC_middle(→12) → [training] FC_predict(→72) for aux loss
+
+    forward() 回傳的 feat 已做 .detach()，PPO 不會訓練此模組。
+
+    WD 對齊:
+      - rnn_type='RNN' (vanilla, not GRU) — WD: rnn_layer_type='RNN'
+      - hidden_dim=30 — WD: memory_dim=30
+      - preprocess_dim=12 — WD: module_connect_dim=12
+    """
+
+    def __init__(
+        self,
+        input_dim: int = 96,
+        fc_dim: int = 48,
+        hidden_dim: int = 30,
+        preprocess_dim: int = 12,
+        predict_dim: int = LIDAR_DIM,  # 72 for LiDAR prediction
+        concat_rnn: bool = True,
+        rnn_type: str = "RNN",  # "RNN" (WD default) or "GRU"
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.concat_rnn = concat_rnn
+        self.rnn_type = rnn_type
+
+        # FC front
+        self.fc_front = nn.Sequential(
+            nn.Linear(input_dim, fc_dim),
+            nn.ReLU(),
+        )
+
+        # RNN (WD: vanilla RNN by default)
+        if rnn_type == "GRU":
+            self.rnn = nn.GRU(fc_dim, hidden_dim, num_layers=1, batch_first=False)
+        else:
+            self.rnn = nn.RNN(fc_dim, hidden_dim, num_layers=1, batch_first=False,
+                              nonlinearity='tanh')
+
+        # FC middle (after concat)
+        middle_input = hidden_dim + fc_dim if concat_rnn else hidden_dim
+        self.fc_middle = nn.Sequential(
+            nn.Linear(middle_input, preprocess_dim),
+            nn.ReLU(),
+        )
+
+        # Predict head (training only — for auxiliary loss)
+        self.predict_head = nn.Linear(preprocess_dim, predict_dim)
+
+        self.preprocess_dim = preprocess_dim
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        hidden: torch.Tensor,
+        training: bool = False,
+    ):
+        """
+        Args:
+            features: [B, 96] from extractor
+            hidden:   [1, B, hidden_dim] RNN hidden state
+            training: if True, compute prediction for auxiliary loss
+
+        Returns:
+            feat:       [B, preprocess_dim] — DETACHED, for RL head
+            prediction: [B, 72] or None — for auxiliary loss
+            new_hidden: [1, B, hidden_dim] — new RNN hidden state
+        """
+        fc_out = self.fc_front(features)                    # [B, 48]
+        rnn_in = fc_out.unsqueeze(0)                        # [1, B, 48] (seq_len=1)
+        rnn_out, new_hidden = self.rnn(rnn_in, hidden)      # [1, B, 30], [1, B, 30]
+        rnn_out = rnn_out.squeeze(0)                        # [B, 30]
+
+        if self.concat_rnn:
+            combined = torch.cat([rnn_out, fc_out], dim=-1) # [B, 78]
+        else:
+            combined = rnn_out                              # [B, 30]
+
+        preprocess_feat = self.fc_middle(combined)          # [B, 12]
+
+        prediction = None
+        if training:
+            prediction = self.predict_head(preprocess_feat) # [B, 72]
+
+        # GRADIENT DETACH — 核心設計：PPO 不訓練 RNN
+        return preprocess_feat.detach(), prediction, new_hidden
+
+
+# Backward compatibility alias
+PreprocessGRU = PreprocessRNN
+
+
+# ============================================================================
+# RNN State Manager
+# ============================================================================
+
+class RNNStateManager:
+    """Per-env GRU hidden state 管理器。"""
+
+    def __init__(self, num_envs: int, hidden_dim: int, device: torch.device):
+        self.hidden = torch.zeros(1, num_envs, hidden_dim, device=device)
+
+    def get(self) -> torch.Tensor:
+        return self.hidden
+
+    def update(self, new_hidden: torch.Tensor):
+        self.hidden = new_hidden.detach()
+
+    def reset(self, env_ids: torch.Tensor):
+        """env reset 時歸零對應 env 的 hidden state。"""
+        if len(env_ids) > 0:
+            self.hidden[:, env_ids, :] = 0.0
+
+
+# ============================================================================
+# RL Heads (PPO 只訓練這些)
+# ============================================================================
+
+class PolicyHead(nn.Module):
+    """Policy head: input_dim → 38 logits (19 accel + 19 omega).
+
+    WD 對齊: spot_policy = [256, 256, 256, 512] (4 hidden layers)
+    input = cat(obs_79D, preprocess_12D) = 91D
+    """
+
+    def __init__(self, input_dim: int = 91):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 512),
+            nn.ReLU(),
+            nn.Linear(512, TOTAL_LOGITS),
+        )
+
+    def forward(self, rl_input: torch.Tensor) -> torch.Tensor:
+        return self.net(rl_input)  # [B, 38]
+
+
+class ValueHead(nn.Module):
+    """Value head: input_dim → scalar.
+
+    WD 對齊: spot_critic = [256, 256, 256, 512, 512] (5 hidden layers)
+    input = cat(obs_79D, preprocess_12D) = 91D
+    """
+
+    def __init__(self, input_dim: int = 91):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1),
+        )
+        # 初始化: 初期 value 偏負（與 charge_skrl 一致）
+        nn.init.orthogonal_(self.net[-1].weight, gain=0.01)
+        nn.init.constant_(self.net[-1].bias, -8.0)
+
+    def forward(self, rl_input: torch.Tensor) -> torch.Tensor:
+        return self.net(rl_input)  # [B, 1]
+
+
+# ============================================================================
+# Obstacle Policy (Warp Drive obstacle agent 移植)
+# ============================================================================
+
+# Obstacle observation layout (per-obstacle, body-frame):
+#   own_local_xy(2) + own_vel(2) + robot_rel_xy(2) + robot_vel(2) + d_wall(1) = 9D
+OBS_POLICY_OBS_DIM = 9
+OBS_POLICY_ACT_DIM = 2  # continuous (vx, vy) velocity command
+
+
+class ObstaclePolicyFC(nn.Module):
+    """Obstacle agent FC policy — parameter shared across all N obstacles.
+
+    Warp Drive 對照: obstacle 用 FullyConnected (256×256)
+    Output: 2D continuous velocity (vx, vy)，由 tanh 限制到 [-1, 1] 再乘 speed_limit
+    """
+
+    def __init__(self, obs_dim: int = OBS_POLICY_OBS_DIM, act_dim: int = OBS_POLICY_ACT_DIM):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+        )
+        self.mean_head = nn.Linear(128, act_dim)
+        self.log_std = nn.Parameter(torch.zeros(act_dim))
+
+        nn.init.orthogonal_(self.mean_head.weight, gain=0.01)
+        nn.init.constant_(self.mean_head.bias, 0.0)
+
+    def forward(self, obs: torch.Tensor):
+        """
+        Args:
+            obs: [B, 9] per-obstacle observation (B = num_envs * N_active_obs)
+        Returns:
+            mean: [B, 2] action mean
+            std:  [B, 2] action std
+        """
+        h = self.net(obs)
+        mean = torch.tanh(self.mean_head(h))  # [-1, 1]
+        std = self.log_std.exp().expand_as(mean)
+        return mean, std
+
+    def sample(self, obs: torch.Tensor):
+        """Sample action + compute log_prob for PPO."""
+        mean, std = self.forward(obs)
+        dist = torch.distributions.Normal(mean, std)
+        action = dist.sample()
+        action = torch.clamp(action, -1.0, 1.0)
+        log_prob = dist.log_prob(action).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1)
+        return action, log_prob, entropy
+
+    def evaluate(self, obs: torch.Tensor, actions: torch.Tensor):
+        """Recompute log_prob + entropy for stored actions."""
+        mean, std = self.forward(obs)
+        dist = torch.distributions.Normal(mean, std)
+        log_prob = dist.log_prob(actions).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1)
+        return log_prob, entropy
+
+
+class ObstacleValueFC(nn.Module):
+    """Obstacle agent value head."""
+
+    def __init__(self, obs_dim: int = OBS_POLICY_OBS_DIM):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+        )
+        nn.init.orthogonal_(self.net[-1].weight, gain=0.01)
+        nn.init.constant_(self.net[-1].bias, 0.0)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.net(obs)  # [B, 1]

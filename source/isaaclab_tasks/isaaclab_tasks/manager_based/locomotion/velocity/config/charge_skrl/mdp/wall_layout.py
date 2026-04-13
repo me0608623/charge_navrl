@@ -66,10 +66,11 @@ MAZE_WALLS_20x20: list[tuple[float, float, float, float]] = [
 ]
 
 BOUNDARY_WALLS_20x20: list[tuple[float, float, float, float]] = [
-    ( 0.0,  10.0, 21.0, 1.0),  # North  (thickness 1.0m)
-    ( 0.0, -10.0, 21.0, 1.0),  # South
-    ( 10.0,  0.0, 1.0, 21.0),  # East
-    (-10.0,  0.0, 1.0, 21.0),  # West
+    # 必須與 charge_env_cfg_vlp16.py 的 room_size=8.0, wall_thickness=0.2 一致
+    ( 0.0,   8.0, 16.2, 0.2),  # North  (center_x, center_y, size_x, size_y)
+    ( 0.0,  -8.0, 16.2, 0.2),  # South
+    ( 8.0,   0.0, 0.2, 16.2),  # East
+    (-8.0,   0.0, 0.2, 16.2),  # West
 ]
 
 ALL_WALLS_20x20 = MAZE_WALLS_20x20 + BOUNDARY_WALLS_20x20
