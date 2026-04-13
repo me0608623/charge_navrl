@@ -1296,6 +1296,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # Training Loop
     # ========================================================================
 
+    _prev_stage = -1  # Track stage for momentum reset
+
     for iteration in range(num_iterations):
         iter_start = time.time()
         charge_buf.reset()
@@ -1305,6 +1307,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # === Determine who trains this iteration (Warp Drive alternation) ===
         train_charge = (iteration % args_cli.train_goal_rate != 1)
         train_obstacle = (iteration % args_cli.train_goal_rate == 1)
+
+        # === WD: Reset optimizer momentum on phase change ===
+        _cur_stage = int(metrics._curriculum_info.get("stage", 1))
+        if _cur_stage != _prev_stage and _prev_stage > 0:
+            # WD: reset_model_mentum — zero optimizer state on phase transition
+            for opt in [charge_opt_rl, obs_optimizer]:
+                for group in opt.param_groups:
+                    for p in group["params"]:
+                        state = opt.state.get(p)
+                        if state:
+                            if "exp_avg" in state:
+                                state["exp_avg"].zero_()
+                            if "exp_avg_sq" in state:
+                                state["exp_avg_sq"].zero_()
+            if charge_opt_aux is not None:
+                for group in charge_opt_aux.param_groups:
+                    for p in group["params"]:
+                        state = charge_opt_aux.state.get(p)
+                        if state:
+                            if "exp_avg" in state:
+                                state["exp_avg"].zero_()
+                            if "exp_avg_sq" in state:
+                                state["exp_avg_sq"].zero_()
+            print(f"[INFO] Phase {_prev_stage}→{_cur_stage}: optimizer momentum reset (WD: reset_model_mentum)")
+        _prev_stage = _cur_stage
 
         # === Sync params from curriculum (gamma is constant per WD) ===
 

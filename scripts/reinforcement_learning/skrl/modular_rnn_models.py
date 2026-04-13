@@ -150,7 +150,7 @@ class PreprocessRNN(nn.Module):
             self.rnn = nn.GRU(fc_dim, hidden_dim, num_layers=1, batch_first=False)
         else:
             self.rnn = nn.RNN(fc_dim, hidden_dim, num_layers=1, batch_first=False,
-                              nonlinearity='tanh')
+                              nonlinearity='relu')
 
         # FC middle (after concat)
         middle_input = hidden_dim + fc_dim if concat_rnn else hidden_dim
