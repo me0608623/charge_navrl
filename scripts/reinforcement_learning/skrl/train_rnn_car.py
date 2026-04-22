@@ -143,6 +143,17 @@ parser.add_argument("--zero_preprocess_feature_for_rl", action="store_true", def
                     help="Ablation: replace 12D preprocess feature with zeros in rl_in. "
                          "Aux path trains normally. Tests whether policy uses RNN features.")
 
+# --- Aux TBPTT ---
+parser.add_argument("--aux_mode", type=str, default="tbptt", choices=["step", "tbptt"],
+                    help="Aux training mode. step=cached hidden single-step (old); "
+                         "tbptt=truncated BPTT sequence unroll (WD-style)")
+parser.add_argument("--aux_seq_len", type=int, default=15,
+                    help="TBPTT sequence length for aux training. WD commonly uses 15")
+parser.add_argument("--aux_burn_in", type=int, default=0,
+                    help="Burn-in steps at start of each sequence (update hidden, skip loss)")
+parser.add_argument("--aux_seq_batch_size", type=int, default=256,
+                    help="Number of sequences per aux mini-batch")
+
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
@@ -300,6 +311,95 @@ class ChargeRolloutBuffer:
 
     def reset(self):
         self.ptr = 0
+
+    def sample_aux_sequences(
+        self, seq_len: int, batch_size: int, burn_in: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int] | None:
+        """Sample contiguous, non-episode-crossing sequences for TBPTT aux training.
+
+        Algorithm:
+          1. Build valid start indices: (t0, env) where t0+seq_len <= T_filled
+             AND no done in [t0, t0+seq_len-1) (done at t means episode ends after t,
+             so next step starts a new episode — sequence must not span that boundary).
+          2. Randomly sample `batch_size` starts (or fewer if not enough).
+          3. Gather obs, target, h0 for each sequence.
+
+        Args:
+            seq_len: total sequence length (including burn_in)
+            batch_size: desired number of sequences
+            burn_in: first `burn_in` steps only warm up hidden, not counted in loss
+
+        Returns:
+            (obs_seq, target_seq, h0, valid_count) or None if no valid sequences.
+            obs_seq:    [B, L, obs_dim]
+            target_seq: [B, L, 7]
+            h0:         [1, B, hidden_dim]
+            valid_count: total number of valid start positions (for monitoring)
+        """
+        T_filled = self.ptr  # actual steps stored this rollout
+        if T_filled < seq_len:
+            return None
+
+        # --- 1. Build valid start mask [T_filled - seq_len + 1, E] ---
+        # For start t0, sequence covers [t0, t0+seq_len).
+        # Invalid if any done[t] == 1 for t in [t0, t0+seq_len-2].
+        # done at last step t0+seq_len-1 is ALLOWED — the terminal obs is still
+        # from the same episode; there's no t0+seq_len that would cross the boundary.
+        max_t0 = T_filled - seq_len  # inclusive
+        E = self.num_envs
+
+        dones_slice = self.dones[:T_filled]  # [T_filled, E]
+
+        if seq_len <= 1:
+            # Single step — always valid (no mid-sequence done possible)
+            valid_mask = torch.ones(max_t0 + 1, E, dtype=torch.bool, device=self.device)
+        elif seq_len == 2:
+            # 2-step: only check done at t0 (not at t0+1 = last step)
+            valid_mask = dones_slice[:max_t0 + 1] < 0.5  # [max_t0+1, E]
+        else:
+            # seq_len >= 3: check dones in [t0, t0+seq_len-2] via cumsum
+            cum = torch.cumsum(dones_slice, dim=0)  # [T_filled, E]
+            # end of check window: t0 + seq_len - 2 (NOT t0 + seq_len - 1)
+            end_idx = torch.arange(seq_len - 2, seq_len - 2 + max_t0 + 1, device=self.device)
+            cum_end = cum[end_idx]  # [max_t0+1, E]
+            # cum_start: cum[t0-1] for t0 in [0..max_t0]; cum[-1] defined as 0
+            cum_start = torch.zeros(1, E, device=self.device)
+            if max_t0 > 0:
+                start_idx = torch.arange(0, max_t0, device=self.device)
+                cum_start = torch.cat([cum_start, cum[start_idx]], dim=0)  # [max_t0+1, E]
+            dones_in_window = cum_end - cum_start  # [max_t0+1, E]
+            valid_mask = dones_in_window < 0.5  # no mid-sequence dones
+
+        # --- 2. Get valid (t0, env) pairs ---
+        valid_positions = valid_mask.nonzero(as_tuple=False)  # [N_valid, 2] → (t0_offset, env_id)
+        n_valid = valid_positions.shape[0]
+
+        if n_valid == 0:
+            return None
+
+        # Sample
+        actual_batch = min(batch_size, n_valid)
+        chosen_idx = torch.randperm(n_valid, device=self.device)[:actual_batch]
+        chosen = valid_positions[chosen_idx]  # [B, 2]
+        t0s = chosen[:, 0]  # [B] — these are offsets from 0
+        envs = chosen[:, 1]  # [B]
+
+        # --- 3. Gather sequences ---
+        B = actual_batch
+        L = seq_len
+        obs_dim = self.raw_obs.shape[-1]
+        hidden_dim = self.hiddens.shape[-1]
+
+        # Time indices: [B, L] where each row is [t0, t0+1, ..., t0+L-1]
+        time_offsets = torch.arange(L, device=self.device).unsqueeze(0)  # [1, L]
+        t_indices = t0s.unsqueeze(1) + time_offsets  # [B, L]
+        e_indices = envs.unsqueeze(1).expand(B, L)  # [B, L]
+
+        obs_seq = self.raw_obs[t_indices, e_indices]        # [B, L, obs_dim]
+        target_seq = self.aux_targets[t_indices, e_indices]  # [B, L, 7]
+        h0 = self.hiddens[t0s, envs].unsqueeze(0)           # [1, B, hidden_dim]
+
+        return obs_seq, target_seq, h0, n_valid
 
 
 # ============================================================================
@@ -1614,29 +1714,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             charge_vf_loss = np.mean(vf_l)
             charge_entropy = np.mean(ent_l)
 
+            # ================================================================
             # Auxiliary loss (WD module loss) — 每 iteration 都跑 (WD: 論文§4.2)
-            # WD-style:
-            #   target = 7D privileged geometry (2 nearest obstacles body-frame x,y,dist + timestep)
-            #   loss   = sum(weight[i] * mean(log(clamp(L1(pred_i, tgt_i), 0.01))))
-            #   weight = [1.0, 1.0, 1.0, 0.7, 0.7, 0.7, 0]
-            # Target is raw geometry — no normalizer applied (WD convention)
+            # ================================================================
+            # Two modes (--aux_mode):
+            #   step:  cached hidden + single-step forward (original, fast)
+            #   tbptt: sample contiguous sequences, unroll RNN with h0, backprop through time
             #
-            # 判讀規則:
-            #   1. aux/preprocess_loss 下降 + rnn_param_delta>0 + predict_head_delta≈0
-            #      → 正常 (預設 aux_lr=0, 只有 RNN cell 更新)
-            #   2. rl/success_rate 上升 + aux/preprocess_loss 不動
-            #      → RL 靠 raw obs 學習, RNN 幫助有限
-            #   3. --zero_preprocess_feature_for_rl 開啟:
-            #      aux/preprocess_loss 照降 + rl/success_rate 變差
-            #      → policy 確實有利用 preprocess feature
+            # WD-style target: 7D privileged geometry, no normalizer (raw)
+            # WD-style loss: log(clamp(L1,0.01))×w[i] for i<6, L1²×w[i] for i>=6
+            #
+            # 判讀規則 (A/B 對照 4 組):
+            #   1. step+normal vs tbptt+normal:
+            #      若 tbptt 讓 aux/preprocess_loss 更快下降 且 rl/success_rate 更高
+            #      → sequence training 有幫助
+            #   2. 若 tbptt 只讓 aux loss 下降，但 RL 沒變好
+            #      → module 學到了，但 policy 未有效利用
+            #   3. --zero_preprocess_feature_for_rl 開啟後 RL 明顯變差
+            #      → policy 確實在利用 preprocess feature
+            #
+            # Param delta 判讀 (預設 aux_lr=0):
+            #   rnn_param_delta_norm > 0  → 正常 (RNN cell 被 aux 訓練)
+            #   predict_head_param_delta ≈ 0 → 正常 (predict_head frozen by aux_lr=0)
+            #   fc_front/fc_middle/extractor delta ≈ 0 → 正常 (all frozen)
             aux_per_feature = {}
-            aux_monitor = {}  # per-module gradient/delta monitoring
+            aux_monitor = {}
             extractor.train(); preprocess_rnn.train()
-            valid_t, valid_e = [], []
-            for t in range(RL):
-                nd = (charge_buf.dones[t] < 0.5).nonzero(as_tuple=False).reshape(-1)
-                if len(nd) > 0:
-                    valid_t.append(torch.full_like(nd, t)); valid_e.append(nd)
 
             # Per-module param lists for monitoring
             _mon_modules = {
@@ -1646,65 +1749,144 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "predict_head": list(preprocess_rnn.predict_head.parameters()),
                 "extractor": list(extractor.parameters()),
             }
-            # Accumulators for gradient norm and param delta (mean across mini-batches)
             _grad_norms = {k: 0.0 for k in _mon_modules}
             _delta_norms = {k: 0.0 for k in _mon_modules}
+            _aux_valid_seq_count = 0
+            _aux_actual_batch = 0
 
-            if valid_t:
-                at = torch.cat(valid_t); ae = torch.cat(valid_e)
-                a_obs = charge_buf.raw_obs[at, ae]
-                a_hid = charge_buf.hiddens[at, ae].unsqueeze(0)
-                a_tgt = charge_buf.aux_targets[at, ae]  # [N, 7] WD privileged target
-                abs_ = min(4096, len(at))
-                alv = 0.0; nab = 0
-                perm = torch.randperm(len(at), device=device)
-                for ab_s in range(0, len(at), abs_):
-                    ab_e = min(ab_s + abs_, len(at))
-                    ab_i = perm[ab_s:ab_e]
-                    mo = obs_normalizer.normalize(a_obs[ab_i])
-                    ft = extractor(mo)
-                    _, pred, _ = preprocess_rnn(ft, a_hid[:, ab_i, :], training=True)
-                    # WD module loss: log(clamp(L1)) × weight, no target normalization
-                    l, aux_display = compute_wd_module_loss(pred, a_tgt[ab_i])
-                    charge_opt_aux.zero_grad(); l.backward()
-                    nn.utils.clip_grad_norm_(charge_params_aux, args_cli.max_grad_norm)
+            if args_cli.aux_mode == "tbptt":
+                # --- TBPTT mode: sample contiguous sequences, unroll RNN ---
+                _seq_len = args_cli.aux_seq_len
+                _burn_in = args_cli.aux_burn_in
+                _seq_bs = args_cli.aux_seq_batch_size
 
-                    # --- Monitor: snapshot before step ---
+                sampled = charge_buf.sample_aux_sequences(_seq_len, _seq_bs, _burn_in)
+                if sampled is not None:
+                    obs_seq, target_seq, h0, _aux_valid_seq_count = sampled
+                    # obs_seq: [B, L, obs_dim], target_seq: [B, L, 7], h0: [1, B, H]
+                    B_seq, L_seq = obs_seq.shape[0], obs_seq.shape[1]
+                    _aux_actual_batch = B_seq
+
+                    # Normalize obs (no target normalization — WD convention)
+                    obs_flat = obs_seq.reshape(B_seq * L_seq, -1)
+                    obs_normed = obs_normalizer.normalize(obs_flat)
+
+                    # Extractor: batch process all timesteps at once
+                    feat_flat = extractor(obs_normed)              # [B*L, 96]
+                    feat_seq = feat_flat.reshape(L_seq, B_seq, -1) # [L, B, 96] time-first
+
+                    # RNN unroll: sequence mode
+                    _, pred_seq, _ = preprocess_rnn(
+                        feat_seq, h0, training=True)               # pred_seq: [L, B, 7]
+
+                    # Burn-in: only compute loss on t >= burn_in
+                    effective_start = _burn_in
+                    effective_len = L_seq - effective_start
+                    pred_eff = pred_seq[effective_start:]           # [L_eff, B, 7]
+                    tgt_eff = target_seq.permute(1, 0, 2)[effective_start:]  # [L_eff, B, 7]
+
+                    # Compute loss: average over time steps and batch
+                    total_loss = torch.tensor(0.0, device=device)
+                    n_loss_steps = 0
+                    last_display = {}
+                    for t_idx in range(effective_len):
+                        l_t, disp_t = compute_wd_module_loss(
+                            pred_eff[t_idx], tgt_eff[t_idx])
+                        total_loss = total_loss + l_t
+                        n_loss_steps += 1
+                        last_display = disp_t
+                    total_loss = total_loss / max(n_loss_steps, 1)
+
+                    # Backward + step with monitoring
                     _snaps = {k: _snapshot_params(ps) for k, ps in _mon_modules.items()}
-                    # --- Monitor: gradient norms (after backward, before step) ---
+                    charge_opt_aux.zero_grad()
+                    total_loss.backward()
+                    nn.utils.clip_grad_norm_(charge_params_aux, args_cli.max_grad_norm)
                     for k, ps in _mon_modules.items():
-                        _grad_norms[k] += _grad_l2_norm(ps)
-
+                        _grad_norms[k] = _grad_l2_norm(ps)
                     charge_opt_aux.step()
-
-                    # --- Monitor: param delta norms (after step) ---
                     for k, ps in _mon_modules.items():
-                        _delta_norms[k] += _param_delta_norm(_snaps[k], ps)
+                        _delta_norms[k] = _param_delta_norm(_snaps[k], ps)
 
-                    alv += l.item(); nab += 1
-                    # Per-feature loss (last batch only, for WandB logging)
-                    if ab_s + abs_ >= len(at):
-                        for k, v in aux_display.items():
-                            if k != "preprcess_loss":
-                                aux_per_feature[f"charge_{k}"] = v
-                aux_loss_val = alv / max(nab, 1)
+                    aux_loss_val = total_loss.item()
+                    for k, v in last_display.items():
+                        if k != "preprcess_loss":
+                            aux_per_feature[f"charge_{k}"] = v
+                    aux_monitor["aux/loss_per_step"] = aux_loss_val / max(effective_len, 1)
 
-                # Average monitoring over mini-batches
-                for k in _mon_modules:
-                    aux_monitor[f"aux/{k}_grad_norm"] = _grad_norms[k] / max(nab, 1)
-                    aux_monitor[f"aux/{k}_param_delta_norm"] = _delta_norms[k] / max(nab, 1)
-                # Param norms (absolute, not averaged)
-                aux_monitor["aux/rnn_param_norm"] = _param_l2_norm(_mon_modules["rnn"])
-                aux_monitor["aux/predict_head_param_norm"] = _param_l2_norm(_mon_modules["predict_head"])
+            else:
+                # --- Step mode: cached hidden + single-step (original path) ---
+                valid_t, valid_e = [], []
+                for t in range(RL):
+                    nd = (charge_buf.dones[t] < 0.5).nonzero(as_tuple=False).reshape(-1)
+                    if len(nd) > 0:
+                        valid_t.append(torch.full_like(nd, t)); valid_e.append(nd)
+                _aux_valid_seq_count = sum(len(v) for v in valid_e) if valid_t else 0
 
-            # Map WD per-dim loss to human-readable names
+                if valid_t:
+                    at = torch.cat(valid_t); ae = torch.cat(valid_e)
+                    a_obs = charge_buf.raw_obs[at, ae]
+                    a_hid = charge_buf.hiddens[at, ae].unsqueeze(0)
+                    a_tgt = charge_buf.aux_targets[at, ae]
+                    abs_ = min(4096, len(at))
+                    alv = 0.0; nab = 0
+                    _aux_actual_batch = len(at)
+                    perm = torch.randperm(len(at), device=device)
+                    for ab_s in range(0, len(at), abs_):
+                        ab_e = min(ab_s + abs_, len(at))
+                        ab_i = perm[ab_s:ab_e]
+                        mo = obs_normalizer.normalize(a_obs[ab_i])
+                        ft = extractor(mo)
+                        _, pred, _ = preprocess_rnn(ft, a_hid[:, ab_i, :], training=True)
+                        l, aux_display = compute_wd_module_loss(pred, a_tgt[ab_i])
+
+                        _snaps = {k: _snapshot_params(ps) for k, ps in _mon_modules.items()}
+                        charge_opt_aux.zero_grad(); l.backward()
+                        nn.utils.clip_grad_norm_(charge_params_aux, args_cli.max_grad_norm)
+                        for k, ps in _mon_modules.items():
+                            _grad_norms[k] += _grad_l2_norm(ps)
+                        charge_opt_aux.step()
+                        for k, ps in _mon_modules.items():
+                            _delta_norms[k] += _param_delta_norm(_snaps[k], ps)
+
+                        alv += l.item(); nab += 1
+                        if ab_s + abs_ >= len(at):
+                            for k, v in aux_display.items():
+                                if k != "preprcess_loss":
+                                    aux_per_feature[f"charge_{k}"] = v
+                    aux_loss_val = alv / max(nab, 1)
+                    for k in _mon_modules:
+                        _grad_norms[k] /= max(nab, 1)
+                        _delta_norms[k] /= max(nab, 1)
+                    aux_monitor["aux/loss_per_step"] = aux_loss_val
+
+            # --- Common monitoring (both modes) ---
+            for k in _mon_modules:
+                aux_monitor[f"aux/{k}_grad_norm"] = _grad_norms[k]
+                aux_monitor[f"aux/{k}_param_delta_norm"] = _delta_norms[k]
+            aux_monitor["aux/rnn_param_norm"] = _param_l2_norm(_mon_modules["rnn"])
+            aux_monitor["aux/predict_head_param_norm"] = _param_l2_norm(_mon_modules["predict_head"])
+
             for raw_key, readable_key in _AUX_DIM_NAMES.items():
                 charge_key = f"charge_{raw_key}"
                 if charge_key in aux_per_feature:
                     aux_monitor[readable_key] = aux_per_feature[charge_key]
             aux_monitor["aux/preprocess_loss"] = aux_loss_val
+            aux_monitor["aux/mode"] = 1.0 if args_cli.aux_mode == "tbptt" else 0.0
+            aux_monitor["aux/seq_len"] = float(args_cli.aux_seq_len if args_cli.aux_mode == "tbptt" else 1)
+            aux_monitor["aux/burn_in"] = float(args_cli.aux_burn_in if args_cli.aux_mode == "tbptt" else 0)
+            aux_monitor["aux/valid_seq_count"] = float(_aux_valid_seq_count)
+            aux_monitor["aux/seq_batch_size_actual"] = float(_aux_actual_batch)
 
-            # One-time gradient verification (iteration 0)
+            # Variance explained (WD a2c_ken.py:158):
+            #   VE = max(-1, 1 - Var(returns - V(s)) / (Var(returns) + eps))
+            # Measures how much of the return variance is explained by V(s).
+            # Must use raw value residual, NOT normalized advantages (var≈1 → VE meaningless).
+            _value_residual = returns - charge_buf.values[:RL]
+            _var_expl = max(-1.0, 1.0 - (_value_residual.var() / (returns.var() + 1e-8)).item())
+            aux_monitor["rl/variance_explained"] = _var_expl
+
+            # One-time gradient verification + aux mode info (iteration 0)
             if iteration == 0:
                 _rnn_grad = any(p.grad is not None and p.grad.abs().sum() > 0
                                 for p in preprocess_rnn.rnn.parameters())
@@ -1717,6 +1899,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if args_cli.zero_preprocess_feature_for_rl:
                     print("[ABLATION] --zero_preprocess_feature_for_rl ACTIVE: "
                           "rl_in uses zero instead of 12D preprocess feature")
+                print(f"[AUX] mode={args_cli.aux_mode}, seq_len={args_cli.aux_seq_len}, "
+                      f"burn_in={args_cli.aux_burn_in}, seq_batch={args_cli.aux_seq_batch_size}")
 
         # === Obstacle PPO Update ===
         obs_loss = 0.0
@@ -1767,11 +1951,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _ph_dn = aux_monitor.get("aux/predict_head_param_delta_norm", 0)
                 _n1d = aux_monitor.get("aux/near1_d_loss", 0)
                 _n2d = aux_monitor.get("aux/near2_d_loss", 0)
+                _vsc = int(aux_monitor.get("aux/valid_seq_count", 0))
+                _asl = int(aux_monitor.get("aux/seq_len", 1))
+                _ve = aux_monitor.get("rl/variance_explained", 0)
                 print(
-                    f"  AUX: loss={aux_loss_val:.4f} "
-                    f"n1d={_n1d:.3f} n2d={_n2d:.3f} | "
+                    f"  AUX({args_cli.aux_mode} L={_asl}): "
+                    f"loss={aux_loss_val:.4f} "
+                    f"n1d={_n1d:.3f} n2d={_n2d:.3f} "
+                    f"valid={_vsc} | "
                     f"rnn_grad={_rnn_gn:.4f} rnn_delta={_rnn_dn:.6f} "
-                    f"ph_delta={_ph_dn:.6f}")
+                    f"ph_delta={_ph_dn:.6f} | "
+                    f"VE={_ve:.3f}")
 
         if wandb_run is not None:
             log_data = {

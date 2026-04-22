@@ -204,22 +204,51 @@ class PreprocessRNN(nn.Module):
         training: bool = False,
         detach_output: bool = False,
     ):
-        """
+        """Supports both single-step [B, D] and sequence [L, B, D] inputs.
+
+        Single-step mode (features.dim() == 2):
+            features: [B, 96]
+            Returns: feat [B, 12], prediction [B, 7] or None, new_hidden [1, B, H]
+
+        Sequence mode (features.dim() == 3, for TBPTT aux training):
+            features: [L, B, 96]
+            Returns: feat [L, B, 12], prediction [L, B, 7] or None, new_hidden [1, B, H]
+
         Args:
-            features: [B, 96] from extractor
+            features: [B, 96] or [L, B, 96] from extractor
             hidden:   [1, B, hidden_dim] RNN hidden state
             training: if True, compute 7D prediction for WD module loss
             detach_output: if True, explicitly detach preprocess feat before return.
-                          Note: In WD, detach happens at the RL concat stage (line 573),
-                          not here. In IL, rollout uses torch.no_grad() which has the
-                          same effect. For aux training path, detach_output should be False
-                          so gradients flow through to RNN.
-
-        Returns:
-            feat:       [B, preprocess_dim]
-            prediction: [B, 7] or None — 7D privileged geometry prediction for module loss
-            new_hidden: [1, B, hidden_dim] — new RNN hidden state
         """
+        seq_mode = features.dim() == 3  # [L, B, D]
+
+        if seq_mode:
+            L, B, D = features.shape
+            # FC front: reshape to [L*B, D], apply, reshape back
+            fc_out = self.fc_front(features.reshape(L * B, D))  # [L*B, 48]
+            fc_out = fc_out.reshape(L, B, -1)                   # [L, B, 48]
+
+            # RNN unroll: input [L, B, 48], hidden [1, B, H]
+            rnn_out, new_hidden = self.rnn(fc_out, hidden)      # [L, B, 30], [1, B, 30]
+
+            if self.concat_rnn:
+                combined = torch.cat([rnn_out, fc_out], dim=-1) # [L, B, 78]
+            else:
+                combined = rnn_out                              # [L, B, 30]
+
+            preprocess_feat = self.fc_middle(
+                combined.reshape(L * B, -1)).reshape(L, B, -1)  # [L, B, 12]
+
+            prediction = None
+            if training:
+                prediction = self.predict_head(
+                    preprocess_feat.reshape(L * B, -1)).reshape(L, B, -1)  # [L, B, 7]
+
+            if detach_output:
+                return preprocess_feat.detach(), prediction, new_hidden
+            return preprocess_feat, prediction, new_hidden
+
+        # --- Single-step mode (original path) ---
         fc_out = self.fc_front(features)                    # [B, 48]
         rnn_in = fc_out.unsqueeze(0)                        # [1, B, 48] (seq_len=1)
         rnn_out, new_hidden = self.rnn(rnn_in, hidden)      # [1, B, 30], [1, B, 30]
