@@ -2,20 +2,27 @@
 """
 train_rnn_car.py — Multi-Agent Modular RNN 訓練 (Isaac Lab 版) v5
 
-完全對齊 Warp Drive train_rnn_car.py 設計:
+保留 Warp Drive modular principle，搭配 IsaacLab 環境適配:
   - Charge (=Spot): ModularRNN-A2CK (vanilla RNN, per-head entropy, loss clamping)
   - Obstacle: FC-PPO (learnable, parameter shared, 取代腳本移動)
   - Alternating training: 2:1 charge:obstacle (Warp Drive train_goal_rate=3)
 
-v5 WD-aligned changes:
+v5 WD-principle changes:
   - γ = 0.984 constant (WD: 1-(1-0.92)/fps, fps=5)
   - PolicyHead [256,256,256,512], ValueHead [256,256,256,512,512]
   - Vanilla RNN (not GRU), memory_dim=30, module_connect_dim=12
-  - aux_lr=0 (preprocess trained by RL gradient only)
   - vf_coeff=0.025 (WD: spot_vf_loss_coeff)
   - A2C mode (--use_a2c): no PPO clipping, single epoch
   - Per-phase obstacle_speed_rate: 0.8→0.85→1.15
   - LR: rl_head=0.0002, rnn=0.0005
+
+v7 WD-principle RNN training (論文§4.2 / custom_trainer.py):
+  - Two-optimizer separation: RL head vs aux module (no shared gradient path)
+  - RL optimizer: policy_head + value_head only (lr=0.0002)
+  - Aux optimizer: RNN cell (lr=0.0005) + preprocess FC (lr=0, frozen) + extractor (lr=0, frozen)
+  - Aux target: WD-style 7D privileged geometry (2 nearest obstacles × body-frame (x,y,d) + timestep)
+  - Aux loss: WD module loss — log(clamp(L1, 0.01)) × per-dim weight (see wd_aux_targets.py)
+  - Detach boundary: preprocess_rnn output .detach()'d before RL head input
 
 Usage:
   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_rnn_car.py \\
@@ -56,7 +63,8 @@ parser.add_argument("--lr", type=float, default=2e-4,
 parser.add_argument("--rnn_lr", type=float, default=5e-4,
                     help="Charge RNN module LR. WD: spot_rnn_model_lr=0.0005")
 parser.add_argument("--aux_lr", type=float, default=0.0,
-                    help="Charge preprocess aux loss LR. WD: spot_preprocess_model_lr=0 (disabled)")
+                    help="Preprocess FC + extractor LR in aux optimizer. "
+                         "WD: spot_preprocess_model_lr=0 (frozen). RNN cell uses --rnn_lr.")
 parser.add_argument("--gamma", type=float, default=0.984,
                     help="Discount factor. WD: 1-(1-0.92)/fps = 0.984 (fps=5)")
 parser.add_argument("--gae_lambda", type=float, default=0.95)
@@ -122,8 +130,8 @@ parser.add_argument("--checkpoint", type=str, default=None, help="Load checkpoin
 
 # --- Env config overrides ---
 parser.add_argument("--reward_mode", type=str, default="current")
-parser.add_argument("--curriculum_version", type=str, default=None,
-                    help="Curriculum version (default: warp_drive_v1 for multi-agent)")
+parser.add_argument("--curriculum_version", type=str, default="warp_drive_goal_first",
+                    help="Curriculum version (default: warp_drive_goal_first — goal→static→dynamic)")
 parser.add_argument("--lidar_no_noise", action="store_true", default=False)
 parser.add_argument("--no_domain_randomization", action="store_true", default=False)
 parser.add_argument("--reward_speed_v05", action="store_true", default=False)
@@ -131,6 +139,9 @@ parser.add_argument("--play", action="store_true", default=False,
                     help="Inference only — no PPO training, just run rollout with loaded checkpoint")
 parser.add_argument("--initial_stage", type=int, default=1,
                     help="Force curriculum to start at this stage (1-8)")
+parser.add_argument("--zero_preprocess_feature_for_rl", action="store_true", default=False,
+                    help="Ablation: replace 12D preprocess feature with zeros in rl_in. "
+                         "Aux path trains normally. Tests whether policy uses RNN features.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -172,8 +183,52 @@ from modular_rnn_models import (
     LIDAR_END,
     NUM_BINS,
 )
+from wd_aux_targets import build_wd_preprocess_targets, compute_wd_module_loss
 
-print("[INFO] Multi-Agent Modular RNN Training v5 — WD-Aligned (A2CK + vanilla RNN)")
+print("[INFO] Multi-Agent Modular RNN Training v5 — WD-Principle (A2CK + vanilla RNN)")
+
+
+# ============================================================================
+# Monitoring helpers (gradient norm, param delta, param norm)
+# ============================================================================
+
+# WD module loss dim → human-readable name mapping
+_AUX_DIM_NAMES = {
+    "module_feture_0_loss": "aux/near1_x_loss",
+    "module_feture_1_loss": "aux/near1_y_loss",
+    "module_feture_2_loss": "aux/near1_d_loss",
+    "module_feture_3_loss": "aux/near2_x_loss",
+    "module_feture_4_loss": "aux/near2_y_loss",
+    "module_feture_5_loss": "aux/near2_d_loss",
+}
+
+
+def _param_l2_norm(params) -> float:
+    """L2 norm of a flat parameter vector."""
+    total = 0.0
+    for p in params:
+        total += p.data.norm(2).item() ** 2
+    return total ** 0.5
+
+
+def _grad_l2_norm(params) -> float:
+    """L2 norm of gradients. Returns 0 if no grad exists."""
+    total = 0.0
+    for p in params:
+        if p.grad is not None:
+            total += p.grad.data.norm(2).item() ** 2
+    return total ** 0.5
+
+
+def _snapshot_params(params) -> torch.Tensor:
+    """Flatten and clone all parameters into a single vector."""
+    return torch.cat([p.data.reshape(-1).clone() for p in params])
+
+
+def _param_delta_norm(before: torch.Tensor, after_params) -> float:
+    """L2 norm of (after - before) parameter vector."""
+    after = torch.cat([p.data.reshape(-1) for p in after_params])
+    return (after - before).norm(2).item()
 
 
 # ============================================================================
@@ -224,9 +279,12 @@ class ChargeRolloutBuffer:
         self.dones = torch.zeros(num_steps, num_envs, device=device)
         self.raw_obs = torch.zeros(num_steps, num_envs, obs_dim, device=device)
         self.hiddens = torch.zeros(num_steps, num_envs, hidden_dim, device=device)
+        # WD-style 7D privileged geometry target for module loss
+        self.aux_targets = torch.zeros(num_steps, num_envs, 7, device=device)
         self.ptr = 0
 
-    def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden):
+    def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden,
+            aux_target=None):
         i = self.ptr
         self.rl_inputs[i] = rl_input
         self.actions[i] = action
@@ -236,6 +294,8 @@ class ChargeRolloutBuffer:
         self.dones[i] = done
         self.raw_obs[i] = raw_ob
         self.hiddens[i] = hidden.squeeze(0)
+        if aux_target is not None:
+            self.aux_targets[i] = aux_target
         self.ptr += 1
 
     def reset(self):
@@ -451,7 +511,7 @@ def compute_obstacle_reward(env_unwrapped, obs_obs: torch.Tensor, max_obstacles:
 
 
 # ============================================================================
-# Warp Drive Charge Reward — 完全對齊原作 per-phase sparse reward
+# Warp Drive Charge Reward — 保留原作 per-phase sparse reward 結構
 #
 # WD spot reward 結構 (flat terrain, car_mode):
 #   1. spot_reward_get_goal: +40 on goal reached
@@ -873,7 +933,7 @@ class MetricsCollector:
                 num_goals: int = 1) -> dict[str, float]:
         """Collect all metrics in Warp Drive naming convention.
 
-        WD 論文指標完全對齊:
+        WD 論文指標命名對齊:
           - car goal reward: 到達目標的 reward 期望值
           - car static obstacle reward: 撞牆 penalty 期望值 (VR_Spot-Map)
           - car dynamic obstacle reward: 撞障礙物 penalty 期望值 (VR_Spot-Obs)
@@ -1059,8 +1119,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # --- Curriculum version ---
     cv = args_cli.curriculum_version
-    if cv is None:
-        cv = "warp_drive_v1"  # default for multi-agent training
     cur = getattr(env_cfg, 'curriculum', None)
     if cur is not None:
         term = getattr(cur, 'goal_obstacle_curriculum', None)
@@ -1132,48 +1190,55 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     preprocess_rnn = PreprocessRNN(
         input_dim=extractor.output_dim, fc_dim=args_cli.fc_dim,
         hidden_dim=args_cli.hidden_dim, preprocess_dim=args_cli.preprocess_dim,
+        predict_dim=7,  # WD-style: 7D privileged geometry target
         rnn_type=args_cli.rnn_type,
     ).to(device)
-    rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # 79+12=91 (WD-aligned)
+    rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # 79+12=91 (WD principle: obs+preprocess)
     policy_head = PolicyHead(input_dim=rl_input_dim).to(device)
     value_head = ValueHead(input_dim=rl_input_dim).to(device)
     rnn_state = RNNStateManager(num_envs, args_cli.hidden_dim, device)
     obs_normalizer = RunningNormalizer(obs_dim, device)
 
-    # WD optimizer structure:
-    #   - RL head (policy+value): spot_lr=0.0002
-    #   - RNN module: spot_rnn_model_lr=0.0005 (via RL gradient, since aux_lr=0)
-    #   - Preprocess (extractor+rnn): spot_preprocess_model_lr=0 (disabled by default)
+    # WD optimizer structure (custom_trainer.py lines 336-349):
+    #   WD 原版: 兩個 optimizer 各包含 ALL params，用 lr=0 控制 freeze:
+    #     optimizers[policy] (RL):     rl_params lr=spot_lr, preprocess lr=0, rnn lr=0
+    #     optimizers_module[policy]:   rl_params lr=0, preprocess lr=spot_preprocess_model_lr, rnn lr=spot_rnn_model_lr
+    #   WD detach (module_connected.py line 573): concat_input = rl_in_.detach()
+    #     → RL loss.backward() 不流到 preprocess/RNN（即使 lr>0 也不會更新）
+    #   [IsaacLab adaptation] 分開 param groups（效果等價，更清晰）:
+    #     charge_opt_rl:  只含 policy_head + value_head
+    #     charge_opt_aux: RNN cell(lr=rnn_lr) + FC(lr=0) + extractor(lr=0)
+
+    # --- RL optimizer: only policy/value heads ---
     charge_params_rl = list(policy_head.parameters()) + list(value_head.parameters())
     charge_opt_rl = torch.optim.Adam(charge_params_rl, lr=args_cli.lr, eps=1e-5)
 
-    # RNN params get rnn_lr (WD: trained via RL gradient when aux_lr=0)
-    charge_params_rnn = list(preprocess_rnn.parameters())
+    # --- Aux optimizer: RNN cell + preprocess FC + extractor ---
+    # Split preprocess_rnn into RNN cell vs FC layers (WD: separate learning rates)
+    charge_params_rnn_cell = list(preprocess_rnn.rnn.parameters())
+    charge_params_preprocess_fc = (list(preprocess_rnn.fc_front.parameters()) +
+                                   list(preprocess_rnn.fc_middle.parameters()) +
+                                   list(preprocess_rnn.predict_head.parameters()))
     charge_params_extractor = list(extractor.parameters())
-    charge_params_aux = charge_params_extractor + charge_params_rnn
+    # All aux params (for grad clipping convenience)
+    charge_params_aux = charge_params_extractor + list(preprocess_rnn.parameters())
 
-    if args_cli.aux_lr > 0:
-        # Aux mode: extractor+rnn trained by prediction loss (original approach)
-        charge_opt_aux = torch.optim.Adam(charge_params_aux, lr=args_cli.aux_lr, eps=1e-5)
-    else:
-        # WD mode: aux_lr=0 → RNN trained by RL gradient (rnn_lr), extractor by RL too
-        charge_opt_aux = None  # No aux training
-
-    # When aux_lr=0 (WD default), RNN is trained by RL gradient → add to RL optimizer
-    if args_cli.aux_lr == 0:
-        charge_opt_rl = torch.optim.Adam([
-            {"params": charge_params_rl, "lr": args_cli.lr},
-            {"params": charge_params_rnn, "lr": args_cli.rnn_lr},
-            {"params": charge_params_extractor, "lr": args_cli.rnn_lr},
-        ], eps=1e-5)
+    charge_opt_aux = torch.optim.Adam([
+        {"params": charge_params_rnn_cell, "lr": args_cli.rnn_lr},          # RNN cell: 0.0005
+        {"params": charge_params_preprocess_fc, "lr": args_cli.aux_lr},     # FC layers: 0 (frozen)
+        {"params": charge_params_extractor, "lr": args_cli.aux_lr},         # Extractor: 0 (frozen)
+    ], eps=1e-5)
 
     # Store initial LR for decay
     for pg in charge_opt_rl.param_groups:
         pg["initial_lr"] = pg["lr"]
+    for pg in charge_opt_aux.param_groups:
+        pg["initial_lr"] = pg["lr"]
 
     total_charge_params = sum(p.numel() for p in charge_params_rl + charge_params_aux)
     print(f"[INFO] Charge: {policy_obs_dim}D + {args_cli.rnn_type} {args_cli.preprocess_dim}D = {rl_input_dim}D, {total_charge_params:,} params")
-    print(f"[INFO] Charge LR: rl_head={args_cli.lr}, rnn={args_cli.rnn_lr}, aux={'disabled' if args_cli.aux_lr == 0 else args_cli.aux_lr}")
+    print(f"[INFO] RL optimizer: policy_head+value_head lr={args_cli.lr}")
+    print(f"[INFO] Aux optimizer: RNN cell lr={args_cli.rnn_lr}, preprocess FC lr={args_cli.aux_lr}, extractor lr={args_cli.aux_lr}")
 
     # --- Build Obstacle models ---
     obs_policy = ObstaclePolicyFC().to(device)
@@ -1241,7 +1306,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "scene_bound_rand": args_cli.scene_bound_rand,
                     "scene_bound_base": args_cli.scene_bound_base,
                 },
-                tags=["marl", "obstacle-policy", "v5", "wd-aligned"],
+                tags=["marl", "obstacle-policy", "v5", "wd-principle"],
             )
             wandb_run = wandb.run
             print(f"[INFO] WandB: {wandb.run.name}")
@@ -1297,6 +1362,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ========================================================================
 
     _prev_stage = -1  # Track stage for momentum reset
+    _prev_obs_agent_active = True  # Track obs_agent activation for logging
 
     for iteration in range(num_iterations):
         iter_start = time.time()
@@ -1305,14 +1371,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         metrics.reset()
 
         # === Determine who trains this iteration (Warp Drive alternation) ===
+        # Per-stage obstacle toggle: skip obs_agent when no dynamic obstacles
+        _n_dynamic = int(metrics._curriculum_info.get("num_obstacles_dynamic", N_obs))
+        _obs_agent_active = _n_dynamic > 0
         train_charge = (iteration % args_cli.train_goal_rate != 1)
-        train_obstacle = (iteration % args_cli.train_goal_rate == 1)
+        train_obstacle = (iteration % args_cli.train_goal_rate == 1) and _obs_agent_active
+        if not _obs_agent_active:
+            train_charge = True  # charge always trains when obs_agent is off
 
         # === WD: Reset optimizer momentum on phase change ===
         _cur_stage = int(metrics._curriculum_info.get("stage", 1))
         if _cur_stage != _prev_stage and _prev_stage > 0:
             # WD: reset_model_mentum — zero optimizer state on phase transition
-            for opt in [charge_opt_rl, obs_optimizer]:
+            for opt in [charge_opt_rl, charge_opt_aux, obs_optimizer]:
                 for group in opt.param_groups:
                     for p in group["params"]:
                         state = opt.state.get(p)
@@ -1321,17 +1392,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                 state["exp_avg"].zero_()
                             if "exp_avg_sq" in state:
                                 state["exp_avg_sq"].zero_()
-            if charge_opt_aux is not None:
-                for group in charge_opt_aux.param_groups:
-                    for p in group["params"]:
-                        state = charge_opt_aux.state.get(p)
-                        if state:
-                            if "exp_avg" in state:
-                                state["exp_avg"].zero_()
-                            if "exp_avg_sq" in state:
-                                state["exp_avg_sq"].zero_()
             print(f"[INFO] Phase {_prev_stage}→{_cur_stage}: optimizer momentum reset (WD: reset_model_mentum)")
+            if _obs_agent_active != _prev_obs_agent_active:
+                print(f"[INFO] obs_agent {'ACTIVATED' if _obs_agent_active else 'DEACTIVATED'} "
+                      f"(dynamic: {_n_dynamic})")
         _prev_stage = _cur_stage
+        _prev_obs_agent_active = _obs_agent_active
 
         # === Sync params from curriculum (gamma is constant per WD) ===
 
@@ -1364,8 +1430,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # === LR decay (WD: ParamScheduler) ===
         if args_cli.lr_decay > 0 and iteration > 0:
             decay = max(0.01, 1.0 - args_cli.lr_decay * iteration)
-            for pg in charge_opt_rl.param_groups:
-                pg["lr"] = pg.get("initial_lr", pg["lr"]) * decay
+            for opt in [charge_opt_rl, charge_opt_aux]:
+                for pg in opt.param_groups:
+                    pg["lr"] = pg.get("initial_lr", pg["lr"]) * decay
 
         # === Rollout: BOTH policies act, alternating trains ===
         extractor.eval(); preprocess_rnn.eval(); policy_head.eval(); value_head.eval()
@@ -1380,7 +1447,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 hidden = rnn_state.get()
                 rnn_feat, _, new_hidden = preprocess_rnn(features, hidden)
                 p_obs = obs_normed[:, POLICY_OBS_INDICES]
-                rl_in = torch.cat([p_obs, rnn_feat], dim=-1)
+                # Ablation: zero out RNN feature for RL (aux path still trains normally)
+                _rnn_for_rl = (torch.zeros_like(rnn_feat)
+                               if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
+                rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)
                 logits = policy_head(rl_in)
                 value = value_head(rl_in).squeeze(-1)
                 actions, log_prob, _ = sample_action(logits)
@@ -1396,24 +1466,39 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _spot_penalty_hit, _spot_reward_get_goal, _spot_cost_operate,
             )
 
-            # --- 3. Obstacle forward + apply ---
-            with torch.no_grad():
-                obs_obs = build_obstacle_obs(env.unwrapped, N_obs, device)  # [E, N, 9]
-                obs_flat = obs_obs.reshape(-1, OBS_POLICY_OBS_DIM)  # [E*N, 9]
-                obs_act, obs_lp, obs_ent = obs_policy.sample(obs_flat)  # [E*N, 2]
-                obs_val = obs_value(obs_flat).squeeze(-1)  # [E*N]
+            # --- 3. Obstacle forward + apply (skip when no dynamic obstacles) ---
+            if _obs_agent_active:
+                with torch.no_grad():
+                    obs_obs = build_obstacle_obs(env.unwrapped, N_obs, device)  # [E, N, 9]
+                    obs_flat = obs_obs.reshape(-1, OBS_POLICY_OBS_DIM)  # [E*N, 9]
+                    obs_act, obs_lp, obs_ent = obs_policy.sample(obs_flat)  # [E*N, 2]
+                    obs_val = obs_value(obs_flat).squeeze(-1)  # [E*N]
 
-            apply_obstacle_actions(env.unwrapped, obs_act.reshape(num_envs, N_obs, 2),
-                                   N_obs, dt=0.2, speed_limit=_obs_speed_limit)
+                apply_obstacle_actions(env.unwrapped, obs_act.reshape(num_envs, N_obs, 2),
+                                       N_obs, dt=0.2, speed_limit=_obs_speed_limit)
 
-            # Obstacle reward
-            obs_rew = compute_obstacle_reward(env.unwrapped, obs_obs, N_obs, args_cli.obs_reward_mode)
+                # Obstacle reward
+                obs_rew = compute_obstacle_reward(env.unwrapped, obs_obs, N_obs, args_cli.obs_reward_mode)
 
-            # Obstacle done = charge done (broadcast to all obstacles)
-            obs_done = done.unsqueeze(-1).expand(-1, N_obs).reshape(-1)
+                # Obstacle done = charge done (broadcast to all obstacles)
+                obs_done = done.unsqueeze(-1).expand(-1, N_obs).reshape(-1)
+            else:
+                # No dynamic obstacles — zero placeholders, no obstacle movement
+                obs_obs = torch.zeros(num_envs, N_obs, OBS_POLICY_OBS_DIM, device=device)
+                obs_flat = obs_obs.reshape(-1, OBS_POLICY_OBS_DIM)
+                obs_act = torch.zeros(num_envs * N_obs, 2, dtype=torch.long, device=device)
+                obs_lp = torch.zeros(num_envs * N_obs, device=device)
+                obs_val = torch.zeros(num_envs * N_obs, device=device)
+                obs_rew = torch.zeros(num_envs * N_obs, device=device)
+                obs_done = done.unsqueeze(-1).expand(-1, N_obs).reshape(-1)
 
             # --- 4. Store transitions ---
-            charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden)
+            # WD-style 7D privileged geometry target (training-only, not used at inference)
+            with torch.no_grad():
+                wd_aux_tgt = build_wd_preprocess_targets(
+                    env.unwrapped, N_obs, device)  # [E, 7]
+            charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
+                           aux_target=wd_aux_tgt)
             obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
 
             # --- 5. Metrics ---
@@ -1453,7 +1538,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 hidden = rnn_state.get()
                 rnn_feat, _, _ = preprocess_rnn(features, hidden)
                 p_obs = obs_normed[:, POLICY_OBS_INDICES]
-                rl_in = torch.cat([p_obs, rnn_feat], dim=-1)
+                _rnn_for_rl = (torch.zeros_like(rnn_feat)
+                               if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
+                rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)
                 last_value = value_head(rl_in).squeeze(-1)
 
             advantages, returns = compute_gae(
@@ -1462,9 +1549,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
             policy_head.train(); value_head.train()
-            # When aux_lr=0 (WD default), extractor+rnn trained by RL gradient
-            if args_cli.aux_lr == 0:
-                extractor.train(); preprocess_rnn.train()
+            # extractor/preprocess_rnn stay in eval() — PPO only trains RL heads
+            # WD equivalent: concat_input = rl_in_.detach() (line 573)
+            # IL: rl_in stored under torch.no_grad() → same effect (no grad to RNN/extractor)
 
             flat_ri = charge_buf.rl_inputs.reshape(-1, rl_input_dim)
             flat_act = charge_buf.actions.reshape(-1, 2)
@@ -1518,11 +1605,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     loss = pl_clamped + args_cli.vf_coeff * vl - entropy_loss
                     charge_opt_rl.zero_grad()
                     loss.backward()
-                    nn.utils.clip_grad_norm_(
-                        list(charge_opt_rl.param_groups[0]["params"]) +
-                        (list(charge_opt_rl.param_groups[1]["params"]) if len(charge_opt_rl.param_groups) > 1 else []) +
-                        (list(charge_opt_rl.param_groups[2]["params"]) if len(charge_opt_rl.param_groups) > 2 else []),
-                        args_cli.max_grad_norm)
+                    nn.utils.clip_grad_norm_(charge_params_rl, args_cli.max_grad_norm)
                     charge_opt_rl.step()
                     ppo_l.append(pl.item()); vf_l.append(vl.item())
                     ent_l.append((ent_lin.mean() + ent_ang.mean()).item())
@@ -1531,43 +1614,109 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             charge_vf_loss = np.mean(vf_l)
             charge_entropy = np.mean(ent_l)
 
-            # Auxiliary loss (only when aux_lr > 0; WD default=0 → skip)
+            # Auxiliary loss (WD module loss) — 每 iteration 都跑 (WD: 論文§4.2)
+            # WD-style:
+            #   target = 7D privileged geometry (2 nearest obstacles body-frame x,y,dist + timestep)
+            #   loss   = sum(weight[i] * mean(log(clamp(L1(pred_i, tgt_i), 0.01))))
+            #   weight = [1.0, 1.0, 1.0, 0.7, 0.7, 0.7, 0]
+            # Target is raw geometry — no normalizer applied (WD convention)
+            #
+            # 判讀規則:
+            #   1. aux/preprocess_loss 下降 + rnn_param_delta>0 + predict_head_delta≈0
+            #      → 正常 (預設 aux_lr=0, 只有 RNN cell 更新)
+            #   2. rl/success_rate 上升 + aux/preprocess_loss 不動
+            #      → RL 靠 raw obs 學習, RNN 幫助有限
+            #   3. --zero_preprocess_feature_for_rl 開啟:
+            #      aux/preprocess_loss 照降 + rl/success_rate 變差
+            #      → policy 確實有利用 preprocess feature
             aux_per_feature = {}
-            if charge_opt_aux is not None:
-                extractor.train(); preprocess_rnn.train()
-                valid_t, valid_e = [], []
-                for t in range(RL - 1):
-                    nd = (charge_buf.dones[t] < 0.5).nonzero(as_tuple=False).reshape(-1)
-                    if len(nd) > 0:
-                        valid_t.append(torch.full_like(nd, t)); valid_e.append(nd)
+            aux_monitor = {}  # per-module gradient/delta monitoring
+            extractor.train(); preprocess_rnn.train()
+            valid_t, valid_e = [], []
+            for t in range(RL):
+                nd = (charge_buf.dones[t] < 0.5).nonzero(as_tuple=False).reshape(-1)
+                if len(nd) > 0:
+                    valid_t.append(torch.full_like(nd, t)); valid_e.append(nd)
 
-                if valid_t:
-                    at = torch.cat(valid_t); ae = torch.cat(valid_e)
-                    a_obs = charge_buf.raw_obs[at, ae]
-                    a_hid = charge_buf.hiddens[at, ae].unsqueeze(0)
-                    a_tgt = charge_buf.raw_obs[at + 1, ae, LIDAR_START:LIDAR_END]
-                    abs_ = min(4096, len(at))
-                    alv = 0.0; nab = 0
-                    perm = torch.randperm(len(at), device=device)
-                    for ab_s in range(0, len(at), abs_):
-                        ab_e = min(ab_s + abs_, len(at))
-                        ab_i = perm[ab_s:ab_e]
-                        mo = obs_normalizer.normalize(a_obs[ab_i])
-                        ft = extractor(mo)
-                        _, pred, _ = preprocess_rnn(ft, a_hid[:, ab_i, :], training=True)
-                        tgt_n = (a_tgt[ab_i] - obs_normalizer.mean[LIDAR_START:LIDAR_END]) / (obs_normalizer.var[LIDAR_START:LIDAR_END].sqrt() + 1e-8)
-                        l = F.smooth_l1_loss(pred, tgt_n)
-                        charge_opt_aux.zero_grad(); l.backward()
-                        nn.utils.clip_grad_norm_(charge_params_aux, args_cli.max_grad_norm)
-                        charge_opt_aux.step()
-                        alv += l.item(); nab += 1
-                        # WD A2: per-feature loss (last batch only)
-                        if ab_s + abs_ >= len(at):
-                            with torch.no_grad():
-                                per_feat = F.smooth_l1_loss(pred, tgt_n, reduction='none').mean(dim=0)
-                                for fi in range(min(per_feat.shape[0], 72)):
-                                    aux_per_feature[f"charge_module_feture_{fi}_loss"] = per_feat[fi].item()
-                    aux_loss_val = alv / max(nab, 1)
+            # Per-module param lists for monitoring
+            _mon_modules = {
+                "rnn": list(preprocess_rnn.rnn.parameters()),
+                "fc_front": list(preprocess_rnn.fc_front.parameters()),
+                "fc_middle": list(preprocess_rnn.fc_middle.parameters()),
+                "predict_head": list(preprocess_rnn.predict_head.parameters()),
+                "extractor": list(extractor.parameters()),
+            }
+            # Accumulators for gradient norm and param delta (mean across mini-batches)
+            _grad_norms = {k: 0.0 for k in _mon_modules}
+            _delta_norms = {k: 0.0 for k in _mon_modules}
+
+            if valid_t:
+                at = torch.cat(valid_t); ae = torch.cat(valid_e)
+                a_obs = charge_buf.raw_obs[at, ae]
+                a_hid = charge_buf.hiddens[at, ae].unsqueeze(0)
+                a_tgt = charge_buf.aux_targets[at, ae]  # [N, 7] WD privileged target
+                abs_ = min(4096, len(at))
+                alv = 0.0; nab = 0
+                perm = torch.randperm(len(at), device=device)
+                for ab_s in range(0, len(at), abs_):
+                    ab_e = min(ab_s + abs_, len(at))
+                    ab_i = perm[ab_s:ab_e]
+                    mo = obs_normalizer.normalize(a_obs[ab_i])
+                    ft = extractor(mo)
+                    _, pred, _ = preprocess_rnn(ft, a_hid[:, ab_i, :], training=True)
+                    # WD module loss: log(clamp(L1)) × weight, no target normalization
+                    l, aux_display = compute_wd_module_loss(pred, a_tgt[ab_i])
+                    charge_opt_aux.zero_grad(); l.backward()
+                    nn.utils.clip_grad_norm_(charge_params_aux, args_cli.max_grad_norm)
+
+                    # --- Monitor: snapshot before step ---
+                    _snaps = {k: _snapshot_params(ps) for k, ps in _mon_modules.items()}
+                    # --- Monitor: gradient norms (after backward, before step) ---
+                    for k, ps in _mon_modules.items():
+                        _grad_norms[k] += _grad_l2_norm(ps)
+
+                    charge_opt_aux.step()
+
+                    # --- Monitor: param delta norms (after step) ---
+                    for k, ps in _mon_modules.items():
+                        _delta_norms[k] += _param_delta_norm(_snaps[k], ps)
+
+                    alv += l.item(); nab += 1
+                    # Per-feature loss (last batch only, for WandB logging)
+                    if ab_s + abs_ >= len(at):
+                        for k, v in aux_display.items():
+                            if k != "preprcess_loss":
+                                aux_per_feature[f"charge_{k}"] = v
+                aux_loss_val = alv / max(nab, 1)
+
+                # Average monitoring over mini-batches
+                for k in _mon_modules:
+                    aux_monitor[f"aux/{k}_grad_norm"] = _grad_norms[k] / max(nab, 1)
+                    aux_monitor[f"aux/{k}_param_delta_norm"] = _delta_norms[k] / max(nab, 1)
+                # Param norms (absolute, not averaged)
+                aux_monitor["aux/rnn_param_norm"] = _param_l2_norm(_mon_modules["rnn"])
+                aux_monitor["aux/predict_head_param_norm"] = _param_l2_norm(_mon_modules["predict_head"])
+
+            # Map WD per-dim loss to human-readable names
+            for raw_key, readable_key in _AUX_DIM_NAMES.items():
+                charge_key = f"charge_{raw_key}"
+                if charge_key in aux_per_feature:
+                    aux_monitor[readable_key] = aux_per_feature[charge_key]
+            aux_monitor["aux/preprocess_loss"] = aux_loss_val
+
+            # One-time gradient verification (iteration 0)
+            if iteration == 0:
+                _rnn_grad = any(p.grad is not None and p.grad.abs().sum() > 0
+                                for p in preprocess_rnn.rnn.parameters())
+                _head_grad = any(p.grad is not None and p.grad.abs().sum() > 0
+                                for p in policy_head.parameters())
+                _ext_lr = charge_opt_aux.param_groups[2]["lr"]
+                print(f"[梯度驗證] RL head={'✓' if _head_grad else '✗'} (PPO), "
+                      f"RNN cell={'✓' if _rnn_grad else '✗'} (aux), "
+                      f"extractor lr={_ext_lr} (frozen={'✓' if _ext_lr == 0 else '✗'})")
+                if args_cli.zero_preprocess_feature_for_rl:
+                    print("[ABLATION] --zero_preprocess_feature_for_rl ACTIVE: "
+                          "rl_in uses zero instead of 12D preprocess feature")
 
         # === Obstacle PPO Update ===
         obs_loss = 0.0
@@ -1594,40 +1743,74 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             num_goals=_num_goals,
         )
 
+        # Timeout rate from metrics
+        _timeout_rate = wd.get("charge/timeout_rate", 0)
+
         if (iteration + 1) % args_cli.log_interval == 0 or iteration == 0:
             stage = wd.get("curriculum/stage", 0)
             sr = wd.get("charge/goal_reach_rate", 0)
             cr = wd.get("charge/hit_probability", 0)
             rwd = wd.get("charge/reward_mean", 0)
             who = "CHARGE" if train_charge else "OBS"
+            obs_tag = f" obs_agent={'ON' if _obs_agent_active else 'OFF'}" if not _obs_agent_active else ""
+            # --- Line 1: RL status ---
             print(
                 f"[{iteration+1}/{num_iterations}] {who} "
-                f"S{int(stage)} | g={current_gamma:.3f} | fps={fps:.0f} | "
-                f"R={rwd:.1f} SR={sr:.1%} CR={cr:.1%} | "
-                f"penalty={_spot_penalty_hit:.0f} | "
+                f"S{int(stage)} | fps={fps:.0f} | "
+                f"R={rwd:.1f} SR={sr:.1%} CR={cr:.1%} TO={_timeout_rate:.1%} | "
                 f"ppo={charge_ppo_loss:.4f} vf={charge_vf_loss:.4f} "
-                f"ent={charge_entropy:.3f} aux={aux_loss_val:.4f} "
-                f"obs_loss={obs_loss:.4f}")
+                f"ent={charge_entropy:.3f}{obs_tag}")
+            # --- Line 2: AUX status (only when charge trained) ---
+            if train_charge:
+                _rnn_gn = aux_monitor.get("aux/rnn_grad_norm", 0)
+                _rnn_dn = aux_monitor.get("aux/rnn_param_delta_norm", 0)
+                _ph_dn = aux_monitor.get("aux/predict_head_param_delta_norm", 0)
+                _n1d = aux_monitor.get("aux/near1_d_loss", 0)
+                _n2d = aux_monitor.get("aux/near2_d_loss", 0)
+                print(
+                    f"  AUX: loss={aux_loss_val:.4f} "
+                    f"n1d={_n1d:.3f} n2d={_n2d:.3f} | "
+                    f"rnn_grad={_rnn_gn:.4f} rnn_delta={_rnn_dn:.6f} "
+                    f"ph_delta={_ph_dn:.6f}")
 
         if wandb_run is not None:
             log_data = {
-                # --- A) Warp Drive: {policy} loss ---
+                # --- A) Warp Drive: {policy} loss (legacy keys preserved) ---
                 "charge loss": charge_ppo_loss,
                 "charge loss coefficient entropy": charge_entropy,
                 "charge vf_loss": charge_vf_loss,
                 "obstacle loss": obs_loss,
                 "obstacle loss coefficient entropy": args_cli.obs_ent_coeff,
-                # --- A2) Warp Drive: module preprocess loss ---
-                "charge_preprcess_loss": aux_loss_val,  # WD original typo preserved
+                # --- A2) Warp Drive: module preprocess loss (legacy key preserved) ---
+                "charge_preprcess_loss": aux_loss_val,
             }
-            # --- A2) Per-feature module loss (WD: charge_module_feture_{N}_loss) ---
+            # --- A2) Per-feature module loss (WD: charge_module_feture_{0..6}_loss) ---
             if train_charge and aux_per_feature:
                 log_data.update(aux_per_feature)
+
+            # --- B) Unified rl/* metrics ---
+            log_data.update({
+                "rl/return_mean": wd.get("charge/reward_mean", 0),
+                "rl/success_rate": wd.get("charge/goal_reach_rate", 0),
+                "rl/collision_rate": wd.get("charge/hit_probability", 0),
+                "rl/timeout_rate": _timeout_rate,
+                "rl/policy_loss": charge_ppo_loss,
+                "rl/value_loss": charge_vf_loss,
+                "rl/entropy": charge_entropy,
+                "rl/stage_idx": float(wd.get("curriculum/stage", 0)),
+            })
+
+            # --- C) Unified aux/* metrics (module loss + gradient/param monitoring) ---
+            if train_charge:
+                log_data.update(aux_monitor)
+
             log_data.update({
                 # --- Train info ---
                 "train/fps": fps,
                 "train/gamma": current_gamma,
                 "train/active_agent": "charge" if train_charge else "obstacle",
+                "train/obs_agent_active": float(_obs_agent_active),
+                "train/zero_preprocess_for_rl": float(args_cli.zero_preprocess_feature_for_rl),
                 # --- WD reward params (per-phase) ---
                 "wd_reward/spot_penalty_hit": _spot_penalty_hit,
                 "wd_reward/spot_reward_get_goal": _spot_reward_get_goal,
@@ -1652,7 +1835,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "obs_policy": obs_policy.state_dict(),
                 "obs_value": obs_value.state_dict(),
                 "charge_opt_rl": charge_opt_rl.state_dict(),
-                "charge_opt_aux": charge_opt_aux.state_dict() if charge_opt_aux else {},
+                "charge_opt_aux": charge_opt_aux.state_dict(),
                 "obs_optimizer": obs_optimizer.state_dict(),
                 "obs_normalizer": {
                     "mean": obs_normalizer.mean, "var": obs_normalizer.var,

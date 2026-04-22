@@ -4,12 +4,20 @@ Modular RNN Models — 移植自 Warp Drive CustomModuleConnected
 核心設計 (來源: new_warp_drive/custom_envs/module_connected.py):
   1. PreprocessRNN: FC → RNN → concat → middle FC → predict head
   2. Gradient detach: preprocess output 傳給 RL head 前切斷梯度
-  3. Auxiliary loss: RNN 只被 LiDAR prediction loss 訓練，PPO 不訓練 RNN
+     WD 有 3 個 .detach():
+       - line 504: rl_ip = ip.detach()  (obs 副本給 RL concat)
+       - line 537: memory_reg.detach()  (hidden state 存儲)
+       - line 573: concat_input = rl_in_.detach()  (RL 最終輸入)
+     效果: RL loss.backward() 不會流到 preprocess/RNN
+  3. Auxiliary loss: RNN 只被 module prediction loss 訓練
+     WD target: 7D preprocess_real_data (2 nearest neighbors × (x,y,dist) + timestep)
+     WD loss:   log(clamp(L1, 0.01)) × per-dim weight
   4. RL head: 只看 detached features，PPO 只訓練 head
 
-架構 (WD-aligned):
+架構:
   Obs (139D env output, 只用 79D)
     → LidarStateExtractor (LiDAR Conv1d 64D + StateMLP 32D = 96D)
+      [IsaacLab adaptation] WD 用 Linear(113→64)+ReLU 單層; IL 用 Conv1d+MLP 2-branch
     → PreprocessRNN (FC→RNN→concat→FC = 12D) + .detach()
     → cat(79D_obs, 12D_preprocess) = 91D
     → PolicyHead (91→256→256→256→512→38)
@@ -22,7 +30,14 @@ WD 對齊參數:
   - PolicyHead: [256, 256, 256, 512]
   - ValueHead: [256, 256, 256, 512, 512]
 
+WD 與 IL 的有意差異 (保留 WD modular principle，搭配 IL 環境適配):
+  - Extractor: WD=Linear(113→64); IL=Conv1d(72D LiDAR)+MLP(7D state)=96D
+    原因: IL obs layout 不同（79D vs 113D），Conv1d 對 LiDAR 更適合
+
 不依賴 obs60 (MOT features) — 部署可行。
+注意: WD train_rnn_car.py 中 spot_state_obs_agent_rate=0，obs 113D 中 60D 障礙物區塊
+多為 default/placeholder 值（type-2 state obstacles 未生成）。有效障礙資訊來自 36D LiDAR
++ 7D preprocess_real_data (2 nearest neighbors)。
 """
 
 import torch
@@ -36,12 +51,12 @@ import numpy as np
 EGO_START, EGO_END = 0, 4        # accel + vel + omega + radius
 GOAL_START, GOAL_END = 4, 6      # waypoint (x, y)
 LIDAR_START, LIDAR_END = 6, 78   # 72 bins
-OBS_START, OBS_END = 78, 138     # SKIP — not used
-TIME_START, TIME_END = 138, 139  # remaining ratio
+TIME_START, TIME_END = 78, 79    # remaining ratio (was 138:139 when obs=139D)
 
 STATE_DIM = 7     # ego(4) + goal(2) + time(1)
 LIDAR_DIM = 72
 USED_OBS_DIM = 79  # 4 + 2 + 72 + 1
+RAW_OBS_DIM = 79   # env output dim (no TopK)
 NUM_BINS = 19
 TOTAL_LOGITS = NUM_BINS * 2  # 38
 
@@ -53,7 +68,7 @@ TOTAL_LOGITS = NUM_BINS * 2  # 38
 class LidarStateExtractor(nn.Module):
     """2-branch extractor: LiDAR Conv1d (64D) + StateMLP (32D) = 96D.
 
-    不使用 obs60 — 直接從 139D env obs 中取 LiDAR 和 state 部分。
+    從 79D env obs 中取 LiDAR(72D) 和 state(7D) 部分。保留 WD modular principle，無 TopK obs。
     """
 
     def __init__(self):
@@ -87,7 +102,7 @@ class LidarStateExtractor(nn.Module):
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            obs: [B, 139] raw env observation (取 79D subset)
+            obs: [B, 79] env observation
         Returns:
             [B, 96] feature embedding
         """
@@ -112,16 +127,30 @@ class LidarStateExtractor(nn.Module):
 class PreprocessRNN(nn.Module):
     """模組化 RNN — 移植自 Warp Drive module_connected.py。
 
-    WD 原始設計:
-      FC_front(96→48) → RNN(48→30) → concat(rnn_out, fc_out)
-      → FC_middle(→12) → [training] FC_predict(→72) for aux loss
+    WD 原始設計 (module_connected.py lines 214-573):
+      preprocess_info_front: Linear(obs→64)+ReLU
+      → RNN(64→30)
+      → [if concat_rnn] cat(rnn_out, fc_out)
+      → preprocess_info_middle: Linear(→module_connect_dim)+ReLU
+      → [training] preprocess_info_back: Linear(→network_feture_dim)+ReLU (for aux loss)
+      → .detach() → concat(detached_obs, preprocess_feat) → RL head
 
-    forward() 回傳的 feat 已做 .detach()，PPO 不會訓練此模組。
+    WD detach 位置 (line 573): concat_input = rl_in_.detach()
+    → RL loss 永遠不訓練此模組。RNN 只被 module loss (aux) 訓練。
+
+    Predict head (WD-style):
+      - 單層 Linear(12→7) + ReLU — 與 WD preprocess_info_back 完全一致
+        (WD config: module_network=[64,'rnn',32,'rl'], network_feture_dim=7 → back=[12→7])
+      - Target: 7D privileged geometry (2 nearest obstacles body-frame x,y,dist + timestep)
+      - Loss: WD module loss — log(clamp(L1, 0.01)) × per-dim weight
+      - See wd_aux_targets.py for target construction and loss computation
 
     WD 對齊:
       - rnn_type='RNN' (vanilla, not GRU) — WD: rnn_layer_type='RNN'
       - hidden_dim=30 — WD: memory_dim=30
       - preprocess_dim=12 — WD: module_connect_dim=12
+      - concat_rnn=True — WD train_rnn_car.py 同樣用 True
+      - predict_head: Linear(12→7)+ReLU — WD preprocess_info_back 原樣
     """
 
     def __init__(
@@ -130,7 +159,7 @@ class PreprocessRNN(nn.Module):
         fc_dim: int = 48,
         hidden_dim: int = 30,
         preprocess_dim: int = 12,
-        predict_dim: int = LIDAR_DIM,  # 72 for LiDAR prediction
+        predict_dim: int = 7,
         concat_rnn: bool = True,
         rnn_type: str = "RNN",  # "RNN" (WD default) or "GRU"
     ):
@@ -159,8 +188,12 @@ class PreprocessRNN(nn.Module):
             nn.ReLU(),
         )
 
-        # Predict head (training only — for auxiliary loss)
-        self.predict_head = nn.Linear(preprocess_dim, predict_dim)
+        # Predict head — WD-style: Linear(12→7)+ReLU (preprocess_info_back)
+        # Training only — predicts 7D privileged geometry target for module loss
+        self.predict_head = nn.Sequential(
+            nn.Linear(preprocess_dim, predict_dim),
+            nn.ReLU(),
+        )
 
         self.preprocess_dim = preprocess_dim
 
@@ -169,16 +202,22 @@ class PreprocessRNN(nn.Module):
         features: torch.Tensor,
         hidden: torch.Tensor,
         training: bool = False,
+        detach_output: bool = False,
     ):
         """
         Args:
             features: [B, 96] from extractor
             hidden:   [1, B, hidden_dim] RNN hidden state
-            training: if True, compute prediction for auxiliary loss
+            training: if True, compute 7D prediction for WD module loss
+            detach_output: if True, explicitly detach preprocess feat before return.
+                          Note: In WD, detach happens at the RL concat stage (line 573),
+                          not here. In IL, rollout uses torch.no_grad() which has the
+                          same effect. For aux training path, detach_output should be False
+                          so gradients flow through to RNN.
 
         Returns:
-            feat:       [B, preprocess_dim] — DETACHED, for RL head
-            prediction: [B, 72] or None — for auxiliary loss
+            feat:       [B, preprocess_dim]
+            prediction: [B, 7] or None — 7D privileged geometry prediction for module loss
             new_hidden: [1, B, hidden_dim] — new RNN hidden state
         """
         fc_out = self.fc_front(features)                    # [B, 48]
@@ -195,10 +234,14 @@ class PreprocessRNN(nn.Module):
 
         prediction = None
         if training:
-            prediction = self.predict_head(preprocess_feat) # [B, 72]
+            prediction = self.predict_head(preprocess_feat) # [B, 7] WD-style privileged target
 
-        # GRADIENT DETACH — 核心設計：PPO 不訓練 RNN
-        return preprocess_feat.detach(), prediction, new_hidden
+        # WD 原版 (line 573): concat_input = rl_in_.detach()
+        # WD 設計: RNN 永遠不吃 RL gradient。detach 在 RL concat 階段完成。
+        # IL: rollout 用 torch.no_grad() 達到同樣效果; PPO 只用 cached rl_in。
+        if detach_output:
+            return preprocess_feat.detach(), prediction, new_hidden
+        return preprocess_feat, prediction, new_hidden
 
 
 # Backward compatibility alias
