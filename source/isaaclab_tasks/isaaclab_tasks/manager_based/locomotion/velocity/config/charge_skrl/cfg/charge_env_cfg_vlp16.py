@@ -61,7 +61,7 @@ from ..mdp.observations import (
     dynamic_obstacles_state,
 )
 from ..mdp.observations.obs_functions import (
-    lidar_vlp16_to_2d_bins,
+    wd_like_sweep_72,
     topk_obstacles_6d,
 )
 
@@ -182,7 +182,7 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
 
         room_size = 8.0
         wall_thickness = 0.2
-        wall_height = 1.5
+        wall_height = 3.0   # ★ 真實牆 3m，高於 VLP16 (z=1.6m)，確保 LiDAR 可見
         wall_length = room_size * 2 + wall_thickness
         wall_color = (0.5, 0.5, 0.5)
 
@@ -219,12 +219,13 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
         # 6 面內部牆壁（迷宮結構，匹配 wall_layout.py MAZE_WALLS）
         internal_walls = [
             # (size, pos) — 均勻分佈在 4 象限，形成走廊
-            ((3.5, 0.2, 1.5), (-6.25, 4.0, 0.75)),    # wall_internal_0: Top-left horizontal
-            ((0.2, 3.0, 1.5), (3.0, 6.5, 0.75)),      # wall_internal_1: Top-right vertical
-            ((3.0, 0.2, 1.5), (4.0, 0.0, 0.75)),      # wall_internal_2: Right-middle horizontal
-            ((0.2, 4.0, 1.5), (-3.0, -1.0, 0.75)),    # wall_internal_3: Center-left vertical
-            ((3.0, 0.2, 1.5), (0.5, -5.0, 0.75)),     # wall_internal_4: Bottom-center horizontal
-            ((0.2, 3.0, 1.5), (6.5, -5.5, 0.75)),     # wall_internal_5: Bottom-right vertical
+            # ★ height 3.0m, center z=1.5 — 對齊外牆
+            ((3.5, 0.2, 3.0), (-6.25, 4.0, 1.5)),    # wall_internal_0: Top-left horizontal
+            ((0.2, 3.0, 3.0), (3.0, 6.5, 1.5)),      # wall_internal_1: Top-right vertical
+            ((3.0, 0.2, 3.0), (4.0, 0.0, 1.5)),      # wall_internal_2: Right-middle horizontal
+            ((0.2, 4.0, 3.0), (-3.0, -1.0, 1.5)),    # wall_internal_3: Center-left vertical
+            ((3.0, 0.2, 3.0), (0.5, -5.0, 1.5)),     # wall_internal_4: Bottom-center horizontal
+            ((0.2, 3.0, 3.0), (6.5, -5.5, 1.5)),     # wall_internal_5: Bottom-right vertical
         ]
 
         for i, (size, pos) in enumerate(internal_walls):
@@ -243,17 +244,18 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
         # 實際使用數量由 event params 的 num_obstacles_static/dynamic 控制
         # 觀測只取 Top-K=10 最近的（obs 維度不變 60D）
         HIDDEN_Z = -10.0
+        # ★ 行人高度 (1.6~1.8m)：確保 VLP16 LiDAR (z=1.6m, lowest beam -15°) 可觀測
         _obstacle_templates = [
-            {"type": "cuboid", "size": (0.5, 0.5, 1.2), "color": (0.8, 0.2, 0.2)},
-            {"type": "cylinder", "radius": 0.3, "height": 1.0, "color": (0.8, 0.8, 0.2)},
-            {"type": "cuboid", "size": (0.7, 0.7, 1.4), "color": (0.2, 0.4, 0.8)},
-            {"type": "cylinder", "radius": 0.25, "height": 0.8, "color": (0.2, 0.8, 0.2)},
-            {"type": "cuboid", "size": (0.6, 0.6, 1.0), "color": (0.8, 0.2, 0.8)},
-            {"type": "cylinder", "radius": 0.35, "height": 1.2, "color": (0.8, 0.5, 0.2)},
-            {"type": "cuboid", "size": (0.4, 0.4, 0.9), "color": (0.2, 0.8, 0.8)},
-            {"type": "cylinder", "radius": 0.2, "height": 1.5, "color": (0.5, 0.5, 0.5)},
-            {"type": "cuboid", "size": (0.55, 0.55, 1.1), "color": (0.9, 0.9, 0.9)},
-            {"type": "cylinder", "radius": 0.28, "height": 1.1, "color": (0.3, 0.3, 0.3)},
+            {"type": "cuboid",   "size": (0.5, 0.5, 1.7),   "color": (0.8, 0.2, 0.2)},
+            {"type": "cylinder", "radius": 0.3, "height": 1.6, "color": (0.8, 0.8, 0.2)},
+            {"type": "cuboid",   "size": (0.7, 0.7, 1.8),   "color": (0.2, 0.4, 0.8)},
+            {"type": "cylinder", "radius": 0.25, "height": 1.7, "color": (0.2, 0.8, 0.2)},
+            {"type": "cuboid",   "size": (0.6, 0.6, 1.6),   "color": (0.8, 0.2, 0.8)},
+            {"type": "cylinder", "radius": 0.35, "height": 1.8, "color": (0.8, 0.5, 0.2)},
+            {"type": "cuboid",   "size": (0.4, 0.4, 1.7),   "color": (0.2, 0.8, 0.8)},
+            {"type": "cylinder", "radius": 0.2, "height": 1.6, "color": (0.5, 0.5, 0.5)},
+            {"type": "cuboid",   "size": (0.55, 0.55, 1.8),  "color": (0.9, 0.9, 0.9)},
+            {"type": "cylinder", "radius": 0.28, "height": 1.7, "color": (0.3, 0.3, 0.3)},
         ]
 
         obstacle_sizes: list[float] = []
@@ -399,11 +401,9 @@ class ObservationsCfgVLP16:
         # --- static state (72D) ---
         # VLP-16 LiDAR 72 bins (單幀，不做 history stacking)
         lidar_static = ObsTerm(
-            func=lidar_vlp16_to_2d_bins,
+            func=wd_like_sweep_72,
             params={
                 "sensor_cfg": SceneEntityCfg("lidar"),
-                "num_channels": 16,
-                "num_horizontal": 360,
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
@@ -474,11 +474,9 @@ class ObservationsCfgVLP16:
 
         # --- static state (72D) ---
         lidar_static = ObsTerm(
-            func=lidar_vlp16_to_2d_bins,
+            func=wd_like_sweep_72,
             params={
                 "sensor_cfg": SceneEntityCfg("lidar"),
-                "num_channels": 16,
-                "num_horizontal": 360,
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
@@ -856,6 +854,65 @@ class EventCfgVLP16Phase2(EventCfgVLP16):
 
 
 @configclass
+class EventCfgVLP16Baseline(EventCfgVLP16):
+    """Single-car baseline events.
+
+    Goal:
+      - keep the same LiDAR/action/reward pipeline as VLP16
+      - reduce difficulty to static-only obstacles
+      - remove domain randomization so failure modes are easier to interpret
+    """
+
+    domain_randomization = None
+
+    randomize_obstacles_startup = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="startup",
+        params={
+            "empty_ratio": 0.25,
+            "static_ratio": 0.75,
+            "dynamic_ratio": 0.00,
+            "num_obstacles_static": 4,
+            "num_obstacles_dynamic": 0,
+            "max_obstacles": 6,
+            "speed_range": 0.0,
+            "min_speed": 0.0,
+            "min_robot_distance": 1.8,
+            "min_goal_distance": 1.2,
+            "min_obstacle_spacing": 1.4,
+            "max_spawn_attempts": 50,
+            "boundary": 7.5,
+            "active_obstacle_ratio": 1.0,
+            "debug": False,
+        },
+    )
+
+    randomize_obstacles = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="reset",
+        params={
+            "empty_ratio": 0.25,
+            "static_ratio": 0.75,
+            "dynamic_ratio": 0.00,
+            "num_obstacles_static": 4,
+            "num_obstacles_dynamic": 0,
+            "max_obstacles": 6,
+            "speed_range": 0.0,
+            "min_speed": 0.0,
+            "min_robot_distance": 1.8,
+            "min_goal_distance": 1.2,
+            "min_obstacle_spacing": 1.4,
+            "max_spawn_attempts": 50,
+            "boundary": 7.5,
+            "active_obstacle_ratio": 1.0,
+            "debug": False,
+        },
+    )
+
+    move_dynamic_obstacles = None
+
+
+@configclass
 class ChargeNavigationEnvCfgVLP16Phase2(ChargeNavigationEnvCfgVLP16):
     """Phase 2 環境配置 — 避障微調
 
@@ -865,3 +922,14 @@ class ChargeNavigationEnvCfgVLP16Phase2(ChargeNavigationEnvCfgVLP16):
 
     rewards: RewardsCfgVLP16Phase2 = RewardsCfgVLP16Phase2()
     events: EventCfgVLP16Phase2 = EventCfgVLP16Phase2()
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16Baseline(ChargeNavigationEnvCfgVLP16):
+    """Fixed single-agent baseline for validating LiDAR -> action -> reward learning."""
+
+    events: EventCfgVLP16Baseline = EventCfgVLP16Baseline()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.seed = 42

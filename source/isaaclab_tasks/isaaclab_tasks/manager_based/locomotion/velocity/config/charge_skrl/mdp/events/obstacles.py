@@ -187,7 +187,7 @@ def reset_obstacles(
         # 生成隨機位置（含碰撞檢查）
         # ------------------------------------------------------------------------
         pos = torch.zeros(num_resets, 3, device=device, dtype=torch.float32)
-        pos[:, 2] = 0.5  # Z 座標：固定高度
+        pos[:, 2] = 0.9  # Z 座標：行人高度 1.6~1.8m 中心（底部 z≥0，頂部 z≥1.6m）
 
         # 追蹤哪些環境還需要找到有效位置
         needs_position = torch.ones(num_resets, dtype=torch.bool, device=device)
@@ -441,7 +441,7 @@ def move_obstacles_goal_directed(
     # 🔥 關鍵：只取 dynamic 環境的 IDs，避免讀寫 static/empty 環境的位置
     # 原因：interval 事件與 reset 事件在同一步執行，
     # root_pos_w (read buffer) 尚未反映 reset 事件的 write，
-    # 若對全部 env 讀寫會把 reset 寫入的 Z=0.5 覆蓋回 Z=-10
+    # 若對全部 env 讀寫會把 reset 寫入的 Z=0.9 覆蓋回 Z=-10
     dyn_env_ids = env_ids[is_dynamic]  # 只有 dynamic 環境
     D = len(dyn_env_ids)
 

@@ -85,7 +85,7 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
 
         room_size = 10.0  # ±10m = 20×20m
         wall_thickness = 1.0  # 1.0m 厚度（原 0.2m）
-        wall_height = 1.5
+        wall_height = 3.0   # ★ 真實牆 3m，高於 VLP16 (z=1.6m)，確保 LiDAR 可見
         wall_length = room_size * 2 + wall_thickness
         wall_color = (0.5, 0.5, 0.5)
 
@@ -162,19 +162,20 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
 
         # 100 個障礙物（循環外觀模板，初始隱藏在 Z = -10.0）
         # play --no_curriculum 可自由設定 --num_static/--num_dynamic
+        # ★ 行人高度 (1.6~1.8m)：確保 VLP16 LiDAR (z=1.6m, lowest beam -15°) 可觀測
         MAX_OBS = 100
         HIDDEN_Z = -10.0
         _static_tpl = [
-            {"type": "cuboid", "size": (0.5, 0.5, 1.2), "color": (0.8, 0.2, 0.2)},
-            {"type": "cylinder", "radius": 0.3, "height": 1.0, "color": (0.8, 0.8, 0.2)},
-            {"type": "cuboid", "size": (0.7, 0.7, 1.4), "color": (0.2, 0.4, 0.8)},
-            {"type": "cylinder", "radius": 0.25, "height": 0.8, "color": (0.2, 0.8, 0.2)},
-            {"type": "cuboid", "size": (0.6, 0.6, 1.0), "color": (0.8, 0.2, 0.8)},
-            {"type": "cylinder", "radius": 0.35, "height": 1.2, "color": (0.8, 0.5, 0.2)},
-            {"type": "cuboid", "size": (0.4, 0.4, 0.9), "color": (0.2, 0.8, 0.8)},
-            {"type": "cylinder", "radius": 0.2, "height": 1.5, "color": (0.5, 0.5, 0.5)},
-            {"type": "cuboid", "size": (0.55, 0.55, 1.1), "color": (0.9, 0.9, 0.9)},
-            {"type": "cylinder", "radius": 0.28, "height": 1.1, "color": (0.3, 0.3, 0.3)},
+            {"type": "cuboid",   "size": (0.5, 0.5, 1.7),   "color": (0.8, 0.2, 0.2)},
+            {"type": "cylinder", "radius": 0.3, "height": 1.6, "color": (0.8, 0.8, 0.2)},
+            {"type": "cuboid",   "size": (0.7, 0.7, 1.8),   "color": (0.2, 0.4, 0.8)},
+            {"type": "cylinder", "radius": 0.25, "height": 1.7, "color": (0.2, 0.8, 0.2)},
+            {"type": "cuboid",   "size": (0.6, 0.6, 1.6),   "color": (0.8, 0.2, 0.8)},
+            {"type": "cylinder", "radius": 0.35, "height": 1.8, "color": (0.8, 0.5, 0.2)},
+            {"type": "cuboid",   "size": (0.4, 0.4, 1.7),   "color": (0.2, 0.8, 0.8)},
+            {"type": "cylinder", "radius": 0.2, "height": 1.6, "color": (0.5, 0.5, 0.5)},
+            {"type": "cuboid",   "size": (0.55, 0.55, 1.8),  "color": (0.9, 0.9, 0.9)},
+            {"type": "cylinder", "radius": 0.28, "height": 1.7, "color": (0.3, 0.3, 0.3)},
         ]
         obstacle_sizes: list[float] = []
         for i in range(MAX_OBS):
@@ -554,6 +555,25 @@ class ChargeNavigationEnvCfgVLP16CurriculumNavRL(ChargeNavigationEnvCfgVLP16Curr
     """
 
     rewards: RewardsCfgVLP16NavRL = RewardsCfgVLP16NavRL()
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY(ChargeNavigationEnvCfgVLP16CurriculumNavRL):
+    """NavRL 播放配置。
+
+    目標:
+    - GUI 檢視單一環境
+    - 不依賴 camera sensors / optical flow
+    - 開啟 LiDAR raycaster debug visualization
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.scene.env_spacing = 20.0
+        self.scene.lidar.debug_vis = True
+        self.viewer.eye = (0.0, -18.0, 14.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
 
 
 # ============================================================================

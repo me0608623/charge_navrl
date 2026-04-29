@@ -106,7 +106,7 @@ def randomize_walls(
 
     # 準備每個 slot 的隱藏 pose
     HIDDEN_Z = -10.0
-    wall_height = 1.5
+    wall_height = 3.0   # ★ 對齊 WALL_SLOT_SPECS height，高於 VLP16
 
     for slot_idx in range(MAX_WALL_SLOTS):
         spec_length, spec_width, spec_height = WALL_SLOT_SPECS[slot_idx]
@@ -231,10 +231,10 @@ def randomize_walls(
     if env._wall_randomize_count <= 2:
         active_per_env = env._maze_wall_mask[env_ids].sum(dim=1).float()
         print(
-            f"[randomize_walls] N={N} | "
-            f"min/max_walls=({min_walls},{max_walls}) | "
-            f"actual: mean={active_per_env.mean():.1f} "
-            f"min={active_per_env.min().item():.0f} "
-            f"max={active_per_env.max().item():.0f}",
+            f"[隨機牆壁] 環境數={N} | "
+            f"牆數範圍=({min_walls},{max_walls}) | "
+            f"實際: 平均={active_per_env.mean():.1f} "
+            f"最小={active_per_env.min().item():.0f} "
+            f"最大={active_per_env.max().item():.0f}",
             flush=True,
         )

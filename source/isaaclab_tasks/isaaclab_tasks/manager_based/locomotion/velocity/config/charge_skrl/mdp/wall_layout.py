@@ -35,7 +35,7 @@ import torch
 from torch import Tensor
 
 # Wall segment definitions: (center_x, center_y, size_x, size_y)
-# All walls: thickness=0.2m, height=1.5m
+# All walls: thickness=0.2m, height=3.0m (★ VLP16 可觀測)
 # 6 面內部牆，均勻分佈在 4 個象限，形成走廊結構
 MAZE_WALLS: list[tuple[float, float, float, float]] = [
     (-6.25, 4.0, 3.5, 0.2),  # 0: Top-left horizontal (x: -8 to -4.5)
@@ -78,17 +78,18 @@ ALL_WALLS_20x20 = MAZE_WALLS_20x20 + BOUNDARY_WALLS_20x20
 # ============================================================================
 # Per-env randomized wall slot specifications
 # ============================================================================
-# 8 wall slots with different lengths, all 1.0m thick, 1.5m tall
+# 8 wall slots with different lengths, all 1.0m thick, 3.0m tall
+# ★ height 3.0m: 高於 VLP16 LiDAR (z=1.6m)，確保所有 phase 牆壁可觀測
 # Mesh size is fixed at spawn time (Isaac Sim limitation); mask controls visibility.
 WALL_SLOT_SPECS: list[tuple[float, float, float]] = [
-    (4.0, 1.0, 1.5),   # slot 0: 4m
-    (3.0, 1.0, 1.5),   # slot 1: 3m
-    (5.0, 1.0, 1.5),   # slot 2: 5m
-    (3.5, 1.0, 1.5),   # slot 3: 3.5m
-    (4.5, 1.0, 1.5),   # slot 4: 4.5m
-    (2.5, 1.0, 1.5),   # slot 5: 2.5m
-    (4.0, 1.0, 1.5),   # slot 6: 4m
-    (3.0, 1.0, 1.5),   # slot 7: 3m
+    (4.0, 1.0, 3.0),   # slot 0: 4m
+    (3.0, 1.0, 3.0),   # slot 1: 3m
+    (5.0, 1.0, 3.0),   # slot 2: 5m
+    (3.5, 1.0, 3.0),   # slot 3: 3.5m
+    (4.5, 1.0, 3.0),   # slot 4: 4.5m
+    (2.5, 1.0, 3.0),   # slot 5: 2.5m
+    (4.0, 1.0, 3.0),   # slot 6: 4m
+    (3.0, 1.0, 3.0),   # slot 7: 3m
 ]
 MAX_WALL_SLOTS = 8
 

@@ -217,9 +217,9 @@ def wall_collision_termination(
         d_min_per_env = dists.min(dim=1).values
         wall_src = "perenv" if hasattr(env, '_maze_wall_centers') else "fallback"
         print(
-            f"[wall_collision] src={wall_src} walls={wall_c.shape[1]} thr={threshold:.2f}m "
-            f"envs={d_min_per_env.shape[0]} | "
-            f"d_min: min={d_min_per_env.min():.2f} mean={d_min_per_env.mean():.2f} max={d_min_per_env.max():.2f}",
+            f"[牆壁碰撞] 來源={wall_src} 牆數={wall_c.shape[1]} 門檻={threshold:.2f}m "
+            f"環境數={d_min_per_env.shape[0]} | "
+            f"最近距離: 最小={d_min_per_env.min():.2f} 平均={d_min_per_env.mean():.2f} 最大={d_min_per_env.max():.2f}",
             flush=True,
         )
 
@@ -310,9 +310,9 @@ def obstacle_collision_geometric(
             r = env._obstacle_radii
             radii_info = f" per_obs_radii=[{r.min():.2f}, {r.max():.2f}]"
         print(
-            f"[obstacle_collision_geometric] entities={n_obs_in_scene}/{max_obstacles} "
-            f"collision_distance={collision_distance:.2f}m (fallback){radii_info} "
-            f"hits_step1={int(overlap.sum().item())}/{N}",
+            f"[障礙物幾何碰撞] 實體={n_obs_in_scene}/{max_obstacles} "
+            f"碰撞距離={collision_distance:.2f}m (fallback){radii_info} "
+            f"碰撞數={int(overlap.sum().item())}/{N}",
             flush=True,
         )
 

@@ -40,12 +40,14 @@ from .charge_env_cfg_phase0_navrl import (
 
 from .charge_env_cfg_vlp16 import (
     ChargeNavigationEnvCfgVLP16,
+    ChargeNavigationEnvCfgVLP16Baseline,
     ChargeNavigationEnvCfgVLP16Phase2,
 )
 
 from .charge_env_cfg_vlp16_curriculum import (
     ChargeNavigationEnvCfgVLP16Curriculum,
     ChargeNavigationEnvCfgVLP16CurriculumNavRL,
+    ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY,
 )
 
 # ============================================================================
@@ -66,6 +68,7 @@ __all__ = [
     "ChargeNavigationEnvCfgPhase0NavRL",
     # VLP-16
     "ChargeNavigationEnvCfgVLP16",
+    "ChargeNavigationEnvCfgVLP16Baseline",
     "ChargeNavigationEnvCfgVLP16Phase2",
     # Competitive
     "ChargeNavigationEnvCfgCompetitive",
@@ -73,4 +76,5 @@ __all__ = [
     "ChargeNavigationEnvCfgVLP16Curriculum",
     # VLP-16 Curriculum NavRL
     "ChargeNavigationEnvCfgVLP16CurriculumNavRL",
+    "ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY",
 ]

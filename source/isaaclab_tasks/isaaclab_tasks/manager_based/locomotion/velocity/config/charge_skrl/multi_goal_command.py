@@ -185,9 +185,9 @@ class MultiGoalCommand(GoalCommand):
             self._marker_print_count = 0
         if self._marker_print_count < 3:
             print(
-                f"[MultiGoalCommand] Visualizing {total} markers "
-                f"(envs={self.num_envs}, goals={ng}), "
-                f"pos sample env0 goal0: {marker_pos[0].tolist()}",
+                f"[多目標命令] 視覺化 {total} 個標記 "
+                f"(環境數={self.num_envs}, 目標數={ng}), "
+                f"範例 env0 goal0 位置: {marker_pos[0].tolist()}",
                 flush=True,
             )
             self._marker_print_count += 1

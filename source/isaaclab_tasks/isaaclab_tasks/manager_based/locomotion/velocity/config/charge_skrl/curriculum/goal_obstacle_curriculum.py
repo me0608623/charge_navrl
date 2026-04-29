@@ -67,6 +67,10 @@ def _make_stage(
     ent_coeff_linear=0.30,
     ent_coeff_angular=0.375,
     obstacle_speed_rate=0.8,
+    num_virtual_spots=0,
+    goal_speed_rate=0.7,
+    goal_distance=(2.0, 13.0),
+    min_obstacles_dynamic=None,
 ):
     """建立單一 stage config dict。
 
@@ -87,6 +91,10 @@ def _make_stage(
     Warp Drive obstacle speed (per-phase):
         obstacle_speed_rate: 障礙物最大速度（relative to charge）
         Phase 1: 0.8, Phase 2-6: 0.85, Phase 7-8: 1.15
+
+    MARL params:
+        num_virtual_spots: 虛擬 spot 數量 (WD: num_spot - 1，因為 1 個是物理 charge)
+        goal_speed_rate: 目標移動速率 (WD: goal_speed_rate_with_spot)
     """
     if n_static + n_dynamic > 0:
         remaining = round(1.0 - empty_ratio, 2)
@@ -100,9 +108,10 @@ def _make_stage(
     stage = {
         "name": name,
         "num_goals": num_goals,
-        "goal_distance": (2.0, 13.0),
+        "goal_distance": goal_distance,
         "num_obstacles_static": n_static,
         "num_obstacles_dynamic": n_dynamic,
+        "min_obstacles_dynamic": min_obstacles_dynamic if min_obstacles_dynamic is not None else n_dynamic,
         "empty_ratio": empty_ratio,
         "static_ratio": s_ratio,
         "dynamic_ratio": d_ratio,
@@ -128,6 +137,9 @@ def _make_stage(
     stage["ent_coeff_angular"] = ent_coeff_angular
     # WD obstacle speed per-phase
     stage["obstacle_speed_rate"] = obstacle_speed_rate
+    # MARL params
+    stage["num_virtual_spots"] = num_virtual_spots
+    stage["goal_speed_rate"] = goal_speed_rate
 
     if reward_weights is not None:
         stage["reward_weights"] = reward_weights
@@ -677,6 +689,121 @@ CURRICULUM_CONFIGS = {
     },
 
     # ==================================================================
+    # warp_drive_goal_first: Goal → Static → Dynamic (obs_agent) 漸進課程
+    #
+    # 設計理念:
+    #   Phase 1-2: 純導航（goal-reaching + walls），無障礙物
+    #   Phase 3-4: 加入 static obstacles（LiDAR 學習靜態避障）
+    #   Phase 5-8: 加入 dynamic obstacles（obs_agent policy 啟動）
+    #
+    # 與 warp_drive_v1 差異: WD 從 Phase 1 就有 dynamic，這版把 dynamic 延後。
+    # 讓 RNN 先從 static LiDAR 變化學到基本空間理解，再學時序預測。
+    #
+    # 訓練腳本配合: train_rnn_car.py 讀 num_obstacles_dynamic，
+    # 若 == 0 則跳過 obstacle policy 的 forward + training。
+    #
+    # | Phase | Focus          | Goals | Static | Dynamic | Walls | penalty | obs_agent |
+    # |-------|----------------|-------|--------|---------|-------|---------|-----------|
+    # | 1     | 純導航          | 8     | 0      | 0       | 0     | -5      | OFF       |
+    # | 2     | 導航 + 牆壁     | 6     | 0      | 0       | 1     | -5      | OFF       |
+    # | 3     | Static 初階    | 4     | 2      | 0       | 1     | -8      | OFF       |
+    # | 4     | Static 密集    | 2     | 4      | 0       | 1     | -12     | OFF       |
+    # | 5     | Dynamic 引入   | 1     | 4      | 2       | 1     | -12     | ON        |
+    # | 6     | Dynamic 中階   | 1     | 4      | 6       | 1     | -40     | ON        |
+    # | 7     | Dense dynamic  | 1     | 4      | 10      | 2     | -85     | ON        |
+    # | 8     | 最終穩定        | 1     | 4      | 6       | 2     | -200    | ON        |
+    # ==================================================================
+    "warp_drive_goal_first": {
+        "upgrade_pass_required": 5,
+        "clear_window_on_promote": True,
+        "stages": [
+            # Phase 1: 純導航 — 多 goal，無障礙物
+            # 低 entropy (WD Phase 1 style)，先學基本走
+            _make_stage(8, 0, 0, 0, 0, 0.990, 45, 1.00,
+                        upgrade_sr=0.85, upgrade_max_cr=1.0, upgrade_max_to=0.20,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=50,
+                        downgrade_sr=0.0, downgrade_min_cr=1.0, downgrade_min_to=1.0,
+                        name="GF1_goal_open",
+                        spot_penalty_hit=-5.0, spot_cost_operate=0.03,
+                        ent_coeff_linear=0.10, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.8),
+
+            # Phase 2: 導航 + 牆壁 — 學繞路
+            _make_stage(6, 0, 0, 0, 1, 0.990, 50, 1.00,
+                        upgrade_sr=0.82, upgrade_max_cr=1.0, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=60,
+                        downgrade_sr=0.30, downgrade_min_cr=1.0, downgrade_min_to=0.80,
+                        name="GF2_goal_walls",
+                        spot_penalty_hit=-5.0,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.8),
+
+            # Phase 3: Static 初階 — 2 static + 1 wall
+            # obs_agent OFF (num_obstacles_dynamic=0)
+            _make_stage(4, 2, 0, 1, 1, 0.992, 55, 0.60,
+                        upgrade_sr=0.78, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=70,
+                        name="GF3_static_intro",
+                        spot_penalty_hit=-8.0,
+                        obs_size_rand=0.1,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.8),
+
+            # Phase 4: Static 密集 — 4 static + 1 wall
+            # obs_agent 仍然 OFF
+            _make_stage(2, 4, 0, 1, 1, 0.993, 60, 0.40,
+                        upgrade_sr=0.75, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=85,
+                        name="GF4_static_dense",
+                        spot_penalty_hit=-12.0,
+                        obs_size_rand=0.2,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.85),
+
+            # Phase 5: Dynamic 引入 — 4 static + 2 dynamic
+            # obs_agent 啟動! obstacle policy 開始訓練
+            _make_stage(1, 4, 2, 1, 1, 0.994, 70, 0.30,
+                        upgrade_sr=0.70, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.35, min_stage_updates=100,
+                        name="GF5_dynamic_intro",
+                        spot_penalty_hit=-12.0,
+                        obs_size_rand=0.3, scene_bound_rand=0.5,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.85),
+
+            # Phase 6: Dynamic 中階 — 4 static + 6 dynamic
+            _make_stage(1, 4, 6, 1, 1, 0.996, 90, 0.15,
+                        upgrade_sr=0.65, upgrade_max_cr=0.35, upgrade_max_to=0.25,
+                        upgrade_min_dyn_sr=0.35, min_stage_updates=120,
+                        name="GF6_dynamic_medium",
+                        spot_penalty_hit=-40.0,
+                        obs_size_rand=0.4, scene_bound_rand=1.0,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.85),
+
+            # Phase 7: Dense dynamic — 4 static + 10 dynamic + 2 walls
+            # WD Phase 7 對齊: penalty=-85, speed=1.15
+            _make_stage(1, 4, 10, 1, 2, 0.998, 210, 0.10,
+                        upgrade_sr=0.55, upgrade_min_dyn_sr=0.30, min_stage_updates=150,
+                        name="GF7_dense",
+                        spot_penalty_hit=-85.0,
+                        obs_size_rand=0.4, scene_bound_rand=1.0,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=1.15),
+
+            # Phase 8: 最終穩定 — penalty=-200
+            _make_stage(1, 4, 6, 1, 2, 0.998, 210, 0.15,
+                        upgrade_sr=1.0, upgrade_max_cr=0.0, upgrade_max_to=0.0,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=0,
+                        downgrade_sr=0.15, name="GF8_stable",
+                        spot_penalty_hit=-200.0,
+                        obs_size_rand=0.4, scene_bound_rand=1.0,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=1.15),
+        ],
+    },
+
+    # ==================================================================
     # warp_drive_v1: 完全照 Warp Drive train_rnn_car.py Phase 1-8 設計
     #
     # Warp Drive 原始 → Isaac Lab 映射:
@@ -704,89 +831,179 @@ CURRICULUM_CONFIGS = {
         "upgrade_pass_required": 5,
         "clear_window_on_promote": True,
         "stages": [
-            # Phase 1: 基本導航 + 3 dynamic obstacles（scripted warm-up or policy）
-            # WD: spot=6, goals=20, obs=3, stairs=1, rl_fps=4, episode=60s
+            # Phase 1: 基本導航 + 3 dynamic obstacles + 5 virtual spots
+            # WD: spot=6, goals=20, obs=3, stairs=1, wall=1, rl_fps=4, episode=60s
             # WD reward: penalty_hit=-5, cost_operate=0.03, get_goal=40
             # WD entropy: spot_entropy=0.04×2.5=0.10 (低: 先學基本走)
-            # WD obs_speed: 0.8
-            _make_stage(8, 0, 3, 0, 0, 0.990, 60, 0.50,
+            # WD obs_speed: 0.8, goal_speed: 0.7
+            _make_stage(8, 0, 3, 0, 1, 0.990, 60, 0.50,
                         upgrade_sr=0.72, upgrade_max_cr=1.0, upgrade_max_to=0.30,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=50,
                         downgrade_sr=0.0, downgrade_min_cr=1.0, downgrade_min_to=1.0,
-                        name="WD1_nav_3obs",
+                        name="WD1_nav_3obs_6spot",
                         spot_penalty_hit=-5.0, spot_cost_operate=0.03,
                         ent_coeff_linear=0.10,
-                        obstacle_speed_rate=0.8),
+                        obstacle_speed_rate=0.8,
+                        num_virtual_spots=5, goal_speed_rate=0.7),
 
-            # Phase 2: spot 減少 → 更高存活期望值
-            # WD: spot=3, goals=16, obs=3, obs_speed=0.85×spot
+            # Phase 2: spot=3 → 2 virtual + 3 obs
+            # WD: spot=3, goals=16, obs=3, wall=1, obs_speed=0.85
             # WD reward: penalty_hit=-8
-            _make_stage(8, 0, 3, 0, 0, 0.991, 60, 0.50,
+            _make_stage(8, 0, 3, 0, 1, 0.991, 60, 0.50,
                         upgrade_sr=0.65, min_stage_updates=65,
-                        name="WD2_3obs_fast",
+                        name="WD2_3obs_3spot",
                         spot_penalty_hit=-8.0,
-                        obstacle_speed_rate=0.85),
+                        obstacle_speed_rate=0.85,
+                        num_virtual_spots=2, goal_speed_rate=0.7),
 
             # Phase 3: 單目標追蹤 + cooperate mode
-            # WD: spot=3, goals=1, obs=2, episode=90s, obs_size_rand=0.1
-            # WD reward: penalty_hit=-12, obs_speed=0.85
-            _make_stage(1, 0, 2, 0, 0, 0.993, 90, 0.40,
+            # WD: spot=3, goals=1, obs=2, wall=1, episode=90s, obs_size_rand=0.1
+            # WD reward: penalty_hit=-12, obs_speed=0.85, goal_speed=0.6
+            _make_stage(1, 0, 2, 0, 1, 0.993, 90, 0.40,
                         upgrade_sr=0.65, upgrade_min_dyn_sr=0.35, min_stage_updates=80,
-                        name="WD3_single_goal",
+                        name="WD3_single_3spot",
                         obs_size_rand=0.1, scene_bound_rand=0.5,
                         spot_penalty_hit=-12.0,
-                        obstacle_speed_rate=0.85),
+                        obstacle_speed_rate=0.85,
+                        num_virtual_spots=2, goal_speed_rate=0.6),
 
             # Phase 4: 加入牆壁
             # WD: spot=3, goals=1, obs=2, wall=1, obs_size_rand=0.2, obs_speed=0.85
-            # WD reward: penalty_hit=-12
+            # WD reward: penalty_hit=-12, goal_speed=0.6
             _make_stage(1, 0, 2, 0, 1, 0.994, 60, 0.40,
                         upgrade_sr=0.65, upgrade_min_dyn_sr=0.35, min_stage_updates=95,
-                        name="WD4_wall",
+                        name="WD4_wall_3spot",
                         obs_size_rand=0.2, scene_bound_rand=1.0,
                         spot_penalty_hit=-12.0,
-                        obstacle_speed_rate=0.85),
+                        obstacle_speed_rate=0.85,
+                        num_virtual_spots=2, goal_speed_rate=0.6),
 
             # Phase 5: 長 episode
             # WD: spot=2, goals=1, obs=2, wall=1, obs_size_rand=0.3, obs_speed=0.85
-            # WD reward: penalty_hit=-12
+            # WD reward: penalty_hit=-12, goal_speed=0.6
             _make_stage(1, 0, 2, 0, 1, 0.995, 100, 0.35,
                         upgrade_sr=0.65, upgrade_min_dyn_sr=0.35, min_stage_updates=110,
-                        name="WD5_long",
+                        name="WD5_long_2spot",
                         obs_size_rand=0.3, scene_bound_rand=1.0,
                         spot_penalty_hit=-12.0,
-                        obstacle_speed_rate=0.85),
+                        obstacle_speed_rate=0.85,
+                        num_virtual_spots=1, goal_speed_rate=0.6),
 
             # Phase 6: 大量動態障礙
             # WD: spot=3, goals=1, obs=10, wall=1, obs_size_rand=0.4, obs_speed=0.85
-            # WD reward: penalty_hit=-15
+            # WD reward: penalty_hit=-15, goal_speed=0.6
             _make_stage(1, 0, 10, 0, 1, 0.997, 210, 0.10,
                         upgrade_sr=0.60, upgrade_min_dyn_sr=0.30, min_stage_updates=130,
-                        name="WD6_10obs",
+                        name="WD6_10obs_3spot",
                         obs_size_rand=0.4, scene_bound_rand=1.0,
                         spot_penalty_hit=-15.0,
-                        obstacle_speed_rate=0.85),
+                        obstacle_speed_rate=0.85,
+                        num_virtual_spots=2, goal_speed_rate=0.6),
 
             # Phase 7: 主要訓練階段（保守策略訓練）
-            # WD: spot=2, goals=1, obs=10, wall=2, obs_size_rand=0.4, obs_speed=1.15
-            # WD reward: penalty_hit=-85（大幅增加避障壓力）
-            _make_stage(1, 0, 10, 0, 2, 0.998, 210, 0.10,
+            # WD: spot=2, goals=1, obs=6, wall=2, obs_size_rand=0.4, obs_speed=1.15
+            # WD reward: penalty_hit=-85, goal_speed=0.5
+            _make_stage(1, 0, 6, 0, 2, 0.998, 210, 0.10,
                         upgrade_sr=0.55, upgrade_min_dyn_sr=0.30, min_stage_updates=150,
-                        name="WD7_main",
+                        name="WD7_main_2spot",
                         obs_size_rand=0.4, scene_bound_rand=1.0,
                         spot_penalty_hit=-85.0,
-                        obstacle_speed_rate=1.15),
+                        obstacle_speed_rate=1.15,
+                        num_virtual_spots=1, goal_speed_rate=0.5),
 
             # Phase 8+: 穩定化（極端碰撞懲罰）
             # WD: spot=2, goals=1, obs=6, wall=2, obs_size_rand=0.4, obs_speed=1.15
-            # WD reward: penalty_hit=-200
+            # WD reward: penalty_hit=-200, goal_speed=0.5
             _make_stage(1, 0, 6, 0, 2, 0.998, 210, 0.15,
                         upgrade_sr=1.0, upgrade_max_cr=0.0, upgrade_max_to=0.0,
                         upgrade_min_dyn_sr=0.0, min_stage_updates=0,
-                        downgrade_sr=0.15, name="WD8_stable",
+                        downgrade_sr=0.15, name="WD8_stable_2spot",
                         obs_size_rand=0.4, scene_bound_rand=1.0,
                         spot_penalty_hit=-200.0,
-                        obstacle_speed_rate=1.15),
+                        obstacle_speed_rate=1.15,
+                        num_virtual_spots=1, goal_speed_rate=0.5),
+        ],
+    },
+
+    # ==================================================================
+    # warp_drive_single_agent_v1: Single-agent 版 WD curriculum
+    #
+    # 設計意圖：
+    #   不是逐數字照抄 WD（WD 有 6 台 spot 同場訓練，成功事件頻率天然高）。
+    #   而是在 single-agent 條件下，對齊 WD early phase 的「成功事件頻率意圖」：
+    #     - Phase 1 就包含 dynamic obstacle + wall → RNN 從頭學 obstacle-aware representation
+    #     - 用 多 goals + 短 goal_distance 補回 single-agent 的低成功頻率
+    #     - 保持低 obstacle/wall 密度 → 避免 sparse reward 學不起來
+    #     - early phase 全程 0 static obstacle → 先聚焦 goal-reaching + dynamic awareness + wall avoidance
+    #       static obstacle 留待後續版本再加入
+    #
+    #   WD Phase 1 (6 spot): 20 goals, 3 obs, 1 wall → 每分鐘大量成功事件
+    #   SA Phase 1 (1 agent): 10 goals, 1 obs, 1 wall, 近距目標 → 近似事件頻率
+    #
+    #   Early phase bounded randomization (per-env):
+    #     - walls: min_walls~max_walls per-env random count + random position/orientation
+    #     - dynamic obstacle count: min_obstacles_dynamic~num_obstacles_dynamic per-env random
+    #     - 不是背一張固定地圖，而是學一個對小變化有韌性的策略
+    #     - SA1/SA2: walls 0~1, dynamic 1~2 → 部分 env 較易，部分開始接觸障礙
+    #     - SA3+: walls 下限收斂到 1，dynamic count range 逐漸收窄
+    # ==================================================================
+    "warp_drive_single_agent_v1": {
+        "upgrade_pass_required": 5,
+        "clear_window_on_promote": True,
+        "stages": [
+            # SA1: dynamic 1~2 + walls 0~1，近距多目標補頻率
+            # bounded random: 有些 env 容易（0 wall, 1 dyn），有些稍難（1 wall, 2 dyn）
+            # goal_distance (2,6) → 確保高成功率啟動學習
+            _make_stage(10, 0, 2, 0, 1, 0.990, 60, 0.0,
+                        upgrade_sr=0.72, upgrade_max_cr=1.0, upgrade_max_to=0.30,
+                        upgrade_min_dyn_sr=0.0, min_stage_updates=50,
+                        downgrade_sr=0.0, downgrade_min_cr=1.0, downgrade_min_to=1.0,
+                        name="SA1_goal_wall_dyn",
+                        spot_penalty_hit=-5.0, spot_cost_operate=0.03,
+                        ent_coeff_linear=0.10, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.8,
+                        goal_distance=(2.0, 6.0),
+                        min_obstacles_dynamic=1),
+
+            # SA2: dynamic 1~2 + walls 0~1，目標距離稍遠
+            _make_stage(8, 0, 2, 0, 1, 0.991, 60, 0.0,
+                        upgrade_sr=0.65, min_stage_updates=65,
+                        name="SA2_goal_wall_2dyn",
+                        spot_penalty_hit=-5.0, spot_cost_operate=0.0,
+                        ent_coeff_linear=0.20, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.8,
+                        goal_distance=(2.0, 7.0),
+                        min_obstacles_dynamic=1),
+
+            # SA3: dynamic 2~3 + walls 1~2，碰撞懲罰加重
+            _make_stage(6, 0, 3, 1, 2, 0.993, 60, 0.0,
+                        upgrade_sr=0.65, upgrade_min_dyn_sr=0.35, min_stage_updates=80,
+                        name="SA3_dyn_intro",
+                        spot_penalty_hit=-8.0, spot_cost_operate=0.0,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.85,
+                        goal_distance=(2.0, 8.0),
+                        min_obstacles_dynamic=2),
+
+            # SA4: dynamic 3~4 + walls 1~2，episode 加長，目標漸遠
+            _make_stage(4, 0, 4, 1, 2, 0.994, 75, 0.0,
+                        upgrade_sr=0.65, upgrade_min_dyn_sr=0.35, min_stage_updates=95,
+                        name="SA4_nav_avoid",
+                        spot_penalty_hit=-12.0, spot_cost_operate=0.0,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.85,
+                        goal_distance=(2.0, 9.0),
+                        min_obstacles_dynamic=3),
+
+            # SA5: dynamic 4~6 + walls 1~2，目標少但距離拉長
+            _make_stage(2, 0, 6, 1, 2, 0.995, 90, 0.0,
+                        upgrade_sr=0.60, upgrade_min_dyn_sr=0.30, min_stage_updates=110,
+                        name="SA5_medium",
+                        spot_penalty_hit=-15.0, spot_cost_operate=0.0,
+                        ent_coeff_linear=0.30, ent_coeff_angular=0.375,
+                        obstacle_speed_rate=0.85,
+                        goal_distance=(2.0, 10.0),
+                        min_obstacles_dynamic=4),
         ],
     },
 }
@@ -1016,6 +1233,7 @@ def goal_obstacle_curriculum(
     min_stage_episodes: int = 5000,
     initial_stage: int = 1,
     curriculum_version: str = "baseline_v1",
+    fixed_stage: bool = False,
 ) -> dict[str, float]:
     """資料驅動課程學習 — 支援多版本切換。
 
@@ -1049,6 +1267,7 @@ def goal_obstacle_curriculum(
             "upgrade_pass_count": 0,
             "upgrade_pass_required": upgrade_pass_required,
             "curriculum_version": curriculum_version,
+            "fixed_stage": fixed_stage,
             "clear_window_on_promote": ver_config.get("clear_window_on_promote", True),
             # Open-ended 狀態
             "is_open_ended": is_open_ended,
@@ -1066,13 +1285,16 @@ def goal_obstacle_curriculum(
             f"  num_envs={n}  |  窗口={effective_window}  |  "
             f"最低停留={effective_min} episodes\n"
             f"  Goals={s['num_goals']}  "
-            f"障礙物={s['num_obstacles_static']}S+{s['num_obstacles_dynamic']}D  "
-            f"牆壁={s['min_walls']}-{s['max_walls']}\n"
+            f"障礙物={s['num_obstacles_static']}S+"
+            f"{s.get('min_obstacles_dynamic', s['num_obstacles_dynamic'])}~{s['num_obstacles_dynamic']}D  "
+            f"牆壁={s['min_walls']}-{s['max_walls']}  "
+            f"goal_dist={s['goal_distance']}\n"
             f"  γ={s['gamma']}  episode={s['episode_length_s']}s\n"
             f"  升級: SR>{s['upgrade_sr']:.0%}"
             f"{'  CR<' + format(s['upgrade_max_cr'], '.0%') if s['upgrade_max_cr'] < 1.0 else ''}"
             f"  TO<{s['upgrade_max_to']:.0%}"
-            f"  需連續通過 {upgrade_pass_required} 次\n"
+            f"  需連續通過 {upgrade_pass_required} 次"
+            f"{'  [FIXED STAGE: transitions disabled]' if fixed_stage else ''}\n"
             f"{'='*70}",
             flush=True,
         )
@@ -1123,6 +1345,8 @@ def goal_obstacle_curriculum(
         min_stage_updates = stage_cfg.get("min_stage_updates", 0)
 
     can_transition = (
+        not state.get("fixed_stage", False)
+        and
         len(window) >= effective_window
         and state["stage_episodes"] >= state["min_stage_episodes"]
         and approx_rollout_cycles >= min_stage_updates
@@ -1155,8 +1379,10 @@ def goal_obstacle_curriculum(
                 f"  累計 {state['total_episodes']} ep, "
                 f"第 {state['stage_transitions']} 次轉換\n"
                 f"  Goals={s['num_goals']}  "
-                f"障礙物={s['num_obstacles_static']}S+{s['num_obstacles_dynamic']}D  "
-                f"牆壁={s['min_walls']}-{s['max_walls']}\n"
+                f"障礙物={s['num_obstacles_static']}S+"
+                f"{s.get('min_obstacles_dynamic', s['num_obstacles_dynamic'])}~{s['num_obstacles_dynamic']}D  "
+                f"牆壁={s['min_walls']}-{s['max_walls']}  "
+                f"goal_dist={s['goal_distance']}\n"
                 f"  γ={s['gamma']}  episode={s['episode_length_s']}s\n"
                 f"{'='*70}",
                 flush=True,
@@ -1447,6 +1673,8 @@ def goal_obstacle_curriculum(
             "sr_gap": success_rate - t_sr,
             "cr_gap": t_cr - collision_rate,
             "to_gap": t_to - timeout_rate,
+            "num_virtual_spots": 0.0,
+            "goal_speed_rate": 0.5,
         }
 
     up_sr_target = stage_cfg["upgrade_sr"]
@@ -1487,6 +1715,8 @@ def goal_obstacle_curriculum(
         "ent_coeff_linear": float(stage_cfg.get("ent_coeff_linear", 0.30)),
         "ent_coeff_angular": float(stage_cfg.get("ent_coeff_angular", 0.375)),
         "obstacle_speed_rate": float(stage_cfg.get("obstacle_speed_rate", 0.8)),
+        "num_virtual_spots": float(stage_cfg.get("num_virtual_spots", 0)),
+        "goal_speed_rate": float(stage_cfg.get("goal_speed_rate", 0.7)),
     }
 
 
@@ -1579,6 +1809,7 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
                 ec.params["mixed_ratio"] = cfg.get("mixed_ratio", 0.0)
                 ec.params["num_obstacles_static"] = cfg["num_obstacles_static"]
                 ec.params["num_obstacles_dynamic"] = cfg["num_obstacles_dynamic"]
+                ec.params["min_obstacles_dynamic"] = cfg.get("min_obstacles_dynamic", cfg["num_obstacles_dynamic"])
                 evt.set_term_cfg(name, ec)
             except Exception:
                 continue

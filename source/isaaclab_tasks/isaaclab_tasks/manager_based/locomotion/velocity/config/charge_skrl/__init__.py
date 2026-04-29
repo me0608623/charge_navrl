@@ -11,10 +11,18 @@ Charge 導航任務模組（SKRL 專用）
 - Curriculum: v9 純死亡機制 (舊版對照)
 """
 
+import importlib.util
+
 import gymnasium as gym
 
 from . import agents
+
+if importlib.util.find_spec(f"{__name__}.direct_marl") is not None:
+    from . import direct_marl  # noqa: F401 — registers DirectMARLEnv tasks
+
 from .cfg import (
+    ChargeNavigationEnvCfgVLP16,
+    ChargeNavigationEnvCfgVLP16Baseline,
     ChargeNavigationEnvCfgVLP16Curriculum,
     ChargeNavigationEnvCfgVLP16CurriculumNavRL,
 )
@@ -24,6 +32,32 @@ from .cfg import (
 ##
 
 _skrl_agents = "isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.agents"
+
+# ============================================================================
+# VLP-16 Base: fixed single-agent environment (backward-compatible task id)
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16:ChargeNavigationEnvCfgVLP16",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+# ============================================================================
+# VLP-16 Single Baseline: static-only, no domain randomization
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Baseline",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16:ChargeNavigationEnvCfgVLP16Baseline",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
 
 # ============================================================================
 # VLP-16 Curriculum: 20×20m + 8 階段課程 (v9 純死亡機制 reward)
@@ -48,6 +82,19 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:ChargeNavigationEnvCfgVLP16CurriculumNavRL",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:"
+            "ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY"
+        ),
         "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
     },
 )

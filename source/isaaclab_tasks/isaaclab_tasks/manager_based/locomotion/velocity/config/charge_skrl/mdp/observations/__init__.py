@@ -28,6 +28,7 @@ from .functions import (
 from .obs_functions import (
     # static state (72D)
     lidar_vlp16_to_2d_bins,
+    wd_like_sweep_72,
     # obs state (60D) — v2 dynamic obstacle observation
     topk_obstacles_6d,
     # goal-centric obstacle observation (phase0 使用)
@@ -49,6 +50,7 @@ __all__ = [
     "goal_position_in_robot_frame",
     "time_remaining_ratio",
     "lidar_vlp16_to_2d_bins",
+    "wd_like_sweep_72",
     "lidar_scan_2d_sweep",
     "topk_obstacles_goal_centric",
     # legacy

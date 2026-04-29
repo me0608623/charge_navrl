@@ -36,6 +36,7 @@ import math
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
+import isaaclab.utils.math as math_utils
 
 
 # ====================================================================
@@ -131,12 +132,23 @@ def lidar_vlp16_to_2d_bins(
     # Step 0: Z-filter — 排除 Z 異常的命中（修復 Bug B「鬼影」問題）
     #
     # 隱藏障礙物 (z=-10) 投影到 2D 後會偽裝成「近距離物體」，
-    # 造成 lidar.min 永遠 ≈ 0。此處用 sensor_z ± z_filter 過濾掉。
+    # 造成 lidar.min 永遠 ≈ 0。
+    # 使用 per-ray origin z (包含 OffsetCfg z=1.6) 而非 pos_w (base_link z≈0)。
     # ==========================================================
     if z_filter > 0:
-        sensor_z = sensor_pos[:, 2:3].unsqueeze(1)  # [N, 1, 1]
-        hit_z = hit_points[:, :, 2:3]                # [N, total_rays, 1]
-        z_diff = (hit_z - sensor_z).abs().squeeze(-1)  # [N, total_rays]
+        # _ray_starts_w includes OffsetCfg; pos_w reports parent prim z≈0
+        if hasattr(sensor, "_ray_starts_w") and sensor._ray_starts_w is not None:
+            origin_z = sensor._ray_starts_w[:, :, 2:3]  # [N, R, 1]
+        else:
+            import warnings
+            warnings.warn(
+                "lidar_vlp16_to_2d_bins: sensor._ray_starts_w unavailable, "
+                "falling back to sensor.data.pos_w for z_filter",
+                stacklevel=2,
+            )
+            origin_z = sensor_pos[:, 2:3].unsqueeze(1)  # [N, 1, 1]
+        hit_z = hit_points[:, :, 2:3]                    # [N, R, 1]
+        z_diff = (hit_z - origin_z).abs().squeeze(-1)    # [N, R]
         # 高度差超過 z_filter 的命中視為無效 → r_max
         invalid_z = z_diff > z_filter
         dist_2d = torch.where(
@@ -230,6 +242,105 @@ def lidar_vlp16_to_2d_bins(
     x = x / r_max
 
     return x   # [N, num_bins]
+
+
+def wd_like_sweep_72(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    num_bins: int = 72,
+    r_max: float = 20.0,
+    r_robot: float = 0.3,
+    r_min: float = 0.0,
+    z_filter: float = 0.0,
+    displacement_std: float = 0.0,
+    hole_rate: float = 0.0,
+    distractor_rate: float = 0.0,
+    distractor_range: tuple[float, float] = (0.2, 2.0),
+) -> torch.Tensor:
+    """Build a WD-style 72-bin sweep from raw ray hits in the robot yaw frame.
+
+    This term does not rely on the original ray ordering. Instead, it:
+
+    1. Computes hit vectors in world frame from ``ray_hits_w - ray_starts_w``.
+    2. Rotates them into the sensor/robot yaw-aligned frame.
+    3. Quantizes angles into a fixed 360-degree, 72-bin layout.
+    4. Uses the minimum distance in each bin as the sweep value.
+    5. Supports multi-channel LiDAR implicitly because all channels project into
+       the same 72 azimuth bins and are reduced with ``amin``.
+
+    Returns:
+        Tensor of shape ``[num_envs, 72]`` in normalized distance units ``[0, 1]``.
+    """
+    sensor = env.scene.sensors[sensor_cfg.name]
+    sensor_quat_w = sensor.data.quat_w      # [N, 4]
+    hit_points_w = sensor.data.ray_hits_w   # [N, R, 3]
+
+    num_envs, num_rays, _ = hit_points_w.shape
+    device = hit_points_w.device
+    dtype = hit_points_w.dtype
+
+    # Per-ray world-space origins (includes OffsetCfg, e.g. z=1.6)
+    # sensor.data.pos_w reports parent prim (base_link z≈0), NOT ray origin.
+    if hasattr(sensor, "_ray_starts_w") and sensor._ray_starts_w is not None:
+        ray_starts_w = sensor._ray_starts_w  # [N, R, 3]
+    else:
+        import warnings
+        warnings.warn(
+            "wd_like_sweep_72: sensor._ray_starts_w unavailable, "
+            "falling back to sensor.data.pos_w (z_filter may be inaccurate)",
+            stacklevel=2,
+        )
+        ray_starts_w = sensor.data.pos_w.unsqueeze(1).expand_as(hit_points_w)
+
+    rel_hits_w = hit_points_w - ray_starts_w  # [N, R, 3]
+    valid = torch.isfinite(hit_points_w).all(dim=-1)
+
+    if z_filter > 0:
+        valid &= rel_hits_w[..., 2].abs() <= z_filter
+
+    yaw_quat_w = math_utils.yaw_quat(sensor_quat_w)
+    yaw_quat_w = yaw_quat_w.unsqueeze(1).expand(-1, num_rays, -1)
+    rel_hits_b = math_utils.quat_apply_inverse(yaw_quat_w, rel_hits_w)
+
+    distances_2d = torch.linalg.norm(rel_hits_b[..., :2], dim=-1)
+    valid &= torch.isfinite(distances_2d)
+
+    if r_min > 0:
+        valid &= distances_2d >= r_min
+
+    distances_2d = torch.where(
+        valid,
+        distances_2d,
+        torch.full_like(distances_2d, r_max),
+    )
+    distances_2d = torch.clamp(distances_2d, min=0.0, max=r_max)
+
+    if displacement_std > 0:
+        noise = torch.randn_like(distances_2d) * displacement_std
+        distances_2d = torch.clamp(distances_2d + noise, min=0.0, max=r_max)
+
+    if hole_rate > 0:
+        hole_mask = torch.rand_like(distances_2d) < hole_rate
+        distances_2d = torch.where(hole_mask, r_max, distances_2d)
+
+    if distractor_rate > 0:
+        distractor_mask = torch.rand_like(distances_2d) < distractor_rate
+        min_r, max_r = distractor_range
+        distractor_values = torch.rand_like(distances_2d) * (max_r - min_r) + min_r
+        distances_2d = torch.where(distractor_mask, distractor_values, distances_2d)
+
+    angles = torch.atan2(rel_hits_b[..., 1], rel_hits_b[..., 0])  # [-pi, pi]
+    bin_size = 2.0 * math.pi / num_bins
+    bin_indices = torch.floor((angles + math.pi) / bin_size).long()
+    bin_indices = torch.clamp(bin_indices, 0, num_bins - 1)
+
+    sweep = torch.full((num_envs, num_bins), r_max, device=device, dtype=dtype)
+    sweep.scatter_reduce_(1, bin_indices, distances_2d, reduce="amin", include_self=True)
+
+    sweep = torch.clamp(sweep - r_robot, min=0.0, max=r_max)
+    sweep = sweep / r_max
+
+    return sweep
 
 
 # ====================================================================

@@ -52,7 +52,8 @@ def randomize_obstacles_by_difficulty(
     mixed_ratio: float = 0.0,      # 混合模式：前 N_s 個靜態 + 後 N_d 個動態
     # 障礙物配置
     num_obstacles_static: int = 5,   # 靜態環境的障礙物數量
-    num_obstacles_dynamic: int = 8,  # 動態環境的障礙物數量
+    num_obstacles_dynamic: int = 8,  # 動態環境的最大障礙物數量
+    min_obstacles_dynamic: int | None = None,  # 動態環境的最小障礙物數量 (None = 固定為 num_obstacles_dynamic)
     max_obstacles: int = 10,         # 場景中最大障礙物數量
     # 移動參數（僅動態環境使用）
     speed_range: float = 0.5,
@@ -72,8 +73,8 @@ def randomize_obstacles_by_difficulty(
 
     在同一個批次中建立不同難度的混合場景：
     - Group 1 (Empty, 50%): 所有障礙物 Z = -10.0，速度 V = 0.0
-    - Group 2 (Static, 30%): 前 num_obstacles_static 個障礙物 Z = 0.5，速度 V = 0.0
-    - Group 3 (Dynamic, 20%): 前 num_obstacles_dynamic 個障礙物 Z = 0.5，隨機速度
+    - Group 2 (Static, 30%): 前 num_obstacles_static 個障礙物 Z = 0.9，速度 V = 0.0
+    - Group 3 (Dynamic, 20%): 前 num_obstacles_dynamic 個障礙物 Z = 0.9，隨機速度
 
     🔥 關鍵實現：
     1. 使用 PyTorch Tensor 操作，避免 Python for 迴圈遍歷環境
@@ -189,7 +190,7 @@ def randomize_obstacles_by_difficulty(
     safe_margin = 1.5
     spawn_range = boundary - safe_margin
     HIDDEN_Z = -10.0
-    VISIBLE_Z = 0.5
+    VISIBLE_Z = 0.9  # ★ 行人高度 1.6~1.8m 中心，底部 z≥0，頂部 z≥1.6m (高於 VLP16)
 
     # 定義 4 個象限（用於分層採樣，確保障礙物分布均勻）
     quadrants = [
@@ -208,14 +209,32 @@ def randomize_obstacles_by_difficulty(
 
     # ========================================================================
     # Active density masking for dynamic environments
+    # Per-env random obstacle count when min_obstacles_dynamic < num_obstacles_dynamic
     # ========================================================================
+    _min_dyn = min_obstacles_dynamic if min_obstacles_dynamic is not None else num_obstacles_dynamic
+    _min_dyn = max(0, min(_min_dyn, num_obstacles_dynamic))
+
     num_dyn = is_dynamic.sum().item()
-    if num_dyn > 0 and active_obstacle_ratio < 1.0:
+    if num_dyn > 0 and _min_dyn < num_obstacles_dynamic:
+        # Per-env random count in [_min_dyn, num_obstacles_dynamic]
+        per_env_count = torch.randint(
+            _min_dyn, num_obstacles_dynamic + 1, (num_dyn,), device=device
+        )
+        # Build per-env active mask: for each env, randomly select which slots are active
+        rand_scores = torch.rand(num_dyn, num_obstacles_dynamic, device=device)
+        # Sort scores and keep top-k per env (k = per_env_count)
+        dyn_active_mask = torch.zeros(num_dyn, max_obstacles, device=device, dtype=torch.bool)
+        for j in range(num_dyn):
+            k = per_env_count[j].item()
+            if k > 0:
+                _, top_idx = rand_scores[j, :].topk(k)
+                dyn_active_mask[j, top_idx] = True
+        dyn_env_ids_local = torch.arange(N, device=device)[is_dynamic]
+        env._obstacle_active_mask[env_ids[dyn_env_ids_local]] = dyn_active_mask
+    elif num_dyn > 0 and active_obstacle_ratio < 1.0:
         num_active = max(1, int(num_obstacles_dynamic * active_obstacle_ratio))
-        # Random scores to select which obstacles are active per dynamic env
         rand_scores = torch.rand(num_dyn, num_obstacles_dynamic, device=device)
         _, active_indices = rand_scores.topk(num_active, dim=1)
-        # Build full-width mask [num_dyn, max_obstacles]
         dyn_active_mask = torch.zeros(num_dyn, max_obstacles, device=device, dtype=torch.bool)
         dyn_active_mask.scatter_(1, active_indices, True)
         dyn_env_ids_local = torch.arange(N, device=device)[is_dynamic]

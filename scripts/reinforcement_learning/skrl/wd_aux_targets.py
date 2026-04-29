@@ -6,15 +6,16 @@ Port from Warp Drive:
   - Loss:   new_warp_drive/warp_drive/training/algorithms/module_loss.py
 
 7D target layout (per env):
-  [near_1_x, near_1_y, near_1_d,   # nearest obstacle body-frame (x, y, surface_dist)
-   near_2_x, near_2_y, near_2_d,   # 2nd nearest obstacle body-frame (x, y, surface_dist)
+  [near_1_x, near_1_y, near_1_d,   # nearest obstacle body-frame surface vector (x, y, dist)
+   near_2_x, near_2_y, near_2_d,   # 2nd nearest obstacle body-frame surface vector (x, y, dist)
    timestep]                        # current episode step (raw integer, not normalized)
 
 Design:
   - Training-only privileged signal — NOT available at inference
   - Target comes from simulator geometry, NOT from policy observation
   - Coordinate frame: robot body-frame (forward=+x, left=+y)
-  - Distance: surface distance (center_dist - obj_radius - robot_radius), clamped >= 0
+  - Distance: predicted surface distance (center_dist - obj_radius - robot_radius), clamped >= 0
+  - x/y: predicted vector from robot to obstacle surface, not obstacle center
   - Only considers active obstacles (Z > 0)
   - Missing obstacles filled with default=10.0 (WD convention: far away)
 
@@ -42,6 +43,7 @@ def build_wd_preprocess_targets(
     max_obstacles: int,
     device: torch.device,
     robot_radius: float = 0.33,
+    prediction_horizon_s: float = 1.0,
 ) -> torch.Tensor:
     """Build WD-style 7D privileged geometry target from simulator state.
 
@@ -54,6 +56,7 @@ def build_wd_preprocess_targets(
     Geometry sources (reusing existing Isaac Lab patterns):
       - Robot pos/quat: env.scene["robot"].data.root_pos_w / root_quat_w
       - Obstacle pos:   env._obs_policy_cache[i].data.root_pos_w
+      - Obstacle vel:   env._obstacle_velocities[:, i] when available
       - Obstacle radii:  env._obstacle_radii[:, i]
       - Episode step:   env.episode_length_buf
 
@@ -66,6 +69,8 @@ def build_wd_preprocess_targets(
         max_obstacles: maximum number of obstacle entities in scene
         device: torch device
         robot_radius: robot body radius for surface distance (m)
+        prediction_horizon_s: seconds to extrapolate obstacle motion before
+            computing the surface vector. WD uses a short look-ahead target.
 
     Returns:
         [num_envs, 7] float tensor — WD preprocess_real_data equivalent
@@ -92,8 +97,8 @@ def build_wd_preprocess_targets(
             else:
                 env_unwrapped._obs_policy_cache.append(None)
 
-    # --- Collect all obstacle body-frame positions + surface distances ---
-    # Shape: [E, N_active, 3] where 3 = (body_x, body_y, surface_d)
+    # --- Collect predicted obstacle surface vectors + surface distances ---
+    # Shape: [E, N_active, 3] where 3 = (surface_x_body, surface_y_body, surface_d)
     n_found = 0
     # Pre-allocate for max_obstacles
     all_body_x = torch.full((num_envs, max_obstacles), _FAR_DEFAULT, device=device)
@@ -116,16 +121,23 @@ def build_wd_preprocess_targets(
         if not active.any():
             continue
 
-        # World-frame displacement
-        dx_w = obs_pos_w[:, 0] - robot_pos_w[:, 0]  # [E]
-        dy_w = obs_pos_w[:, 1] - robot_pos_w[:, 1]  # [E]
+        # WD predicts obstacle position before building preprocess_data_arr.
+        # When the obstacle velocity cache is unavailable, this falls back to
+        # the current position while still using surface-vector geometry.
+        pred_x_w = obs_pos_w[:, 0]
+        pred_y_w = obs_pos_w[:, 1]
+        if hasattr(env_unwrapped, "_obstacle_velocities"):
+            obs_vel = env_unwrapped._obstacle_velocities
+            if obs_vel.shape[1] > i:
+                pred_x_w = pred_x_w + obs_vel[:, i, 0] * prediction_horizon_s
+                pred_y_w = pred_y_w + obs_vel[:, i, 1] * prediction_horizon_s
 
-        # Body-frame rotation (obs_functions.py: R(yaw)^T * delta)
-        bx = cos_yaw * dx_w + sin_yaw * dy_w         # [E]
-        by = -sin_yaw * dx_w + cos_yaw * dy_w        # [E]
+        # World-frame displacement to predicted obstacle center.
+        dx_w = pred_x_w - robot_pos_w[:, 0]  # [E]
+        dy_w = pred_y_w - robot_pos_w[:, 1]  # [E]
 
-        # Center distance
-        center_d = torch.sqrt(bx * bx + by * by).clamp(min=1e-6)  # [E]
+        # Center distance in world frame.
+        center_d = torch.sqrt(dx_w * dx_w + dy_w * dy_w).clamp(min=1e-6)  # [E]
 
         # Obstacle radius
         if has_radii:
@@ -138,10 +150,22 @@ def build_wd_preprocess_targets(
             # But WD uses: center_d - obj_radius - robot_radius
             # _obstacle_radii ≈ obs_collision_base (default 0.9) which is ~obj_r + robot_r
             # So surface_d = center_d - _obstacle_radii is close to WD convention
-            surf_d = (center_d - obs_r).clamp(min=0.0)
+            collision_radius = obs_r
         else:
             # Fallback: assume obstacle radius ≈ 0.5m
-            surf_d = (center_d - 0.5 - robot_radius).clamp(min=0.0)
+            collision_radius = torch.full_like(center_d, 0.5 + robot_radius)
+
+        # Vector to the closest obstacle surface point along the center ray.
+        # This matches the collision-relevant target: if the obstacle overlaps
+        # the robot collision radius, the remaining safe distance is zero.
+        surf_d = (center_d - collision_radius).clamp(min=0.0)
+        surface_scale = surf_d / center_d
+        surface_dx_w = dx_w * surface_scale
+        surface_dy_w = dy_w * surface_scale
+
+        # Body-frame rotation (obs_functions.py: R(yaw)^T * delta)
+        bx = cos_yaw * surface_dx_w + sin_yaw * surface_dy_w
+        by = -sin_yaw * surface_dx_w + cos_yaw * surface_dy_w
 
         all_body_x[:, i] = torch.where(active, bx, torch.full_like(bx, _FAR_DEFAULT))
         all_body_y[:, i] = torch.where(active, by, torch.full_like(by, _FAR_DEFAULT))

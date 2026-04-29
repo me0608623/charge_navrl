@@ -36,7 +36,10 @@ from isaaclab.utils.version import get_isaac_sim_version
 
 # Note: This is a temporary import for the VisuoTactileSensorCfg class.
 # It will be removed once the VisuoTactileSensor class is added to the core Isaac Lab framework.
-from isaaclab_contrib.sensors.tacsl_sensor import VisuoTactileSensorCfg
+try:
+    from isaaclab_contrib.sensors.tacsl_sensor import VisuoTactileSensorCfg
+except ImportError:
+    VisuoTactileSensorCfg = None
 
 from .interactive_scene_cfg import InteractiveSceneCfg
 
@@ -770,7 +773,7 @@ class InteractiveScene:
                     for filter_prim_path in asset_cfg.filter_prim_paths_expr:
                         updated_filter_prim_paths_expr.append(filter_prim_path.format(ENV_REGEX_NS=self.env_regex_ns))
                     asset_cfg.filter_prim_paths_expr = updated_filter_prim_paths_expr
-                elif isinstance(asset_cfg, VisuoTactileSensorCfg):
+                elif VisuoTactileSensorCfg is not None and isinstance(asset_cfg, VisuoTactileSensorCfg):
                     if hasattr(asset_cfg, "camera_cfg") and asset_cfg.camera_cfg is not None:
                         asset_cfg.camera_cfg.prim_path = asset_cfg.camera_cfg.prim_path.format(
                             ENV_REGEX_NS=self.env_regex_ns
