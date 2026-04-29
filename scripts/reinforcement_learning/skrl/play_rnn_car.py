@@ -48,7 +48,17 @@ parser.add_argument("--gate_cone_half_bins", type=int, default=6)
 parser.add_argument("--gate_cone_bottom_k", type=int, default=3)
 parser.add_argument("--gate_omni_blend", type=float, default=0.2)
 parser.add_argument("--use_safety_shield", action="store_true", default=False)
+parser.add_argument("--use_vo_shield", action="store_true", default=False,
+                    help="Enable VO predictive shield after discrete action decoding")
+parser.add_argument("--scripted_obstacles", action="store_true", default=False,
+                    help="Allow scripted dynamic obstacle motion during play instead of freezing it")
 parser.add_argument("--shield_mode", type=str, default="soft", choices=["soft", "hard"])
+parser.add_argument("--vo_horizon", type=float, default=1.0,
+                    help="VO prediction horizon in seconds")
+parser.add_argument("--vo_safety_radius", type=float, default=0.45,
+                    help="VO collision/safety radius in meters")
+parser.add_argument("--vo_evade_gain", type=float, default=1.0,
+                    help="VO angular evasion gain")
 parser.add_argument("--dynamic_safety_mode", type=str, default="log_distance",
                     choices=["log_distance", "closing_risk"])
 parser.add_argument("--goal_vel_gate_beta", type=float, default=0.2)
@@ -73,12 +83,18 @@ parser.add_argument("--lidar_sanity", action="store_true", default=False,
                     help="Run LiDAR geometry sanity test after env init, then exit")
 parser.add_argument("--diagnostic", action="store_true", default=False,
                     help="Print LiDAR observability diagnostics for first 10 steps")
+parser.add_argument("--aux_debug", action="store_true", default=False,
+                    help="Print RNN aux prediction vs simulator-derived nearest-obstacle target")
+parser.add_argument("--aux_debug_interval", type=int, default=25,
+                    help="Print aux debug every N play steps")
 parser.add_argument("--bev_vis", action="store_true", default=False,
                     help="Show a live top-down BEV window of the 72-bin LiDAR sweep during play")
 parser.add_argument("--bev_update_interval", type=int, default=2,
                     help="Update BEV visualization every N play steps")
 parser.add_argument("--bev_max_range", type=float, default=20.0,
                     help="Maximum range in meters for the BEV visualization")
+parser.add_argument("--bev_frame", type=str, default="body", choices=["body", "world"],
+                    help="BEV frame: body keeps 0 deg as robot front; world keeps world axes fixed")
 parser.add_argument("--no_domain_randomization", action="store_true", default=False)
 parser.add_argument("--reward_speed_v05", action="store_true", default=False)
 parser.add_argument("--ds_weight_boost", type=float, default=1.0)
@@ -107,6 +123,7 @@ import isaaclab_tasks  # noqa: F401
 sys.path.insert(0, str(Path(__file__).parent))
 from charge_env_overrides import apply_charge_env_overrides
 from modular_rnn_models import LidarStateExtractor, PolicyHead, PreprocessRNN, RNNStateManager, ValueHead
+from wd_aux_targets import build_wd_preprocess_targets
 
 
 POLICY_OBS_INDICES = list(range(0, 78)) + [138]
@@ -502,10 +519,66 @@ def print_lidar_diagnostic(raw_env, step: int):
           f"max={int((real_dist >= 19.5).sum())}")
 
 
+def print_aux_debug(raw_env, step: int, obs_tensor: torch.Tensor, aux_pred: torch.Tensor, max_obstacles: int):
+    """Print RNN aux prediction against the simulator target for env 0."""
+    from isaaclab.managers import SceneEntityCfg
+    from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.observations.obs_functions import (
+        wd_like_sweep_72,
+    )
+
+    target = build_wd_preprocess_targets(
+        raw_env,
+        max_obstacles=max_obstacles,
+        device=aux_pred.device,
+    )
+
+    pred0 = aux_pred[0].detach()
+    tgt0 = target[0].detach()
+    err0 = pred0 - tgt0
+
+    def _fmt_triplet(v):
+        return f"x={v[0].item():+6.2f} y={v[1].item():+6.2f} d={v[2].item():5.2f}"
+
+    sensor_cfg = SceneEntityCfg("lidar")
+    sensor_cfg.resolve(raw_env.scene)
+    sweep = wd_like_sweep_72(
+        raw_env,
+        sensor_cfg,
+        num_bins=72,
+        r_max=20.0,
+        r_robot=0.3,
+        r_min=0.5,
+        z_filter=0.5,
+    )
+    lidar_m = sweep[0] * 20.0
+    near_bin = int(lidar_m.argmin().item())
+    near_angle = -180.0 + near_bin * 5.0
+
+    obs_lidar = obs_tensor[0, 6:78].detach()
+    obs_near_bin = int(obs_lidar.argmin().item())
+    obs_near_angle = -180.0 + obs_near_bin * 5.0
+    # obs_lidar is normalized by env observation config: distance / 20.0.
+    obs_near_m = obs_lidar[obs_near_bin].item() * 20.0
+
+    print(f"\n[AUX DEBUG step={step}] env0 RNN prediction vs simulator target")
+    print("  near1 pred:  " + _fmt_triplet(pred0[0:3]))
+    print("  near1 real:  " + _fmt_triplet(tgt0[0:3]))
+    print("  near1 error: " + _fmt_triplet(err0[0:3]))
+    print("  near2 pred:  " + _fmt_triplet(pred0[3:6]))
+    print("  near2 real:  " + _fmt_triplet(tgt0[3:6]))
+    print("  near2 error: " + _fmt_triplet(err0[3:6]))
+    print(f"  timestep pred={pred0[6].item():.2f} real={tgt0[6].item():.0f} "
+          f"(loss weight is 0 in training)")
+    print(f"  lidar from obs[6:78]: min={obs_near_m:.2f}m "
+          f"@local_bin={obs_near_bin} global_bin={obs_near_bin + 6} ({obs_near_angle:+.0f}deg)")
+    print(f"  lidar recomputed:     min={lidar_m[near_bin].item():.2f}m "
+          f"@bin={near_bin} ({near_angle:+.0f}deg)\n")
+
+
 class LiveBEVVisualizer:
     """Small Matplotlib BEV window for inspecting the exact 72-bin sweep used by RL."""
 
-    def __init__(self, raw_env, max_range: float = 20.0, image_size: int = 700):
+    def __init__(self, raw_env, max_range: float = 20.0, frame: str = "body"):
         import matplotlib
         import numpy as np
         from isaaclab.managers import SceneEntityCfg
@@ -522,16 +595,42 @@ class LiveBEVVisualizer:
         self.np = np
         self.raw_env = raw_env
         self.max_range = float(max_range)
+        self.frame = frame
         self.wd_like_sweep_72 = wd_like_sweep_72
         self.sensor_cfg = SceneEntityCfg("lidar")
         self.sensor_cfg.resolve(raw_env.scene)
         self.ground_echo_dist = 1.6 / np.tan(np.radians(15.0)) - 0.3
+        self.goal_body_radius = 0.35
+        self.goal_threshold = 0.35
+        self.goal_success_center_dist = self.goal_body_radius + self.goal_threshold
         self.plt.ion()
         self.fig, self.ax = self.plt.subplots(figsize=(7, 7))
         try:
             self.fig.canvas.manager.set_window_title("Charge RL BEV - 72-bin LiDAR")
         except Exception:
             pass
+
+    def _sensor_yaw(self) -> float:
+        """Return env-0 sensor yaw in world frame. Isaac Lab quaternions are wxyz."""
+        q = self.raw_env.scene.sensors["lidar"].data.quat_w[0].detach().cpu().numpy()
+        w, x, y, z = [float(v) for v in q]
+        return float(self.np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+    def _body_to_world(self, x_forward, y_left, yaw: float):
+        cos_y = self.np.cos(yaw)
+        sin_y = self.np.sin(yaw)
+        x_world = cos_y * x_forward - sin_y * y_left
+        y_world = sin_y * x_forward + cos_y * y_left
+        return x_world, y_world
+
+    def _world_rel_to_plot(self, rel_w, yaw: float):
+        if self.frame == "world":
+            return rel_w[..., 0], rel_w[..., 1]
+        cos_y = self.np.cos(yaw)
+        sin_y = self.np.sin(yaw)
+        x_forward = cos_y * rel_w[..., 0] + sin_y * rel_w[..., 1]
+        y_left = -sin_y * rel_w[..., 0] + cos_y * rel_w[..., 1]
+        return y_left, x_forward
 
     def update(self, step: int, obs_tensor: torch.Tensor, actions: torch.Tensor):
         np = self.np
@@ -549,6 +648,19 @@ class LiveBEVVisualizer:
         angles = np.radians(angles_deg)
         x_forward = real_dist * np.cos(angles)
         y_left = real_dist * np.sin(angles)
+        yaw = self._sensor_yaw()
+
+        if self.frame == "world":
+            plot_x, plot_y = self._body_to_world(x_forward, y_left, yaw)
+            xlabel = "world X relative to robot (m)"
+            ylabel = "world Y relative to robot (m)"
+            title_suffix = "world frame"
+        else:
+            # Body-frame display: x-axis is left/right, y-axis is forward. 0 deg is always robot front.
+            plot_x, plot_y = y_left, x_forward
+            xlabel = "left/right y (m)"
+            ylabel = "forward x (m)"
+            title_suffix = "body frame: 0 deg = robot front"
 
         if not self.plt.fignum_exists(self.fig.number):
             return False
@@ -560,19 +672,18 @@ class LiveBEVVisualizer:
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlim(-self.max_range, self.max_range)
         ax.set_ylim(-self.max_range, self.max_range)
-        ax.set_xlabel("left/right y (m)", color="white")
-        ax.set_ylabel("forward x (m)", color="white")
+        ax.set_xlabel(xlabel, color="white")
+        ax.set_ylabel(ylabel, color="white")
         ax.tick_params(colors="white")
         ax.grid(True, color="#383838", linewidth=0.7)
-        ax.set_title("Charge RL BEV - 72-bin LiDAR", color="white")
+        ax.set_title(f"Charge RL BEV - 72-bin LiDAR ({title_suffix})", color="white")
 
         for r_m in [2, 5, 10, 15, 20]:
             circle = self.plt.Circle((0, 0), r_m, fill=False, color="#4a4a4a", linewidth=0.8)
             ax.add_patch(circle)
             ax.text(0.2, r_m, f"{r_m}m", color="#888888", fontsize=8)
 
-        # Plot body-frame BEV as (y_left, x_forward), so forward points upward.
-        ax.plot(y_left, x_forward, color="#7fbf7f", linewidth=1.2, alpha=0.8)
+        ax.plot(plot_x, plot_y, color="#7fbf7f", linewidth=1.2, alpha=0.8)
 
         colors = np.full(real_dist.shape, "#50dc50", dtype=object)
         colors[real_dist < 5.0] = "#ffa500"
@@ -581,31 +692,55 @@ class LiveBEVVisualizer:
         sizes = np.full(real_dist.shape, 22.0)
         sizes[real_dist < 5.0] = 36.0
         sizes[real_dist < 2.0] = 54.0
-        ax.scatter(y_left, x_forward, c=colors.tolist(), s=sizes, zorder=3)
+        ax.scatter(plot_x, plot_y, c=colors.tolist(), s=sizes, zorder=3)
 
         # Robot footprint and forward direction.
         ax.add_patch(self.plt.Circle((0, 0), 0.3, fill=False, color="white", linewidth=2.0, zorder=4))
-        ax.arrow(0, 0, 0, 1.2, color="white", width=0.04, head_width=0.35, length_includes_head=True, zorder=5)
+        if self.frame == "world":
+            head_x = 1.2 * np.cos(yaw)
+            head_y = 1.2 * np.sin(yaw)
+        else:
+            head_x, head_y = 0.0, 1.2
+        ax.arrow(0, 0, head_x, head_y, color="white", width=0.04, head_width=0.35, length_includes_head=True, zorder=5)
+        ax.scatter([0], [0], c="white", s=28, marker="o", edgecolors="black", linewidths=0.6, zorder=7)
+
+        self._draw_goals(ax, yaw)
+        goal_info = self._draw_termination_goal(ax, yaw)
 
         # Goal vector from the same observation slice already printed by play.py.
         if obs_tensor is not None and obs_tensor.shape[-1] >= 6:
             goal_xy = obs_tensor[0, 4:6].detach().cpu().numpy()
             gx = float(np.clip(goal_xy[0], -self.max_range, self.max_range))
             gy = float(np.clip(goal_xy[1], -self.max_range, self.max_range))
-            ax.arrow(0, 0, gy, gx, color="#ffd040", width=0.035, head_width=0.45, length_includes_head=True, zorder=4)
-            ax.scatter([gy], [gx], c=["#ffd040"], s=80, zorder=5)
+            if self.frame == "world":
+                goal_x, goal_y = self._body_to_world(gx, gy, yaw)
+            else:
+                goal_x, goal_y = gy, gx
+            ax.arrow(0, 0, goal_x, goal_y, color="#ffd040", width=0.035, head_width=0.45, length_includes_head=True, zorder=4)
+            ax.scatter([goal_x], [goal_y], c=["#ffd040"], s=80, zorder=5)
 
         near_idx = int(real_dist.argmin())
         near_d = float(real_dist[near_idx])
         near_angle = -180.0 + near_idx * 5.0
         echo_bins = int(((real_dist >= self.ground_echo_dist - 0.3) & (real_dist <= self.ground_echo_dist + 0.3)).sum())
         action_text = actions[0].detach().cpu().tolist() if actions is not None else ["?", "?"]
+        goal_line = "termination goal: unavailable"
+        if goal_info is not None:
+            status = "SUCCESS" if goal_info["success"] else "not-yet"
+            goal_line = (
+                f"term_goal[{goal_info['source']}] center={goal_info['center_dist']:.2f}m "
+                f"edge={goal_info['effective_dist']:.2f}m<{self.goal_threshold:.2f}? {status}"
+            )
+            if goal_info.get("idx") is not None:
+                goal_line += f" idx={goal_info['idx']}"
         text_lines = [
             f"step={step} action={action_text}",
+            f"frame={self.frame}  yaw={np.degrees(yaw):+.1f} deg",
+            goal_line,
             f"nearest: {near_d:.2f}m @ bin {near_idx} ({near_angle:+.0f} deg)",
             f"mean={real_dist.mean():.2f}m  <2m={(real_dist < 2.0).sum()}/72  2-5m={((real_dist >= 2.0) & (real_dist < 5.0)).sum()}/72",
             f"near floor echo 5.6m={echo_bins}/72  max-range={(real_dist >= self.max_range - 0.5).sum()}/72",
-            "white=robot/front  yellow=goal  red/orange=close obstacle",
+            "white=robot/front+center  yellow=command goal  magenta=termination target",
         ]
         ax.text(
             0.02, 0.98, "\n".join(text_lines),
@@ -623,6 +758,79 @@ class LiveBEVVisualizer:
     def close(self):
         if self.plt.fignum_exists(self.fig.number):
             self.plt.close(self.fig)
+
+    def _selected_goal_index(self):
+        try:
+            cmd = self.raw_env.command_manager.get_term("goal_command")
+            if hasattr(cmd, "all_goals_pos_w"):
+                goals_w = cmd.all_goals_pos_w[0, :int(cmd.cfg.num_goals), :2]
+                robot_w = self.raw_env.scene["robot"].data.root_pos_w[0, :2]
+                return int(torch.norm(goals_w - robot_w.unsqueeze(0), dim=1).argmin().item())
+        except Exception:
+            return None
+        return None
+
+    def _draw_goals(self, ax, yaw: float):
+        """Draw all MultiGoalCommand goals and the goal-reach success disk."""
+        try:
+            cmd = self.raw_env.command_manager.get_term("goal_command")
+            if not hasattr(cmd, "all_goals_pos_w"):
+                return
+            ng = int(cmd.cfg.num_goals)
+            goals_w = cmd.all_goals_pos_w[0, :ng, :2].detach().cpu().numpy()
+            robot_w = self.raw_env.scene["robot"].data.root_pos_w[0, :2].detach().cpu().numpy()
+        except Exception:
+            return
+
+        rel_w = goals_w - robot_w[None, :]
+        goal_plot_x, goal_plot_y = self._world_rel_to_plot(rel_w, yaw)
+
+        selected_idx = self._selected_goal_index()
+        ax.scatter(goal_plot_x, goal_plot_y, c="#40d8ff", s=38, marker="x", linewidths=1.2, zorder=4)
+        for i, (gx, gy) in enumerate(zip(goal_plot_x, goal_plot_y)):
+            ax.text(gx + 0.12, gy + 0.12, str(i), color="#40d8ff", fontsize=7, zorder=4)
+
+        if selected_idx is not None and 0 <= selected_idx < len(goal_plot_x):
+            sx = goal_plot_x[selected_idx]
+            sy = goal_plot_y[selected_idx]
+            ax.scatter([sx], [sy], c="#ffd040", s=120, marker="*", edgecolors="black", linewidths=0.8, zorder=6)
+
+    def _draw_termination_goal(self, ax, yaw: float):
+        """Draw the exact target used by goal_reached() and return its distance stats."""
+        try:
+            robot_w = self.raw_env.scene["robot"].data.root_pos_w[0, :2].detach().cpu().numpy()
+            idx = None
+            if hasattr(self.raw_env, "_local_goal_world") and self.raw_env._local_goal_world is not None:
+                target_w = self.raw_env._local_goal_world[0, :2].detach().cpu().numpy()
+                source = "_local_goal_world"
+            else:
+                cmd = self.raw_env.command_manager.get_term("goal_command")
+                if hasattr(cmd, "all_goals_pos_w"):
+                    idx = self._selected_goal_index()
+                    target_w = cmd.all_goals_pos_w[0, idx, :2].detach().cpu().numpy()
+                    source = "multi_goal_command"
+                else:
+                    target_w = self.raw_env.command_manager.get_command("goal_command")[0, :2].detach().cpu().numpy()
+                    source = "goal_command"
+        except Exception:
+            return None
+
+        rel_w = target_w - robot_w
+        tx, ty = self._world_rel_to_plot(rel_w, yaw)
+        center_dist = float(self.np.linalg.norm(rel_w))
+        effective_dist = max(center_dist - self.goal_body_radius, 0.0)
+        success = effective_dist < self.goal_threshold
+        color = "#ff40ff" if not success else "#40ff80"
+        ax.scatter([tx], [ty], c=color, s=170, marker="P", edgecolors="black", linewidths=0.9, zorder=8)
+        ax.add_patch(self.plt.Circle((tx, ty), self.goal_success_center_dist, fill=False, color=color, linestyle="--", linewidth=1.4, zorder=6))
+        ax.plot([0, tx], [0, ty], color=color, linewidth=1.0, alpha=0.75, zorder=4)
+        return {
+            "source": source,
+            "idx": idx,
+            "center_dist": center_dist,
+            "effective_dist": effective_dist,
+            "success": success,
+        }
 
 
 def main():
@@ -705,6 +913,7 @@ def main():
     rnn_type = ckpt_args.get("rnn_type", "RNN")
     encoder_mode = ckpt_args.get("charge_encoder_mode", "extractor_rnn")
     zero_preprocess = ckpt_args.get("zero_preprocess_feature_for_rl", False)
+    max_active_obstacles = int(ckpt_args.get("max_active_obstacles", 10))
     if zero_preprocess:
         print("[PLAY] --zero_preprocess_feature_for_rl active: RNN features zeroed for RL heads")
 
@@ -743,8 +952,13 @@ def main():
     var = obs_norm.get("var", torch.ones(obs_tensor.shape[-1], device=device))
     rnn_state = RNNStateManager(raw_env.num_envs, hidden_dim, device)
 
-    # Align obstacle behavior with training (disable scripted motion)
-    raw_env._obstacle_policy_active = True
+    # Align obstacle behavior with training by default: disable scripted motion.
+    # For VO inspection, --scripted_obstacles lets interval events move dynamic obstacles.
+    raw_env._obstacle_policy_active = not args_cli.scripted_obstacles
+    print(
+        "[PLAY] obstacle motion: "
+        + ("scripted interval events enabled" if args_cli.scripted_obstacles else "scripted interval events disabled")
+    )
 
     step_dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
     episode_reward = torch.zeros(raw_env.num_envs, device=device)
@@ -763,8 +977,8 @@ def main():
         if args_cli.num_envs != 1:
             print("[PLAY] --bev_vis shows env 0 only; using num_envs > 1 is allowed but less readable.")
         try:
-            bev_visualizer = LiveBEVVisualizer(raw_env, max_range=args_cli.bev_max_range)
-            print("[PLAY] BEV visualization enabled. Press 'q' or ESC in the BEV window to stop play.")
+            bev_visualizer = LiveBEVVisualizer(raw_env, max_range=args_cli.bev_max_range, frame=args_cli.bev_frame)
+            print(f"[PLAY] BEV visualization enabled (frame={args_cli.bev_frame}). Close the BEV window to stop play.")
         except Exception as exc:
             print(f"[PLAY] WARNING: failed to initialize BEV visualization: {exc}")
             bev_visualizer = None
@@ -816,11 +1030,14 @@ def main():
             else:
                 features = p_obs  # raw_fc_rnn: 79D directly to RNN
             hidden = rnn_state.get()
-            rnn_feat, _, new_hidden = preprocess_rnn(features, hidden)
+            rnn_feat, aux_pred, new_hidden = preprocess_rnn(features, hidden, training=args_cli.aux_debug)
             rnn_for_rl = torch.zeros_like(rnn_feat) if zero_preprocess else rnn_feat
             rl_in = torch.cat([p_obs, rnn_for_rl], dim=-1)
             logits = policy_head(rl_in)
             actions = sample_action(logits, args_cli.deterministic)
+
+            if args_cli.aux_debug and aux_pred is not None and step % max(1, args_cli.aux_debug_interval) == 0:
+                print_aux_debug(raw_env, step, obs_tensor, aux_pred, max_active_obstacles)
 
         # `inference_mode()` creates inference tensors that cannot be modified
         # in-place later during per-env hidden-state resets.

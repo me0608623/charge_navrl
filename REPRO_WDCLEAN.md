@@ -223,6 +223,61 @@ PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/rnn_car_
   --run_name wdclean_sa_v1_rawfc_freeze_env512_p1_normret_vbias0_vfc05_u300_0429
 ```
 
+## Play / Replay
+
+The replay entrypoint is also included on this branch:
+
+```text
+scripts/reinforcement_learning/skrl/play_rnn_car.py
+scripts/reinforcement_learning/skrl/charge_env_overrides.py
+```
+
+`play_rnn_car.py` depends on the same model and aux-target files used by training:
+
+```text
+scripts/reinforcement_learning/skrl/modular_rnn_models.py
+scripts/reinforcement_learning/skrl/wd_aux_targets.py
+source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/
+```
+
+Basic replay command:
+
+```bash
+PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/play_rnn_car.py \
+  --task Isaac-Navigation-Charge-VLP16-Curriculum-NavRL \
+  --num_envs 1 \
+  --checkpoint logs/rnn_car/<run_name>/checkpoint_<steps>.pt \
+  --stage 1 \
+  --curriculum_version warp_drive_single_agent_v1 \
+  --camera top \
+  --deterministic
+```
+
+Useful debugging options:
+
+```text
+--aux_debug --aux_debug_interval 25
+--bev_vis --bev_frame body
+--bev_frame world
+--use_vo_shield
+--scripted_obstacles
+```
+
+If replaying the PID `3960465` family of checkpoints, use the same task and curriculum version:
+
+```bash
+PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/play_rnn_car.py \
+  --task Isaac-Navigation-Charge-VLP16-Curriculum-NavRL \
+  --num_envs 1 \
+  --checkpoint logs/rnn_car/wd_sa_v1_rawfc_freeze_env512_p1_normret_vbias0_vfc05_u300_0429/checkpoint_<steps>.pt \
+  --stage 1 \
+  --curriculum_version warp_drive_single_agent_v1 \
+  --camera top \
+  --deterministic \
+  --aux_debug \
+  --bev_vis
+```
+
 ## Notes
 
 Old-vs-new smoke comparison has matched logged reward/loss/aux/obstacle metrics for the tested short run. Do not claim long-run bit-exactness across machines; Isaac Sim / PhysX / GPU scheduling should be treated as statistically reproducible, not bit-exact.
