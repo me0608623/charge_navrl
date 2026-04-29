@@ -254,6 +254,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from wandb_trainer import WandBSequentialTrainer
 from console_summary import ConsoleSummaryLogger
 from training_params_logger import dump_training_params
+from charge_env_overrides import apply_charge_env_overrides
 
 # Registry for custom SKRL model modules (resolved in patched _generate_models)
 import vlp16_models as _vlp16_models_module
@@ -1036,7 +1037,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[model_variant] WARN: failed to override model class: {e}")
 
     # --- 消融實驗: CLI → env_cfg 覆蓋 (在 config dump 前，gym.make 前) ---
-    _apply_ablation_overrides(env_cfg, args_cli)
+    apply_charge_env_overrides(env_cfg, args_cli)
 
     # Dump configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
