@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+# Phase configs — 每個 curriculum version 的 phase 設定集中在 phases/ 子目錄
+# 修改 phase 設定請直接編輯對應檔案（例如 phases/wd_single_agent_v1.py）
+from .phases import PHASE_REGISTRY
+
 
 # ============================================================================
 # Ablation 參數（由 CLI 設定）
@@ -1008,6 +1012,10 @@ CURRICULUM_CONFIGS = {
     },
 }
 
+# 從 phases/ 子目錄載入的 configs 覆蓋同名 inline configs
+# 優先級: phases/ 檔案 > 上面的 inline 定義
+CURRICULUM_CONFIGS.update(PHASE_REGISTRY)
+
 
 # ============================================================================
 # Open-ended curriculum 參數映射
@@ -1825,6 +1833,10 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
         ec = evt.get_term_cfg("randomize_wall_positions")
         ec.params["min_walls"] = cfg["min_walls"]
         ec.params["max_walls"] = cfg["max_walls"]
+        # Per-phase 內牆長度 (WD: wall_length 6→4.5→3.5)
+        twl = cfg.get("target_wall_length", 0.0)
+        if twl > 0:
+            ec.params["target_wall_length"] = twl
         evt.set_term_cfg("randomize_wall_positions", ec)
     except Exception:
         pass

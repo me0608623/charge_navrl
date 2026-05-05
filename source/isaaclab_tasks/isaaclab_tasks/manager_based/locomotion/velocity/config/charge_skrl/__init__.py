@@ -73,6 +73,20 @@ gym.register(
 )
 
 # ============================================================================
+# VLP-16 Curriculum WD Sparse: Warp Drive 稀疏獎勵（train_rnn_car_wdclip.py 專用）
+# rewards 全部歸零，訓練腳本自行計算 compute_wd_charge_reward()
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum-WD",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_wd_sparse:ChargeNavigationEnvCfgVLP16CurriculumWD",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+# ============================================================================
 # VLP-16 Curriculum NavRL: NavRL-Style Dense Rewards（主力 baseline）
 # 消融實驗用 CLI 參數切換: --v_gate_mode / --progress_gate_mode / --use_gap_reward / --use_safety_shield
 # ============================================================================

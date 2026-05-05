@@ -50,11 +50,6 @@ def init_perenv_walls(env: ManagerBasedRLEnv, env_ids):
     env._boundary_wall_centers = bw_data[:, :2]   # [4, 2]
     env._boundary_wall_sizes = bw_data[:, 2:]     # [4, 2]
 
-    # Backward-compat dispatch (legacy consumers)
-    from ..wall_layout import get_wall_tensors_20x20, get_all_wall_tensors_20x20
-    env._wall_tensor_fn = get_wall_tensors_20x20
-    env._all_wall_tensor_fn = get_all_wall_tensors_20x20
-
     print(
         f"[init_perenv_walls] N={N} | {MAX_WALL_SLOTS} wall slots | "
         f"boundary thickness=1.0m | all slots hidden (Z=-10)",
@@ -71,6 +66,7 @@ def randomize_walls(
     min_wall_spacing: float = 2.0,
     max_spawn_attempts: int = 30,
     robot_safe_dist: float = 1.5,
+    target_wall_length: float = 0.0,
 ):
     """Reset event: per-env 隨機化牆壁位置和數量。
 
@@ -83,6 +79,9 @@ def randomize_walls(
         min_wall_spacing: 牆壁之間的最小距離 (AABB 間距)
         max_spawn_attempts: 每個 wall slot 的最大嘗試次數
         robot_safe_dist: 牆壁與機器人的最小距離
+        target_wall_length: 目標牆壁長度 (m)。> 0 時優先選擇接近此長度的 slot。
+                           0 = 不篩選（使用原始 slot 順序）。
+                           WD 對照: Phase 1-3=6.0, Phase 4=4.5, Phase 5=5.0, Phase 7+=3.5
     """
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
@@ -92,6 +91,14 @@ def randomize_walls(
     N = len(env_ids)
     device = env.device
     max_walls = min(max_walls, MAX_WALL_SLOTS)
+
+    # 依 target_wall_length 排序 slot 優先順序（最接近目標長度的 slot 優先啟用）
+    if target_wall_length > 0:
+        slot_lengths = [spec[0] for spec in WALL_SLOT_SPECS]
+        slot_order = sorted(range(MAX_WALL_SLOTS),
+                            key=lambda i: abs(slot_lengths[i] - target_wall_length))
+    else:
+        slot_order = list(range(MAX_WALL_SLOTS))
 
     # 每個環境隨機決定啟用的牆壁數量
     num_active = torch.randint(min_walls, max_walls + 1, (N,), device=device)
@@ -108,11 +115,11 @@ def randomize_walls(
     HIDDEN_Z = -10.0
     wall_height = 3.0   # ★ 對齊 WALL_SLOT_SPECS height，高於 VLP16
 
-    for slot_idx in range(MAX_WALL_SLOTS):
+    for priority_rank, slot_idx in enumerate(slot_order):
         spec_length, spec_width, spec_height = WALL_SLOT_SPECS[slot_idx]
 
-        # 哪些 env 的這個 slot 是 active
-        is_active = slot_idx < num_active  # [N] bool
+        # 哪些 env 的這個 slot 是 active（按優先順序，前 num_active 個啟用）
+        is_active = priority_rank < num_active  # [N] bool
 
         # 隨機方向: 0=原始(水平), 1=旋轉90°(垂直)
         rotate_90 = torch.randint(0, 2, (N,), device=device).bool()
@@ -157,9 +164,10 @@ def randomize_walls(
             robot_dist = torch.sqrt(robot_dx ** 2 + robot_dy ** 2)
             valid_robot = robot_dist >= robot_safe_dist
 
-            # 檢查 3: 與已放置牆壁的距離
+            # 檢查 3: 與已放置牆壁的距離（只看本輪已放置的 slots）
             valid_spacing = torch.ones(N, dtype=torch.bool, device=device)
-            for prev_slot in range(slot_idx):
+            for prev_rank in range(priority_rank):
+                prev_slot = slot_order[prev_rank]
                 prev_mask = env._maze_wall_mask[env_ids, prev_slot]
                 prev_cx = env._maze_wall_centers[env_ids, prev_slot, 0]
                 prev_cy = env._maze_wall_centers[env_ids, prev_slot, 1]

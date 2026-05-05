@@ -1,11 +1,47 @@
-"""VLP-16 Curriculum 環境配置 — 20×20m 場景 + 期望值驅動課程學習 (v9)
+"""VLP-16 Curriculum 環境配置 — 場景骨架定義
 
-繼承 ChargeNavigationEnvCfgVLP16，變更：
-- 場景：16×16m → 20×20m，4 面內部牆（密度更低）
-- 課程學習：4 階段 goal-obstacle 聯動（只改環境，不改獎勵）
-- 獎勵：v9 期望值驅動 — 只保留 reaching_goal + potential_progress
-  所有懲罰項歸零，避障動機完全來自死亡機制
-- Episode：45s → 60s（更大場景）
+═══════════════════════════════════════════════════════════════════════════
+本檔案定義「場景骨架」— 所有 curriculum version 共用的物理場景結構。
+不直接決定每個 phase 的內容（那由 curriculum/phases/*.py 控制）。
+
+本檔案負責：
+  1. 物理場景 (MySceneCfgVLP16_20x20):
+     - 外牆: 20×20m (固定，對齊 WD grid_length_bias=20)
+     - 內牆 slots: 8 個不同長度 (2.5~5.0m)，初始隱藏在 Z=-10
+       → 由 randomize_walls event 依 curriculum phase 決定啟用哪些
+       → target_wall_length 參數控制優先啟用接近目標長度的 slot
+     - 障礙物 slots: 100 個 (cuboid/cylinder 混合)，初始隱藏在 Z=-10
+       → 注意: train_rnn_car_wdclip.py 不使用 scripted 障礙物移動
+       → 障礙物由 learned obstacle policy (ObstaclePolicyFC) 控制
+       → max_active_obstacles=10，實際數量由 curriculum phase 決定
+     - LiDAR: VLP16, z=1.6m, 72 bins, raycast Wall_.* + Obstacle_.*
+
+  2. 命令初始值 (CommandsCfgVLP16Curriculum):
+     - Phase 1 預設: 8 goals, 距離 2-13m
+     → curriculum 動態覆蓋 num_goals / goal_distance
+
+  3. 事件初始值 (EventCfgVLP16Curriculum):
+     - Phase 1 預設: 100% empty, 0 obstacles, 0-2 walls
+     → curriculum 動態覆蓋 obstacle/wall 參數
+
+  4. NavRL 獎勵 (RewardsCfgVLP16NavRL):
+     - 6 項 dense rewards (velocity_to_goal, safe_progress, etc.)
+     → 注意: train_rnn_car_wdclip.py 完全繞過這些 rewards！
+       WD 訓練用自己的 compute_wd_charge_reward() (sparse: +40 goal, -5 collision)
+     → 這些 rewards 只對 train_charge_ac.py (NavRL 路線) 有效
+     → WD 路線請用 charge_env_cfg_wd_sparse.py (rewards 全歸零)
+
+  5. 課程函式指標 (CurriculumCfgVLP16):
+     → 指向 goal_obstacle_curriculum()
+     → CLI --curriculum_version 決定使用哪個 phase 定義
+     → phase 定義在 curriculum/phases/*.py (一個檔案一個 version)
+
+Obstacle Agent (不在此 cfg 定義):
+  - 網路: models/modular_rnn_models.py → ObstaclePolicyFC (FC 128×128, 9D→2D)
+  - 訓練: train_rnn_car_wdclip.py (PPO, 與 charge 交替)
+  - 觀測: 9D per obstacle (robot相對位置/速度/距離/朝向/active)
+  - 動作: continuous (vx, vy) ∈ [-speed_limit, +speed_limit]
+═══════════════════════════════════════════════════════════════════════════
 """
 
 import math
@@ -76,7 +112,7 @@ from ..mdp.wall_layout import WALL_SLOT_SPECS, MAX_WALL_SLOTS
 # ============================================================================
 @configclass
 class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
-    """20×20m 場景 — 4 面內部牆（匹配 MAZE_WALLS_20x20）"""
+    """20×20m 場景 — 4 面外牆 + 8 wall slots（per-env 隨機化）"""
 
     def __post_init__(self):
         # 呼叫祖父類 __post_init__（跳過 MySceneCfgVLP16 的 16×16 牆壁設定）
@@ -212,7 +248,12 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
 # ============================================================================
 @configclass
 class CommandsCfgVLP16Curriculum:
-    """課程命令：Phase 1 初始 8 goals，全場均勻分布 2-13m（v19 還原）"""
+    """課程命令配置。
+
+    NOTE: 以下欄位在執行時由 goal_obstacle_curriculum.py 動態覆蓋：
+      - num_goals, max_goals, distance, wall_boundary, obstacle_safe_distance 等
+    這裡的值僅作為 Stage 1 初始 / fallback 使用。
+    """
     goal_command = MultiGoalCommandCfg(
         asset_name="robot",
         resampling_time_range=(1e9, 1e9),
