@@ -684,6 +684,11 @@ def move_obstacles_vectorized(
     if getattr(env, '_obstacle_policy_active', False):
         return
 
+    # Guard: rule-based behavior scheduler active → 由 scheduler.step() 控制移動
+    if getattr(env, '_behavior_scheduler', None) is not None:
+        env._behavior_scheduler.step(env, dt=move_dt)
+        return
+
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
     elif isinstance(env_ids, (list, tuple)):

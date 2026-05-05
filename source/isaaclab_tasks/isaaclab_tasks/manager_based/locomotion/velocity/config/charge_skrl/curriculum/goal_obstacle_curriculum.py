@@ -1844,6 +1844,30 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
     env.cfg.episode_length_s = cfg["episode_length_s"]
     env._target_discount_factor = cfg["gamma"]
 
+    # --- Rule-based behavior scheduler ---
+    # 如果 stage config 含 behavior_mix，建立或更新 BehaviorScheduler
+    behavior_mix = cfg.get("behavior_mix")
+    if behavior_mix is not None:
+        try:
+            from ..mdp.events.behavior_scheduler import BehaviorScheduler
+            if getattr(env, '_behavior_scheduler', None) is None:
+                # 首次建立
+                max_obs = cfg.get("num_obstacles_static", 0) + cfg.get("num_obstacles_dynamic", 5)
+                env._behavior_scheduler = BehaviorScheduler(
+                    stage_config=cfg,
+                    num_envs=env.num_envs,
+                    max_obstacles=max_obs,
+                    device=str(env.device),
+                    boundary=8.5,
+                )
+                print(f"[Curriculum] BehaviorScheduler created: {max_obs} slots, mix={behavior_mix}", flush=True)
+            else:
+                # 升階時更新
+                env._behavior_scheduler.update_stage(cfg)
+                print(f"[Curriculum] BehaviorScheduler updated: mix={behavior_mix}", flush=True)
+        except Exception as e:
+            print(f"[Curriculum] BehaviorScheduler init failed: {e}", flush=True)
+
     # --- Stage-dependent reward weights ---
     rw = cfg.get("reward_weights")
     if rw is not None:

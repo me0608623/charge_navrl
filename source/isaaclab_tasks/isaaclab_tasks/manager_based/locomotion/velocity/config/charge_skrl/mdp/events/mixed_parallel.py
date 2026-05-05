@@ -99,6 +99,17 @@ def randomize_obstacles_by_difficulty(
         boundary: 場景邊界（米）
     """
     # ========================================================================
+    # Guard: BehaviorScheduler active → 由 scheduler 控制 spawn
+    # ========================================================================
+    if getattr(env, '_behavior_scheduler', None) is not None:
+        if env_ids is None:
+            env_ids = torch.arange(env.num_envs, device=env.device)
+        elif not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.tensor(env_ids, device=env.device, dtype=torch.long)
+        env._behavior_scheduler.reset(env_ids, env)
+        return
+
+    # ========================================================================
     # 參數處理與初始化
     # ========================================================================
     if env_ids is None:

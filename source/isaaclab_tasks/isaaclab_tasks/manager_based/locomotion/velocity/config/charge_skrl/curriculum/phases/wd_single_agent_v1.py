@@ -288,7 +288,8 @@ def _to_legacy_stage(phase: dict) -> dict:
         "downgrade_min_cr": phase["downgrade_min_cr"],
         "downgrade_min_to": phase["downgrade_min_to"],
         # Optional
-        **({k: phase[k] for k in ("obs_size_rand", "scene_bound_rand", "reward_weights")
+        **({k: phase[k] for k in ("obs_size_rand", "scene_bound_rand", "reward_weights",
+                                    "behavior_mix", "speed_overrides", "safety_overrides")
             if k in phase}),
     }
 
