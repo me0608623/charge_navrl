@@ -42,6 +42,8 @@ try:
         step_horizontal_crossing, spawn_horizontal_crossing,
         step_path_crossing, spawn_path_crossing,
         step_near_miss, spawn_near_miss,
+        step_corridor_crossing, spawn_corridor_crossing,
+        step_occlusion, spawn_occlusion,
     )
 except ImportError:
     from rule_behaviors import (
@@ -51,6 +53,8 @@ except ImportError:
         step_horizontal_crossing, spawn_horizontal_crossing,
         step_path_crossing, spawn_path_crossing,
         step_near_miss, spawn_near_miss,
+        step_corridor_crossing, spawn_corridor_crossing,
+        step_occlusion, spawn_occlusion,
     )
 
 
@@ -159,6 +163,12 @@ class BehaviorScheduler:
         self.nm_clearance = torch.zeros(E, N, device=device)
 
         # ══════════════════════════════════════════════════════════════════
+        # Occlusion State
+        # ══════════════════════════════════════════════════════════════════
+        self.occ_velocity = torch.zeros(E, N, 2, device=device)
+        self.occ_frame_counter = torch.zeros(E, N, dtype=torch.long, device=device)
+
+        # ══════════════════════════════════════════════════════════════════
         # Metrics
         # ══════════════════════════════════════════════════════════════════
         self._collision_by_type = torch.zeros(NUM_BEHAVIOR_TYPES, device=device)
@@ -230,11 +240,14 @@ class BehaviorScheduler:
         step_static(self, static_mask, dt)
         step_patrol(self, patrol_mask, dt)
         step_random_walk(self, rw_mask, dt)
+        cc_mask = (self.behavior_type == BEHAVIOR_CORRIDOR_CROSSING)
+        occ_mask = (self.behavior_type == BEHAVIOR_OCCLUSION)
+
         step_horizontal_crossing(self, hc_mask, dt)
         step_path_crossing(self, pc_mask, dt)
         step_near_miss(self, nm_mask, dt)
-
-        # TODO P3: corridor_crossing, occlusion
+        step_corridor_crossing(self, cc_mask, dt)
+        step_occlusion(self, occ_mask, dt)
 
         # 邊界反彈 (所有 active obstacles)
         active_mask = (self.behavior_type != BEHAVIOR_INACTIVE)
@@ -308,7 +321,10 @@ class BehaviorScheduler:
             spawn_path_crossing(self, env_ids, slot_ids, self.boundary)
         elif btype_id == BEHAVIOR_NEAR_MISS:
             spawn_near_miss(self, env_ids, slot_ids, self.boundary)
-        # TODO P3: corridor_crossing, occlusion
+        elif btype_id == BEHAVIOR_CORRIDOR_CROSSING:
+            spawn_corridor_crossing(self, env_ids, slot_ids, self.boundary)
+        elif btype_id == BEHAVIOR_OCCLUSION:
+            spawn_occlusion(self, env_ids, slot_ids, self.boundary)
 
     def _allocate_counts(self, behavior_mix: dict, total_slots: int) -> dict:
         """根據 behavior_mix 比例分配 slot 數量。

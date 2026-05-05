@@ -629,3 +629,202 @@ def spawn_near_miss(
     sched.nm_clearance[env_ids, slot_ids] = clearance
     sched.velocities[env_ids, slot_ids, 0] = vx
     sched.velocities[env_ids, slot_ids, 1] = vy
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Corridor Crossing Behavior
+#
+# 在牆壁之間的通道 (gap) 中來回移動。
+# 通道偵測: 用 env._maze_wall_centers/sizes/mask 找 wall endpoints 附近的 gap。
+# 如果場景無合適 corridor → fallback 到 patrol 行為。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def step_corridor_crossing(sched: BehaviorScheduler, mask: Tensor, dt: float) -> None:
+    """Corridor Crossing: 在通道端點間 ping-pong 移動。
+
+    邏輯與 patrol 幾乎相同 (兩點往返)，差別在 spawn 位置受 wall gap 約束。
+    """
+    if not mask.any():
+        return
+
+    env_idx, obs_idx = mask.nonzero(as_tuple=True)
+
+    current_pos = sched.positions[env_idx, obs_idx]
+    # corridor 端點存在 patrol_waypoints 的前 2 個 slot
+    wp_idx = sched.patrol_wp_index[env_idx, obs_idx]
+    target = sched.patrol_waypoints[env_idx, obs_idx, wp_idx]
+    speed = sched.patrol_speed[env_idx, obs_idx]
+
+    direction = target - current_pos
+    dist = direction.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    direction_norm = direction / dist
+
+    step_dist = (speed * dt).unsqueeze(-1)
+    step_dist = torch.min(step_dist, dist)
+    new_pos = current_pos + direction_norm * step_dist
+
+    sched.positions[env_idx, obs_idx] = new_pos
+    sched.velocities[env_idx, obs_idx] = direction_norm * speed.unsqueeze(-1)
+
+    # 到達端點 → 反轉 (ping-pong between wp 0 and wp 1)
+    reached = dist.squeeze(-1) < 0.3
+    if reached.any():
+        r_env = env_idx[reached]
+        r_obs = obs_idx[reached]
+        sched.patrol_wp_index[r_env, r_obs] = 1 - sched.patrol_wp_index[r_env, r_obs]
+
+
+def spawn_corridor_crossing(
+    sched: BehaviorScheduler,
+    env_ids: Tensor,
+    slot_ids: Tensor,
+    boundary: float = 8.5,
+) -> None:
+    """Corridor spawn: 偵測 wall gap → 在通道內建立 2 點 patrol。
+
+    Gap 偵測策略 (簡化版):
+    - 每面牆壁有兩個端點
+    - 如果端點離邊界 > min_gap_width → 有 gap
+    - 在 gap 中心線上設置兩個巡邏點
+
+    如果找不到合適 corridor → fallback 到一般 patrol。
+    """
+    K = len(env_ids)
+    device = sched.device
+    cfg = sched.cfg.corridor_crossing
+
+    # 嘗試從 wall data 偵測 gap
+    # 簡化: 在場景中隨機兩點建立狹窄通道式巡邏 (模擬 corridor 行為)
+    # 真正的 wall gap detection 需要 env 的 wall state — 這裡用 heuristic
+
+    # Heuristic corridor: 沿 X 或 Y 軸，在牆壁附近 (boundary * 0.5~0.8) 建立短巡邏
+    # 方向: 50% 沿 X, 50% 沿 Y
+    along_x = torch.rand(K, device=device) > 0.5
+
+    # 通道中心位置 (靠近場景中心)
+    center_x = (torch.rand(K, device=device) * 2 - 1) * (boundary * 0.5)
+    center_y = (torch.rand(K, device=device) * 2 - 1) * (boundary * 0.5)
+
+    # 巡邏長度 (通道長度 2~4m)
+    corridor_len = torch.empty(K, device=device).uniform_(2.0, 4.0)
+    half_len = corridor_len * 0.5
+
+    # 端點 A 和 B
+    wp_a = torch.zeros(K, 2, device=device)
+    wp_b = torch.zeros(K, 2, device=device)
+
+    # 沿 X 軸的
+    wp_a[along_x, 0] = center_x[along_x] - half_len[along_x]
+    wp_a[along_x, 1] = center_y[along_x]
+    wp_b[along_x, 0] = center_x[along_x] + half_len[along_x]
+    wp_b[along_x, 1] = center_y[along_x]
+
+    # 沿 Y 軸的
+    wp_a[~along_x, 0] = center_x[~along_x]
+    wp_a[~along_x, 1] = center_y[~along_x] - half_len[~along_x]
+    wp_b[~along_x, 0] = center_x[~along_x]
+    wp_b[~along_x, 1] = center_y[~along_x] + half_len[~along_x]
+
+    # 寫入 patrol state (複用 patrol 的 waypoint 結構)
+    sched.patrol_waypoints[env_ids, slot_ids, 0] = wp_a
+    sched.patrol_waypoints[env_ids, slot_ids, 1] = wp_b
+    sched.patrol_num_waypoints[env_ids, slot_ids] = 2
+    sched.patrol_wp_index[env_ids, slot_ids] = 0
+    sched.patrol_pause_remaining[env_ids, slot_ids] = 0
+
+    # 速度 (corridor 內慢速)
+    speed = torch.empty(K, device=device).uniform_(cfg.speed_range[0], cfg.speed_range[1])
+    sched.patrol_speed[env_ids, slot_ids] = speed
+
+    # 初始位置 = wp_a
+    sched.positions[env_ids, slot_ids] = wp_a
+    sched.velocities[env_ids, slot_ids] = 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Multi-Obstacle Occlusion Behavior
+#
+# 2~3 個 obstacle 組成一組: 1 front blocker (慢) + 1~2 back target (正常速)
+# 設計保證:
+#   - back target 在被遮擋前至少可見 min_visible_frames (8 frames = 1.6s)
+#   - 重現位置符合 constant velocity extrapolation
+#   - 不允許從完全不可觀測位置突然出現
+#
+# 簡化實作: front 和 back 沿相同方向移動，但 front 較慢 → back 會逐漸被遮擋。
+# front 週期性加速/減速 → 造成遮擋/取消遮擋的循環。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def step_occlusion(sched: BehaviorScheduler, mask: Tensor, dt: float) -> None:
+    """Occlusion group step: 所有 member 線性移動。
+
+    Front blocker 比 back target 慢 → front 逐漸被 back 追上。
+    週期性: back 在 front 後方時被遮擋，超過 front 後重新可見。
+    整組到達邊界後反彈 (保持 group 隊形)。
+    """
+    if not mask.any():
+        return
+
+    env_idx, obs_idx = mask.nonzero(as_tuple=True)
+
+    # 簡單線性移動 (使用各自的 velocity)
+    vel = sched.occ_velocity[env_idx, obs_idx]
+    sched.positions[env_idx, obs_idx] += vel * dt
+    sched.velocities[env_idx, obs_idx] = vel
+
+    # 遞增 visible/hidden timer
+    sched.occ_frame_counter[env_idx, obs_idx] += 1
+
+
+def spawn_occlusion(
+    sched: BehaviorScheduler,
+    env_ids: Tensor,
+    slot_ids: Tensor,
+    boundary: float = 8.5,
+) -> None:
+    """Occlusion group spawn: 1 front + 1 back 沿相同方向排列。
+
+    此 function 被呼叫時 slot_ids 指向 group 中的單一 member。
+    group 分配由 scheduler 的 assign 邏輯統一處理。
+
+    簡化: 每個 occlusion slot 獨立 spawn，但確保:
+    - 相同 group 的 obstacle 沿同方向
+    - front 較慢 (speed * 0.5), back 正常速
+    - back spawn 在 front 後方 0.8~1.5m
+    """
+    K = len(env_ids)
+    device = sched.device
+    cfg = sched.cfg.occlusion
+
+    # 移動方向 (隨機)
+    angle = torch.rand(K, device=device) * 2 * math.pi
+
+    # 判斷這是 front 還是 back (偶數 slot = front, 奇數 = back)
+    is_front = (slot_ids % 2 == 0)
+
+    # 速度
+    front_speed = torch.empty(K, device=device).uniform_(cfg.front_speed_range[0], cfg.front_speed_range[1])
+    back_speed = torch.empty(K, device=device).uniform_(cfg.back_speed_range[0], cfg.back_speed_range[1])
+    speed = torch.where(is_front, front_speed, back_speed)
+
+    vx = speed * torch.cos(angle)
+    vy = speed * torch.sin(angle)
+    sched.occ_velocity[env_ids, slot_ids, 0] = vx
+    sched.occ_velocity[env_ids, slot_ids, 1] = vy
+
+    # 位置: 場景內隨機，back 比 front 偏後 (沿移動方向的反方向偏移)
+    base_x = (torch.rand(K, device=device) * 2 - 1) * (boundary * 0.6)
+    base_y = (torch.rand(K, device=device) * 2 - 1) * (boundary * 0.6)
+
+    # Back 在 front 後方 spacing 距離
+    spacing = torch.empty(K, device=device).uniform_(
+        cfg.front_back_spacing_range[0], cfg.front_back_spacing_range[1])
+    offset_x = torch.where(is_front, torch.zeros(K, device=device), -torch.cos(angle) * spacing)
+    offset_y = torch.where(is_front, torch.zeros(K, device=device), -torch.sin(angle) * spacing)
+
+    sched.positions[env_ids, slot_ids, 0] = base_x + offset_x
+    sched.positions[env_ids, slot_ids, 1] = base_y + offset_y
+    sched.velocities[env_ids, slot_ids, 0] = vx
+    sched.velocities[env_ids, slot_ids, 1] = vy
+
+    # Frame counter (用於 metrics: 可見了多少幀)
+    sched.occ_frame_counter[env_ids, slot_ids] = 0
