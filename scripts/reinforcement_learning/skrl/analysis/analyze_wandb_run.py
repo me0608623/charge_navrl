@@ -57,7 +57,7 @@ DEFAULT_KEYS = [
     "rl/collision_rate",
     "rl/timeout_rate",
     "rl/value_loss",
-    "rl/variance_explained",
+    "rl_critic/variance_explained",
     "aux/preprocess_loss",
     "aux/loss_per_step",
     "aux/rnn_param_delta_norm",
@@ -70,7 +70,7 @@ PLOT_KEYS = [
     "rl/success_rate",
     "rl/collision_rate",
     "rl/return_mean",
-    "rl/variance_explained",
+    "rl_critic/variance_explained",
     "aux/loss_per_step",
     "aux/preprocess_loss",
 ]
@@ -251,7 +251,7 @@ def health_summary(latest: dict[str, float | None], trends: dict[str, str]) -> l
     msgs: list[str] = []
     sr = latest.get("rl/success_rate")
     cr = latest.get("rl/collision_rate")
-    ve = latest.get("rl/variance_explained")
+    ve = latest.get("rl_critic/variance_explained")
     aux = latest.get("aux/loss_per_step")
     rnn_delta = latest.get("aux/rnn_param_delta_norm")
 
@@ -396,7 +396,7 @@ def parse_latest_from_output_log(output_log: Path) -> dict[str, float]:
                 "aux/rnn_grad_norm": float(g["rnn_grad"]),
                 "aux/rnn_param_delta_norm": float(g["rnn_delta"]),
                 "aux/predict_head_param_delta_norm": float(g["ph_delta"]),
-                "rl/variance_explained": float(g["ve"]),
+                "rl_critic/variance_explained": float(g["ve"]),
                 "aux/seq_len": float(g["L"]),
                 "aux/mode": 1.0 if g["mode"] == "tbptt" else 0.0,
             })

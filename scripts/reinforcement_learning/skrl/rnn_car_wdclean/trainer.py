@@ -602,8 +602,8 @@ def run(args_cli, headless_mode: bool):
                     _randomize_scene_bounds(done_ids, _scene_bound_rand)
                 obs = next_obs
 
-            # === Charge PPO Update ===
-            charge_ppo_loss = 0.0
+            # === Charge Policy Update (A2C when --use_a2c, else PPO) ===
+            charge_policy_loss = 0.0
             charge_vf_loss = 0.0
             charge_entropy = 0.0
             aux_loss_val = 0.0
@@ -669,7 +669,7 @@ def run(args_cli, headless_mode: bool):
 
                 n_epochs = 1 if args_cli.use_a2c else args_cli.ppo_epochs
 
-                ppo_l, vf_l, ent_l = [], [], []
+                pl_l, vf_l, ent_l = [], [], []
                 vf_raw_l, pl_clamped_l, vf_clamped_l = [], [], []
                 pl_clamp_triggered_l, vf_clamp_triggered_l = [], []
                 total_loss_l = []
@@ -684,6 +684,9 @@ def run(args_cli, headless_mode: bool):
                 wd_merged_grad_pre_l, wd_merged_grad_post_l = [], []
                 wd_actor_update_ratio_l, wd_critic_update_ratio_l = [], []
                 wd_actor_param_norm_l, wd_critic_param_norm_l = [], []
+                post_kl_l, post_ratio_mean_l, post_ratio_std_l = [], [], []
+                post_ratio_min_l, post_ratio_max_l = [], []
+                post_ratio_outside_20_l, post_ratio_outside_50_l = [], []
 
                 for _ in range(n_epochs):
                     if args_cli.use_a2c:
@@ -761,6 +764,19 @@ def run(args_cli, headless_mode: bool):
 
                         charge_opt_rl.step()
 
+                        # --- post-update policy diagnostics ---
+                        with torch.no_grad():
+                            _post_nl = policy_head(flat_ri[mb])
+                            _post_lp, _, _ = evaluate_actions(_post_nl, flat_act[mb])
+                            _post_ratio = (_post_lp - flat_lp[mb]).exp()
+                            post_kl_l.append((flat_lp[mb] - _post_lp).mean().item())
+                            post_ratio_mean_l.append(_post_ratio.mean().item())
+                            post_ratio_std_l.append(_post_ratio.std().item())
+                            post_ratio_min_l.append(_post_ratio.min().item())
+                            post_ratio_max_l.append(_post_ratio.max().item())
+                            post_ratio_outside_20_l.append(((_post_ratio - 1.0).abs() > 0.2).float().mean().item())
+                            post_ratio_outside_50_l.append(((_post_ratio - 1.0).abs() > 0.5).float().mean().item())
+
                         actor_delta = _param_delta_norm(actor_before, charge_params_actor)
                         critic_delta = _param_delta_norm(critic_before, charge_params_critic)
                         module_entropy = math.log10(actor_update_est + args_cli.wd_module_entropy_eps) - math.log10(
@@ -769,7 +785,7 @@ def run(args_cli, headless_mode: bool):
                         _actor_pnorm = _param_l2_norm(charge_params_actor)
                         _critic_pnorm = _param_l2_norm(charge_params_critic)
 
-                        ppo_l.append(pl.item()); vf_l.append(vl.item())
+                        pl_l.append(pl.item()); vf_l.append(vl.item())
                         ent_l.append((ent_lin.mean() + ent_ang.mean()).item())
                         vf_raw_l.append(vl_raw)
                         pl_clamped_l.append(pl_clamped.item())
@@ -798,27 +814,27 @@ def run(args_cli, headless_mode: bool):
                         wd_actor_update_ratio_l.append(actor_delta / (_actor_pnorm + 1e-12))
                         wd_critic_update_ratio_l.append(critic_delta / (_critic_pnorm + 1e-12))
 
-                charge_ppo_loss = np.mean(ppo_l)
+                charge_policy_loss = np.mean(pl_l)
                 charge_vf_loss = np.mean(vf_l)
                 charge_entropy = np.mean(ent_l)
                 wd_update_monitor = {
-                    "wd_update/actor_grad_norm": float(np.mean(wd_actor_grad_l)) if wd_actor_grad_l else 0.0,
-                    "wd_update/critic_grad_norm": float(np.mean(wd_critic_grad_l)) if wd_critic_grad_l else 0.0,
-                    "wd_update/actor_update_est": float(np.mean(wd_actor_update_l)) if wd_actor_update_l else 0.0,
-                    "wd_update/critic_update_est": float(np.mean(wd_critic_update_l)) if wd_critic_update_l else 0.0,
-                    "wd_update/actor_param_delta_norm": float(np.mean(wd_actor_delta_l)) if wd_actor_delta_l else 0.0,
-                    "wd_update/critic_param_delta_norm": float(np.mean(wd_critic_delta_l)) if wd_critic_delta_l else 0.0,
-                    "wd_update/actor_clip_fraction": float(np.mean(wd_actor_clip_l)) if wd_actor_clip_l else 0.0,
-                    "wd_update/critic_clip_fraction": float(np.mean(wd_critic_clip_l)) if wd_critic_clip_l else 0.0,
+                    "wd_update_actor/grad_norm": float(np.mean(wd_actor_grad_l)) if wd_actor_grad_l else 0.0,
+                    "wd_update_actor/update_est": float(np.mean(wd_actor_update_l)) if wd_actor_update_l else 0.0,
+                    "wd_update_actor/param_delta_norm": float(np.mean(wd_actor_delta_l)) if wd_actor_delta_l else 0.0,
+                    "wd_update_actor/clip_fraction": float(np.mean(wd_actor_clip_l)) if wd_actor_clip_l else 0.0,
+                    "wd_update_actor/grad_norm_post_clip": float(np.mean(wd_actor_grad_post_l)) if wd_actor_grad_post_l else 0.0,
+                    "wd_update_actor/param_norm": float(np.mean(wd_actor_param_norm_l)) if wd_actor_param_norm_l else 0.0,
+                    "wd_update_actor/update_ratio": float(np.mean(wd_actor_update_ratio_l)) if wd_actor_update_ratio_l else 0.0,
+                    "wd_update_critic/grad_norm": float(np.mean(wd_critic_grad_l)) if wd_critic_grad_l else 0.0,
+                    "wd_update_critic/update_est": float(np.mean(wd_critic_update_l)) if wd_critic_update_l else 0.0,
+                    "wd_update_critic/param_delta_norm": float(np.mean(wd_critic_delta_l)) if wd_critic_delta_l else 0.0,
+                    "wd_update_critic/clip_fraction": float(np.mean(wd_critic_clip_l)) if wd_critic_clip_l else 0.0,
+                    "wd_update_critic/grad_norm_post_clip": float(np.mean(wd_critic_grad_post_l)) if wd_critic_grad_post_l else 0.0,
+                    "wd_update_critic/param_norm": float(np.mean(wd_critic_param_norm_l)) if wd_critic_param_norm_l else 0.0,
+                    "wd_update_critic/update_ratio": float(np.mean(wd_critic_update_ratio_l)) if wd_critic_update_ratio_l else 0.0,
                     "wd_update/module_entropy": float(np.mean(wd_module_entropy_l)) if wd_module_entropy_l else 0.0,
-                    "wd_update/actor_grad_norm_post_clip": float(np.mean(wd_actor_grad_post_l)) if wd_actor_grad_post_l else 0.0,
-                    "wd_update/critic_grad_norm_post_clip": float(np.mean(wd_critic_grad_post_l)) if wd_critic_grad_post_l else 0.0,
                     "wd_update/merged_grad_norm_pre_clip": float(np.mean(wd_merged_grad_pre_l)) if wd_merged_grad_pre_l else 0.0,
                     "wd_update/merged_grad_norm_post_clip": float(np.mean(wd_merged_grad_post_l)) if wd_merged_grad_post_l else 0.0,
-                    "wd_update/actor_param_norm": float(np.mean(wd_actor_param_norm_l)) if wd_actor_param_norm_l else 0.0,
-                    "wd_update/critic_param_norm": float(np.mean(wd_critic_param_norm_l)) if wd_critic_param_norm_l else 0.0,
-                    "wd_update/actor_update_ratio": float(np.mean(wd_actor_update_ratio_l)) if wd_actor_update_ratio_l else 0.0,
-                    "wd_update/critic_update_ratio": float(np.mean(wd_critic_update_ratio_l)) if wd_critic_update_ratio_l else 0.0,
                     "rl/raw_vf_loss": float(np.mean(vf_raw_l)) if vf_raw_l else 0.0,
                     "rl/clamped_policy_loss": float(np.mean(pl_clamped_l)) if pl_clamped_l else 0.0,
                     "rl/clamped_vf_loss": float(np.mean(vf_clamped_l)) if vf_clamped_l else 0.0,
@@ -830,30 +846,40 @@ def run(args_cli, headless_mode: bool):
                     "rl/entropy_linear": float(np.mean(ent_lin_l)) if ent_lin_l else 0.0,
                     "rl/entropy_angular": float(np.mean(ent_ang_l)) if ent_ang_l else 0.0,
                     "rl/total_loss": float(np.mean(total_loss_l)) if total_loss_l else 0.0,
-                    "rl/returns_mean": _ret_mean,
-                    "rl/returns_std": _ret_std,
-                    "rl/returns_min": _ret_min,
-                    "rl/returns_max": _ret_max,
-                    "rl/value_target_mean": _target_mean,
-                    "rl/value_target_std": _target_std,
-                    "rl/value_target_min": _target_min,
-                    "rl/value_target_max": _target_max,
-                    "rl/value_pred_mean": _value_pred_mean,
-                    "rl/value_pred_std": _value_pred_std,
-                    "rl/value_pred_min": _value_pred_min,
-                    "rl/value_pred_max": _value_pred_max,
-                    "rl/value_error_mean": _value_error_mean,
-                    "rl/value_error_std": _value_error_std,
-                    "rl/value_error_abs_max": _value_error_abs_max,
-                    "rl/advantage_mean": _adv_mean,
-                    "rl/advantage_std": _adv_std,
-                    "rl/advantage_min": _adv_min,
-                    "rl/advantage_max": _adv_max,
-                    "rl/raw_advantage_std": _raw_adv_std,
+                    "rl_critic/returns_mean": _ret_mean,
+                    "rl_critic/returns_std": _ret_std,
+                    "rl_critic/returns_min": _ret_min,
+                    "rl_critic/returns_max": _ret_max,
+                    "rl_critic/value_target_mean": _target_mean,
+                    "rl_critic/value_target_std": _target_std,
+                    "rl_critic/value_target_min": _target_min,
+                    "rl_critic/value_target_max": _target_max,
+                    "rl_critic/value_pred_mean": _value_pred_mean,
+                    "rl_critic/value_pred_std": _value_pred_std,
+                    "rl_critic/value_pred_min": _value_pred_min,
+                    "rl_critic/value_pred_max": _value_pred_max,
+                    "rl_critic/value_error_mean": _value_error_mean,
+                    "rl_critic/value_error_std": _value_error_std,
+                    "rl_critic/value_error_abs_max": _value_error_abs_max,
+                    "rl_adv/mean": _adv_mean,
+                    "rl_adv/std": _adv_std,
+                    "rl_adv/min": _adv_min,
+                    "rl_adv/max": _adv_max,
+                    "rl_adv/raw_std": _raw_adv_std,
                 }
                 if ppo_clip_frac_l:
                     wd_update_monitor["rl/clip_fraction"] = float(np.mean(ppo_clip_frac_l))
                     wd_update_monitor["rl/ratio_mean"] = float(np.mean(ppo_ratio_l))
+
+                # post-update trust-region diagnostics
+                if post_kl_l:
+                    wd_update_monitor["rl_trust/approx_kl"] = float(np.mean(post_kl_l))
+                    wd_update_monitor["rl_trust/ratio_mean"] = float(np.mean(post_ratio_mean_l))
+                    wd_update_monitor["rl_trust/ratio_std"] = float(np.mean(post_ratio_std_l))
+                    wd_update_monitor["rl_trust/ratio_min"] = float(np.mean(post_ratio_min_l))
+                    wd_update_monitor["rl_trust/ratio_max"] = float(np.mean(post_ratio_max_l))
+                    wd_update_monitor["rl_trust/ratio_outside_20pct"] = float(np.mean(post_ratio_outside_20_l))
+                    wd_update_monitor["rl_trust/ratio_outside_50pct"] = float(np.mean(post_ratio_outside_50_l))
 
                 # ============================================================
                 # Auxiliary loss (WD module loss)
@@ -1017,7 +1043,7 @@ def run(args_cli, headless_mode: bool):
 
                 _value_residual = value_targets - charge_buf.values[:RL]
                 _var_expl = max(-1.0, 1.0 - (_value_residual.var() / (value_targets.var() + 1e-8)).item())
-                aux_monitor["rl/variance_explained"] = _var_expl
+                aux_monitor["rl_critic/variance_explained"] = _var_expl
 
                 if iteration == 0:
                     _rnn_grad = any(p.grad is not None and p.grad.abs().sum() > 0
@@ -1079,7 +1105,7 @@ def run(args_cli, headless_mode: bool):
                         f"[{iteration+1}/{num_iterations}] {who} "
                         f"S{int(stage)} | fps={fps:.0f} | "
                         f"R={rwd:.1f} SR={sr:.1%} CR={cr:.1%} TO={_timeout_rate:.1%} | "
-                        f"ppo={charge_ppo_loss:.4f} vf={charge_vf_loss:.4f} "
+                        f"pl={charge_policy_loss:.4f} vf={charge_vf_loss:.4f} "
                         f"ent={charge_entropy:.3f} | "
                         f"gV={goal_v:+.3f} gD={goal_d:+.2f} h={goal_h:.0f}deg "
                         f"sw={goal_sw:.3f}{obs_tag}")
@@ -1090,7 +1116,7 @@ def run(args_cli, headless_mode: bool):
                         f"[{iteration+1}/{num_iterations}] {who} "
                         f"S{int(stage)} | fps={fps:.0f} | "
                         f"R={rwd:.1f} SR={sr:.1%} CR={cr:.1%} TO={_timeout_rate:.1%} | "
-                        f"obs_ppo={_obs_pl:.4f} obs_ent={_obs_ent:.3f} | "
+                        f"obs_pl={_obs_pl:.4f} obs_ent={_obs_ent:.3f} | "
                         f"gV={goal_v:+.3f} gD={goal_d:+.2f} h={goal_h:.0f}deg "
                         f"sw={goal_sw:.3f}{obs_tag}")
                 if train_charge:
@@ -1102,7 +1128,7 @@ def run(args_cli, headless_mode: bool):
                     _n2d = aux_monitor.get("aux/near2_d_loss", 0)
                     _vsc = int(aux_monitor.get("aux/valid_seq_count", 0))
                     _asl = int(aux_monitor.get("aux/seq_len", 1))
-                    _ve = aux_monitor.get("rl/variance_explained", 0)
+                    _ve = aux_monitor.get("rl_critic/variance_explained", 0)
                     print(
                         f"  AUX({args_cli.aux_mode} L={_asl}): "
                         f"loss={aux_loss_val:.4f} "
@@ -1124,7 +1150,7 @@ def run(args_cli, headless_mode: bool):
                 })
                 if train_charge:
                     log_data.update({
-                        "rl/policy_loss": charge_ppo_loss,
+                        "rl/policy_loss": charge_policy_loss,
                         "rl/value_loss": charge_vf_loss,
                         "rl/entropy": charge_entropy,
                     })

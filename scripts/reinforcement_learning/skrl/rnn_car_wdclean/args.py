@@ -70,7 +70,7 @@ def create_parser() -> argparse.ArgumentParser:
                              "critic spikes suppressing actor updates through merged grad clipping.")
     parser.add_argument("--no_wd_update_clip", dest="wd_update_clip", action="store_false",
                         help="Disable WD-style actor/critic gradient scaling while keeping the experiment entrypoint.")
-    parser.set_defaults(wd_update_clip=False)
+    parser.set_defaults(wd_update_clip=True)
     parser.add_argument("--wd_update_monitor_only", action="store_true", default=False,
                         help="Deprecated alias for the default behavior: log WD-style update metrics but do not scale gradients.")
     parser.add_argument("--wd_actor_update_clip", type=float, default=8.0,
@@ -134,15 +134,17 @@ def create_parser() -> argparse.ArgumentParser:
 
     # --- Env config overrides ---
     parser.add_argument("--reward_mode", type=str, default="current")
-    parser.add_argument("--curriculum_version", type=str, default="warp_drive_goal_first",
-                        help="Curriculum version (default: warp_drive_goal_first -- goal->static->dynamic)")
+    parser.add_argument("--curriculum_version", type=str, default="warp_drive_single_agent_v1",
+                        help="Curriculum phase config key. Default: warp_drive_single_agent_v1. "
+                             "Use --initial_stage to choose the starting phase; --fixed_stage to disable transitions.")
     parser.add_argument("--lidar_no_noise", action="store_true", default=False)
     parser.add_argument("--no_domain_randomization", action="store_true", default=False)
     parser.add_argument("--reward_speed_v05", action="store_true", default=False)
     parser.add_argument("--play", action="store_true", default=False,
                         help="Inference only -- no PPO training, just run rollout with loaded checkpoint")
     parser.add_argument("--initial_stage", type=int, default=1,
-                        help="Force curriculum to start at this stage (1-8)")
+                        help="Force curriculum to start at this phase/stage. "
+                             "Range depends on --curriculum_version (warp_drive_single_agent_v1 currently 1-5).")
     parser.add_argument("--fixed_stage", action="store_true", default=False,
                         help="Keep curriculum at initial_stage and disable promote/demote transitions. "
                              "Useful for WD-style fixed phase experiments.")
