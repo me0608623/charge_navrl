@@ -1136,3 +1136,9 @@ class RewardsCfgVLP16NavRLGroundV8(RewardsCfgVLP16NavRLGroundV7):
         params={},
         weight=-0.2,
     )
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRLGroundV8(ChargeNavigationEnvCfgVLP16Curriculum):
+    """VLP-16 Curriculum + NavRL-Ground v8 (v21 實驗用)"""
+    rewards: RewardsCfgVLP16NavRLGroundV8 = RewardsCfgVLP16NavRLGroundV8()

@@ -7,6 +7,7 @@ import os
 from rnn_car_modular.experiment_config import ExperimentConfig, load_experiment_config_from_file
 
 # Lazy imports to avoid circular dependency; configs import ExperimentConfig
+from rnn_car_modular.configs.navrl_ground_a2c_aux import CONFIG as navrl_ground_a2c_aux
 from rnn_car_modular.configs.wd_sa2_a2c_aux import CONFIG as wd_sa2_a2c_aux
 from rnn_car_modular.configs.wd_sa2_a2c_aux_lowent import CONFIG as wd_sa2_a2c_aux_lowent
 from rnn_car_modular.configs.wd_sa2_a2c_noaux import CONFIG as wd_sa2_a2c_noaux
@@ -14,6 +15,7 @@ from rnn_car_modular.configs.wd_sa2_ppo_noaux import CONFIG as wd_sa2_ppo_noaux
 
 
 EXPERIMENT_CONFIGS: dict[str, ExperimentConfig] = {
+    "navrl_ground_a2c_aux": navrl_ground_a2c_aux,
     "wd_sa2_a2c_aux": wd_sa2_a2c_aux,
     "wd_sa2_a2c_aux_lowent": wd_sa2_a2c_aux_lowent,
     "wd_sa2_a2c_noaux": wd_sa2_a2c_noaux,

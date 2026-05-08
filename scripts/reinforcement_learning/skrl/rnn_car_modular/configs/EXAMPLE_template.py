@@ -63,11 +63,17 @@
 
 8. Reward 規則（Phase 2 runtime dispatch）
    - reward_profile="wd_sparse":
-     → 唯一已實作的 reward。碰撞/goal 獎勵由 Phase Config 動態 sync。
-   - reward_profile="navrl_dense" / "hybrid_progress" / "ttc_risk":
+     → WD 稀疏獎勵。外部計算，碰撞/goal 獎勵由 Phase Config 動態 sync。
+     → task 須用 "...-Curriculum-WD"（env reward 權重歸零）。
+   - reward_profile="navrl_dense_v8":
+     → NavRL 8 項 dense reward。外部計算（與 wd_sparse 一致）。
+     → 公式/權重/參數全在 rewards/navrl_dense_v8.py → REWARD_TERMS dict。
+     → task 用 "...-Curriculum-WD"（env reward 歸零，由 module 控制）。
+     → 範例: navrl_ground_a2c_aux.py
+   - reward_profile="hybrid_progress" / "ttc_risk":
      → 尚未實作，會 raise NotImplementedError。
    - 未來新增 reward 只需:
-     a. 建立 rnn_car_modular/rewards/<name>.py
+     a. 建立 rnn_car_modular/rewards/<name>.py（實作 RewardModule protocol）
      b. 在 rewards/factory.py 加分支
      c. 在此 config 設 reward_profile="<name>"
 
@@ -99,7 +105,9 @@ CONFIG = ExperimentConfig(
     # ─────────────────────────────────────────────────────────
 
     # IsaacLab gym 任務 ID。決定觀測空間 / 動作空間 / 物理場景。
-    # 目前只用: "Isaac-Navigation-Charge-VLP16-Curriculum-WD"
+    # reward 由 modular module 外部計算，不依賴 env 的 reward_manager。
+    # 所有 reward_profile 都用 WD env（env reward 歸零）:
+    #   "Isaac-Navigation-Charge-VLP16-Curriculum-WD"
     # 不要隨便改，除非你新建了 gym.register 的任務。
     task="Isaac-Navigation-Charge-VLP16-Curriculum-WD",
 
@@ -132,8 +140,8 @@ CONFIG = ExperimentConfig(
     # ─────────────────────────────────────────────────────────
 
     # Reward function 選擇。Phase 2 已啟用 runtime dispatch。
-    # ✅ "wd_sparse"        — Warp Drive 稀疏獎勵（goal +40 / collision -5~-100）
-    # ❌ "navrl_dense"      — 尚未實作
+    # ✅ "wd_sparse"        — WD 稀疏獎勵（goal +40 / collision -5~-100），外部計算
+    # ✅ "navrl_dense_v8"   — NavRL 8 項 dense reward，外部計算，權重在 navrl_dense_v8.py
     # ❌ "hybrid_progress"  — 尚未實作
     # ❌ "ttc_risk"         — 尚未實作
     reward_profile="wd_sparse",

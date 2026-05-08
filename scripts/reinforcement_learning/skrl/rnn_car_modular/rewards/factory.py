@@ -15,7 +15,7 @@ def create_reward_module(
     """Create a reward module from profile name.
 
     Args:
-        reward_profile: One of "wd_sparse", "navrl_dense", "hybrid_progress", "ttc_risk".
+        reward_profile: One of "wd_sparse", "navrl_dense_v8", ...
         penalty_hit: Initial collision penalty (synced from curriculum later).
         reward_get_goal: Initial goal reward.
         cost_operate: Initial action cost.
@@ -33,8 +33,12 @@ def create_reward_module(
             cost_operate=cost_operate,
         )
 
+    if reward_profile == "navrl_dense_v8":
+        from rnn_car_modular.rewards.navrl_dense_v8 import NavRLDenseV8Reward
+        return NavRLDenseV8Reward()
+
     raise NotImplementedError(
         f"reward_profile={reward_profile!r} is not yet implemented. "
-        f"Available: wd_sparse. "
-        f"Future: navrl_dense, hybrid_progress, ttc_risk."
+        f"Available: wd_sparse, navrl_dense_v8. "
+        f"Future: hybrid_progress, ttc_risk."
     )

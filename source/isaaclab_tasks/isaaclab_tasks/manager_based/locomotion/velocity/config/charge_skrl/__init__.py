@@ -126,3 +126,16 @@ gym.register(
         "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
     },
 )
+
+# ============================================================================
+# NavRL-Ground v8: v21 實驗版 — safety/goal 比例修正 + 碰撞遞增 + time_penalty 恢復
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Ground-V8",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:ChargeNavigationEnvCfgVLP16CurriculumNavRLGroundV8",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
