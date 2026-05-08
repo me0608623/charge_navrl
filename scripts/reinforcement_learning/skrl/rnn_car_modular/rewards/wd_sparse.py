@@ -1,0 +1,78 @@
+"""WD sparse reward module -- wraps the canonical compute_wd_charge_reward.
+
+This is a thin facade that delegates to the existing implementation in
+rnn_car_wdclean/rewards.py to avoid logic duplication and drift.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import torch
+
+# Ensure the wdclean package is importable
+_skrl_root = Path(__file__).resolve().parent.parent.parent
+if str(_skrl_root) not in sys.path:
+    sys.path.insert(0, str(_skrl_root))
+
+from rnn_car_wdclean.rewards import compute_wd_charge_reward  # noqa: E402
+
+
+class WDSparseReward:
+    """Warp Drive style sparse reward for charge navigation.
+
+    Breakdown keys (unchanged):
+        goal_reward, wall_hit_reward, obs_hit_reward, floor_reward,
+        action_reward, goal_reached, wall_collision, obs_collision, other_death
+    """
+
+    name: str = "wd_sparse"
+
+    def __init__(
+        self,
+        penalty_hit: float = -5.0,
+        reward_get_goal: float = 40.0,
+        cost_operate: float = 0.03,
+        rl_fps: float = 5.0,
+        cost_turn_rate: float = 0.5,
+    ) -> None:
+        self.penalty_hit = penalty_hit
+        self.reward_get_goal = reward_get_goal
+        self.cost_operate = cost_operate
+        self.rl_fps = rl_fps
+        self.cost_turn_rate = cost_turn_rate
+
+    def update_params(self, curriculum_info: dict) -> None:
+        """Sync reward params from curriculum phase config.
+
+        Expected keys (matching Phase Config flat schema):
+            spot_penalty_hit, spot_reward_get_goal, spot_cost_operate
+        """
+        if "spot_penalty_hit" in curriculum_info:
+            self.penalty_hit = curriculum_info["spot_penalty_hit"]
+        if "spot_reward_get_goal" in curriculum_info:
+            self.reward_get_goal = curriculum_info["spot_reward_get_goal"]
+        if "spot_cost_operate" in curriculum_info:
+            self.cost_operate = curriculum_info["spot_cost_operate"]
+
+    def compute(
+        self,
+        env_unwrapped: object,
+        actions: torch.Tensor,
+        terminated: torch.Tensor,
+        truncated: torch.Tensor,
+        context: dict | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute WD sparse reward by delegating to canonical implementation."""
+        return compute_wd_charge_reward(
+            env_unwrapped=env_unwrapped,
+            actions=actions,
+            terminated=terminated,
+            truncated=truncated,
+            penalty_hit=self.penalty_hit,
+            reward_get_goal=self.reward_get_goal,
+            cost_operate=self.cost_operate,
+            rl_fps=self.rl_fps,
+            cost_turn_rate=self.cost_turn_rate,
+        )

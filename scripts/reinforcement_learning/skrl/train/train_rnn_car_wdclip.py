@@ -183,7 +183,7 @@ parser.add_argument("--wd_update_clip", dest="wd_update_clip", action="store_tru
                          "critic spikes suppressing actor updates through merged grad clipping.")
 parser.add_argument("--no_wd_update_clip", dest="wd_update_clip", action="store_false",
                     help="Disable WD-style actor/critic gradient scaling while keeping the experiment entrypoint.")
-parser.set_defaults(wd_update_clip=False)
+parser.set_defaults(wd_update_clip=True)
 # --wd_update_monitor_only
 # - 用意：(已棄用) 只 log WD-style metrics 不做實際 clip，等同預設行為。保留用於 backward compat。
 parser.add_argument("--wd_update_monitor_only", action="store_true", default=False,
@@ -386,11 +386,13 @@ parser.add_argument("--action_table_sample_size", type=int, default=2048,
 # - 更改影響：切換 reward 結構會根本改變 policy gradient signal，不同 mode 結果不可比。
 parser.add_argument("--reward_mode", type=str, default="current")
 # --curriculum_version
-# - 用意：選擇 curriculum 版本（決定 goal/static/dynamic 引入順序與參數遞進方式）。
+# - 用意：選擇 curriculum phase config 檔案；預設使用 single-agent WD 設計。
+# - 搭配 --initial_stage 決定目前從哪個 phase/stage 開始；--fixed_stage 決定是否固定不升降。
 # - 正常範圍：固定字串。
 # - 更改影響：不同 curriculum 學習路徑完全不同，影響所有下游指標。
-parser.add_argument("--curriculum_version", type=str, default="warp_drive_goal_first",
-                    help="Curriculum version (default: warp_drive_goal_first — goal→static→dynamic)")
+parser.add_argument("--curriculum_version", type=str, default="warp_drive_single_agent_v1",
+                    help="Curriculum phase config key. Default: warp_drive_single_agent_v1. "
+                         "Use --initial_stage to choose the starting phase; --fixed_stage to disable transitions.")
 # --lidar_no_noise
 # - 用意：關閉 LiDAR 噪聲（消除 distractor 和 Uniform noise 干擾）。
 # - 正常範圍：布林旗標（預設 False = 有噪聲）。
@@ -413,18 +415,19 @@ parser.add_argument("--reward_speed_v05", action="store_true", default=False)
 parser.add_argument("--play", action="store_true", default=False,
                     help="Inference only — no PPO training, just run rollout with loaded checkpoint")
 # --initial_stage
-# - 用意：強制 curriculum 從指定階段開始（1-8）。
-# - 正常範圍：1～8。
+# - 用意：用 CLI 決定目前調用哪個 phase/stage 參數。
+# - 正常範圍：1～該 curriculum 的 stage 數（warp_drive_single_agent_v1 目前 1～5）。
 # - 更改影響：跳過前面階段可能讓 policy 面臨太難的環境而學不動；但可節省早期時間。
 parser.add_argument("--initial_stage", type=int, default=1,
-                    help="Force curriculum to start at this stage (1-8)")
+                    help="Force curriculum to start at this phase/stage. "
+                         "Range depends on --curriculum_version (warp_drive_single_agent_v1 currently 1-5).")
 # --fixed_stage
 # - 用意：固定在 initial_stage 不升降（禁用 curriculum 晉升/降級）。
 # - 正常範圍：布林旗標。
 # - 更改影響：啟用後環境難度固定，用於 WD 風格的定階段實驗或消融測試。
-parser.add_argument("--fixed_stage", action="store_true", default=False,
+parser.add_argument("--fixed_stage", action="store_true", default=True,
                     help="Keep curriculum at initial_stage and disable promote/demote transitions. "
-                         "Useful for WD-style fixed phase experiments.")
+                         "Useful for WD-style fixed phase experiments. (default: True)")
 # --zero_preprocess_feature_for_rl
 # - 用意：消融測試——把送給 RL head 的 12D preprocess feature 替換為全零。
 # - 正常範圍：布林旗標。
@@ -461,8 +464,31 @@ parser.add_argument("--aux_burn_in", type=int, default=0,
 parser.add_argument("--aux_seq_batch_size", type=int, default=256,
                     help="Number of sequences per aux mini-batch")
 
+# --- Modular Profiles (Phase 0: metadata only, does not change behavior) ---
+parser.add_argument("--reward_profile", type=str, default="wd_sparse",
+                    choices=["wd_sparse", "navrl_dense", "hybrid_progress", "ttc_risk"],
+                    help="Reward module profile. Phase 0: only wd_sparse executes.")
+parser.add_argument("--scene_profile", type=str, default=None,
+                    help="Scene/curriculum profile. Default: inferred from --curriculum_version.")
+parser.add_argument("--algorithm_profile", type=str, default=None,
+                    choices=["a2c_wd", "ppo_clip"],
+                    help="Algorithm profile. Default: inferred from --use_a2c / --use_ppo.")
+parser.add_argument("--aux_profile", type=str, default=None,
+                    choices=["wd_7d_geometry", "none", "future_collision_risk"],
+                    help="Aux training profile. Default: inferred from --disable_aux_training.")
+parser.add_argument("--encoder_profile", type=str, default=None,
+                    help="Encoder profile. Default: inferred from --charge_encoder_mode.")
+
+# --- Experiment Config (LEGO-style run composition) ---
+parser.add_argument("--experiment_config", type=str, default=None,
+                    help="Experiment config name (e.g. wd_sa2_a2c_aux_lowent) or .py file path. "
+                         "Provides defaults for all training params; CLI flags override.")
+parser.add_argument("--print_experiment_config", action="store_true", default=False,
+                    help="Print resolved experiment config and exit.")
+
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
+_original_argv = list(sys.argv)  # Save before hydra strips args (for experiment_config CLI detection)
 
 headless_mode = getattr(args_cli, "headless", False) or "--headless" in sys.argv
 sys.argv = [sys.argv[0]] + hydra_args
@@ -473,25 +499,30 @@ simulation_app = app_launcher.app
 # ============================================================================
 # 2. Post-launcher imports
 # ============================================================================
+# 注意：所有 Isaac Sim / Omniverse 相關套件必須在 AppLauncher 啟動後才能 import。
+# 在此之前 import 會造成 Omniverse Kit 尚未初始化而崩潰。
 
-import gymnasium as gym
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.distributions import Categorical
+import gymnasium as gym          # OpenAI Gym 相容介面 (IsaacLab 環境的 gym wrapper)
+import numpy as np               # NumPy：CPU 端數值計算、metrics 統計
+import torch                     # PyTorch：GPU 張量運算、模型訓練
+import torch.nn as nn            # 神經網路模組 (Linear、RNN、Conv1d…)
+import torch.nn.functional as F  # 無狀態 NN 函數 (mse_loss…)
+from torch.distributions import Categorical  # 離散動作分佈 (policy logits → 動作採樣)
 
 from isaaclab.envs import ManagerBasedRLEnvCfg, DirectRLEnvCfg, DirectMARLEnvCfg
-from isaaclab_rl.skrl import SkrlVecEnvWrapper
+from isaaclab_rl.skrl import SkrlVecEnvWrapper  # 把 IsaacLab env 包成 skrl 相容介面
 
-import isaaclab_tasks  # noqa: register tasks
-from isaaclab_tasks.utils.hydra import hydra_task_config
+import isaaclab_tasks  # noqa: register tasks  ← side-effect import，觸發所有 gym.register
+from isaaclab_tasks.utils.hydra import hydra_task_config  # Hydra config decorator
 
+# 將訓練腳本目錄加到 sys.path，使下方的相對 import 能找到同目錄與 parent 的模組
 sys.path.insert(0, str(Path(__file__).parent))
 _skrl_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_skrl_root))  # skrl/ root
+sys.path.insert(0, str(_skrl_root))          # skrl/ root
 sys.path.insert(0, str(_skrl_root / "models"))  # skrl/models/
-sys.path.insert(0, str(_skrl_root / "utils"))  # skrl/utils/
+sys.path.insert(0, str(_skrl_root / "utils"))   # skrl/utils/
+
+# Charge 側網路模組（從 modular_rnn_models.py 匯入）
 from modular_rnn_models import (
     LidarStateExtractor,
     PreprocessRNN,
@@ -506,6 +537,51 @@ from modular_rnn_models import (
     NUM_BINS,
 )
 from wd_aux_targets import build_wd_preprocess_targets, compute_wd_module_loss
+# build_wd_preprocess_targets: 每步計算「最近 2 個障礙物」的 7D 特權幾何資訊 (aux loss target)
+# compute_wd_module_loss: Warp Drive module loss = log(clamp(L1, 0.01)) per-dim weighted
+
+from rnn_car_modular.profiles import resolve_profiles, validate_profiles, profiles_to_dict
+from rnn_car_modular.experiment_config import (
+    ExperimentConfig, apply_experiment_config, experiment_config_to_dict,
+)
+
+# --- Apply experiment config (if provided) before profile resolution ---
+_experiment_cfg: ExperimentConfig | None = None
+_experiment_applied_fields: list[str] = []
+if args_cli.experiment_config is not None:
+    from rnn_car_modular.configs.registry import get_experiment_config
+    _experiment_cfg = get_experiment_config(args_cli.experiment_config)
+    _experiment_applied_fields = apply_experiment_config(args_cli, _experiment_cfg, _original_argv)
+    print(f"[EXPERIMENT_CONFIG] name={_experiment_cfg.name} description={_experiment_cfg.description}")
+    if _experiment_applied_fields:
+        _applied_summary = " ".join(
+            f"{k}={getattr(args_cli, k)}" for k in _experiment_applied_fields[:15]
+        )
+        print(f"[EXPERIMENT_CONFIG] applied fields ({len(_experiment_applied_fields)}): {_applied_summary}"
+              + ("..." if len(_experiment_applied_fields) > 15 else ""))
+
+if args_cli.print_experiment_config:
+    if _experiment_cfg is not None:
+        import json
+        print(json.dumps(experiment_config_to_dict(_experiment_cfg), indent=2, default=str))
+    else:
+        print("[EXPERIMENT_CONFIG] No --experiment_config provided.")
+    simulation_app.close()
+    sys.exit(0)
+
+# --- Resolve & validate trainer profiles (Phase 0: metadata only) ---
+_trainer_profiles = resolve_profiles(args_cli)
+validate_profiles(_trainer_profiles, args_cli)
+print(f"[PROFILES] reward={_trainer_profiles.reward_profile} "
+      f"scene={_trainer_profiles.scene_profile} "
+      f"algorithm={_trainer_profiles.algorithm_profile} "
+      f"aux={_trainer_profiles.aux_profile} "
+      f"encoder={_trainer_profiles.encoder_profile}")
+
+# --- Create reward module from profile (Phase 2: runtime dispatch) ---
+from rnn_car_modular.rewards.factory import create_reward_module
+_reward_module = create_reward_module(_trainer_profiles.reward_profile)
+print(f"[REWARD] module={_reward_module.name} (runtime dispatch active)")
 
 print("[INFO] Multi-Agent Modular RNN Training v5 — WD-Principle (A2CK + vanilla RNN)")
 
@@ -513,20 +589,25 @@ print("[INFO] Multi-Agent Modular RNN Training v5 — WD-Principle (A2CK + vanil
 # ============================================================================
 # Monitoring helpers (gradient norm, param delta, param norm)
 # ============================================================================
+# 這些函數提供 WD-style 訓練診斷，用來監測以下三個維度:
+#   1. param_l2_norm  → 參數「量級」(模型是否發散/縮水)
+#   2. grad_l2_norm   → 梯度「壓力」(更新是否被 clip 壓制或爆炸)
+#   3. param_delta_norm → 實際更新「步長」(優化器一次 step 的位移量)
 
 # WD module loss dim → human-readable name mapping
+# wd_aux_targets.py 輸出 7D loss，前 6 維對應最近兩個障礙物的 body-frame 相對座標
 _AUX_DIM_NAMES = {
-    "module_feture_0_loss": "aux/near1_x_loss",
-    "module_feture_1_loss": "aux/near1_y_loss",
-    "module_feture_2_loss": "aux/near1_d_loss",
-    "module_feture_3_loss": "aux/near2_x_loss",
-    "module_feture_4_loss": "aux/near2_y_loss",
-    "module_feture_5_loss": "aux/near2_d_loss",
+    "module_feture_0_loss": "aux/near1_x_loss",   # 最近障礙物 1 的 x 方向 loss
+    "module_feture_1_loss": "aux/near1_y_loss",   # 最近障礙物 1 的 y 方向 loss
+    "module_feture_2_loss": "aux/near1_d_loss",   # 最近障礙物 1 的距離 loss
+    "module_feture_3_loss": "aux/near2_x_loss",   # 最近障礙物 2 的 x 方向 loss
+    "module_feture_4_loss": "aux/near2_y_loss",   # 最近障礙物 2 的 y 方向 loss
+    "module_feture_5_loss": "aux/near2_d_loss",   # 最近障礙物 2 的距離 loss
 }
 
 
 def _param_l2_norm(params) -> float:
-    """L2 norm of a flat parameter vector."""
+    """計算參數向量的 L2 norm（監控模型量級用）。"""
     total = 0.0
     for p in params:
         total += p.data.norm(2).item() ** 2
@@ -534,7 +615,7 @@ def _param_l2_norm(params) -> float:
 
 
 def _grad_l2_norm(params) -> float:
-    """L2 norm of gradients. Returns 0 if no grad exists."""
+    """計算梯度向量的 L2 norm（監控梯度壓力用）。無梯度時返回 0。"""
     total = 0.0
     for p in params:
         if p.grad is not None:
@@ -543,7 +624,8 @@ def _grad_l2_norm(params) -> float:
 
 
 def _scale_grads(params, scale: float):
-    """Scale gradients in-place for a parameter group."""
+    """對一個參數組的梯度做 in-place 縮放（WD-style actor/critic 分離 clip 用）。
+    scale >= 1.0 時直接跳過（不放大梯度）。"""
     if scale >= 1.0:
         return
     for p in params:
@@ -552,12 +634,15 @@ def _scale_grads(params, scale: float):
 
 
 def _snapshot_params(params) -> torch.Tensor:
-    """Flatten and clone all parameters into a single vector."""
+    """把所有參數 flatten 並 clone 為單一向量，用來計算 param_delta_norm。"""
     return torch.cat([p.data.reshape(-1).clone() for p in params])
 
 
 def _param_delta_norm(before: torch.Tensor, after_params) -> float:
-    """L2 norm of (after - before) parameter vector."""
+    """計算 optimizer.step() 前後的參數位移量 (L2 norm)。
+    公式: ||theta_after - theta_before||_2
+    用途: 比較 actor/critic 更新幅度，診斷 WD module_entropy。
+    """
     after = torch.cat([p.data.reshape(-1) for p in after_params])
     return (after - before).norm(2).item()
 
@@ -565,24 +650,38 @@ def _param_delta_norm(before: torch.Tensor, after_params) -> float:
 # ============================================================================
 # Running observation normalizer
 # ============================================================================
+# 使用 Welford's online algorithm 對觀測值做增量式均值/方差估計，避免儲存所有歷史資料。
+# 歸一化後再 clip 到 [-clip, clip]，防止離群值破壞網路輸入。
 
 class RunningNormalizer:
-    """Welford's online algorithm for running mean/var normalization."""
+    """Welford's online algorithm for running mean/var normalization.
+
+    每個 rollout step 呼叫 update(obs) 更新統計量，
+    呼叫 normalize(obs) 做標準化：(x - mean) / (std + 1e-8)，並 clip 到 ±clip。
+
+    注意：此 normalizer 只對 Charge 的 139D 觀測做標準化。
+    Obstacle obs (9D) 目前不另外 normalize，因為已在 env 端計算相對距離。
+    """
 
     def __init__(self, shape, device, clip=5.0):
-        self.mean = torch.zeros(shape, device=device)
-        self.var = torch.ones(shape, device=device)
-        self.count = 1e-4
-        self.clip = clip
+        self.mean = torch.zeros(shape, device=device)   # 每 dim 的 running mean
+        self.var = torch.ones(shape, device=device)     # 每 dim 的 running variance
+        self.count = 1e-4  # 初始化為小正值避免除以零（而非 0）
+        self.clip = clip   # 標準化後的 clamp 範圍（對應 RunningStandardScaler 的 clip）
 
     @torch.no_grad()
     def update(self, x):
+        """Welford parallel update：用新的 mini-batch x 更新 mean/var。
+        x: [N, dim]，N = num_envs（每 step 全部 env 的觀測）
+        """
         batch_mean = x.mean(dim=0)
         batch_var = x.var(dim=0, unbiased=False)
         batch_count = x.shape[0]
         delta = batch_mean - self.mean
         total = self.count + batch_count
+        # 更新 mean（加權平均）
         self.mean = self.mean + delta * batch_count / total
+        # 更新 var（parallel Welford — 合併兩組統計量）
         m_a = self.var * self.count
         m_b = batch_var * batch_count
         m2 = m_a + m_b + delta**2 * self.count * batch_count / total
@@ -590,32 +689,45 @@ class RunningNormalizer:
         self.count = total
 
     def normalize(self, x):
+        """標準化 x 並 clip 到 [-clip, clip]。"""
         return torch.clamp((x - self.mean) / (self.var.sqrt() + 1e-8), -self.clip, self.clip)
 
 
 # ============================================================================
 # Charge Rollout Buffer (PPO + aux loss)
 # ============================================================================
+# Rollout buffer 同時儲存兩種訓練所需的資料：
+#   1. RL 訓練（A2C/PPO）：rl_inputs, actions, log_probs, rewards, values, dones
+#   2. Aux/RNN 訓練（TBPTT）：raw_obs, hiddens, aux_targets
+#
+# 設計重點：
+#   - raw_obs 儲存未 normalize 的原始觀測，aux TBPTT 時會即時 normalize（避免 stale stats）
+#   - hiddens 儲存每步的 RNN hidden state，TBPTT 用 h0 初始化序列而非 zero-init
+#   - ptr 指向下一個寫入位置，每次 rollout 開始時 reset() 歸零
 
 class ChargeRolloutBuffer:
     def __init__(self, num_steps, num_envs, rl_input_dim, obs_dim, hidden_dim, device):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.device = device
-        self.rl_inputs = torch.zeros(num_steps, num_envs, rl_input_dim, device=device)
-        self.actions = torch.zeros(num_steps, num_envs, 2, dtype=torch.long, device=device)
-        self.log_probs = torch.zeros(num_steps, num_envs, device=device)
-        self.rewards = torch.zeros(num_steps, num_envs, device=device)
-        self.values = torch.zeros(num_steps, num_envs, device=device)
-        self.dones = torch.zeros(num_steps, num_envs, device=device)
-        self.raw_obs = torch.zeros(num_steps, num_envs, obs_dim, device=device)
-        self.hiddens = torch.zeros(num_steps, num_envs, hidden_dim, device=device)
+        # RL 訓練所需欄位（形狀：[T, E, *]）
+        self.rl_inputs = torch.zeros(num_steps, num_envs, rl_input_dim, device=device)  # [T,E, obs+rnn_feat]
+        self.actions = torch.zeros(num_steps, num_envs, 2, dtype=torch.long, device=device)  # [T,E,2] discrete(linear, angular)
+        self.log_probs = torch.zeros(num_steps, num_envs, device=device)   # [T,E] joint log prob
+        self.rewards = torch.zeros(num_steps, num_envs, device=device)     # [T,E] WD sparse reward
+        self.values = torch.zeros(num_steps, num_envs, device=device)      # [T,E] critic prediction
+        self.dones = torch.zeros(num_steps, num_envs, device=device)       # [T,E] episode end flag
+        # Aux/RNN 訓練所需欄位
+        self.raw_obs = torch.zeros(num_steps, num_envs, obs_dim, device=device)       # [T,E,139] 原始觀測
+        self.hiddens = torch.zeros(num_steps, num_envs, hidden_dim, device=device)    # [T,E,H] RNN hidden
         # WD-style 7D privileged geometry target for module loss
+        # 7D = near1(x,y,d) + near2(x,y,d) + timestep
         self.aux_targets = torch.zeros(num_steps, num_envs, 7, device=device)
-        self.ptr = 0
+        self.ptr = 0  # 下一個寫入步數的 pointer
 
     def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden,
             aux_target=None):
+        """儲存一個 rollout step 的所有資料。每次 env.step() 後呼叫。"""
         i = self.ptr
         self.rl_inputs[i] = rl_input
         self.actions[i] = action
@@ -624,37 +736,39 @@ class ChargeRolloutBuffer:
         self.values[i] = value
         self.dones[i] = done
         self.raw_obs[i] = raw_ob
-        self.hiddens[i] = hidden.squeeze(0)
+        self.hiddens[i] = hidden.squeeze(0)  # 去掉 RNN 的 [1, E, H] 前導維度
         if aux_target is not None:
             self.aux_targets[i] = aux_target
         self.ptr += 1
 
     def reset(self):
+        """每次 rollout 開始前呼叫，重置 ptr（不清除 tensor，直接覆蓋）。"""
         self.ptr = 0
 
     def sample_aux_sequences(
         self, seq_len: int, batch_size: int, burn_in: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int] | None:
-        """Sample contiguous, non-episode-crossing sequences for TBPTT aux training.
+        """為 TBPTT aux 訓練採樣不跨 episode 的連續序列。
 
-        Algorithm:
-          1. Build valid start indices: (t0, env) where t0+seq_len <= T_filled
-             AND no done in [t0, t0+seq_len-1) (done at t means episode ends after t,
-             so next step starts a new episode — sequence must not span that boundary).
-          2. Randomly sample `batch_size` starts (or fewer if not enough).
-          3. Gather obs, target, h0 for each sequence.
+        演算法:
+          1. 建立有效起始位置集合: (t0, env)，條件是:
+               - t0 + seq_len <= T_filled (序列不超過 buffer 已填充量)
+               - [t0, t0+seq_len-2] 之間沒有 done（不跨 episode 邊界；done at t0+seq_len-1 允許，
+                 因為最後一步仍是同一 episode 的觀測）
+          2. 隨機採樣 batch_size 個起始位置（若不足則全取）
+          3. 收集每條序列的 obs / aux_target / h0（用儲存的 hidden state 初始化）
 
         Args:
-            seq_len: total sequence length (including burn_in)
-            batch_size: desired number of sequences
-            burn_in: first `burn_in` steps only warm up hidden, not counted in loss
+            seq_len:    序列總長（含 burn_in）
+            batch_size: 目標序列數
+            burn_in:    序列開頭只更新 hidden、不計入 loss 的步數
 
         Returns:
-            (obs_seq, target_seq, h0, valid_count) or None if no valid sequences.
-            obs_seq:    [B, L, obs_dim]
-            target_seq: [B, L, 7]
-            h0:         [1, B, hidden_dim]
-            valid_count: total number of valid start positions (for monitoring)
+            (obs_seq, target_seq, h0, valid_count) 或 None（無合法序列時）
+            obs_seq:     [B, L, obs_dim]
+            target_seq:  [B, L, 7]
+            h0:          [1, B, hidden_dim]
+            valid_count: 合法起始位置總數（用於監控）
         """
         T_filled = self.ptr  # actual steps stored this rollout
         if T_filled < seq_len:
@@ -725,16 +839,26 @@ class ChargeRolloutBuffer:
 # ============================================================================
 # Obstacle Rollout Buffer
 # ============================================================================
+# 障礙物 rollout buffer 與 Charge 的主要差異：
+#   - 每個障礙物視為「獨立 agent」，buffer 的 batch 維度 = num_envs × max_obstacles
+#   - 不需要 RNN hidden state（障礙物 policy 是 stateless FC network）
+#   - 不需要 raw_obs 或 aux_targets（障礙物沒有 aux loss）
+#   - done = charge 的 done，廣播到所有障礙物（同一 env 的所有障礙物同步重置）
 
 class ObstacleRolloutBuffer:
-    """Flat buffer: each obstacle is an independent sample."""
+    """Flat buffer: 每個障礙物視為獨立樣本，B = num_envs × max_obstacles。
+
+    obs_dim = OBS_POLICY_OBS_DIM = 9D per obstacle:
+      own_xy(2) + own_vel(2) + robot_rel_xy(2) + robot_vel(2) + d_wall(1)
+    act_dim = 2: continuous velocity command (vx, vy) in [-1, 1]
+    """
 
     def __init__(self, num_steps, num_envs, max_obstacles, obs_dim, act_dim, device):
         self.num_steps = num_steps
-        self.B = num_envs * max_obstacles  # flat batch dimension
+        self.B = num_envs * max_obstacles  # 展平的 batch 維度（所有 env × 所有障礙物）
         self.device = device
-        self.obs = torch.zeros(num_steps, self.B, obs_dim, device=device)
-        self.actions = torch.zeros(num_steps, self.B, act_dim, device=device)
+        self.obs = torch.zeros(num_steps, self.B, obs_dim, device=device)    # [T, E*N, 9]
+        self.actions = torch.zeros(num_steps, self.B, act_dim, device=device)# [T, E*N, 2]
         self.log_probs = torch.zeros(num_steps, self.B, device=device)
         self.rewards = torch.zeros(num_steps, self.B, device=device)
         self.values = torch.zeros(num_steps, self.B, device=device)
@@ -742,6 +866,7 @@ class ObstacleRolloutBuffer:
         self.ptr = 0
 
     def add(self, obs, action, log_prob, reward, value, done):
+        """儲存一個 rollout step 的障礙物資料。"""
         i = self.ptr
         self.obs[i] = obs
         self.actions[i] = action
@@ -752,18 +877,32 @@ class ObstacleRolloutBuffer:
         self.ptr += 1
 
     def reset(self):
+        """每次 rollout 開始前重置 ptr。"""
         self.ptr = 0
 
 
 # ============================================================================
 # Obstacle environment interface
 # ============================================================================
+# 這組函數是 Charge 環境與 obstacle policy 之間的橋接層。
+# Isaac Lab 沒有內建 multi-agent obstacle policy，因此需要手動:
+#   1. build_obstacle_obs:  從 scene entities 讀取障礙物位置/速度，組成 policy 輸入
+#   2. apply_obstacle_actions: 把 policy 輸出的速度命令寫回 sim（更新障礙物位置）
+#   3. compute_obstacle_reward: 計算障礙物 policy 的 reward（WD: zero，或 weak adversarial）
+# 注意：障礙物位置以 local frame（相對 env_origins）計算，再還原到 world frame 寫回 sim。
 
 def build_obstacle_obs(env_unwrapped, max_obstacles: int, device) -> torch.Tensor:
-    """Read obstacle + robot state, build [num_envs, N, 9] obs tensor.
+    """讀取障礙物 + 機器人狀態，組裝 [num_envs, N, 9] obs tensor。
 
-    Per-obstacle obs (body-frame of env):
+    Per-obstacle obs (以 env local frame 為基準):
       own_local_xy(2) + own_vel(2) + robot_rel_xy(2) + robot_vel(2) + d_wall(1) = 9D
+    其中:
+      own_local_xy: 障礙物在 env 內的 (x,y) 座標
+      own_vel: 來自 _obstacle_velocities cache（上一步的 apply_obstacle_actions 更新）
+      robot_rel_xy: 機器人位置 - 障礙物位置（相對方向）
+      robot_vel: 機器人的世界系速度 (vx, vy)
+      d_wall: 障礙物到最近邊界的距離
+    非活躍障礙物（Z ≤ 0）填全零。
     """
     num_envs = env_unwrapped.num_envs
     env_origins = env_unwrapped.scene.env_origins  # [num_envs, 3]
@@ -832,13 +971,21 @@ def build_obstacle_obs(env_unwrapped, max_obstacles: int, device) -> torch.Tenso
 
 def apply_obstacle_actions(env_unwrapped, actions: torch.Tensor, max_obstacles: int,
                            dt: float = 0.2, speed_limit: float = 0.8, bound_limit: float = 7.0):
-    """Apply obstacle policy actions: velocity → position update → write_root_pose_to_sim.
+    """把障礙物 policy 輸出的速度命令套用到場景：位置更新 + 邊界反彈 + 寫回 sim。
 
-    Only moves ACTIVE obstacles (Z > 0). Hidden obstacles (Z=-10) are skipped.
-    Uses per-env _scene_bounds if available (scene size randomization).
+    只移動 ACTIVE 障礙物（Z > 0），隱藏障礙物（Z=-10）跳過。
+    使用 per-env _scene_bounds（支援 scene size randomization）。
+
+    流程:
+      1. actions * speed_limit → velocity（[-1,1] → 真實速度，m/s）
+      2. L2 norm clamp：確保實際速度不超過 speed_limit
+      3. local_xy += velocity * dt（Euler 積分）
+      4. 邊界反彈（soft bounce）：越界後對稱反射 + final clamp
+      5. write_root_pose_to_sim：把 new_pos 寫回 Isaac Sim（只更新 active 障礙物）
+      6. 更新 _obstacle_velocities cache（供下一步 build_obstacle_obs 使用）
 
     Args:
-        actions: [num_envs, N, 2] velocity commands in [-1, 1], scaled by speed_limit
+        actions: [num_envs, N, 2] 速度命令，範圍 [-1, 1]，會乘以 speed_limit
     """
     env_origins = env_unwrapped.scene.env_origins  # [E, 3]
 
@@ -905,13 +1052,16 @@ def apply_obstacle_actions(env_unwrapped, actions: torch.Tensor, max_obstacles: 
 
 def compute_obstacle_reward(env_unwrapped, obs_obs: torch.Tensor, max_obstacles: int,
                             mode: str = "zero") -> torch.Tensor:
-    """Compute per-obstacle reward.
+    """計算每個障礙物的 reward。
+
+    WD 原版 (mode="zero")：障礙物沒有 reward 信號，純粹被 learned policy 驅動
+    approach 模式 (mode="approach")：障礙物靠近機器人時得到小正 reward（弱對抗）
 
     Args:
-        obs_obs: [num_envs, N, 9] obstacle observations
-        mode: "zero" (Warp Drive) or "approach" (weak adversarial)
+        obs_obs: [num_envs, N, 9] 障礙物觀測（由 build_obstacle_obs 產生）
+        mode: "zero"（WD 風格，障礙物無 reward）或 "approach"（弱對抗）
     Returns:
-        [num_envs * N] flat reward
+        [num_envs * N] 展平的 per-obstacle reward
     """
     num_envs = obs_obs.shape[0]
     N = max_obstacles
@@ -936,10 +1086,15 @@ def compute_obstacle_reward(env_unwrapped, obs_obs: torch.Tensor, max_obstacles:
 
 @torch.no_grad()
 def compute_charge_action_diagnostics(env_unwrapped, actions: torch.Tensor) -> dict[str, torch.Tensor] | None:
-    """Map discrete charge actions to physical action diagnostics.
+    """把離散動作索引映射為物理動作（速度/加速度/角速度），供診斷用。
 
-    The policy outputs two discrete indices. For debugging navigation behavior we
-    also need the executed forward speed, acceleration, and yaw rate.
+    Policy 輸出 [linear_idx, angular_idx] 兩個離散索引（各 19 種選擇）。
+    這個函數從 action_manager 讀取 processed_actions（實際執行的速度/角速度）
+    與 applied_accelerations（實際套用的加速度），方便觀察 policy 行為。
+
+    Returns:
+        dict 包含: linear_idx, angular_idx, v_x, a_x, omega
+        或 None（無法取得 action term 時）
     """
     try:
         terms = getattr(env_unwrapped.action_manager, "_terms", {})
@@ -991,9 +1146,20 @@ def compute_wd_charge_reward(
     rl_fps: float = 5.0,
     cost_turn_rate: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Compute Warp Drive style sparse reward for charge agent.
+    """計算 Warp Drive 風格的 sparse reward（用於 charge agent 的 RL 訓練）。
 
-    Uses termination_manager per-term buffers to detect goal_reached vs collision.
+    注意：Isaac Lab 環境本身也提供 dense reward（velocity_to_goal + safety 等），
+    但這個函數完全獨立重新計算 WD 原版的 sparse reward，取代 env reward 供 PPO 使用。
+    env 的 dense reward 只用於 MetricsCollector 裡的指標記錄（不參與 RL loss）。
+
+    WD Reward 結構:
+      + goal_reward:    到達目標 → +reward_get_goal（通常 +40）
+      + wall_hit:       撞牆 → penalty_hit（-5 ~ -200，依 phase）
+      + obs_hit:        撞障礙物 → penalty_hit（同上）
+      + action_reward:  Phase 1 有 action cost（鼓勵省油/省力）
+
+    從 termination_manager 讀取每個 termination term 的 buffer，
+    區分 goal_reached / wall_collision / obstacle_collision / other_death。
 
     Returns:
         (reward, breakdown) where breakdown contains per-component tensors:
@@ -1094,23 +1260,42 @@ def compute_wd_charge_reward(
 # ============================================================================
 # PPO Utilities
 # ============================================================================
+# 注意：compute_gae 和 sample_action / evaluate_actions 都是 Charge policy 用的。
+# Obstacle policy 使用更通用的 ppo_update_continuous（continuous action）。
 
 def compute_gae(rewards, values, dones, last_value, gamma, gae_lambda):
+    """計算 Generalized Advantage Estimation (GAE)。
+
+    使用反向遍歷（t = T-1 → 0）計算每步 advantage：
+      delta[t] = r[t] + gamma * V[t+1] * (1 - done[t]) - V[t]
+      A[t] = delta[t] + gamma * lambda * (1 - done[t]) * A[t+1]
+    Returns:
+      advantages: [T, E] 的 advantage 估計
+      returns:    [T, E] 的 value target（advantages + values）
+    """
     T = rewards.shape[0]
     advantages = torch.zeros_like(rewards)
     last_gae = 0.0
     for t in reversed(range(T)):
         next_value = last_value if t == T - 1 else values[t + 1]
-        next_non_terminal = 1.0 - dones[t]
+        next_non_terminal = 1.0 - dones[t]  # done=1 時截斷 bootstrap
         delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]
         last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
         advantages[t] = last_gae
-    return advantages, advantages + values
+    return advantages, advantages + values  # (A, V_target)
 
 
 def sample_action(logits):
-    logits_a = logits[:, :NUM_BINS]
-    logits_w = logits[:, NUM_BINS:]
+    """從 policy logits 採樣離散動作，同時計算 log_prob 和 entropy。
+
+    logits: [E, NUM_BINS*2]，前 NUM_BINS 是線性加速，後 NUM_BINS 是角速度
+    Returns:
+      actions:  [E, 2] long tensor (linear_idx, angular_idx)
+      log_prob: [E] joint log prob = log π(a1) + log π(a2)
+      entropy:  [E] joint entropy（用於 A2CK per-head entropy loss）
+    """
+    logits_a = logits[:, :NUM_BINS]   # 線性加速 head 的 logits（19 種選擇）
+    logits_w = logits[:, NUM_BINS:]   # 角速度 head 的 logits（19 種選擇）
     dist_a = Categorical(logits=logits_a)
     dist_w = Categorical(logits=logits_w)
     action_a = dist_a.sample()
@@ -1121,7 +1306,13 @@ def sample_action(logits):
 
 
 def evaluate_actions(logits, actions):
-    """Returns (log_prob, entropy_linear, entropy_angular)."""
+    """重新評估已採樣動作的 log_prob（PPO 用），同時返回 per-head entropy（A2CK 用）。
+
+    Returns:
+      log_prob:        [B] joint log prob（同 sample_action，但基於舊動作）
+      entropy_linear:  [B] 線性加速 head 的 entropy（WD: ent_coeff_linear × H1）
+      entropy_angular: [B] 角速度 head 的 entropy（WD: ent_coeff_angular × H2）
+    """
     logits_a = logits[:, :NUM_BINS]
     logits_w = logits[:, NUM_BINS:]
     dist_a = Categorical(logits=logits_a)
@@ -1132,7 +1323,14 @@ def evaluate_actions(logits, actions):
 
 def ppo_update_continuous(policy, value_fn, buffer, optimizer, epochs, mini_batches,
                           clip_eps, vf_coeff, ent_coeff, max_grad_norm, gamma, gae_lambda):
-    """Generic PPO update for continuous action policies (obstacle)."""
+    """通用 PPO 更新（用於連續動作的 Obstacle policy）。
+
+    與 Charge 的 A2C/PPO 更新不同之處：
+      - 使用標準 clipped surrogate loss（PPO）
+      - 不分 actor/critic 兩個 optimizer，單一 optimizer 更新所有參數
+      - 不做 WD-style gradient cap（障礙物不是主要訓練目標）
+      - 單一 entropy coeff（不分 per-head）
+    """
     T = buffer.ptr
     B = buffer.B
 
@@ -1210,6 +1408,14 @@ class MetricsCollector:
       spot → charge, car → charge
       goal → goal (unchanged)
       obstacle → obstacle
+
+    架構：
+      - Per-env accumulators: 追蹤每個 env 當前 episode 的累計值（tensor, 長期存活）
+      - Completed lists: 每當 episode 結束時，把累計值放進 list（CPU float list）
+      - collect(): 把 completed lists 統計後輸出 WandB metrics dict，同時清空 list
+      - reset(): 每次 iteration 開始前呼叫，清空 completed lists 和計數器
+        （注意：per-env accumulators 不在 reset() 清空，
+        因為它們需要跨 rollout 保持連續性；只在 episode 結束時清零）
     """
 
     def __init__(self, num_envs: int, max_obstacles: int, device, action_table_sample_size: int = 2048):
@@ -1218,18 +1424,18 @@ class MetricsCollector:
         self.device = device
         self.action_table_sample_size = max(0, int(action_table_sample_size))
 
-        # --- Per-env episode accumulators ---
-        self._ep_reward = torch.zeros(num_envs, device=device)
-        self._ep_length = torch.zeros(num_envs, device=device)
-        self._ep_steps_alive = torch.zeros(num_envs, device=device)  # 存活步數
+        # --- Per-env episode accumulators（跨 rollout 累積，只在 episode 結束時清零）---
+        self._ep_reward = torch.zeros(num_envs, device=device)       # 累計 episode reward
+        self._ep_length = torch.zeros(num_envs, device=device)       # episode 總步數
+        self._ep_steps_alive = torch.zeros(num_envs, device=device)  # 存活步數（done=0 的步數）
 
         # --- Per-env WD reward decomposition accumulators ---
         # 每個 env 的 episode 內累加各 reward 分量，episode 結束時記錄
-        self._ep_goal_reward = torch.zeros(num_envs, device=device)
-        self._ep_wall_hit_reward = torch.zeros(num_envs, device=device)
-        self._ep_obs_hit_reward = torch.zeros(num_envs, device=device)
-        self._ep_floor_reward = torch.zeros(num_envs, device=device)
-        self._ep_action_reward = torch.zeros(num_envs, device=device)
+        self._ep_goal_reward = torch.zeros(num_envs, device=device)      # +goal reward 累計
+        self._ep_wall_hit_reward = torch.zeros(num_envs, device=device)  # wall hit penalty 累計
+        self._ep_obs_hit_reward = torch.zeros(num_envs, device=device)   # obs hit penalty 累計
+        self._ep_floor_reward = torch.zeros(num_envs, device=device)     # floor reward 累計（恆 0）
+        self._ep_action_reward = torch.zeros(num_envs, device=device)    # action cost 累計
 
         # --- Completed episode reward decomposition ---
         self._completed_goal_reward: list[float] = []
@@ -1242,6 +1448,17 @@ class MetricsCollector:
         self._completed_rewards: list[float] = []
         self._completed_lengths: list[float] = []
         self._completed_alive: list[float] = []
+
+        # --- Per-outcome expected value tracking (WD 期望值) ---
+        # 每個 episode 完成時，根據結局（goal/collision/timeout）分別記錄 reward 和 length，
+        # 用於計算條件期望值 E[reward | outcome]。
+        self._ev_reward_goal: list[float] = []       # E[reward | goal_reached]
+        self._ev_reward_collision: list[float] = []  # E[reward | collision]
+        self._ev_reward_timeout: list[float] = []    # E[reward | timeout]
+        self._ev_length_goal: list[float] = []       # E[length | goal_reached]
+        self._ev_length_collision: list[float] = []  # E[length | collision]
+        self._ev_length_timeout: list[float] = []    # E[length | timeout]
+        self._ev_alive_ratio: list[float] = []       # alive_steps / total_steps per episode
 
         # --- Goal-directed behavior diagnostics (monitoring only, not reward) ---
         self._ep_goal_start_dist = torch.full((num_envs,), float("nan"), device=device)
@@ -1294,10 +1511,16 @@ class MetricsCollector:
         self._obs_distances: list[float] = []  # distance to robot
 
     def compute_goal_diagnostics(self, env_unwrapped) -> dict[str, torch.Tensor] | None:
-        """Return per-env goal-directed diagnostics before env.step().
+        """計算 per-env 目標導向診斷指標（在 env.step() 之前呼叫）。
 
-        These values answer whether the policy is actually moving toward the
-        active termination target. They are logged only; they do not affect reward.
+        這些指標用來判斷 policy 是否真的在向目標移動，只做記錄，不影響 reward。
+        包括：
+          - distance:        機器人到目標的距離
+          - velocity_to_goal: 機器人速度在目標方向上的投影（正值 = 靠近目標）
+          - heading_error_abs: |yaw - goal_angle|（絕對 heading 誤差，rad）
+          - target_id:       目前追蹤的目標 ID（用於偵測目標切換）
+          - goal_blocked_by_wall: 目標被牆擋住（LOS check）
+          - is_reset:        episode 第一步（用於記錄 reset 時的初始距離/角度）
         """
         try:
             robot = env_unwrapped.scene["robot"]
@@ -1363,12 +1586,19 @@ class MetricsCollector:
              goal_diagnostics: dict[str, torch.Tensor] | None = None,
              charge_actions: dict[str, torch.Tensor] | None = None,
              rollout_step: int | None = None):
-        """Record one env step.
+        """記錄一個 env step 的所有指標。在每個 rollout step 結束後呼叫。
 
         Args:
-            obs_obs: [E, N, 9] obstacle observations (for obstacle metrics)
-            obs_actions: [E, N, 2] obstacle actions (for speed metrics)
-            reward_breakdown: dict from compute_wd_charge_reward (per-component tensors)
+            obs:             [E, 139] 當前觀測（未使用，保留介面）
+            reward:          [E] 當前 step reward（Isaac Lab env reward）
+            done:            [E] 是否 episode 結束
+            info:            env.step() 返回的 info dict（含 Episode_Reward/ 等）
+            obs_obs:         [E, N, 9] 障礙物觀測（用於障礙物速度/距離 metrics）
+            obs_actions:     [E, N, 2] 障礙物動作（用於障礙物速度 metrics）
+            reward_breakdown: compute_wd_charge_reward 返回的 per-component reward dict
+            goal_diagnostics: compute_goal_diagnostics 返回的診斷 dict
+            charge_actions:  compute_charge_action_diagnostics 返回的物理動作診斷
+            rollout_step:    當前 rollout 內的步數（用於 action table 的時間戳）
         """
         self._ep_reward += reward.reshape(-1)
         self._ep_length += 1.0
@@ -1538,6 +1768,22 @@ class MetricsCollector:
                     self._completed_target_switch_rate.append(self._ep_goal_switch_count[idx].item() / switch_steps)
                     if self._ep_goal_reward[idx].item() > 0:
                         self._completed_steps_to_goal.append(self._ep_length[idx].item())
+                # --- Per-outcome expected value tracking ---
+                ep_rwd = self._ep_reward[idx].item()
+                ep_len = self._ep_length[idx].item()
+                alive_ratio = self._ep_steps_alive[idx].item() / max(ep_len, 1.0)
+                self._ev_alive_ratio.append(alive_ratio)
+                if reward_breakdown is not None:
+                    if reward_breakdown["goal_reached"][idx]:
+                        self._ev_reward_goal.append(ep_rwd)
+                        self._ev_length_goal.append(ep_len)
+                    elif reward_breakdown["wall_collision"][idx] or reward_breakdown["obs_collision"][idx]:
+                        self._ev_reward_collision.append(ep_rwd)
+                        self._ev_length_collision.append(ep_len)
+                    else:
+                        self._ev_reward_timeout.append(ep_rwd)
+                        self._ev_length_timeout.append(ep_len)
+
                 self._total_eps += 1
                 # dies_at_birth: episode ended within 2 steps
                 if self._ep_length[idx].item() <= 2:
@@ -1560,17 +1806,18 @@ class MetricsCollector:
             self._ep_goal_switch_count[ids] = 0.0
 
     def get_gamma(self):
+        """從 curriculum_info 取得當前的 gamma 值（若有的話）。"""
         return self._curriculum_info.get("gamma", None)
 
     def collect(self) -> dict[str, float]:
-        """Collect all metrics under structured WandB groups.
+        """把本 iteration 收集的所有指標整理成 WandB log dict，並清空 completed lists。
 
-        Groups:
-          - charge/*: episode stats, collision breakdown, VR
-          - goal_diagnostics/*: goal-directed behavior metrics
-          - obstacle/*: obstacle agent metrics
-          - charge/reward_term/*: raw Isaac Lab reward terms
-          - curriculum/*: curriculum state
+        WandB 指標分組（/前的 prefix）:
+          - charge/*:              episode 層級統計（reward, SR, CR, TO, 碰撞分解）
+          - goal_diagnostics/*:    目標導向行為診斷（progress, velocity_to_goal, heading error）
+          - obstacle/*:            障礙物 agent 指標（速度、距離）
+          - charge/reward_term/*:  Isaac Lab 原始 reward term（從 info["log"] 讀取）
+          - curriculum/*:          curriculum 狀態（stage）
         """
         m: dict[str, float] = {}
         eps = 1e-8
@@ -1653,6 +1900,63 @@ class MetricsCollector:
         if "stage" in self._curriculum_info:
             m["curriculum/stage"] = self._curriculum_info["stage"]
 
+        # ==============================================================
+        # expect_value/ — WD 期望值 (Expected Value metrics)
+        # ==============================================================
+        # WD 論文用 V_Survive / V_Move / V_Spot-Goal 等期望值追蹤訓練進程。
+        # 以下為 charge 版本，將 episode reward 按結局分類計算條件期望值。
+
+        # V_total: 總體期望值 = E[reward] (WD: V_Spot)
+        if self._completed_rewards:
+            m["expect_value/V_total"] = np.mean(self._completed_rewards)
+
+        # V_navigate: 導航期望值 = E[reward | goal_reached] (WD: V_Move)
+        if self._ev_reward_goal:
+            m["expect_value/V_navigate"] = np.mean(self._ev_reward_goal)
+
+        # V_collision: 碰撞期望值 = E[reward | collision]
+        if self._ev_reward_collision:
+            m["expect_value/V_collision"] = np.mean(self._ev_reward_collision)
+
+        # V_timeout: 超時期望值 = E[reward | timeout]
+        if self._ev_reward_timeout:
+            m["expect_value/V_timeout"] = np.mean(self._ev_reward_timeout)
+
+        # V_survive: 存活期望值 = E[alive_ratio] (WD: V_Survive)
+        if self._ev_alive_ratio:
+            m["expect_value/V_survive"] = np.mean(self._ev_alive_ratio)
+
+        # p_goal / p_collision / p_timeout: 結局機率
+        m["expect_value/p_goal"] = self._goal_reached / te
+        m["expect_value/p_collision"] = self._collision / te
+        m["expect_value/p_timeout"] = self._timeout / te
+
+        # VR_wall / VR_obs: 碰撞歸因佔比 (WD: VR_Spot-Map / VR_Spot-Obs)
+        m["expect_value/VR_wall"] = self._wall_collision / total_col
+        m["expect_value/VR_obs"] = self._obstacle_collision / total_col
+
+        # ep_length_goal / ep_length_collision: 按結局分類的 episode 長度
+        if self._ev_length_goal:
+            m["expect_value/ep_length_goal"] = np.mean(self._ev_length_goal)
+        if self._ev_length_collision:
+            m["expect_value/ep_length_collision"] = np.mean(self._ev_length_collision)
+
+        # V_goal_reward: 目標獎勵期望值 = E[goal_reward 分量] (WD: V_Spot-Goal)
+        if self._completed_goal_reward:
+            m["expect_value/V_goal_reward"] = np.mean(self._completed_goal_reward)
+
+        # V_penalty: 碰撞懲罰期望值 = E[wall_hit + obs_hit 分量]
+        if self._completed_wall_hit_reward and self._completed_obs_hit_reward:
+            wall_arr = np.array(self._completed_wall_hit_reward)
+            obs_arr = np.array(self._completed_obs_hit_reward)
+            m["expect_value/V_penalty"] = np.mean(wall_arr + obs_arr)
+
+        # V_action_cost: 操作成本期望值（Phase 1 有 cost_operate 時才有意義）
+        if self._completed_action_reward:
+            action_mean = np.mean(self._completed_action_reward)
+            if abs(action_mean) > 1e-6:
+                m["expect_value/V_action_cost"] = action_mean
+
         return m
 
     def action_speed_accel_rows(self) -> list[list[float]]:
@@ -1695,27 +1999,51 @@ class MetricsCollector:
         self._reward_terms.clear()
         self._obs_speeds.clear()
         self._obs_distances.clear()
+        self._ev_reward_goal.clear()
+        self._ev_reward_collision.clear()
+        self._ev_reward_timeout.clear()
+        self._ev_length_goal.clear()
+        self._ev_length_collision.clear()
+        self._ev_length_timeout.clear()
+        self._ev_alive_ratio.clear()
 
 
 # ============================================================================
 # Main Training
 # ============================================================================
+# main() 函數是整個訓練的入口，負責以下事項（依序）：
+#   1. 設定 random seed（確保可重現性）
+#   2. 套用 env config overrides（num_envs, LiDAR noise, curriculum version 等）
+#   3. 建立 IsaacLab 環境（gym.make + SkrlVecEnvWrapper）
+#   4. 建立模型（Charge: PreprocessRNN + PolicyHead + ValueHead；Obstacle: FC policy/value）
+#   5. 設定 Two-Optimizer（charge_opt_rl + charge_opt_aux）
+#   6. 建立 RolloutBuffer、MetricsCollector
+#   7. 初始化 WandB
+#   8. 載入 checkpoint（若有）
+#   9. 進入主訓練迴圈（Rollout → RL update → Aux update → Obstacle update → Logging）
 
 @hydra_task_config(args_cli.task, "skrl_cfg_entry_point")
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
+    # @hydra_task_config 裝飾器會從 gym 已註冊的 task 取得 env_cfg 和 agent_cfg（yaml）。
+    # env_cfg = ManagerBasedRLEnvCfg，包含 scene, observations, rewards, terminations 等。
+    # agent_cfg = PPO YAML（skrl 用，但本腳本不使用 skrl 的 trainer，只借用 env wrapper）。
 
-    # --- Seed ---
+    # --- Seed：確保所有隨機源都固定 ---
     if args_cli.seed == -1:
-        args_cli.seed = random.randint(0, 10000)
-    torch.manual_seed(args_cli.seed)
-    np.random.seed(args_cli.seed)
-    random.seed(args_cli.seed)
+        args_cli.seed = random.randint(0, 10000)  # -1 = 隨機 seed（每次都不同）
+    torch.manual_seed(args_cli.seed)   # PyTorch GPU/CPU 隨機種子
+    np.random.seed(args_cli.seed)      # NumPy 隨機種子
+    random.seed(args_cli.seed)         # Python random 模組種子
 
-    # --- Env config overrides ---
+    # --- Env config overrides：在 gym.make 之前修改 cfg ---
     if args_cli.num_envs is not None:
-        env_cfg.scene.num_envs = args_cli.num_envs
+        env_cfg.scene.num_envs = args_cli.num_envs  # 覆蓋 YAML 裡的 num_envs
 
     if args_cli.lidar_no_noise:
+        # --lidar_no_noise: 關閉 LiDAR 三種噪聲（displacement_std / hole_rate / distractor_rate）。
+        # 背景：v18b 發現 distractor_rate=0.002 + Uniform noise 使 lidar.min 永遠 ≈ 0，
+        # 讓 policy 學到不信任 LiDAR（Bug B）。
+        # 關閉後 sim-to-real gap 增大，但 policy 訓練訊號更乾淨。
         try:
             disabled_groups = []
             for group_name in ("policy", "critic"):
@@ -1723,10 +2051,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 lidar_cfg = getattr(obs_group, "lidar_static", None)
                 if lidar_cfg is None:
                     continue
-                lidar_cfg.params["displacement_std"] = 0.0
-                lidar_cfg.params["hole_rate"] = 0.0
-                lidar_cfg.params["distractor_rate"] = 0.0
-                lidar_cfg.noise = None
+                lidar_cfg.params["displacement_std"] = 0.0     # 測距誤差 → 0
+                lidar_cfg.params["hole_rate"] = 0.0             # 隨機遮擋率 → 0
+                lidar_cfg.params["distractor_rate"] = 0.0       # 干擾點率 → 0
+                lidar_cfg.noise = None                           # 移除 IsaacLab ObsTerm 噪聲
                 disabled_groups.append(group_name)
             if not disabled_groups:
                 raise AttributeError("no lidar_static ObsTerm found in policy/critic observation groups")
@@ -1734,7 +2062,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         except Exception as e:
             print(f"[WARN] Failed to disable LiDAR noise: {e}")
 
-    # --- Curriculum version ---
+    # --- Curriculum version：設定 goal_obstacle_curriculum 的版本與起始階段 ---
+    # curriculum_version 決定用哪組 phase config（warp_drive_single_agent_v1 等）
+    # initial_stage 決定從哪個 phase 開始（1 = 最簡單，通常 5 = 最難）
+    # fixed_stage = True 時不會自動升/降級，用於定階段消融實驗
     cv = args_cli.curriculum_version
     cur = getattr(env_cfg, 'curriculum', None)
     if cur is not None:
@@ -1748,54 +2079,84 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 f"fixed_stage={args_cli.fixed_stage}"
             )
 
-    # --- Create env ---
+    # --- Create env：建立 IsaacLab 環境 ---
+    # gym.make → ManagerBasedRLEnv（多 env、並行 sim、Isaac Sim 後端）
+    # SkrlVecEnvWrapper → 包成 skrl/PyTorch 相容介面（提供 env.num_envs, env.device 等屬性）
     env = gym.make(args_cli.task, cfg=env_cfg)
     env = SkrlVecEnvWrapper(env, ml_framework="torch")
-    num_envs = env.num_envs
-    device = env.device
+    num_envs = env.num_envs   # 實際並行 env 數（可能與 cfg 設定略有不同）
+    device = env.device        # GPU device（Isaac Sim 固定在 CUDA:0）
 
-    # Obstacle mode setup
-    _obstacle_mode = args_cli.obstacle_mode
+    # --- Obstacle mode setup：設定障礙物控制模式 ---
+    # 優先順序: CLI 明確指定 > phase config (GLOBAL) > CLI default
+    # learned: 使用 learned FC policy（ObstaclePolicyFC + ObstacleValueFC）
+    # rule_based: 使用 BehaviorScheduler（deterministic 行為，無 neural network）
+    # scripted: 使用環境內建的 move_obstacles_vectorized（目標導向移動）
+    _cli_explicitly_set = any(a.startswith("--obstacle_mode") for a in sys.argv)
+    _phase_obstacle_mode = None
+    try:
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases import PHASE_REGISTRY
+        _phase_cfg = PHASE_REGISTRY.get(cv, {})
+        _phase_obstacle_mode = _phase_cfg.get("obstacle_mode")
+    except Exception:
+        pass
+    # CLI 明確指定時用 CLI；否則用 phase config；再 fallback CLI default
+    if _cli_explicitly_set:
+        _obstacle_mode = args_cli.obstacle_mode
+        print(f"[INFO] Obstacle mode: {_obstacle_mode} (CLI override)")
+    elif _phase_obstacle_mode is not None:
+        _obstacle_mode = _phase_obstacle_mode
+        print(f"[INFO] Obstacle mode: {_obstacle_mode} (from phase config GLOBAL)")
+    else:
+        _obstacle_mode = args_cli.obstacle_mode
+        print(f"[INFO] Obstacle mode: {_obstacle_mode} (CLI default)")
     if _obstacle_mode == "learned":
-        env.unwrapped._obstacle_policy_active = True
+        env.unwrapped._obstacle_policy_active = True   # 通知 env：外部 policy 控制障礙物
         print(f"[INFO] Obstacle mode: LEARNED — FC policy controls obstacles")
     elif _obstacle_mode == "rule_based":
         # BehaviorScheduler 由 curriculum _apply_stage 自動建立
-        # 不設 _obstacle_policy_active → scripted motion 也不跑 (scheduler guard 優先)
+        # 不設 _obstacle_policy_active → scripted motion 也不跑（scheduler guard 優先）
         env.unwrapped._obstacle_policy_active = False
         print(f"[INFO] Obstacle mode: RULE_BASED — BehaviorScheduler controls obstacles")
     else:  # scripted
         env.unwrapped._obstacle_policy_active = False
         print(f"[INFO] Obstacle mode: SCRIPTED — move_obstacles_vectorized controls obstacles")
 
-    obs_dim = env.observation_space.shape[-1]  # 139
-    N_obs = args_cli.max_active_obstacles
+    obs_dim = env.observation_space.shape[-1]  # 139D 觀測維度（Charge）
+    N_obs = args_cli.max_active_obstacles        # 最大同時活動障礙物數量
 
-    # --- Obstacle size + scene bound randomization (Warp Drive: obs_size_rand, floor_width_bias) ---
-    # _obstacle_radii: [E, N] per-env per-obstacle collision radius
-    # _scene_bounds: [E] per-env obstacle movement boundary
-    # Updated from curriculum stage config or CLI override
+    # --- Obstacle size + scene bound randomization（對應 WD: obs_size_rand, floor_width_bias）---
+    # WD 原版在每個 episode 重置時，隨機化障礙物半徑（agent_size）和場景大小（floor_width）。
+    # IsaacLab 版本：
+    #   _obstacle_radii: [E, N] per-env per-obstacle collision radius（幾何碰撞判定距離）
+    #   _scene_bounds:   [E] per-env 障礙物活動範圍半徑（越大場景越空曠）
+    # 這兩個 tensor 被寫入 env.unwrapped，讓 obs_functions.py / 本腳本的 geofence 都能讀取。
+    # 如果 CLI 設定 obs_size_rand=0，則從 curriculum 自動同步（per-phase 遞增）。
     _obs_size_rand = args_cli.obs_size_rand  # 0 = auto from curriculum
     _scene_bound_rand = args_cli.scene_bound_rand  # 0 = auto from curriculum
-    _obs_collision_base = args_cli.obs_collision_base
-    _scene_bound_base = args_cli.scene_bound_base
+    _obs_collision_base = args_cli.obs_collision_base   # 碰撞半徑基準值（m）
+    _scene_bound_base = args_cli.scene_bound_base       # 活動邊界基準值（m）
 
+    # 初始化所有 env 的 radii/bounds 為基準值（後續每次 episode reset 重新隨機化）
     env.unwrapped._obstacle_radii = torch.full(
         (num_envs, N_obs), _obs_collision_base, device=device)
     env.unwrapped._scene_bounds = torch.full(
         (num_envs,), _scene_bound_base, device=device)
 
     def _randomize_obstacle_sizes(env_ids: torch.Tensor, rand_range: float):
-        """Re-randomize obstacle collision radii for given env_ids."""
+        """對指定 env_ids 重新隨機化障礙物碰撞半徑。
+        radius = base ± rand/2（對應 WD: agent_size = rand * obs_size_rand + bias - obs_size_rand/2）
+        """
         if rand_range <= 0.0:
             return
         n = env_ids.shape[0]
-        # radius = base ± rand/2 (matching WD: agent_size = rand * obs_size_rand + bias - obs_size_rand/2)
         noise = (torch.rand(n, N_obs, device=device) - 0.5) * rand_range
         env.unwrapped._obstacle_radii[env_ids] = (_obs_collision_base + noise).clamp(min=0.3)
 
     def _randomize_scene_bounds(env_ids: torch.Tensor, rand_range: float):
-        """Re-randomize scene boundary for given env_ids."""
+        """對指定 env_ids 重新隨機化場景活動邊界。
+        bound = base ± rand/2，最小 4.0m（避免場景過小）
+        """
         if rand_range <= 0.0:
             return
         n = env_ids.shape[0]
@@ -1813,15 +2174,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] obs_dim={obs_dim}, max_active_obstacles={N_obs}")
 
     # --- Charge policy / WD-like obs path ---
-    # Current IsaacLab full obs is 139D:
-    #   [0:6] ego/goal-like state, [6:78] 72-bin LiDAR, [78:138] TopK obstacles (10×6), [138] time.
-    # Legacy modes keep the original 79D path: [0:78] + [138].
-    # wd_exact_rnn builds the closest executable WD car flattened obs:
-    #   113D = 17D base + 60D TopK obstacles + 36D LiDAR (72 bins pair-averaged).
-    POLICY_OBS_INDICES = list(range(0, 78)) + [138]
+    # IsaacLab 完整觀測是 139D：
+    #   [0:4]   ego state: accel, vel, omega, radius
+    #   [4:6]   goal (x, y)
+    #   [6:78]  72-bin LiDAR（5° 解析度）
+    #   [78:138] TopK obstacles 60D（10個 × 6D：body-frame x,y,vx,vy,r,mask）
+    #   [138]   time (episode timestep / episode_length)
+    #
+    # 三種 obs 路徑（由 --charge_encoder_mode 選擇）：
+    #   extractor_rnn: 完整 139D → Conv1d LiDAR extractor(96D) → FC → RNN → 12D → RL
+    #   raw_fc_rnn:    legacy 79D ([0:78]+[138]) → FC → RNN → 12D → RL（更簡單）
+    #   wd_exact_rnn:  重組為 WD 的 113D 格式（17D base + 60D obs + 36D LiDAR pair-pooled）
+    POLICY_OBS_INDICES = list(range(0, 78)) + [138]   # legacy 79D 的索引
     _policy_obs_idx = torch.tensor(POLICY_OBS_INDICES, dtype=torch.long, device=device)
-    wd_exact_mode = (args_cli.charge_encoder_mode == "wd_exact_rnn")
-    use_extractor = (args_cli.charge_encoder_mode == "extractor_rnn")
+    wd_exact_mode = (args_cli.charge_encoder_mode == "wd_exact_rnn")   # 是否使用 WD 精確模式
+    use_extractor = (args_cli.charge_encoder_mode == "extractor_rnn")  # 是否使用 Conv1d extractor
 
     if wd_exact_mode:
         _wd_overrides = []
@@ -1920,28 +2287,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     policy_obs_dim = 113 if wd_exact_mode else len(POLICY_OBS_INDICES)
 
-    # --- Build Charge models ---
+    # --- Build Charge models（根據 --charge_encoder_mode 建立對應架構）---
+    # ModularRNN 架構（WD 原版 §4.2）：
+    #   Input → Extractor(optional) → fc_front → RNN → fc_middle → predict_head(aux)
+    #                                                 → preprocess_feat(12D)
+    #   RL head: concat(policy_obs, preprocess_feat) → PolicyHead / ValueHead
     if use_extractor:
-        extractor = LidarStateExtractor().to(device)
-        rnn_input_dim = extractor.output_dim  # 96
+        extractor = LidarStateExtractor().to(device)   # Conv1d LiDAR + MLP obs 特徵抽取器
+        rnn_input_dim = extractor.output_dim  # 96D（extractor 輸出維度）
     else:
         extractor = None
-        rnn_input_dim = policy_obs_dim  # raw legacy 79D or wd_exact 113D
+        rnn_input_dim = policy_obs_dim  # 79D（raw_fc_rnn）或 113D（wd_exact_rnn）
     preprocess_rnn = PreprocessRNN(
         input_dim=rnn_input_dim, fc_dim=args_cli.fc_dim,
         hidden_dim=args_cli.hidden_dim, preprocess_dim=args_cli.preprocess_dim,
-        predict_dim=7,  # WD-style: 7D privileged geometry target
+        predict_dim=7,  # WD-style: 7D 特權幾何資訊（aux loss target）
         rnn_type=args_cli.rnn_type,
         middle_dim=args_cli.wd_middle_dim if wd_exact_mode else None,
     ).to(device)
-    rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # WD principle: obs+preprocess
-    policy_head = PolicyHead(input_dim=rl_input_dim).to(device)
-    value_head = ValueHead(input_dim=rl_input_dim).to(device)
+    rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # WD principle: concat(obs, preprocess_feat)
+    policy_head = PolicyHead(input_dim=rl_input_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
+    value_head = ValueHead(input_dim=rl_input_dim).to(device)     # 輸出 1 scalar（critic）
     if args_cli.value_init_bias is not None:
+        # --normalize_return 時，value target 均值 ≈ 0，value head bias 設 0 加快早期穩定
         nn.init.constant_(value_head.net[-1].bias, args_cli.value_init_bias)
         print(f"[INFO] Value head final bias override: {args_cli.value_init_bias}")
-    rnn_state = RNNStateManager(num_envs, args_cli.hidden_dim, device)
-    obs_normalizer = RunningNormalizer(obs_dim, device)
+    rnn_state = RNNStateManager(num_envs, args_cli.hidden_dim, device)  # 管理每個 env 的 RNN hidden state
+    obs_normalizer = RunningNormalizer(obs_dim, device)                 # 線上均值/方差歸一化
 
     # WD optimizer structure (custom_trainer.py lines 336-349):
     #   WD 原版: 兩個 optimizer 各包含 ALL params，用 lr=0 控制 freeze:
@@ -1966,19 +2338,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     #   charge_opt_rl:  只含 policy_head + value_head
     #   charge_opt_aux: 5 groups（各自獨立 lr）
 
-    # --- RL optimizer: only policy/value heads ---
-    charge_params_actor = list(policy_head.parameters())
-    charge_params_critic = list(value_head.parameters())
+    # --- RL optimizer: 只含 policy_head + value_head（WD 兩 optimizer 架構）---
+    # WD 原版在 RL optimizer 裡，preprocess/RNN 的 lr=0（等同 freeze）。
+    # IsaacLab 版本直接把 RL optimizer 限縮到只包含 policy/value head 的 params，
+    # 確保 RL loss.backward() 絕對不更新 preprocess_rnn 或 extractor。
+    charge_params_actor = list(policy_head.parameters())                  # PolicyHead 的所有參數
+    charge_params_critic = list(value_head.parameters())                  # ValueHead 的所有參數
     charge_params_rl = charge_params_actor + charge_params_critic
     charge_opt_rl = torch.optim.Adam(charge_params_rl, lr=args_cli.lr, eps=1e-5)
 
-    # --- Aux optimizer: fine-grained param groups ---
+    # --- Aux optimizer: 細粒度 param groups，各自設 lr ---
+    # 5 個 group（依「output → input」方向排列，解凍策略也由 output 端向 input 端逐步放開）：
+    #   group 0: rnn_cell      → 核心記憶更新，RNN 主力 lr（rnn_lr=5e-4）
+    #   group 1: predict_head  → aux loss 輸出映射（預設 frozen，解凍實驗: 1e-4）
+    #   group 2: fc_middle     → RNN → predict_head 中間 FC（預設 frozen，解凍: 5e-5）
+    #   group 3: fc_front      → 輸入 → RNN 前 FC（預設 frozen，解凍風險高）
+    #   group 4: extractor     → Conv1d+MLP 特徵抽取器（預設 frozen，最後才解凍）
     charge_params_rnn_cell = list(preprocess_rnn.rnn.parameters())
     charge_params_fc_front = list(preprocess_rnn.fc_front.parameters())
     charge_params_fc_middle = list(preprocess_rnn.fc_middle.parameters())
     charge_params_predict_head = list(preprocess_rnn.predict_head.parameters())
     charge_params_extractor = list(extractor.parameters()) if use_extractor else []
-    # All aux params (for grad clipping convenience)
+    # 所有 aux params（用於 clip_grad_norm_ 的便利合集）
     charge_params_aux = charge_params_extractor + list(preprocess_rnn.parameters())
 
     # Resolve per-group LR: use fine-grained --aux_lr_* if set, else fall back to --aux_lr
@@ -2024,6 +2405,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"  extractor:    N/A (raw_fc_rnn mode, no extractor)")
 
     # --- Build Obstacle models (skip if rule_based or scripted) ---
+    total_obs_params = 0
     if _obstacle_mode == "learned":
         obs_policy = ObstaclePolicyFC().to(device)
         obs_value = ObstacleValueFC().to(device)
@@ -2039,14 +2421,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         obs_optimizer = None
         print(f"[INFO] Obstacle mode={_obstacle_mode}: no obstacle policy/optimizer initialized")
 
-    # --- Training config ---
-    RL = args_cli.rollout_length
-    batch_size = num_envs * RL
-    mini_batch_size = batch_size // args_cli.mini_batches
-    total_timesteps = args_cli.timesteps
-    num_iterations = total_timesteps // RL
+    # --- Training config：計算訓練迴圈的基本超參 ---
+    RL = args_cli.rollout_length              # 每次 rollout 收集的步數（T）
+    batch_size = num_envs * RL               # PPO batch size = E × T（每 iteration 的總樣本數）
+    mini_batch_size = batch_size // args_cli.mini_batches  # 每個 mini-batch 的大小
+    total_timesteps = args_cli.timesteps     # 總訓練 frame 數（所有 env 累計）
+    num_iterations = total_timesteps // RL   # 總 iteration 數
 
-    # WD: γ = 1 - (1 - 0.92) / rl_fps = 0.984 (fps=5) — constant across all phases
+    # WD: γ = 1 - (1 - 0.92) / rl_fps = 0.984（fps=5），跨所有 phase 固定不變
+    # 注意：不同於 Isaac Lab NavRL 課程中 γ 會隨 stage 遞增（0.990→0.998）
     current_gamma = args_cli.gamma
 
     print(f"[INFO] {num_iterations} iterations, {RL} rollout, {batch_size:,} batch, "
@@ -2060,6 +2443,76 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
     if args_cli.disable_aux_training:
         print("[INFO] Aux/RNN training DISABLED: pure-RL resume; preprocess_rnn/extractor weights frozen")
+
+    # --- Runtime-syncable trainer params (phase/task config may override these safely) ---
+    _current_rl_lr = args_cli.lr
+    _current_rnn_lr = args_cli.rnn_lr
+    _current_vf_coeff = args_cli.vf_coeff
+    _current_max_grad_norm = args_cli.max_grad_norm
+    _current_aux_grad_clip = args_cli.aux_grad_clip if args_cli.aux_grad_clip is not None else args_cli.max_grad_norm
+    _current_wd_actor_update_clip = args_cli.wd_actor_update_clip
+    _current_wd_critic_update_clip = args_cli.wd_critic_update_clip
+
+    def _set_optimizer_group_lr(group, lr: float):
+        group["lr"] = lr
+        group["initial_lr"] = lr
+
+    def _sync_phase_trainer_params(cur_info: dict[str, float], stage_changed: bool = False):
+        nonlocal _current_rl_lr, _current_rnn_lr, _current_vf_coeff
+        nonlocal _current_max_grad_norm, _current_aux_grad_clip
+        nonlocal _current_wd_actor_update_clip, _current_wd_critic_update_clip
+
+        phase_rl_lr = float(cur_info.get("trainer_lr", 0.0) or 0.0)
+        phase_rnn_lr = float(cur_info.get("trainer_rnn_lr", 0.0) or 0.0)
+        phase_vf_coeff = float(cur_info.get("trainer_vf_coeff", 0.0) or 0.0)
+        phase_max_grad_norm = float(cur_info.get("trainer_max_grad_norm", 0.0) or 0.0)
+        phase_aux_grad_clip = float(cur_info.get("trainer_aux_grad_clip", 0.0) or 0.0)
+        phase_actor_cap = float(cur_info.get("trainer_wd_actor_update_clip", 0.0) or 0.0)
+        phase_critic_cap = float(cur_info.get("trainer_wd_critic_update_clip", 0.0) or 0.0)
+
+        changed = []
+        if phase_rl_lr > 0 and abs(phase_rl_lr - _current_rl_lr) > 1e-12:
+            for pg in charge_opt_rl.param_groups:
+                _set_optimizer_group_lr(pg, phase_rl_lr)
+            _current_rl_lr = phase_rl_lr
+            changed.append(f"lr={phase_rl_lr:g}")
+
+        if phase_rnn_lr > 0 and abs(phase_rnn_lr - _current_rnn_lr) > 1e-12:
+            for pg in charge_opt_aux.param_groups:
+                base_lr = float(pg.get("initial_lr", pg["lr"]))
+                if abs(base_lr - _current_rnn_lr) < 1e-12:
+                    _set_optimizer_group_lr(pg, phase_rnn_lr)
+            _current_rnn_lr = phase_rnn_lr
+            changed.append(f"rnn_lr={phase_rnn_lr:g}")
+
+        if phase_vf_coeff > 0 and abs(phase_vf_coeff - _current_vf_coeff) > 1e-12:
+            _current_vf_coeff = phase_vf_coeff
+            changed.append(f"vf_coeff={phase_vf_coeff:g}")
+
+        if phase_max_grad_norm > 0 and abs(phase_max_grad_norm - _current_max_grad_norm) > 1e-12:
+            _current_max_grad_norm = phase_max_grad_norm
+            changed.append(f"max_grad_norm={phase_max_grad_norm:g}")
+
+        if phase_aux_grad_clip > 0 and abs(phase_aux_grad_clip - _current_aux_grad_clip) > 1e-12:
+            _current_aux_grad_clip = phase_aux_grad_clip
+            changed.append(f"aux_grad_clip={phase_aux_grad_clip:g}")
+
+        if phase_actor_cap > 0 and abs(phase_actor_cap - _current_wd_actor_update_clip) > 1e-12:
+            _current_wd_actor_update_clip = phase_actor_cap
+            changed.append(f"wd_actor_clip={phase_actor_cap:g}")
+
+        if phase_critic_cap > 0 and abs(phase_critic_cap - _current_wd_critic_update_clip) > 1e-12:
+            _current_wd_critic_update_clip = phase_critic_cap
+            changed.append(f"wd_critic_clip={phase_critic_cap:g}")
+
+        if changed or stage_changed:
+            print(
+                f"[INFO] Phase trainer sync: stage={int(cur_info.get('stage', -1))} "
+                f"rl_lr={_current_rl_lr:g} rnn_lr={_current_rnn_lr:g} "
+                f"vf={_current_vf_coeff:g} grad={_current_max_grad_norm:g} "
+                f"aux_grad={_current_aux_grad_clip:g} wd_caps=({_current_wd_actor_update_clip:g}, {_current_wd_critic_update_clip:g})"
+                f"{' | changed: ' + ', '.join(changed) if changed else ''}"
+            )
 
     # --- Buffers ---
     charge_buf = ChargeRolloutBuffer(RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device)
@@ -2118,8 +2571,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "obs_collision_base": args_cli.obs_collision_base,
                     "scene_bound_rand": args_cli.scene_bound_rand,
                     "scene_bound_base": args_cli.scene_bound_base,
+                    "profiles": profiles_to_dict(_trainer_profiles),
+                    "experiment_config": experiment_config_to_dict(_experiment_cfg) if _experiment_cfg else None,
                 },
-                tags=["marl", "obstacle-policy", "v5", "wd-principle"],
+                tags=["marl", "obstacle-policy", "v5", "wd-principle",
+                       _trainer_profiles.reward_profile,
+                       _trainer_profiles.algorithm_profile]
+                      + (list(_experiment_cfg.tags) if _experiment_cfg else []),
             )
             wandb_run = wandb.run
             print(f"[INFO] WandB: {wandb.run.name}")
@@ -2134,9 +2592,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         preprocess_rnn.load_state_dict(ckpt["preprocess_rnn"])
         policy_head.load_state_dict(ckpt["policy_head"])
         value_head.load_state_dict(ckpt["value_head"])
-        if "obs_policy" in ckpt:
+        if "obs_policy" in ckpt and obs_policy is not None:
             obs_policy.load_state_dict(ckpt["obs_policy"])
             obs_value.load_state_dict(ckpt["obs_value"])
+        elif "obs_policy" in ckpt and obs_policy is None:
+            print(f"[INFO] Checkpoint has obs_policy but obstacle_mode={_obstacle_mode} — skipping obs_policy load")
         if "obs_normalizer" in ckpt:
             obs_normalizer.mean = ckpt["obs_normalizer"]["mean"]
             obs_normalizer.var = ckpt["obs_normalizer"]["var"]
@@ -2147,7 +2607,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ("charge_opt_aux", charge_opt_aux),
                 ("obs_optimizer", obs_optimizer),
             ):
-                if key in ckpt:
+                if key in ckpt and opt is not None:
                     try:
                         opt.load_state_dict(ckpt[key])
                         for pg in opt.param_groups:
@@ -2165,6 +2625,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _spot_penalty_hit = -5.0
     _spot_reward_get_goal = 40.0
     _spot_cost_operate = 0.03  # Phase 1 default (will update from curriculum)
+    _reward_module.update_params({
+        "spot_penalty_hit": _spot_penalty_hit,
+        "spot_reward_get_goal": _spot_reward_get_goal,
+        "spot_cost_operate": _spot_cost_operate,
+    })
 
     # --- WD entropy params (initial, Phase 1 defaults) ---
     # A2CK per-head: spot_entropy_coeff=0.04×2.5=0.10, action2=0.15×2.5=0.375
@@ -2186,42 +2651,52 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     )
 
     # ========================================================================
-    # Training Loop
+    # Training Loop（主訓練迴圈）
     # ========================================================================
+    # 每次 iteration 的完整流程：
+    #   1. Rollout: 收集 RL 步數（Charge + Obstacle 交替）
+    #   2. Charge RL Update: A2C/PPO loss + WD gradient caps
+    #   3. Charge Aux Update: TBPTT RNN module loss（WD-order 或 legacy-order）
+    #   4. Obstacle PPO Update: 每 train_goal_rate 次訓練 1 次 obstacle
+    #   5. Logging: WandB metrics + console print
+    #   6. Checkpoint: 每 save_interval 次儲存模型
 
-    _prev_stage = -1  # Track stage for momentum reset
-    _prev_obs_agent_active = True  # Track obs_agent activation for logging
-    _prev_rnn_feature_mean = None  # Diagnose slow RNN feature distribution drift
+    _prev_stage = -1         # 追蹤上一個 curriculum stage（用於偵測 phase 切換）
+    _prev_obs_agent_active = True  # 追蹤 obs_agent 是否活躍（用於 logging）
+    _prev_rnn_feature_mean = None  # 追蹤 RNN feature 分佈，偵測漂移
 
     for iteration in range(num_iterations):
         iter_start = time.time()
-        charge_buf.reset()
+        charge_buf.reset()         # 重置 Charge rollout buffer（ptr=0）
         if obs_buf is not None:
-            obs_buf.reset()
-        metrics.reset()
+            obs_buf.reset()        # 重置 Obstacle rollout buffer
+        metrics.reset()            # 清空 MetricsCollector（完成 episode 統計）
 
-        # === Determine who trains this iteration (Warp Drive alternation) ===
-        # Per-stage obstacle toggle: skip obs_agent when no dynamic obstacles
+        # === Determine who trains this iteration（Warp Drive 交替訓練）===
+        # WD: 每 train_goal_rate(=3) 次 iteration 中，1 次訓練 obstacle，其餘訓練 charge
+        # iteration % 3 == 1 時訓練 obstacle（0, 2 訓練 charge）
         _n_dynamic = int(metrics._curriculum_info.get("num_obstacles_dynamic", N_obs))
         _obs_agent_active = (_n_dynamic > 0) and (_obstacle_mode == "learned")
         train_charge = (iteration % args_cli.train_goal_rate != 1) or not _obs_agent_active
         train_obstacle = (iteration % args_cli.train_goal_rate == 1) and _obs_agent_active
         if not _obs_agent_active:
-            train_charge = True  # charge always trains when obs_agent is off
+            train_charge = True  # 沒有動態障礙物時，charge 每次都訓練
 
-        # === WD: Reset optimizer momentum on phase change ===
+        # === WD: Reset optimizer momentum on phase change（對應 WD: reset_model_mentum）===
+        # 在 phase 切換時，清空 Adam 的動量（exp_avg/exp_avg_sq），
+        # 避免舊 phase 積累的動量方向影響新 phase 的梯度更新。
         _cur_stage = int(metrics._curriculum_info.get("stage", 1))
-        if _cur_stage != _prev_stage and _prev_stage > 0:
-            # WD: reset_model_mentum — zero optimizer state on phase transition
+        _stage_changed = (_cur_stage != _prev_stage)
+        if _stage_changed and _prev_stage > 0:
             for opt in [charge_opt_rl, charge_opt_aux] + ([obs_optimizer] if obs_optimizer else []):
                 for group in opt.param_groups:
                     for p in group["params"]:
                         state = opt.state.get(p)
                         if state:
                             if "exp_avg" in state:
-                                state["exp_avg"].zero_()
+                                state["exp_avg"].zero_()      # Adam 一階動量清零
                             if "exp_avg_sq" in state:
-                                state["exp_avg_sq"].zero_()
+                                state["exp_avg_sq"].zero_()   # Adam 二階動量清零
             print(f"[INFO] Phase {_prev_stage}→{_cur_stage}: optimizer momentum reset (WD: reset_model_mentum)")
             if _obs_agent_active != _prev_obs_agent_active:
                 print(f"[INFO] obs_agent {'ACTIVATED' if _obs_agent_active else 'DEACTIVATED'} "
@@ -2237,10 +2712,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.scene_bound_rand == 0.0:
             _scene_bound_rand = metrics._curriculum_info.get("scene_bound_rand", 0.0)
 
-        # Sync WD reward params from curriculum (per-phase)
+        # Sync WD reward params from curriculum (per-phase) via reward module
         _spot_penalty_hit = metrics._curriculum_info.get("spot_penalty_hit", -5.0)
         _spot_reward_get_goal = metrics._curriculum_info.get("spot_reward_get_goal", 40.0)
         _spot_cost_operate = metrics._curriculum_info.get("spot_cost_operate", 0.0)
+        _reward_module.update_params(metrics._curriculum_info)
 
         # Sync WD entropy params from curriculum (per-phase, A2CK per-head)
         if args_cli.ent_coeff_linear == 0.0:
@@ -2258,6 +2734,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "obstacle_speed_rate", args_cli.obs_speed_limit)
         metrics._obs_speed_limit = _obs_speed_limit  # sync for speed metric
 
+        # Sync safe trainer hyperparameters from phase/task registry
+        _sync_phase_trainer_params(metrics._curriculum_info, stage_changed=_stage_changed)
+
         # === LR decay (WD: ParamScheduler) ===
         if args_cli.lr_decay > 0 and iteration > 0:
             decay = max(0.01, 1.0 - args_cli.lr_decay * iteration)
@@ -2265,59 +2744,60 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 for pg in opt.param_groups:
                     pg["lr"] = pg.get("initial_lr", pg["lr"]) * decay
 
-        # === Rollout: BOTH policies act, alternating trains ===
+        # === Rollout: 兩個 policy 都 act，交替決定誰 train ===
+        # Rollout 期間所有模型設 eval()（不需要 batch norm/dropout 行為）
         if use_extractor: extractor.eval()
         preprocess_rnn.eval(); policy_head.eval(); value_head.eval()
-        obs_policy.eval(); obs_value.eval()
+        if obs_policy is not None:
+            obs_policy.eval(); obs_value.eval()
 
         for step in range(RL):
-            # --- 1. Charge forward ---
+            # --- 1. Charge forward（推論模式，torch.no_grad() 加速）---
             with torch.no_grad():
-                obs_normalizer.update(obs)
-                obs_normed = obs_normalizer.normalize(obs)
-                features = _charge_features_for_rnn(obs_normed)
-                hidden = rnn_state.get()
-                rnn_feat, _, new_hidden = preprocess_rnn(features, hidden)
-                p_obs = _charge_obs_for_rl(obs_normed)
-                # Ablation: zero out RNN feature for RL (aux path still trains normally)
+                obs_normalizer.update(obs)          # 更新 running stats（用新的 obs batch）
+                obs_normed = obs_normalizer.normalize(obs)  # 標準化觀測
+                features = _charge_features_for_rnn(obs_normed)  # 提取 RNN 輸入特徵（extractor 或 raw）
+                hidden = rnn_state.get()                          # 取得當前 hidden state [1, E, H]
+                rnn_feat, _, new_hidden = preprocess_rnn(features, hidden)  # RNN forward → 12D preprocess feature
+                p_obs = _charge_obs_for_rl(obs_normed)    # 取得 RL head 的觀測部分（79D 或 113D）
+                # Ablation: zero out RNN feature for RL（aux path 照常訓練，只是 RL 看不到）
                 _rnn_for_rl = (torch.zeros_like(rnn_feat)
                                if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
-                rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)
-                logits = policy_head(rl_in)
-                value = value_head(rl_in).squeeze(-1)
-                actions, log_prob, _ = sample_action(logits)
-                goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)
+                rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)  # concat obs + preprocess_feat → RL input
+                logits = policy_head(rl_in)                       # [E, 38] policy logits（雙頭各 19）
+                value = value_head(rl_in).squeeze(-1)             # [E] critic value
+                actions, log_prob, _ = sample_action(logits)     # 採樣動作 + joint log_prob
+                goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)  # 目標診斷（不影響 reward）
 
             # --- 2. Env step ---
             next_obs, reward, terminated, truncated, info = env.step(actions.float())
-            done = (terminated.squeeze(-1) | truncated.squeeze(-1)).float()
-            env_reward_flat = reward.squeeze(-1)  # Isaac Lab env reward (for logging)
-            charge_action_diagnostics = compute_charge_action_diagnostics(env.unwrapped, actions)
+            done = (terminated.squeeze(-1) | truncated.squeeze(-1)).float()  # [E] 0/1 episode 結束旗標
+            env_reward_flat = reward.squeeze(-1)  # Isaac Lab env reward（dense，只用於 logging）
+            charge_action_diagnostics = compute_charge_action_diagnostics(env.unwrapped, actions)  # 物理動作診斷
 
-            # Warp Drive style sparse reward (for PPO training)
-            reward_flat, reward_breakdown = compute_wd_charge_reward(
+            # Reward computation via modular dispatch (Phase 2)
+            reward_flat, reward_breakdown = _reward_module.compute(
                 env.unwrapped, actions, terminated, truncated,
-                _spot_penalty_hit, _spot_reward_get_goal, _spot_cost_operate,
             )
 
-            # --- 3. Obstacle forward + apply (skip when no dynamic obstacles) ---
+            # --- 3. Obstacle forward + apply（若無動態障礙物則跳過）---
             if _obs_agent_active:
                 with torch.no_grad():
                     obs_obs = build_obstacle_obs(env.unwrapped, N_obs, device)  # [E, N, 9]
-                    obs_flat = obs_obs.reshape(-1, OBS_POLICY_OBS_DIM)  # [E*N, 9]
-                    obs_act, obs_lp, obs_ent = obs_policy.sample(obs_flat)  # [E*N, 2]
-                    obs_val = obs_value(obs_flat).squeeze(-1)  # [E*N]
+                    obs_flat = obs_obs.reshape(-1, OBS_POLICY_OBS_DIM)           # [E*N, 9]
+                    obs_act, obs_lp, obs_ent = obs_policy.sample(obs_flat)       # [E*N, 2]
+                    obs_val = obs_value(obs_flat).squeeze(-1)                    # [E*N]
 
                 apply_obstacle_actions(env.unwrapped, obs_act.reshape(num_envs, N_obs, 2),
                                        N_obs, dt=0.2, speed_limit=_obs_speed_limit)
 
-                # Obstacle reward
+                # Obstacle reward（WD: zero，approach: 弱對抗）
                 obs_rew = compute_obstacle_reward(env.unwrapped, obs_obs, N_obs, args_cli.obs_reward_mode)
 
-                # Obstacle done = charge done (broadcast to all obstacles)
+                # Obstacle done = charge done（同一 env 的所有障礙物同步 done）
                 obs_done = done.unsqueeze(-1).expand(-1, N_obs).reshape(-1)
             else:
-                # No dynamic obstacles — zero placeholders, no obstacle movement
+                # 無動態障礙物：填零 placeholder，不移動障礙物
                 obs_obs = torch.zeros(num_envs, N_obs, OBS_POLICY_OBS_DIM, device=device)
                 obs_flat = obs_obs.reshape(-1, OBS_POLICY_OBS_DIM)
                 obs_act = torch.zeros(num_envs * N_obs, 2, dtype=torch.long, device=device)
@@ -2326,16 +2806,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs_rew = torch.zeros(num_envs * N_obs, device=device)
                 obs_done = done.unsqueeze(-1).expand(-1, N_obs).reshape(-1)
 
-            # --- 4. Store transitions ---
-            # WD-style 7D privileged geometry target (training-only, not used at inference)
+            # --- 4. Store transitions（儲存本步資料到 rollout buffer）---
+            # WD-style 7D privileged geometry target（訓練專用，推論時不需要）
             with torch.no_grad():
                 wd_aux_tgt = build_wd_preprocess_targets(
-                    env.unwrapped, N_obs, device)  # [E, 7]
+                    env.unwrapped, N_obs, device)  # [E, 7]：最近 2 障礙物的 body-frame 幾何資訊
             charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
                            aux_target=wd_aux_tgt)
-            obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
+            if obs_buf is not None:
+                obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
 
-            # --- 5. Metrics ---
+            # --- 5. Metrics：記錄本步指標 ---
             metrics.step(obs, reward, done, info,
                          obs_obs=obs_obs, obs_actions=obs_act.reshape(num_envs, N_obs, 2),
                          reward_breakdown=reward_breakdown,
@@ -2343,44 +2824,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                          charge_actions=charge_action_diagnostics,
                          rollout_step=step)
 
-            # --- 6. Update states ---
-            rnn_state.update(new_hidden)
+            # --- 6. Update states（更新 RNN hidden state + episode reset 處理）---
+            rnn_state.update(new_hidden)    # 把新的 hidden state 存回 RNNStateManager
             done_mask = done.bool()
             if done_mask.any():
                 done_ids = done_mask.nonzero(as_tuple=False).reshape(-1)
-                rnn_state.reset(done_ids)
-                # Reset obstacle velocity cache for done envs
+                rnn_state.reset(done_ids)  # episode 結束的 env 重置 hidden state 為 0
+                # 重置障礙物速度 cache（避免舊 episode 的速度污染新 episode）
                 if hasattr(env.unwrapped, "_obstacle_velocities"):
                     env.unwrapped._obstacle_velocities[done_ids] = 0.0
-                # Re-randomize obstacle sizes and scene bounds on episode reset
+                # 每次 episode reset 重新隨機化障礙物大小和場景邊界（WD: obs_size_rand）
                 _randomize_obstacle_sizes(done_ids, _obs_size_rand)
                 _randomize_scene_bounds(done_ids, _scene_bound_rand)
-            obs = next_obs
+            obs = next_obs  # 更新當前觀測
 
-        # === Charge PPO Update (skip in play mode) ===
+        # === Charge PPO Update（play 模式跳過所有訓練）===
         charge_ppo_loss = 0.0
         charge_vf_loss = 0.0
         charge_entropy = 0.0
         aux_loss_val = 0.0
         if args_cli.play:
+            # --play: 推論模式，只跑 rollout，不做任何優化
             train_charge = False
             train_obstacle = False
         aux_per_feature = {}
         wd_update_monitor = {}
 
         if train_charge:
-            _aux_already_done = False  # flag: True if WD-order aux ran before RL
+            _aux_already_done = False  # flag: True 表示 WD-order 已在 RL 之前完成 aux 更新
 
             # =============================================================
-            # WD-order: Aux FIRST → Fresh forward → RL (wd_exact_rnn mode)
+            # WD-order: Aux FIRST → Fresh forward → RL（wd_exact_rnn + A2C 模式）
             # =============================================================
             # WD 原版流程 (custom_trainer.py):
-            #   1. Rollout (collect obs/actions/rewards)
-            #   2. Aux update (update RNN weights with module loss)
-            #   3. Fresh RL forward (re-forward obs through UPDATED RNN → new features)
-            #   4. RL update (A2C with fresh features)
-            # 這確保 RL head 永遠看到「最新 RNN 的 feature」而非延遲一個 iteration。
-            # 只在 A2C 模式有效（PPO 需要 old log_probs 對應 old features，混搭會破壞 ratio）。
+            #   1. Rollout（收集 obs/actions/rewards）
+            #   2. Aux update（用 module loss 更新 RNN 權重）
+            #   3. Fresh RL forward（用更新後的 RNN 重新 forward obs → 取得新 features）
+            #   4. RL update（用新 features 做 A2C 更新）
+            # 這確保 RL head 永遠看到「最新 RNN feature」，不是延遲一個 iteration 的舊 feature。
+            # 只在 A2C 模式有效：PPO 需要舊 log_probs 和舊 features 對應，WD-order 會打破這個假設。
             if wd_exact_mode and args_cli.use_a2c and not args_cli.disable_aux_training:
                 # --- Run aux update (same logic as the section below) ---
                 if use_extractor: extractor.train()
@@ -2434,7 +2916,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     total_loss.backward()
                     nn.utils.clip_grad_norm_(
                         charge_params_aux,
-                        args_cli.aux_grad_clip if args_cli.aux_grad_clip is not None else args_cli.max_grad_norm,
+                        _current_aux_grad_clip,
                     )
                     # Capture grad norms before step
                     for k, ps in _mon_modules_pre.items():
@@ -2470,7 +2952,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _done_mask = charge_buf.dones[t].unsqueeze(0).unsqueeze(-1)  # [1,E,1]
                         _fresh_h = _fresh_h * (1.0 - _done_mask)
 
-            # Bootstrap (with fresh or original features)
+            # Bootstrap：用 rollout 最後一個 obs 的 value 做 GAE 的 V_{T+1}
+            # （WD-order 模式時，使用 fresh features；legacy 模式使用原始 features）
             with torch.no_grad():
                 obs_normed = obs_normalizer.normalize(obs)
                 features = _charge_features_for_rnn(obs_normed)
@@ -2480,25 +2963,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _rnn_for_rl = (torch.zeros_like(rnn_feat)
                                if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
                 rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)
-                last_value = value_head(rl_in).squeeze(-1)
+                last_value = value_head(rl_in).squeeze(-1)  # [E] bootstrap value V_{T+1}
 
+            # GAE 計算（使用 WD 固定 gamma=0.984 + gae_lambda）
             advantages, returns = compute_gae(
                 charge_buf.rewards, charge_buf.values, charge_buf.dones,
                 last_value, current_gamma, args_cli.gae_lambda)
             if args_cli.normalize_return:
-                # Normalize the critic target only. Policy advantages keep the
-                # existing GAE + global normalization path, so this experiment
-                # isolates critic target scale without changing actor learning.
+                # --normalize_return：只對 critic target 做歸一化（actor advantages 路徑不變）
+                # 目的：隔離「critic target scale 是否造成 gradient spike」這個問題，
+                # 同時不改變 actor 的學習信號。
                 value_targets = (returns - returns.mean()) / (returns.std() + 1e-8)
             else:
-                value_targets = returns
-            _raw_adv_std = advantages.std().item()  # before normalize
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                value_targets = returns  # 不歸一化：使用 raw GAE returns 作為 critic target
+            _raw_adv_std = advantages.std().item()  # 歸一化前的 advantage std（用於診斷）
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)  # 標準化 advantage
 
             policy_head.train(); value_head.train()
-            # extractor/preprocess_rnn stay in eval() — PPO only trains RL heads
-            # WD equivalent: concat_input = rl_in_.detach() (line 573)
-            # IL: rl_in stored under torch.no_grad() → same effect (no grad to RNN/extractor)
+            # extractor/preprocess_rnn 維持 eval()：RL 只訓練 RL heads，不更新 aux module
+            # WD 等價做法：concat_input = rl_in_.detach()（custom_trainer.py line 573）
+            # IsaacLab 版本：rl_in 在 torch.no_grad() 下計算，效果相同（無梯度流到 RNN/extractor）
 
             flat_ri = charge_buf.rl_inputs.reshape(-1, rl_input_dim)
             flat_act = charge_buf.actions.reshape(-1, 2)
@@ -2530,7 +3014,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _adv_min = flat_adv.min().item()
             _adv_max = flat_adv.max().item()
 
-            # A2C: single epoch, no mini-batching; PPO: multiple epochs + mini-batches
+            # A2C: 單 epoch 全 batch 更新（WD: A2CK mode，不 mini-batch）
+            # PPO: 多 epoch + mini-batch（標準 PPO）
             n_epochs = 1 if args_cli.use_a2c else args_cli.ppo_epochs
 
             ppo_l, vf_l, ent_l = [], [], []
@@ -2550,6 +3035,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # Patch 5: update ratio
             wd_actor_update_ratio_l, wd_critic_update_ratio_l = [], []
             wd_actor_param_norm_l, wd_critic_param_norm_l = [], []
+            # Post-update trust-region diagnostics
+            post_kl_l, post_ratio_mean_l, post_ratio_std_l = [], [], []
+            post_ratio_min_l, post_ratio_max_l = [], []
+            post_ratio_outside_20_l, post_ratio_outside_50_l = [], []
             for _ in range(n_epochs):
                 if args_cli.use_a2c:
                     # A2C: full batch, single pass (WD: A2CK mode)
@@ -2569,83 +3058,105 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _approx_kl = (flat_lp[mb] - nlp).mean().item()
 
                     if args_cli.use_a2c:
-                        # A2CK: no clipping, pure policy gradient
+                        # A2CK（WD 原版）：無 PPO clip，純 policy gradient
+                        # loss = -E[log π(a|s) * A(s,a)]（on-policy）
                         pl = -(nlp * flat_adv[mb].detach()).mean()
                     else:
-                        # PPO: clipped surrogate
+                        # PPO clipped surrogate：
+                        # ratio = π_new(a|s) / π_old(a|s)
+                        # loss = -min(ratio*A, clip(ratio, 1±ε)*A)
                         ratio = (nlp - flat_lp[mb]).exp()
                         s1 = ratio * flat_adv[mb]
                         s2 = torch.clamp(ratio, 1 - args_cli.clip_eps, 1 + args_cli.clip_eps) * flat_adv[mb]
                         pl = -torch.min(s1, s2).mean()
-                        # Patch 3: PPO-specific metrics
+                        # Patch 3: PPO-only 指標（A2C 不計算）
                         with torch.no_grad():
                             _clip_frac = ((ratio - 1.0).abs() > args_cli.clip_eps).float().mean().item()
                             ppo_clip_frac_l.append(_clip_frac)
                             ppo_ratio_l.append(ratio.mean().item())
 
-                    vl = F.mse_loss(nv, flat_value_target[mb])
-                    vl_raw = vl.item()  # Patch 1: save raw vf_loss before clamp
+                    vl = F.mse_loss(nv, flat_value_target[mb])  # critic MSE loss
+                    vl_raw = vl.item()  # Patch 1: 記錄 clamp 前的原始 vf_loss（用於診斷）
 
-                    # WD A2CK: per-head entropy with separate coefficients
+                    # WD A2CK: per-head entropy（線性/角速度分別用不同的 entropy coeff）
+                    # 對應 WD: spot_entropy_coeff=0.04 × 2.5 = 0.10（線性）, angular=0.375
                     entropy_loss = (_ent_coeff_linear * ent_lin.mean()
                                     + _ent_coeff_angular * ent_ang.mean())
 
-                    # WD loss clamping: prevent catastrophic gradient spikes
+                    # WD loss clamping: 防止 catastrophic gradient spikes（WD 論文 §4.2）
+                    # policy loss > 20 → 縮放到 20（等比例保留方向）
                     _pl_clamp_triggered = abs(pl.item()) > 20.0
                     pl_clamped = pl
                     if _pl_clamp_triggered:
                         pl_clamped = pl * (20.0 / abs(pl.item()))
-                    vf_term = args_cli.vf_coeff * vl
+                    # vf term > 30 → 縮放（按 policy loss 量級動態調整 max_coeff）
+                    vf_term = _current_vf_coeff * vl
                     _vf_clamp_triggered = abs(vf_term.item()) > 30.0
                     if _vf_clamp_triggered:
                         max_30 = abs(max(min(30.0, abs(pl.item())), 10.0) / vl.item())
                         vl = vl * max_30
 
-                    loss = pl_clamped + args_cli.vf_coeff * vl - entropy_loss
+                    # 最終 joint loss = policy + value - entropy（WD 標準公式）
+                    loss = pl_clamped + _current_vf_coeff * vl - entropy_loss
                     actor_before = _snapshot_params(charge_params_actor)
                     critic_before = _snapshot_params(charge_params_critic)
 
                     charge_opt_rl.zero_grad()
                     loss.backward()
 
-                    # WD thesis-inspired update monitor:
+                    # WD thesis-inspired update monitor（模組熵診斷）：
                     #   module_entropy = log10(|actor update|) - log10(|critic update|)
-                    # We estimate update magnitude as lr * grad_norm before Adam's adaptive
-                    # rescaling. This is intentionally a transparent diagnostic, not a
-                    # claim of exact equivalence to Warp Drive's custom optimizer.
-                    actor_grad = _grad_l2_norm(charge_params_actor)
-                    critic_grad = _grad_l2_norm(charge_params_critic)
-                    actor_update_est = args_cli.lr * actor_grad
-                    critic_update_est = args_cli.lr * critic_grad
+                    # 這裡用 lr × grad_norm 估計更新幅度（Adam 的 adaptive rescaling 之前）。
+                    # 這是透明的診斷指標，不等同於 WD 的 custom optimizer，
+                    # 但可以反映 actor/critic 更新壓力是否失衡。
+                    actor_grad = _grad_l2_norm(charge_params_actor)   # actor 梯度 L2 norm
+                    critic_grad = _grad_l2_norm(charge_params_critic)  # critic 梯度 L2 norm
+                    actor_update_est = _current_rl_lr * actor_grad    # 估計 actor 更新量
+                    critic_update_est = _current_rl_lr * critic_grad  # 估計 critic 更新量
 
                     actor_scale = 1.0
                     critic_scale = 1.0
                     if args_cli.wd_update_clip and not args_cli.wd_update_monitor_only:
-                        # WD thesis eq. 4.9/4.10 caps policy/critic update pressure
-                        # separately (k=8, q=30). In this PyTorch port we apply the
-                        # caps to raw per-module grad norms. The previous lr*grad
-                        # comparison was too small by lr and practically never fired.
-                        if actor_grad > args_cli.wd_actor_update_clip:
-                            actor_scale = args_cli.wd_actor_update_clip / (actor_grad + 1e-12)
-                        if critic_grad > args_cli.wd_critic_update_clip:
-                            critic_scale = args_cli.wd_critic_update_clip / (critic_grad + 1e-12)
-                        _scale_grads(charge_params_actor, actor_scale)
-                        _scale_grads(charge_params_critic, critic_scale)
+                        # WD thesis eq. 4.9/4.10：分別對 actor/critic 梯度做 cap（k=8, q=30）。
+                        # 防止 critic spike 透過 merged clip 壓制 actor 更新。
+                        # 在 PyTorch port 中，直接對 per-module grad norm 做 cap：
+                        #   actor_scale = k / grad_norm（若 norm > k）
+                        #   critic_scale = q / grad_norm（若 norm > q）
+                        if actor_grad > _current_wd_actor_update_clip:
+                            actor_scale = _current_wd_actor_update_clip / (actor_grad + 1e-12)
+                        if critic_grad > _current_wd_critic_update_clip:
+                            critic_scale = _current_wd_critic_update_clip / (critic_grad + 1e-12)
+                        _scale_grads(charge_params_actor, actor_scale)   # actor 梯度縮放
+                        _scale_grads(charge_params_critic, critic_scale) # critic 梯度縮放
 
-                    # Patch 4: merged grad norm before clip
-                    _merged_pre = _grad_l2_norm(charge_params_rl)
+                    # Patch 4: 記錄 clip 前後的 merged grad norm（診斷用）
+                    _merged_pre = _grad_l2_norm(charge_params_rl)  # clip 之前的合併 grad norm
                     if args_cli.wd_update_clip and not args_cli.wd_update_monitor_only:
-                        # Do not apply merged global clipping here. When critic dominates,
-                        # merged clipping scales actor and critic together and can kill
-                        # the actor update. WD-style mode relies on separated caps above.
+                        # WD-style 模式：不做 merged global clip（已在上方做 per-module cap）。
+                        # 原因：merged clip 在 critic 主導時會同時縮小 actor 梯度，
+                        # 可能讓 actor 學不到任何東西。
                         _merged_post = _grad_l2_norm(charge_params_rl)
                     else:
-                        _merged_post = nn.utils.clip_grad_norm_(charge_params_rl, args_cli.max_grad_norm)
+                        # 標準模式：做 global clip_grad_norm_（返回裁切後的 norm）
+                        _merged_post = nn.utils.clip_grad_norm_(charge_params_rl, _current_max_grad_norm)
                     # Patch 4: per-module grad norm after all clipping
                     _actor_grad_post = _grad_l2_norm(charge_params_actor)
                     _critic_grad_post = _grad_l2_norm(charge_params_critic)
 
                     charge_opt_rl.step()
+
+                    # --- post-update policy diagnostics ---
+                    with torch.no_grad():
+                        _post_nl = policy_head(flat_ri[mb])
+                        _post_lp, _, _ = evaluate_actions(_post_nl, flat_act[mb])
+                        _post_ratio = (_post_lp - flat_lp[mb]).exp()
+                        post_kl_l.append((flat_lp[mb] - _post_lp).mean().item())
+                        post_ratio_mean_l.append(_post_ratio.mean().item())
+                        post_ratio_std_l.append(_post_ratio.std().item())
+                        post_ratio_min_l.append(_post_ratio.min().item())
+                        post_ratio_max_l.append(_post_ratio.max().item())
+                        post_ratio_outside_20_l.append(((_post_ratio - 1.0).abs() > 0.2).float().mean().item())
+                        post_ratio_outside_50_l.append(((_post_ratio - 1.0).abs() > 0.5).float().mean().item())
 
                     actor_delta = _param_delta_norm(actor_before, charge_params_actor)
                     critic_delta = _param_delta_norm(critic_before, charge_params_critic)
@@ -2719,8 +3230,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "rl/raw_vf_loss": float(np.mean(vf_raw_l)) if vf_raw_l else 0.0,
                 "rl/clamped_policy_loss": float(np.mean(pl_clamped_l)) if pl_clamped_l else 0.0,
                 "rl/clamped_vf_loss": float(np.mean(vf_clamped_l)) if vf_clamped_l else 0.0,
-                "rl/vf_coeff": args_cli.vf_coeff,
-                "rl/vf_coeff_times_vf_loss": args_cli.vf_coeff * float(np.mean(vf_raw_l)) if vf_raw_l else 0.0,
+                "rl/vf_coeff": _current_vf_coeff,
+                "rl/vf_coeff_times_vf_loss": _current_vf_coeff * float(np.mean(vf_raw_l)) if vf_raw_l else 0.0,
                 "rl/policy_clamp_triggered": float(np.mean(pl_clamp_triggered_l)) if pl_clamp_triggered_l else 0.0,
                 "rl/vf_clamp_triggered": float(np.mean(vf_clamp_triggered_l)) if vf_clamp_triggered_l else 0.0,
                 # --- Patch 3: approx_kl + per-head entropy ---
@@ -2730,32 +3241,42 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # --- Patch 5: total loss ---
                 "rl/total_loss": float(np.mean(total_loss_l)) if total_loss_l else 0.0,
                 # --- Patch 2: returns/advantage statistics ---
-                "rl/returns_mean": _ret_mean,
-                "rl/returns_std": _ret_std,
-                "rl/returns_min": _ret_min,
-                "rl/returns_max": _ret_max,
+                "rl_critic/returns_mean": _ret_mean,
+                "rl_critic/returns_std": _ret_std,
+                "rl_critic/returns_min": _ret_min,
+                "rl_critic/returns_max": _ret_max,
                 # Clear aliases: critic target distribution vs current value prediction
-                "rl/value_target_mean": _target_mean,
-                "rl/value_target_std": _target_std,
-                "rl/value_target_min": _target_min,
-                "rl/value_target_max": _target_max,
-                "rl/value_pred_mean": _value_pred_mean,
-                "rl/value_pred_std": _value_pred_std,
-                "rl/value_pred_min": _value_pred_min,
-                "rl/value_pred_max": _value_pred_max,
-                "rl/value_error_mean": _value_error_mean,
-                "rl/value_error_std": _value_error_std,
-                "rl/value_error_abs_max": _value_error_abs_max,
-                "rl/advantage_mean": _adv_mean,
-                "rl/advantage_std": _adv_std,
-                "rl/advantage_min": _adv_min,
-                "rl/advantage_max": _adv_max,
-                "rl/raw_advantage_std": _raw_adv_std,
+                "rl_critic/value_target_mean": _target_mean,
+                "rl_critic/value_target_std": _target_std,
+                "rl_critic/value_target_min": _target_min,
+                "rl_critic/value_target_max": _target_max,
+                "rl_critic/value_pred_mean": _value_pred_mean,
+                "rl_critic/value_pred_std": _value_pred_std,
+                "rl_critic/value_pred_min": _value_pred_min,
+                "rl_critic/value_pred_max": _value_pred_max,
+                "rl_critic/value_error_mean": _value_error_mean,
+                "rl_critic/value_error_std": _value_error_std,
+                "rl_critic/value_error_abs_max": _value_error_abs_max,
+                "rl_adv/mean": _adv_mean,
+                "rl_adv/std": _adv_std,
+                "rl_adv/min": _adv_min,
+                "rl_adv/max": _adv_max,
+                "rl_adv/raw_std": _raw_adv_std,
             }
             # Patch 3: PPO-only metrics (conditional)
             if ppo_clip_frac_l:
                 wd_update_monitor["rl/clip_fraction"] = float(np.mean(ppo_clip_frac_l))
                 wd_update_monitor["rl/ratio_mean"] = float(np.mean(ppo_ratio_l))
+
+            # Post-update trust-region diagnostics
+            if post_kl_l:
+                wd_update_monitor["rl_trust/approx_kl"] = float(np.mean(post_kl_l))
+                wd_update_monitor["rl_trust/ratio_mean"] = float(np.mean(post_ratio_mean_l))
+                wd_update_monitor["rl_trust/ratio_std"] = float(np.mean(post_ratio_std_l))
+                wd_update_monitor["rl_trust/ratio_min"] = float(np.mean(post_ratio_min_l))
+                wd_update_monitor["rl_trust/ratio_max"] = float(np.mean(post_ratio_max_l))
+                wd_update_monitor["rl_trust/ratio_outside_20pct"] = float(np.mean(post_ratio_outside_20_l))
+                wd_update_monitor["rl_trust/ratio_outside_50pct"] = float(np.mean(post_ratio_outside_50_l))
 
             # ================================================================
             # Auxiliary loss (WD module loss) — 每 iteration 都跑 (WD: 論文§4.2)
@@ -2879,7 +3400,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     total_loss.backward()
                     nn.utils.clip_grad_norm_(
                         charge_params_aux,
-                        args_cli.aux_grad_clip if args_cli.aux_grad_clip is not None else args_cli.max_grad_norm,
+                        _current_aux_grad_clip,
                     )
                     for k, ps in _mon_modules.items():
                         _grad_norms[k] = _grad_l2_norm(ps)
@@ -2934,7 +3455,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # must use value_targets rather than raw returns.
             _value_residual = value_targets - charge_buf.values[:RL]
             _var_expl = max(-1.0, 1.0 - (_value_residual.var() / (value_targets.var() + 1e-8)).item())
-            aux_monitor["rl/variance_explained"] = _var_expl
+            aux_monitor["rl_critic/variance_explained"] = _var_expl
 
             # One-time gradient verification + aux mode info (iteration 0)
             if iteration == 0:
@@ -2964,10 +3485,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                       f"mode=tbptt, seq_len={args_cli.aux_seq_len}, "
                       f"burn_in={args_cli.aux_burn_in}, seq_batch={args_cli.aux_seq_batch_size}")
 
-        # === Obstacle PPO Update ===
-        obs_metrics = None  # None means obstacle didn't train this iter
+        # === Obstacle PPO Update（每 train_goal_rate 次訓練 1 次）===
+        obs_metrics = None  # None 表示本 iteration 沒有訓練 obstacle
         if train_obstacle:
             obs_policy.train(); obs_value.train()
+            # 使用通用 PPO update（continuous action，單 optimizer，無 WD cap）
             obs_metrics = ppo_update_continuous(
                 obs_policy, obs_value, obs_buf, obs_optimizer,
                 epochs=args_cli.ppo_epochs, mini_batches=args_cli.mini_batches,
@@ -2975,11 +3497,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ent_coeff=args_cli.obs_ent_coeff, max_grad_norm=args_cli.max_grad_norm,
                 gamma=current_gamma, gae_lambda=args_cli.gae_lambda)
 
-        # === Logging ===
+        # === Logging：計算本 iteration 的性能指標 ===
         elapsed = time.time() - iter_start
-        total_steps = (iteration + 1) * RL
-        fps = num_envs * RL / elapsed
-        wd = metrics.collect()
+        total_steps = (iteration + 1) * RL     # 累計 env-steps（所有 env 的總 frame 數）
+        fps = num_envs * RL / elapsed           # 訓練速率（env-frames/sec）
+        wd = metrics.collect()                  # 取得本 iteration 的 WandB metrics dict
 
         # Timeout rate from metrics
         _timeout_rate = wd.get("charge/timeout_rate", 0)
@@ -3025,7 +3547,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _n2d = aux_monitor.get("aux/near2_d_loss", 0)
                 _vsc = int(aux_monitor.get("aux/valid_seq_count", 0))
                 _asl = int(aux_monitor.get("aux/seq_len", 1))
-                _ve = aux_monitor.get("rl/variance_explained", 0)
+                _ve = aux_monitor.get("rl_critic/variance_explained", 0)
                 _aux_label = "disabled" if args_cli.disable_aux_training else "tbptt"
                 print(
                     f"  AUX({_aux_label} L={_asl}): "
@@ -3038,17 +3560,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         if wandb_run is not None:
             # ----------------------------------------------------------------
-            # WandB Logging Strategy:
+            # WandB Logging 策略：
             #
-            # rl/* = charge-only canonical metrics.  Previously, rl/entropy,
-            # rl/policy_loss, rl/value_loss were written every iteration with
-            # value 0 during OBS iterations (when charge didn't train).  This
-            # caused a regular oscillation pattern (0 ↔ ~5.8) on WandB charts,
-            # making it look like entropy was collapsing every other iteration.
+            # rl/* 只在 charge 訓練的 iteration 寫入（避免 OBS iteration 寫 0 造成假性下降）。
+            # 問題：如果每次 iteration 都寫 rl/entropy，OBS iteration 時 charge_entropy=0，
+            # WandB 圖表會出現 0 ↔ ~5.8 的規律振盪，看起來像 entropy collapse。
             #
-            # Fix: rl/policy_loss, rl/value_loss, rl/entropy are only written
-            # when train_charge=True.  Same for charge/* and legacy charge keys.
-            # obstacle/* keys are only written when train_obstacle=True.
+            # 修正：rl/policy_loss, rl/value_loss, rl/entropy 只在 train_charge=True 時寫入。
+            # 同樣，obstacle/* 只在 train_obstacle=True 時寫入。
+            # rl/success_rate, rl/collision_rate 等 episode-level 指標每次都寫（無論誰訓練）。
             # ----------------------------------------------------------------
 
             log_data = {}
@@ -3094,6 +3614,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "train/ent_coeff_angular": _ent_coeff_angular,
             })
 
+            # --- phase_parameter/* = 當前 phase 的訓練進度與環境配置 ---
+            log_data.update({
+                "phase_parameter/timesteps": total_steps,
+                "phase_parameter/updates": iteration + 1,
+                "phase_parameter/interactions": total_steps,
+                "phase_parameter/batch_size": batch_size,
+                "phase_parameter/rollout_length": RL,
+                "phase_parameter/num_envs": num_envs,
+            })
+
             # --- behavior/* from BehaviorScheduler (rule_based mode) ---
             if _obstacle_mode == "rule_based" and hasattr(env.unwrapped, '_behavior_scheduler'):
                 bsched = env.unwrapped._behavior_scheduler
@@ -3122,38 +3652,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     )
             wandb_run.log(log_data, step=total_steps)
 
-        # === Save checkpoint ===
+        # === Save checkpoint：定期儲存模型、optimizer state、normalizer 統計 ===
         if (iteration + 1) % args_cli.save_interval == 0 or iteration == num_iterations - 1:
             ckpt_path = os.path.join(log_dir, f"checkpoint_{total_steps}.pt")
             _ckpt_dict = {
-                "preprocess_rnn": preprocess_rnn.state_dict(),
-                "policy_head": policy_head.state_dict(),
-                "value_head": value_head.state_dict(),
-                "obs_policy": obs_policy.state_dict() if obs_policy else {},
-                "obs_value": obs_value.state_dict() if obs_value else {},
-                "charge_opt_rl": charge_opt_rl.state_dict(),
-                "charge_opt_aux": charge_opt_aux.state_dict(),
+                "preprocess_rnn": preprocess_rnn.state_dict(),   # RNN cell + fc_front/middle + predict_head
+                "policy_head": policy_head.state_dict(),         # actor head
+                "value_head": value_head.state_dict(),           # critic head
+                "obs_policy": obs_policy.state_dict() if obs_policy else {},  # 障礙物 policy（learned mode）
+                "obs_value": obs_value.state_dict() if obs_value else {},     # 障礙物 critic
+                "charge_opt_rl": charge_opt_rl.state_dict(),     # RL optimizer state（Adam momentum）
+                "charge_opt_aux": charge_opt_aux.state_dict(),   # Aux optimizer state
                 "obs_optimizer": obs_optimizer.state_dict() if obs_optimizer else {},
                 "obs_normalizer": {
-                    "mean": obs_normalizer.mean, "var": obs_normalizer.var,
-                    "count": obs_normalizer.count},
-                "iteration": iteration, "total_steps": total_steps,
-                "args": vars(args_cli),
+                    "mean": obs_normalizer.mean,   # running mean（139D）
+                    "var": obs_normalizer.var,     # running variance
+                    "count": obs_normalizer.count, # sample count
+                },
+                "iteration": iteration,            # 已完成的 iteration 數（用於 resume）
+                "total_steps": total_steps,        # 累計 env-steps
+                "args": vars(args_cli),            # 完整 CLI args（用於實驗重現）
             }
             if use_extractor:
-                _ckpt_dict["extractor"] = extractor.state_dict()
+                _ckpt_dict["extractor"] = extractor.state_dict()  # Conv1d extractor（only in extractor_rnn mode）
             torch.save(_ckpt_dict, ckpt_path)
             print(f"[SAVE] {ckpt_path}")
 
-    # === Finish ===
+    # === Finish：訓練結束，收尾並關閉資源 ===
     total_time = time.time() - start_time
     print(f"\n{'='*60}")
     print(f"Training complete: {total_timesteps:,} steps in {total_time:.0f}s ({total_time/60:.1f}min)")
     print(f"{'='*60}")
     if wandb_run is not None:
         import wandb
-        wandb.finish()
-    env.close()
+        wandb.finish()  # 完成 WandB run（上傳 summary、標記 finished）
+    env.close()         # 關閉 Isaac Sim 環境（釋放 GPU 資源）
 
 
 if __name__ == "__main__":
