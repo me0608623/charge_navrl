@@ -24,15 +24,22 @@ VLP-16 配置（離散動作 + Multi-Branch CNN）:
 # Phase 0 配置
 # ============================================================================
 
-from .charge_env_cfg_phase0 import (
-    ChargeNavigationEnvCfgPhase0,
-    ChargeNavigationEnvCfgPhase0_PLAY,
-)
+try:
+    from .charge_env_cfg_phase0 import (
+        ChargeNavigationEnvCfgPhase0,
+        ChargeNavigationEnvCfgPhase0_PLAY,
+    )
+except ImportError:
+    ChargeNavigationEnvCfgPhase0 = None  # type: ignore[assignment, misc]
+    ChargeNavigationEnvCfgPhase0_PLAY = None  # type: ignore[assignment, misc]
 
 # NavRL 風格配置
-from .charge_env_cfg_phase0_navrl import (
-    ChargeNavigationEnvCfgPhase0NavRL,
-)
+try:
+    from .charge_env_cfg_phase0_navrl import (
+        ChargeNavigationEnvCfgPhase0NavRL,
+    )
+except ImportError:
+    ChargeNavigationEnvCfgPhase0NavRL = None  # type: ignore[assignment, misc]
 
 # ============================================================================
 # VLP-16 配置

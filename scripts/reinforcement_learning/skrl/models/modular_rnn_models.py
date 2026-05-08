@@ -381,4 +381,7 @@ class ValueHead(nn.Module):
 # Obstacle Agent — 已遷移到 obstacle_agent/ 模組
 # ============================================================================
 # 向後相容 import (訓練腳本仍 from modular_rnn_models import ObstaclePolicyFC)
-from obstacle_agent import ObstaclePolicyFC, ObstacleValueFC, OBS_DIM as OBS_POLICY_OBS_DIM, ACT_DIM as OBS_POLICY_ACT_DIM  # noqa: F401, E501
+try:
+    from obstacle_agent import ObstaclePolicyFC, ObstacleValueFC, OBS_DIM as OBS_POLICY_OBS_DIM, ACT_DIM as OBS_POLICY_ACT_DIM  # noqa: F401, E501
+except (ImportError, ModuleNotFoundError):
+    pass  # play scripts don't need obstacle_agent

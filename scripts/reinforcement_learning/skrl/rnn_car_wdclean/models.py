@@ -4,8 +4,10 @@ import sys
 from pathlib import Path
 
 _parent = str(Path(__file__).resolve().parent.parent)
-if _parent not in sys.path:
-    sys.path.insert(0, _parent)
+_models_dir = str(Path(__file__).resolve().parent.parent / "models")
+for _p in [_parent, _models_dir]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from modular_rnn_models import (  # noqa: F401
     # Constants

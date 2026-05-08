@@ -44,6 +44,17 @@ class MetricsCollector:
         self._completed_lengths: list[float] = []
         self._completed_alive: list[float] = []
 
+        # --- Per-outcome expected value tracking (WD 期望值) ---
+        # 每個 episode 完成時，根據結局（goal/collision/timeout）分別記錄 reward 和 length，
+        # 用於計算條件期望值 E[reward | outcome]。
+        self._ev_reward_goal: list[float] = []       # E[reward | goal_reached]
+        self._ev_reward_collision: list[float] = []  # E[reward | collision]
+        self._ev_reward_timeout: list[float] = []    # E[reward | timeout]
+        self._ev_length_goal: list[float] = []       # E[length | goal_reached]
+        self._ev_length_collision: list[float] = []  # E[length | collision]
+        self._ev_length_timeout: list[float] = []    # E[length | timeout]
+        self._ev_alive_ratio: list[float] = []       # alive_steps / total_steps per episode
+
         # --- Goal-directed behavior diagnostics ---
         self._ep_goal_start_dist = torch.full((num_envs,), float("nan"), device=device)
         self._ep_goal_prev_dist = torch.full((num_envs,), float("nan"), device=device)
@@ -234,6 +245,22 @@ class MetricsCollector:
                     self._completed_heading_error_abs_mean.append(self._ep_goal_heading_abs_sum[idx].item() / steps)
                     switch_steps = max(steps - 1.0, 1.0)
                     self._completed_target_switch_rate.append(self._ep_goal_switch_count[idx].item() / switch_steps)
+                # --- Per-outcome expected value tracking ---
+                ep_rwd = self._ep_reward[idx].item()
+                ep_len = self._ep_length[idx].item()
+                alive_ratio = self._ep_steps_alive[idx].item() / max(ep_len, 1.0)
+                self._ev_alive_ratio.append(alive_ratio)
+                if reward_breakdown is not None:
+                    if reward_breakdown["goal_reached"][idx]:
+                        self._ev_reward_goal.append(ep_rwd)
+                        self._ev_length_goal.append(ep_len)
+                    elif reward_breakdown["wall_collision"][idx] or reward_breakdown["obs_collision"][idx]:
+                        self._ev_reward_collision.append(ep_rwd)
+                        self._ev_length_collision.append(ep_len)
+                    else:
+                        self._ev_reward_timeout.append(ep_rwd)
+                        self._ev_length_timeout.append(ep_len)
+
                 self._total_eps += 1
                 if self._ep_length[idx].item() <= 2:
                     self._first_step_deaths += 1
@@ -311,6 +338,73 @@ class MetricsCollector:
         if "stage" in self._curriculum_info:
             m["curriculum/stage"] = self._curriculum_info["stage"]
 
+        # --- Expected Value metrics (WD 期望值) ---
+        # V_total: 總體期望值 = 所有 episode 的平均回報 (WD: V_Spot)
+        if self._completed_rewards:
+            m["expect_value/V_total"] = np.mean(self._completed_rewards)
+
+        # V_navigate: 導航期望值 = E[reward | goal_reached] (WD: V_Move)
+        # 衡量「成功 episode 的回報品質」— 是快速到達還是勉強到達？
+        if self._ev_reward_goal:
+            m["expect_value/V_navigate"] = np.mean(self._ev_reward_goal)
+
+        # V_collision: 碰撞期望值 = E[reward | collision]
+        # 衡量「碰撞 episode 積累了多少回報才死」— 越接近 0 代表早期就碰撞
+        if self._ev_reward_collision:
+            m["expect_value/V_collision"] = np.mean(self._ev_reward_collision)
+
+        # V_timeout: 超時期望值 = E[reward | timeout]
+        # 衡量「超時 episode 是接近成功（reward ≈ 0）還是完全卡住（reward << 0）」
+        if self._ev_reward_timeout:
+            m["expect_value/V_timeout"] = np.mean(self._ev_reward_timeout)
+
+        # V_survive: 存活期望值 = E[alive_steps / ep_length] (WD: V_Survive)
+        # 衡量 agent 在 episode 中的平均存活比例
+        if self._ev_alive_ratio:
+            m["expect_value/V_survive"] = np.mean(self._ev_alive_ratio)
+
+        # p_goal: 到達目標機率 (WD: p_Spot-Goal)
+        m["expect_value/p_goal"] = self._goal_reached / te
+
+        # p_collision: 碰撞機率 (WD: p_Spot-Obs + p_Spot-Map)
+        m["expect_value/p_collision"] = self._collision / te
+
+        # p_timeout: 超時機率
+        m["expect_value/p_timeout"] = self._timeout / te
+
+        # VR_wall / VR_obs: 碰撞歸因佔比 (WD: VR_Spot-Map / VR_Spot-Obs)
+        # 「碰撞中有多少比例來自牆壁 vs 動態障礙」— 用於診斷 policy 弱點
+        total_col = self._collision + eps
+        m["expect_value/VR_wall"] = self._wall_collision / total_col
+        m["expect_value/VR_obs"] = self._obstacle_collision / total_col
+
+        # ep_length_goal: 成功 episode 平均步數 — 導航效率
+        if self._ev_length_goal:
+            m["expect_value/ep_length_goal"] = np.mean(self._ev_length_goal)
+
+        # ep_length_collision: 碰撞 episode 平均步數 — 碰撞前能存活多久
+        if self._ev_length_collision:
+            m["expect_value/ep_length_collision"] = np.mean(self._ev_length_collision)
+
+        # V_goal_reward: 目標獎勵期望值 = E[goal_reward 分量] (WD: V_Spot-Goal)
+        # 衡量每 episode 平均獲得多少 goal reward（≈ p_goal × reward_get_goal）
+        if self._completed_goal_reward:
+            m["expect_value/V_goal_reward"] = np.mean(self._completed_goal_reward)
+
+        # V_penalty: 碰撞懲罰期望值 = E[wall_hit + obs_hit 分量]
+        # 衡量每 episode 平均承受多少碰撞懲罰（≈ p_collision × penalty_hit）
+        if self._completed_wall_hit_reward and self._completed_obs_hit_reward:
+            wall_arr = np.array(self._completed_wall_hit_reward)
+            obs_arr = np.array(self._completed_obs_hit_reward)
+            m["expect_value/V_penalty"] = np.mean(wall_arr + obs_arr)
+
+        # V_action_cost: 操作成本期望值 = E[action_reward 分量]
+        # 衡量 action cost 對 episode reward 的平均貢獻（Phase 1 有 cost_operate 時才有意義）
+        if self._completed_action_reward:
+            action_mean = np.mean(self._completed_action_reward)
+            if abs(action_mean) > 1e-6:
+                m["expect_value/V_action_cost"] = action_mean
+
         return m
 
     def reset(self):
@@ -340,3 +434,10 @@ class MetricsCollector:
         self._reward_terms.clear()
         self._obs_speeds.clear()
         self._obs_distances.clear()
+        self._ev_reward_goal.clear()
+        self._ev_reward_collision.clear()
+        self._ev_reward_timeout.clear()
+        self._ev_length_goal.clear()
+        self._ev_length_collision.clear()
+        self._ev_length_timeout.clear()
+        self._ev_alive_ratio.clear()

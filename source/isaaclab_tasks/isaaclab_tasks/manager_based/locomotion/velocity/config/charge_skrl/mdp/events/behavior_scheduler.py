@@ -220,6 +220,15 @@ class BehaviorScheduler:
         # Rejection sampling: 確保 safety constraints
         self._enforce_spawn_constraints(env_ids, env)
 
+        # ★ 立刻寫入 sim（避免等到第一個 step() 才顯示）
+        self._write_positions_to_sim(env)
+
+        # 診斷: 印出分配結果
+        active_count = (self.behavior_type[env_ids] != BEHAVIOR_INACTIVE).sum().item()
+        if N_envs <= 4:  # play 模式少 env 才印
+            print(f"[BehaviorScheduler] reset {N_envs} envs → {active_count} active obstacles "
+                  f"(max_slots={self.max_obstacles}, mix={self.behavior_mix})")
+
     def step(self, env: ManagerBasedRLEnv, dt: float = 0.2) -> None:
         """每個 env step 呼叫一��，向量化移動��有 obstacle。
 

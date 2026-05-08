@@ -1,20 +1,18 @@
 """迷宮牆壁幾何定義 + GPU 並行空間查詢工具
 
-原位置: core/wall_layout.py → 遷移至 mdp/wall_layout.py (共用工具)
-
-場景: 16x16m / 20x20m 訓練房間 (center origin)
-    - 4 面外牆 (BOUNDARY_WALLS): 封閉房間
-    - 6~8 面內部牆 (MAZE_WALLS / WALL_SLOT_SPECS): 迷宮結構
+場景:
+  - 16x16m: MAZE_WALLS + BOUNDARY_WALLS（舊版，供非課程 task 使用）
+  - 20x20m: WALL_SLOT_SPECS (per-env 隨機) + BOUNDARY_WALLS_20x20（課程 task 使用）
 
 資料格式: (center_x, center_y, size_x, size_y) — AABB 表示
 
-函數 (legacy — global wall data):
+函數 (global wall data — 16x16):
     get_wall_tensors(device):        內部牆 (6 段) → GPU tensor
     get_all_wall_tensors(device):    全部牆 (10 段) → GPU tensor
-    check_wall_proximity_batch():    GPU AABB proximity — 批量檢查 N 個點是否太近牆壁
-    check_los_batch():               GPU slab method — 批量 Line-of-Sight 遮擋檢查
+    check_wall_proximity_batch():    GPU AABB proximity
+    check_los_batch():               GPU slab method LOS
 
-函數 (per-env — randomized walls):
+函數 (per-env — 20x20 randomized walls):
     check_wall_proximity_perenv():   per-env AABB proximity — [N,2] vs [N,W,2]
     check_los_perenv():              per-env LOS — [N,2] origins, [N,F,2] targets
     get_combined_wall_data(env):     合併 per-env maze walls + global boundary walls
@@ -22,11 +20,12 @@
 使用者:
     - events/reset.py: 重置位置時避免放在牆內
     - events/mixed_parallel.py: 障礙物放置時避開牆壁
+    - events/walls.py: per-env 牆壁初始化（讀取 WALL_SLOT_SPECS + BOUNDARY_WALLS_20x20）
     - observations/obs_functions.py: topk_obstacles 的 LOS 遮擋判斷
     - goal_command.py: 目標生成時避開牆壁
     - terminations/robot_state.py: 牆壁碰撞終止
 
-效能: 全部 GPU 向量化，O(N×W) 複雜度，256×14=3,584 次比較在 GPU 上微不足道。
+效能: 全部 GPU 向量化，O(N×W) 複雜度。
 """
 
 from __future__ import annotations
@@ -66,11 +65,12 @@ MAZE_WALLS_20x20: list[tuple[float, float, float, float]] = [
 ]
 
 BOUNDARY_WALLS_20x20: list[tuple[float, float, float, float]] = [
-    # 必須與 charge_env_cfg_vlp16.py 的 room_size=8.0, wall_thickness=0.2 一致
-    ( 0.0,   8.0, 16.2, 0.2),  # North  (center_x, center_y, size_x, size_y)
-    ( 0.0,  -8.0, 16.2, 0.2),  # South
-    ( 8.0,   0.0, 0.2, 16.2),  # East
-    (-8.0,   0.0, 0.2, 16.2),  # West
+    # 必須與 charge_env_cfg_vlp16_curriculum.py MySceneCfgVLP16_20x20 的
+    # room_size=10.0, wall_thickness=1.0 一致
+    ( 0.0,  10.0, 21.0, 1.0),  # North  (center_x, center_y, size_x, size_y)
+    ( 0.0, -10.0, 21.0, 1.0),  # South
+    ( 10.0,  0.0,  1.0, 21.0), # East
+    (-10.0,  0.0,  1.0, 21.0), # West
 ]
 
 ALL_WALLS_20x20 = MAZE_WALLS_20x20 + BOUNDARY_WALLS_20x20
@@ -96,8 +96,6 @@ MAX_WALL_SLOTS = 8
 # Module-level cache: {device_str: (wall_centers, wall_sizes)}
 _wall_tensor_cache: dict[str, tuple[Tensor, Tensor]] = {}
 _all_wall_cache: dict[str, tuple[Tensor, Tensor]] = {}
-_wall_tensor_cache_20x20: dict[str, tuple[Tensor, Tensor]] = {}
-_all_wall_cache_20x20: dict[str, tuple[Tensor, Tensor]] = {}
 
 
 def get_wall_tensors(device) -> tuple[Tensor, Tensor]:
@@ -136,22 +134,9 @@ def get_all_wall_tensors(device) -> tuple[Tensor, Tensor]:
     return _all_wall_cache[key]
 
 
-def get_wall_tensors_20x20(device) -> tuple[Tensor, Tensor]:
-    """Return cached (wall_centers [4, 2], wall_sizes [4, 2]) for 20×20m maze walls."""
-    key = str(device)
-    if key not in _wall_tensor_cache_20x20:
-        data = torch.tensor(MAZE_WALLS_20x20, dtype=torch.float32, device=device)
-        _wall_tensor_cache_20x20[key] = (data[:, :2], data[:, 2:])
-    return _wall_tensor_cache_20x20[key]
-
-
-def get_all_wall_tensors_20x20(device) -> tuple[Tensor, Tensor]:
-    """Return cached (wall_centers [8, 2], wall_sizes [8, 2]) for all 20×20m walls."""
-    key = str(device)
-    if key not in _all_wall_cache_20x20:
-        data = torch.tensor(ALL_WALLS_20x20, dtype=torch.float32, device=device)
-        _all_wall_cache_20x20[key] = (data[:, :2], data[:, 2:])
-    return _all_wall_cache_20x20[key]
+# NOTE: MAZE_WALLS_20x20 / ALL_WALLS_20x20 kept for reference/debugging.
+# Per-env wall spawning uses WALL_SLOT_SPECS (randomized), not these static coords.
+# get_wall_tensors_20x20 / get_all_wall_tensors_20x20 removed (never called at runtime).
 
 
 def check_wall_proximity_batch(
@@ -419,7 +404,8 @@ def get_combined_wall_data(env) -> tuple[Tensor, Tensor, Tensor]:
 
         return centers, sizes, mask
 
-    # Fallback: broadcast static 20x20 walls to all envs
+    # Fallback: use static ALL_WALLS_20x20 when per-env walls not initialized
+    # (should not happen in curriculum training — events/walls.py always sets _maze_wall_centers)
     device = env.device
     N = env.num_envs
     data = torch.tensor(ALL_WALLS_20x20, dtype=torch.float32, device=device)

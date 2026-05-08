@@ -613,9 +613,9 @@ def spawn_near_miss(
     # 7. 總穿越距離 = 2 * travel_before_pass (對稱: spawn → pass → exit)
     total_dist = travel_before_pass * 2.0
 
-    # Clamp spawn within extended boundary (允許從邊界外進入)
-    spawn_x.clamp_(-(boundary + 2.0), boundary + 2.0)
-    spawn_y.clamp_(-(boundary + 2.0), boundary + 2.0)
+    # Clamp spawn within boundary（不超出 boundary，避免 boundary_bounce 導致 done 提前觸發）
+    spawn_x.clamp_(-boundary, boundary)
+    spawn_y.clamp_(-boundary, boundary)
 
     # 寫入 state
     sched.positions[env_ids, slot_ids, 0] = spawn_x

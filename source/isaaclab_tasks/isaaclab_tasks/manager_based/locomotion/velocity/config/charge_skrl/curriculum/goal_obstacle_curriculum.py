@@ -1725,6 +1725,14 @@ def goal_obstacle_curriculum(
         "obstacle_speed_rate": float(stage_cfg.get("obstacle_speed_rate", 0.8)),
         "num_virtual_spots": float(stage_cfg.get("num_virtual_spots", 0)),
         "goal_speed_rate": float(stage_cfg.get("goal_speed_rate", 0.7)),
+        # phase/task-specific trainer runtime info (safe sync subset only)
+        "trainer_lr": float(stage_cfg.get("trainer_lr", 0.0)),
+        "trainer_rnn_lr": float(stage_cfg.get("trainer_rnn_lr", 0.0)),
+        "trainer_vf_coeff": float(stage_cfg.get("trainer_vf_coeff", 0.0)),
+        "trainer_max_grad_norm": float(stage_cfg.get("trainer_max_grad_norm", 0.0)),
+        "trainer_aux_grad_clip": float(stage_cfg.get("trainer_aux_grad_clip", 0.0)),
+        "trainer_wd_actor_update_clip": float(stage_cfg.get("trainer_wd_actor_update_clip", 0.0)),
+        "trainer_wd_critic_update_clip": float(stage_cfg.get("trainer_wd_critic_update_clip", 0.0)),
     }
 
 
