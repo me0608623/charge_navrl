@@ -9,7 +9,7 @@ COMMON="--task Isaac-Navigation-Charge-VLP16-Curriculum-NavRL \
   --use_a2c --ppo_epochs 1 \
   --lr 0.0002 --rnn_lr 0.0005 --aux_lr 0.0 \
   --gamma 0.984 --vf_coeff 0.025 \
-  --curriculum_version warp_drive_goal_first \
+  --curriculum_version warp_drive_single_agent_v1 \
   --log_interval 5 --save_interval 200"
 
 echo "========== [1/4] step + normal =========="

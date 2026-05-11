@@ -79,818 +79,637 @@ GLOBAL = {
 # ═══════════════════════════════════════════════════════════════════════════
 
 STAGES = [
+    # ═══════════════════════════════════════════════════════════════════════
+    # φ 單調遞增設計表 (Monotonic φ Progression)  v2 — 2026-05-11
+    # ═══════════════════════════════════════════════════════════════════════
+    #
+    # 設計原則：
+    # 1. 每個 stage 都有 static obstacles（從 SA1 開始）
+    # 2. 每個 φ 只做小幅單調遞增（goals 遞減、其餘遞增）
+    # 3. 不刪除已引入的元素（behavior types 只增不減）
+    # 4. reward signal density (goals/episode_s) 每步最多下降 ~35%
+    #
+    # | φ              | SA1 | SA2 | SA3 | SA4 | SA5 | SA6 | SA7 | SA8 |
+    # |----------------|-----|-----|-----|-----|-----|-----|-----|-----|
+    # | goals          |  10 |   8 |   6 |   4 |   4 |   3 |   2 |   1 |
+    # | goal_dist_max  |   6 |   7 |   8 |   9 |   9 |  10 |  10 |  10 |
+    # | static_obs     |   1 |   1 |   2 |   2 |   3 |   3 |   3 |   3 |
+    # | dynamic_obs    |   2 |   2 |   3 |   4 |   5 |   6 |   8 |   8 |
+    # | dynamic_min    |   1 |   1 |   2 |   3 |   3 |   5 |   6 |   6 |
+    # | walls_max      |   1 |   1 |   2 |   2 |   3 |   3 |   3 |   3 |
+    # | wall_length    | 3.0 | 3.0 | 3.5 | 4.0 | 4.0 | 4.5 | 4.5 | 5.0 |
+    # | episode_s      |  60 |  60 |  60 |  60 |  75 |  90 | 120 | 180 |
+    # | penalty        |  -5 |  -8 | -10 | -12 | -15 | -25 | -50 |-100 |
+    # | obs_speed      |0.80 |0.80 |0.85 |0.85 |0.85 |0.90 |1.00 |1.15 |
+    # | behavior_types |   2 |   3 |   4 |   5 |   6 |   7 |   8 |   8 |
+    # | signal (g/ep)  |.167 |.133 |.100 |.067 |.053 |.033 |.017 |.006 |
+    # | signal Δ%      |  —  | -20 | -25 | -33 | -20 | -37 | -48 | -67 |
+    # | density obs/m² |.03  |.03  |.05  |.06  |.08  |.09  |.11  |.11  |
+    # ═══════════════════════════════════════════════════════════════════════
+
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 1 / SA1
-    # 【訓練能力】抵達目的地（導航）
-    #   論文策略：高 goal density + 低 penalty → p(goal) 高、p(obs) 低
-    #   短 episode + 多 goal = 成功事件頻率高，讓 agent 先學會「往 goal 走」
-    #   少量動態障礙(obs=3)只為讓 RNN 提前接觸時序信號，不期待學會避障
-    #
-    # ── WD P1 參考 (train_rnn_car.py, 8 phases, fps=4, ent×2.5) ──
-    # spots=6, goals=20, obs=3, penalty=-5, cost=0.03,
-    # ent_linear=0.10, ent_angular=0.375, speed=0.80, 60s, batch=50K
-    # wall=0
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=512,  timesteps=30000,  updates=100,  interactions=15.4M
-    # Formal: num_envs=512,  timesteps=270000, updates=900,  interactions=138.2M
-    # Long:   num_envs=512,  timesteps=450000, updates=1500, interactions=230.4M
-    # 說明：SA1 是 sparse goal bootstrap；優先保證 update 次數，不急著放大 num_envs。
+    # Stage 1 / SA1 — 導航 bootstrap
+    # 【焦點】高 goal density + 低 penalty → 讓 agent 學會「往 goal 走」
+    # 【新增】static_obstacles=1 從一開始就接觸靜態幾何
+    # dφ: (baseline)
+    # WD P1: spots=6, goals=20, obs=3, penalty=-5, speed=0.80, 60s
+    # Budget: Sanity 512×100=15.4M | Formal 512×900=138.2M
     # ──────────────────────────────────────────────────────────────────────
     {
-        # task 名稱，主要用於 console / WandB / curriculum debug。
-        "name": "SA1_goal_wall_dyn",
+        "name": "SA1_nav_bootstrap",
 
         "scene": {
-            # 場內同時存在的 goal 數量。
-            # goals 越多，隨機走到某個 goal 的機率越高，早期成功事件頻率越高。
-            "goals": 10,                       # WD P1=20
-
-            # goal 與 robot 的重採樣距離範圍 (min_m, max_m)。
-            # 前期用短距離讓任務更容易，減少 sparse reward 太稀的問題。
+            "goals": 10,
             "goal_distance": (2.0, 6.0),
-
-            # 靜態障礙物數量。
-            # SA1 先設 0，避免一開始同時學太多種幾何干擾。
-            "static_obstacles": 0,             # WD P1: 無 static（spots 是 virtual）
-
-            # 動態障礙物最大數量。
-            # 這是 per-env randomization 的上限，不一定每個 env 都塞滿。
-            "dynamic_obstacles": 2,            # WD P1=3
-
-            # 動態障礙物最小數量。
-            # 代表每個 env 會在 [1, 2] 之間抽樣動態障礙數量。
+            "static_obstacles": 1,              # v2: 0→1，從一開始就有靜態
+            "dynamic_obstacles": 2,
             "dynamic_obstacles_min": 1,
-
-            # 內牆最少數量。
-            "walls_min": 0,                    # WD P1: 無牆
-
-            # 內牆最多數量。
-            "walls_max": 1,                    # WD P1: 無牆
-
-            # 內牆目標長度（公尺）。
-            # 不是保證每一面牆都剛好等長，而是 wall randomization 的參考長度。
-            "wall_length": 5.0,
-
-            # episode 最長秒數。
-            # 越短代表 timeout 更快，鼓勵 agent 不要拖太久。
-            "episode_s": 60,                   # WD P1=60
-
-            # 這個 phase 對應的折扣因子。
-            # 雖然 train script 目前主要維持 WD constant gamma 概念，
-            # 但 env/curriculum 仍保存這個欄位作為 phase 描述與 runtime info。
+            "walls_min": 0,
+            "walls_max": 1,
+            "wall_length": 3.0,                 # v2: 5.0→3.0，短牆降低初期阻擋
+            "episode_s": 60,
             "gamma": 0.984,
         },
 
         "reward": {
-            # 碰撞懲罰。數值越負，policy 越傾向保守避障。
-            "penalty_hit": -5.0,               # WD P1=-5
-
-            # 到 goal 的獎勵。這裡維持 WD 常見 +40 設定。
-            "reward_get_goal": 40.0,           # WD P1=40
-
-            # 每步操作成本。Phase 1 保留少量 cost，避免 agent 高頻亂抖。
-            "cost_operate": 0.03,              # WD P1=0.03
-
-            # 若要對 env reward manager 的 dense reward term 做 per-phase 調整，
-            # 可在這裡填 dict；目前 WD sparse task 先不使用，設 None。
+            "penalty_hit": -5.0,
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
         "exploration": {
-            # 線速度 head 的 entropy coeff。
-            # 實驗證實 0.01 可讓 ent 自然收斂到 ~4.0，不需人為 floor。
-            "entropy_linear": 0.01,            # WD P1=0.10 → 實測調降
-
-            # 角速度 head 的 entropy coeff。
-            # 配合 linear head 等比例調降。
-            "entropy_angular": 0.02,           # WD P1=0.375 → 實測調降
+            "entropy_linear": 0.01,
+            "entropy_angular": 0.02,
         },
 
-        # ── behavior ──
-        # WD 原版沒有 behavior_mix / speed_overrides 機制，只有全局 speed 參數。
-        # SA 新增 BehaviorScheduler，可 per-behavior 指定類型比例與速度範圍。
         "behavior": {
-            "obstacle_speed": 0.80,            # WD P1=0.80 | 全局動態障礙速度倍率，乘以 base_speed 決定最大移動速度
+            "obstacle_speed": 0.80,
             "behavior_mix": {
-                "patrol": 0.60,                # WD: 無此機制 | 沿固定路徑巡邏，提供可預測的週期性動態模式
-                "random_walk": 0.40,           # WD: 無此機制 | 隨機方向移動，低速不規則時序干擾
+                "patrol": 0.60,
+                "random_walk": 0.40,
             },
-            "speed_overrides": {               # WD: 無此機制（只有全局 speed）| per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.15, 0.35)},       # 低速穩定巡邏，作為最早期動態樣本
-                "random_walk": {"speed_range": (0.10, 0.30)},  # 更低速，避免 SA1 被動態干擾壓垮
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.15, 0.35)},
+                "random_walk": {"speed_range": (0.10, 0.30)},
             },
         },
 
-        # ── trainer ──
-        # WD 原版全 phase 使用固定超參，不做 per-phase 微調。
-        # SA 允許高難 phase 降低 LR / 收緊 grad clip，穩定後期訓練。
         "trainer": {
-            "lr": 2e-4,                        # WD 全 phase 固定 2e-4 (spot_lr) | RL policy/value head optimizer 學習率
-            "rnn_lr": 5e-4,                    # WD 全 phase 固定 5e-4 (spot_rnn_model_lr) | RNN / aux optimizer 學習率
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 (spot_vf_loss_coeff) | value loss 在 joint loss 中的權重係數
-            "max_grad_norm": 1.0,              # WD 全 phase 固定 1.0 | RL optimizer 全局梯度裁剪上限
-            "aux_grad_clip": 0.5,              # WD: 無獨立 aux clip（沿用 max_grad_norm）| aux/RNN 更新專用梯度裁剪，隔離 RNN spike
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 (k) | actor grad norm 超過此值時縮放，防止 policy 更新過猛
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 (q) | critic grad norm 超過此值時縮放，防止 value spike 壓制 actor
+            "lr": 2e-4,
+            "rnn_lr": 5e-4,
+            "vf_coeff": 0.5,
+            "max_grad_norm": 1.0,
+            "aux_grad_clip": 0.5,
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 原版用固定 iteration budget 升階（每 phase 跑完指定 batch 數即升），不用 SR/CR/TO 門檻。
-        # SA 改為 performance-based 升降階，需連續滿足條件 upgrade_pass_required 次。
         "transition": {
-            "upgrade_sr": 0.72,                # WD: 無 SR 門檻 | 成功率（到達 goal 比例）≥ 此值才允許升階
-            "upgrade_max_cr": 1.0,             # WD: 無 CR 門檻 | 碰撞率必須 ≤ 此值；1.0=不限制，SA1 先專注導航
-            "upgrade_max_to": 0.30,            # WD: 無 TO 門檻 | 超時率必須 ≤ 此值，避免 agent 拖延不前進
-            "upgrade_min_dyn_sr": 0.0,         # WD: 無此指標 | 僅在含動態障礙 env 上的 SR 下限；0.0=不限制
-            "min_stage_updates": 50,           # WD: 用固定 batch budget | 至少停留多少 rollout 更新次數，防止過早升階
-            "downgrade_sr": 0.0,               # WD: 無降階機制 | SR 低於此值觸發降階；0.0=SA1 幾乎不降
-            "downgrade_min_cr": 1.0,           # WD: 無降階機制 | CR 高於此值觸發降階；1.0=不限制
-            "downgrade_min_to": 1.0,           # WD: 無降階機制 | TO 高於此值觸發降階；1.0=不限制
+            "upgrade_sr": 0.72,
+            "upgrade_max_cr": 1.0,              # SA1 先專注導航，不限碰撞
+            "upgrade_max_to": 0.30,
+            "upgrade_min_dyn_sr": 0.0,
+            "min_stage_updates": 50,
+            "downgrade_sr": 0.0,                # SA1 幾乎不降
+            "downgrade_min_cr": 1.0,
+            "downgrade_min_to": 1.0,
         },
     },
 
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 2 / SA2
-    # 【訓練能力】抵達目的地（強化）+ 初步避障意識
-    #   論文策略：penalty 從 -5 → -8，開始讓 p(obs) 提升但仍以導航為主
-    #   goal 仍多(16)、episode 仍短(60s) → 導航成功事件仍是主要學習信號
-    #   entropy 提高(0.30) → 鼓勵探索更多路徑，為後續避障做準備
-    #
-    # ── WD P2 參考 ──
-    # spots=3, goals=16, obs=3, penalty=-8, cost=0.0,
-    # ent_linear=0.30, ent_angular=0.375, speed=0.85, 60s, batch=90K
-    # wall=0
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=1024, timesteps=30000,  updates=100,  interactions=30.7M
-    # Formal: num_envs=1024, timesteps=180000, updates=600,  interactions=184.3M
-    # Long:   num_envs=1024, timesteps=450000, updates=1500, interactions=460.8M
-    # 說明：SA2 從 SA1 best checkpoint 開新 run；建議先 600 updates 判斷，再延長。
+    # Stage 2 / SA2 — 導航強化 + 靜態辨識
+    # 【焦點】penalty ↑, 引入 "static" behavior 讓 RNN 區分靜態 vs 動態
+    # dφ from SA1: goals -2, penalty -3, +static behavior type
+    # WD P2: spots=3, goals=16, obs=3, penalty=-8, speed=0.85, 60s
+    # Budget: Formal 1024×600=184.3M
     # ──────────────────────────────────────────────────────────────────────
     {
-        "name": "SA2_goal_wall_2dyn",
+        "name": "SA2_nav_static",
 
         "scene": {
-            "goals": 8,                         # WD P2=16
-            "goal_distance": (2.0, 7.0),       # 稍微拉遠最大目標距離
-            "static_obstacles": 0,             # WD P2: 無 static
-            "dynamic_obstacles": 2,            # WD P2=3
-            "dynamic_obstacles_min": 1,        # 每 env 仍在 [1, 2] 抽樣
-            "walls_min": 0,                    # WD P2: 無牆
-            "walls_max": 1,                    # WD P2: 無牆
-            "wall_length": 5.0,                # WD P2: 無牆
-            "episode_s": 60,                   # WD P2=60
-            "gamma": 0.984,                    # 與 Phase 1 統一，WD constant gamma
+            "goals": 8,
+            "goal_distance": (2.0, 7.0),
+            "static_obstacles": 1,              # 同 SA1
+            "dynamic_obstacles": 2,
+            "dynamic_obstacles_min": 1,
+            "walls_min": 0,
+            "walls_max": 1,
+            "wall_length": 3.0,
+            "episode_s": 60,
+            "gamma": 0.984,
         },
 
         "reward": {
-            "penalty_hit": -8.0,               # WD P2=-8
-            "reward_get_goal": 40.0,           # WD P2=40
-            "cost_operate": 0.0,               # WD P2=0.0
+            "penalty_hit": -8.0,
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.0,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.01,            # WD P2=0.30 → 實測調降
-            "entropy_angular": 0.02,           # WD P2=0.375 → 實測調降
+            "entropy_linear": 0.01,
+            "entropy_angular": 0.02,
         },
 
-        # ── behavior ──
-        # WD P2 只有全局 speed=0.85，無 behavior_mix / speed_overrides。
         "behavior": {
-            "obstacle_speed": 0.80,            # WD P2=0.85 | 全局動態障礙速度倍率
+            "obstacle_speed": 0.80,
             "behavior_mix": {
-                "static": 0.40,                # WD: 無此機制 | 固定不動，讓 RNN 學習區分靜態 vs 動態回波
-                "patrol": 0.40,                # WD: 無此機制 | 沿固定路徑巡邏，可預測週期動態
-                "random_walk": 0.20,           # WD: 無此機制 | 隨機方向移動，不規則時序干擾
+                "patrol": 0.45,
+                "random_walk": 0.30,
+                "static": 0.25,                 # 新增，讓 RNN 學靜態 vs 動態
             },
-            "speed_overrides": {               # WD: 無此機制 | per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.20, 0.40)},       # 稍提速，鞏固動態感知
-                "random_walk": {"speed_range": (0.15, 0.40)},  # 上限提高，增加不確定性
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.20, 0.40)},
+                "random_walk": {"speed_range": (0.15, 0.40)},
             },
         },
 
-        # ── trainer ──
-        # WD 全 phase 固定超參，不做 per-phase 微調。
         "trainer": {
-            "lr": 2e-4,                        # WD 全 phase 固定 2e-4 | RL policy/value head 學習率
-            "rnn_lr": 5e-4,                    # WD 全 phase 固定 5e-4 | RNN / aux optimizer 學習率
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 | value loss 權重係數
-            "max_grad_norm": 1.0,              # WD 全 phase 固定 1.0 | RL 全局梯度裁剪上限
-            "aux_grad_clip": 0.5,              # WD: 無獨立 aux clip | aux/RNN 專用梯度裁剪
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 | actor grad norm cap
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 | critic grad norm cap
+            "lr": 2e-4,
+            "rnn_lr": 5e-4,
+            "vf_coeff": 0.5,
+            "max_grad_norm": 1.0,
+            "aux_grad_clip": 0.5,
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 用固定 iteration budget 升階，無 performance 門檻。
         "transition": {
-            "upgrade_sr": 0.65,                # WD: 無 SR 門檻 | 成功率 ≥ 此值才升階；比 SA1 低因任務更難
-            "upgrade_max_cr": 0.40,            # WD: 無 CR 門檻 | 碰撞率 ≤ 此值；開始限制碰撞
-            "upgrade_max_to": 0.30,            # WD: 無 TO 門檻 | 超時率 ≤ 此值
-            "upgrade_min_dyn_sr": 0.0,         # WD: 無此指標 | 動態 env SR 下限；0.0=不限制
-            "min_stage_updates": 65,           # WD: 用固定 batch budget | 最少停留更新次數
-            "downgrade_sr": 0.15,              # WD: 無降階機制 | SR < 此值觸發降階
-            "downgrade_min_cr": 0.70,          # WD: 無降階機制 | CR > 此值觸發降階
-            "downgrade_min_to": 0.65,          # WD: 無降階機制 | TO > 此值觸發降階
+            "upgrade_sr": 0.65,
+            "upgrade_max_cr": 0.40,
+            "upgrade_max_to": 0.30,
+            "upgrade_min_dyn_sr": 0.0,
+            "min_stage_updates": 65,
+            "downgrade_sr": 0.15,
+            "downgrade_min_cr": 0.70,
+            "downgrade_min_to": 0.65,
         },
     },
 
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 3 / SA3
-    # 【訓練能力】導航精確度 + 避障過渡
-    #   論文策略：goal 驟降到 1 + episode 延長到 90s → p(goal) 降低、p(obs) 上升
-    #   penalty -12 大幅提高避障代價；episode 延長讓 agent 有更多時間遇到障礙
-    #   論文指出：延長 episode = 提升避障能力的需求機率（agent 可等安全時機再走）
-    #   entropy 再提高(0.50) → 高探索維持，避免過早收斂到保守策略
-    #
-    # ── WD P3 參考 ──
-    # spots=3, goals=1, obs=2, penalty=-12, cost=0.0,
-    # ent_linear=0.50, ent_angular=0.375, speed=0.85, 90s, batch=105K
-    # wall=0
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=1024, timesteps=30000,  updates=100,  interactions=30.7M
-    # Formal: num_envs=1024, timesteps=270000, updates=900,  interactions=276.5M
-    # Long:   num_envs=1024, timesteps=450000, updates=1500, interactions=460.8M
-    # 說明：SA3 開始拉高避障/timing 需求；update 不足會看不到策略轉變。
+    # Stage 3 / SA3 — 障礙密度 ↑ + 牆壁 + 首個 crossing
+    # 【焦點】更多靜態/動態 + 引入牆壁 + horizontal_crossing
+    # dφ from SA2: static +1, dynamic +1, walls 0-1→1-2, penalty -2,
+    #              goals -2, +horizontal_crossing
+    # WD P3: spots=3, goals=1, obs=2, penalty=-12, speed=0.85, 90s
+    # Budget: Formal 1024×900=276.5M
     # ──────────────────────────────────────────────────────────────────────
     {
-        "name": "SA3_dyn_intro",
+        "name": "SA3_walls_crossing",
 
         "scene": {
-            "goals": 3,                         # WD P3=1
-            "goal_distance": (2.0, 8.0),       # 導航距離再拉遠
-            "static_obstacles": 3,             # WD P3: 無 static
-            "dynamic_obstacles": 5,            # WD P3=2
-            "dynamic_obstacles_min": 2,        # 每 env 至少 2 個動態障礙
-            "walls_min": 1,                    # WD P3: 無牆
-            "walls_max": 2,                    # WD P3: 無牆
-            "wall_length": 4.5,                # WD P3: 無牆
-            "episode_s": 90,                   # WD P3=90
-            "gamma": 0.984,                    # 與 P1/P2 統一，WD constant gamma
+            "goals": 6,                         # v2: 3→6，保持 reward signal
+            "goal_distance": (2.0, 8.0),
+            "static_obstacles": 2,              # ↑ from 1
+            "dynamic_obstacles": 3,             # ↑ from 2
+            "dynamic_obstacles_min": 2,         # ↑ from 1
+            "walls_min": 1,                     # ↑ from 0
+            "walls_max": 2,                     # ↑ from 1
+            "wall_length": 3.5,                 # ↑ from 3.0
+            "episode_s": 60,                    # v2: 90→60，保持短 episode 維持 signal
+            "gamma": 0.990,
         },
 
         "reward": {
-            "penalty_hit": -12.0,               # WD P3=-12
-            "reward_get_goal": 40.0,           # WD P3=40
-            "cost_operate": 0.0,               # WD P3=0.0
+            "penalty_hit": -10.0,               # v2: -8→-10，漸進增加
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.0,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.01,            # WD P3=0.50
-            "entropy_angular": 0.02,          # WD P3=0.375
+            "entropy_linear": 0.01,
+            "entropy_angular": 0.02,
         },
 
-        # ── behavior ──
-        # WD P3 只有全局 speed=0.85，無 behavior_mix / speed_overrides。
         "behavior": {
-            "obstacle_speed": 0.85,            # WD P3=0.85 | 全局動態障礙速度倍率
+            "obstacle_speed": 0.85,             # ↑ from 0.80
             "behavior_mix": {
-                "static": 0.20,                # WD: 無此機制 | 固定不動，保留靜態幾何辨識
-                "patrol": 0.35,                # WD: 無此機制 | 沿路徑巡邏，可預測動態仍是主體
-                "random_walk": 0.20,           # WD: 無此機制 | 隨機方向移動，不規則干擾
-                "horizontal_crossing": 0.15,   # WD: 無此機制 | 橫向穿越 robot 路徑，訓練 timing 判斷
-                "path_crossing": 0.10,         # WD: 無此機制 | 沿 robot→goal 方向交叉穿越，訓練近距離反應
+                "patrol": 0.30,
+                "random_walk": 0.25,
+                "static": 0.20,
+                "horizontal_crossing": 0.25,    # 新增：首個 crossing behavior
             },
-            "speed_overrides": {               # WD: 無此機制 | per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.25, 0.55)},              # 中速巡邏
-                "random_walk": {"speed_range": (0.20, 0.55)},         # 中速隨機
-                "horizontal_crossing": {"speed_range": (0.35, 0.65)}, # 較快橫穿，測試反應
-                "path_crossing": {"speed_range": (0.25, 0.60)},       # 路徑交叉速度
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.25, 0.50)},
+                "random_walk": {"speed_range": (0.20, 0.45)},
+                "horizontal_crossing": {"speed_range": (0.25, 0.50)},
             },
         },
 
-        # ── trainer ──
-        # WD 全 phase 固定超參，不做 per-phase 微調。
         "trainer": {
-            "lr": 2e-4,                        # WD 全 phase 固定 2e-4 | RL policy/value head 學習率
-            "rnn_lr": 5e-4,                    # WD 全 phase 固定 5e-4 | RNN / aux optimizer 學習率
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 | value loss 權重係數
-            "max_grad_norm": 1.0,              # WD 全 phase 固定 1.0 | RL 全局梯度裁剪上限
-            "aux_grad_clip": 0.5,              # WD: 無獨立 aux clip | aux/RNN 專用梯度裁剪
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 | actor grad norm cap
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 | critic grad norm cap
+            "lr": 2e-4,
+            "rnn_lr": 5e-4,
+            "vf_coeff": 0.5,
+            "max_grad_norm": 1.0,
+            "aux_grad_clip": 0.5,
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 用固定 iteration budget 升階，無 performance 門檻。
         "transition": {
-            "upgrade_sr": 0.65,                # WD: 無 SR 門檻 | 成功率 ≥ 此值才升階
-            "upgrade_max_cr": 0.40,            # WD: 無 CR 門檻 | 碰撞率 ≤ 此值
-            "upgrade_max_to": 0.30,            # WD: 無 TO 門檻 | 超時率 ≤ 此值
-            "upgrade_min_dyn_sr": 0.35,        # WD: 無此指標 | 動態 env SR 下限；開始要求避障能力
-            "min_stage_updates": 80,           # WD: 用固定 batch budget | 最少停留更新次數
-            "downgrade_sr": 0.15,              # WD: 無降階機制 | SR < 此值觸發降階
-            "downgrade_min_cr": 0.70,          # WD: 無降階機制 | CR > 此值觸發降階
-            "downgrade_min_to": 0.65,          # WD: 無降階機制 | TO > 此值觸發降階
+            "upgrade_sr": 0.60,
+            "upgrade_max_cr": 0.40,
+            "upgrade_max_to": 0.30,
+            "upgrade_min_dyn_sr": 0.20,
+            "min_stage_updates": 80,
+            "downgrade_sr": 0.15,
+            "downgrade_min_cr": 0.70,
+            "downgrade_min_to": 0.65,
         },
     },
 
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 4 / SA4
-    # 【訓練能力】空間規劃（牆壁引入）
-    #   論文策略：引入牆壁 = 新環境參數，改變「空間規劃」能力的需求機率
-    #   penalty 維持 -12（不再靠 reward 加壓，而是靠環境結構改變能力需求）
-    #   牆壁迫使 agent 學會繞路、預判路徑，而非直線衝向 goal
-    #   episode 縮回 60s → 在有牆環境下仍要求效率
-    #
-    # ── WD P4 參考 ──
-    # spots=3, goals=1, obs=2, penalty=-12, cost=0.0,
-    # ent_linear=0.50, ent_angular=0.375, speed=0.85, 60s, batch=105K
-    # wall=1/4.5m
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=1024, timesteps=30000,  updates=100,  interactions=30.7M
-    # Formal: num_envs=1024, timesteps=270000, updates=900,  interactions=276.5M
-    # Long:   num_envs=1024, timesteps=450000, updates=1500, interactions=460.8M
-    # 說明：SA4 加牆與繞路；先保持 1024 env，避免 batch 過大讓路徑訊號被平均。
+    # Stage 4 / SA4 — 空間規劃 + path crossing
+    # 【焦點】更多動態 + penalty ↑ + path_crossing
+    # dφ from SA3: dynamic +1, goals -2, penalty -2, +path_crossing
+    # WD P4: spots=3, goals=1, obs=2, penalty=-12, speed=0.85, 60s, wall=1/4.5m
+    # Budget: Formal 1024×900=276.5M
     # ──────────────────────────────────────────────────────────────────────
     {
-        "name": "SA4_nav_avoid",
+        "name": "SA4_spatial_plan",
 
         "scene": {
-            "goals": 4,                         # WD P4=1
-            "goal_distance": (2.0, 9.0),       # 更長距離導航
-            "static_obstacles": 0,             # WD P4: 無 static
-            "dynamic_obstacles": 4,            # WD P4=2
-            "dynamic_obstacles_min": 3,        # 每 env 至少 3 個動態
-            "walls_min": 1,                    # WD P4=1
-            "walls_max": 2,                    # WD P4=1
-            "wall_length": 4.0,                # WD P4=4.5m
-            "episode_s": 60,                   # WD P4=60
+            "goals": 4,
+            "goal_distance": (2.0, 9.0),
+            "static_obstacles": 2,              # 同 SA3
+            "dynamic_obstacles": 4,             # ↑ from 3
+            "dynamic_obstacles_min": 3,         # ↑ from 2
+            "walls_min": 1,
+            "walls_max": 2,
+            "wall_length": 4.0,                 # ↑ from 3.5
+            "episode_s": 60,
             "gamma": 0.994,
         },
 
         "reward": {
-            "penalty_hit": -12.0,              # WD P4=-12（一致）
-            "reward_get_goal": 40.0,           # WD P4=40
-            "cost_operate": 0.0,               # WD P4=0.0
+            "penalty_hit": -12.0,               # ↑ from -10
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.0,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.30,            # WD P4=0.50
-            "entropy_angular": 0.375,          # WD P4=0.375
+            "entropy_linear": 0.01,
+            "entropy_angular": 0.02,
         },
 
-        # ── behavior ──
-        # WD P4 只有全局 speed=0.85，無 behavior_mix / speed_overrides。
         "behavior": {
-            "obstacle_speed": 0.85,            # WD P4=0.85 | 全局動態障礙速度倍率
+            "obstacle_speed": 0.85,
             "behavior_mix": {
-                "patrol": 0.25,                # WD: 無此機制 | 沿路徑巡邏，可預測動態
-                "random_walk": 0.15,           # WD: 無此機制 | 隨機方向移動，不規則干擾
-                "horizontal_crossing": 0.20,   # WD: 無此機制 | 橫向穿越 robot 路徑，訓練 timing
-                "path_crossing": 0.15,         # WD: 無此機制 | 沿 robot→goal 交叉穿越，近距離反應
-                "near_miss": 0.15,             # WD: 無此機制 | 高速擦身而過，訓練精確空間判斷
-                "corridor_crossing": 0.10,     # WD: 無此機制 | 狹窄通道中穿越，受限空間避障
+                "patrol": 0.25,
+                "random_walk": 0.20,
+                "static": 0.10,
+                "horizontal_crossing": 0.20,
+                "path_crossing": 0.25,          # 新增：robot→goal 路徑交叉
             },
-            "speed_overrides": {               # WD: 無此機制 | per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.30, 0.65)},              # 中高速巡邏
-                "random_walk": {"speed_range": (0.25, 0.60)},         # 中速隨機
-                "horizontal_crossing": {"speed_range": (0.40, 0.80)}, # 較快橫穿
-                "path_crossing": {"speed_range": (0.35, 0.75)},       # 中高速路徑交叉
-                "near_miss": {"speed_range": (0.35, 0.75)},           # 中高速擦身
-                "corridor_crossing": {"speed_range": (0.25, 0.55)},   # 低速窄道穿越
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.25, 0.55)},
+                "random_walk": {"speed_range": (0.20, 0.50)},
+                "horizontal_crossing": {"speed_range": (0.30, 0.60)},
+                "path_crossing": {"speed_range": (0.25, 0.55)},
             },
         },
 
-        # ── trainer ──
-        # WD 全 phase 固定超參。SA4 開始微降 rnn_lr 以穩定 representation。
         "trainer": {
-            "lr": 2e-4,                        # WD 全 phase 固定 2e-4 | RL policy/value head 學習率
-            "rnn_lr": 4e-4,                    # WD 全 phase 固定 5e-4 | RNN 學習率；SA4 降至 4e-4 減少 representation drift
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 | value loss 權重係數
-            "max_grad_norm": 1.0,              # WD 全 phase 固定 1.0 | RL 全局梯度裁剪上限
-            "aux_grad_clip": 0.5,              # WD: 無獨立 aux clip | aux/RNN 專用梯度裁剪
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 | actor grad norm cap
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 | critic grad norm cap
+            "lr": 2e-4,
+            "rnn_lr": 4e-4,                     # ↓ from 5e-4
+            "vf_coeff": 0.5,
+            "max_grad_norm": 1.0,
+            "aux_grad_clip": 0.5,
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 用固定 iteration budget 升階，無 performance 門檻。
         "transition": {
-            "upgrade_sr": 0.65,                # WD: 無 SR 門檻 | 成功率 ≥ 此值才升階
-            "upgrade_max_cr": 0.40,            # WD: 無 CR 門檻 | 碰撞率 ≤ 此值
-            "upgrade_max_to": 0.30,            # WD: 無 TO 門檻 | 超時率 ≤ 此值
-            "upgrade_min_dyn_sr": 0.35,        # WD: 無此指標 | 動態 env SR 下限
-            "min_stage_updates": 95,           # WD: 用固定 batch budget | 最少停留更新次數
-            "downgrade_sr": 0.15,              # WD: 無降階機制 | SR < 此值觸發降階
-            "downgrade_min_cr": 0.70,          # WD: 無降階機制 | CR > 此值觸發降階
-            "downgrade_min_to": 0.65,          # WD: 無降階機制 | TO > 此值觸發降階
+            "upgrade_sr": 0.60,
+            "upgrade_max_cr": 0.35,
+            "upgrade_max_to": 0.30,
+            "upgrade_min_dyn_sr": 0.30,
+            "min_stage_updates": 95,
+            "downgrade_sr": 0.15,
+            "downgrade_min_cr": 0.70,
+            "downgrade_min_to": 0.65,
         },
     },
 
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 5 / SA5
-    # 【訓練能力】耐久導航 + 空間規劃強化
-    #   論文策略：episode 延長到 100s + 牆更長(5.0m) → 結合長時間與複雜結構
-    #   penalty 維持 -12 不變，但更長 episode = 更多碰撞機會 = p(obs) 自然上升
-    #   spots 降到 2 → 被 virtual spots 干擾的機率下降，focus 在真實任務
-    #
-    # ── WD P5 參考 ──
-    # spots=2, goals=1, obs=2, penalty=-12, cost=0.0,
-    # ent_linear=0.50, ent_angular=0.375, speed=0.85, 100s, batch=168K
-    # wall=1/5.0m
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=1024, timesteps=30000,  updates=100,  interactions=30.7M
-    # Formal: num_envs=1024, timesteps=270000, updates=900,  interactions=276.5M
-    # Long:   num_envs=1024, timesteps=450000, updates=1500, interactions=460.8M
-    # 說明：SA5 是中高難度整合；若 1024 env VRAM/throughput 正常，可另做 1536 env 對照。
+    # Stage 5 / SA5 — 耐久導航 + corridor
+    # 【焦點】首次延長 episode + 更多靜態/牆 + corridor_crossing
+    # 【關鍵】goals 保持 4 不減，維持 reward signal (4/75=0.053)
+    # dφ from SA4: static +1, dynamic +1, walls +1, episode +15s,
+    #              penalty -3, +corridor_crossing
+    # WD P5: spots=2, goals=1, obs=2, penalty=-12, speed=0.85, 100s, wall=1/5.0m
+    # Budget: Formal 1024×900=276.5M | Long 1024×1500=460.8M
     # ──────────────────────────────────────────────────────────────────────
     {
-        "name": "SA5_medium",
+        "name": "SA5_endurance",
 
         "scene": {
-            "goals": 2,                         # WD P5=1
-            "goal_distance": (2.0, 10.0),      # 長距離導航
-            "static_obstacles": 0,             # WD P5: 無 static
-            "dynamic_obstacles": 6,            # WD P5=2（SA5 加更多）
-            "dynamic_obstacles_min": 4,        # 每 env 至少 4 個動態
-            "walls_min": 1,                    # WD P5=1
-            "walls_max": 2,                    # WD P5=1
-            "wall_length": 3.5,                # WD P5=5.0m
-            "episode_s": 90,                   # WD P5=100
+            "goals": 4,                         # 同 SA4！維持 reward signal
+            "goal_distance": (2.0, 9.0),
+            "static_obstacles": 3,              # ↑ from 2
+            "dynamic_obstacles": 5,             # ↑ from 4
+            "dynamic_obstacles_min": 3,
+            "walls_min": 2,                     # ↑ from 1
+            "walls_max": 3,                     # ↑ from 2
+            "wall_length": 4.0,
+            "episode_s": 75,                    # ↑ from 60（漸進，非 60→90 跳躍）
             "gamma": 0.995,
         },
 
         "reward": {
-            "penalty_hit": -15.0,              # WD P5=-12
-            "reward_get_goal": 40.0,           # WD P5=40
-            "cost_operate": 0.0,               # WD P5=0.0
+            "penalty_hit": -15.0,               # ↑ from -12
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.0,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.30,            # WD P5=0.50
-            "entropy_angular": 0.375,          # WD P5=0.375
+            "entropy_linear": 0.008,            # ↓ from 0.01
+            "entropy_angular": 0.015,
         },
 
-        # ── behavior ──
-        # WD P5 只有全局 speed=0.85，無 behavior_mix / speed_overrides。
-        # SA5 引入完整 7-behavior 分佈，含 occlusion 模擬遮蔽後突現。
         "behavior": {
-            "obstacle_speed": 0.85,            # WD P5=0.85 | 全局動態障礙速度倍率
+            "obstacle_speed": 0.85,
             "behavior_mix": {
-                "patrol": 0.15,                # WD: 無此機制 | 沿路徑巡邏，可預測動態
-                "random_walk": 0.15,           # WD: 無此機制 | 隨機方向移動，不規則干擾
-                "horizontal_crossing": 0.15,   # WD: 無此機制 | 橫向穿越 robot 路徑，訓練 timing
-                "path_crossing": 0.15,         # WD: 無此機制 | 沿 robot→goal 交叉穿越，近距離反應
-                "near_miss": 0.15,             # WD: 無此機制 | 高速擦身而過，訓練精確空間判斷
-                "corridor_crossing": 0.10,     # WD: 無此機制 | 狹窄通道中穿越，受限空間避障
-                "occlusion": 0.15,             # WD: 無此機制 | 從牆/障礙物後方突然出現，訓練遮蔽反應
+                "patrol": 0.20,
+                "random_walk": 0.15,
+                "static": 0.10,
+                "horizontal_crossing": 0.15,
+                "path_crossing": 0.15,
+                "corridor_crossing": 0.25,      # 新增：狹窄通道穿越
             },
-            "speed_overrides": {               # WD: 無此機制 | per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.35, 0.75)},              # 中高速巡邏
-                "random_walk": {"speed_range": (0.30, 0.75)},         # 中高速隨機
-                "horizontal_crossing": {"speed_range": (0.45, 0.85)}, # 快速橫穿
-                "path_crossing": {"speed_range": (0.40, 0.80)},       # 快速路徑交叉
-                "near_miss": {"speed_range": (0.40, 0.80)},           # 快速擦身
-                "corridor_crossing": {"speed_range": (0.30, 0.65)},   # 中速窄道穿越
-                "occlusion": {"speed_range": (0.25, 0.60)},           # 中低速突現（給 agent 些微反應時間）
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.30, 0.65)},
+                "random_walk": {"speed_range": (0.25, 0.60)},
+                "horizontal_crossing": {"speed_range": (0.35, 0.70)},
+                "path_crossing": {"speed_range": (0.30, 0.65)},
+                "corridor_crossing": {"speed_range": (0.20, 0.45)},
             },
         },
 
-        # ── trainer ──
-        # WD 全 phase 固定超參。SA5 開始降低 LR + 收緊 grad clip，穩定高難 phase 訓練。
         "trainer": {
-            "lr": 1.5e-4,                      # WD 全 phase 固定 2e-4 | RL 學習率；SA5 降至 1.5e-4 減少 policy 更新過猛
-            "rnn_lr": 3e-4,                    # WD 全 phase 固定 5e-4 | RNN 學習率；SA5 降至 3e-4 降低 feature drift
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 | value loss 權重係數
-            "max_grad_norm": 0.8,              # WD 全 phase 固定 1.0 | RL 梯度裁剪；SA5 收緊至 0.8
-            "aux_grad_clip": 0.4,              # WD: 無獨立 aux clip | aux/RNN 梯度裁剪；SA5 收緊至 0.4
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 | actor grad norm cap
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 | critic grad norm cap
+            "lr": 1.5e-4,                       # ↓ from 2e-4
+            "rnn_lr": 3e-4,                     # ↓ from 4e-4
+            "vf_coeff": 0.5,
+            "max_grad_norm": 0.8,               # ↓ from 1.0
+            "aux_grad_clip": 0.4,               # ↓ from 0.5
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 用固定 iteration budget 升階，無 performance 門檻。
         "transition": {
-            "upgrade_sr": 0.60,                # WD: 無 SR 門檻 | 成功率 ≥ 此值才升階
-            "upgrade_max_cr": 0.40,            # WD: 無 CR 門檻 | 碰撞率 ≤ 此值
-            "upgrade_max_to": 0.30,            # WD: 無 TO 門檻 | 超時率 ≤ 此值
-            "upgrade_min_dyn_sr": 0.30,        # WD: 無此指標 | 動態 env SR 下限
-            "min_stage_updates": 110,          # WD: 用固定 batch budget | 最少停留更新次數
-            "downgrade_sr": 0.15,              # WD: 無降階機制 | SR < 此值觸發降階
-            "downgrade_min_cr": 0.70,          # WD: 無降階機制 | CR > 此值觸發降階
-            "downgrade_min_to": 0.65,          # WD: 無降階機制 | TO > 此值觸發降階
+            "upgrade_sr": 0.55,
+            "upgrade_max_cr": 0.35,
+            "upgrade_max_to": 0.30,
+            "upgrade_min_dyn_sr": 0.35,
+            "min_stage_updates": 110,
+            "downgrade_sr": 0.15,
+            "downgrade_min_cr": 0.70,
+            "downgrade_min_to": 0.65,
         },
     },
 
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 6 / SA6
-    # 【訓練能力】避障（核心訓練階段）
-    #   論文策略：obs 從 2 暴增到 10 + episode 大幅延長到 210s
-    #   → p(obs) 劇增，避障成為主要學習信號
-    #   論文指出「延長 episode 使得避障的重要性提高」：agent 可等待安全時機
-    #   penalty -15 適度提高，但主要靠環境參數（obs 數量 × episode 長度）驅動
-    #   牆壁暫時移除 → 讓 agent 專注學「動態避障」而非「空間規劃」
-    #
-    # ── WD P6 參考 ──
-    # spots=3, goals=1, obs=10, penalty=-15, cost=0.0,
-    # ent_linear=0.50, ent_angular=0.375, speed=0.85, 210s, batch=105K
-    # wall=0
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=1024, timesteps=30000,  updates=100,  interactions=30.7M
-    # Formal: num_envs=1024, timesteps=450000, updates=1500, interactions=460.8M
-    # Stretch:num_envs=1536, timesteps=450000, updates=1500, interactions=691.2M
-    # 說明：SA6 是核心 dense avoidance；可提高 interaction，但仍需保留足夠 update 次數。
+    # Stage 6 / SA6 — dense 避障 + near_miss
+    # 【焦點】更多動態 + 延長 episode + penalty ↑ + near_miss
+    # dφ from SA5: dynamic +1, goals -1, episode +15s, penalty -10,
+    #              +near_miss, obs_speed ↑
+    # WD P6: spots=3, goals=1, obs=10, penalty=-15, speed=0.85, 210s
+    # Budget: Formal 1024×1500=460.8M
     # ──────────────────────────────────────────────────────────────────────
     {
         "name": "SA6_dense_avoid",
 
         "scene": {
-            "goals": 1,                         # WD P6=1
-            "goal_distance": (3.0, 10.0),      # 長距離，靠導航能力存量
-            "static_obstacles": 0,             # WD P6: 無 static
-            "dynamic_obstacles": 10,           # WD P6=10（大量動態）
-            "dynamic_obstacles_min": 8,        # 每 env 至少 8 個
-            "walls_min": 0,                    # WD P6: 無牆（專注動態避障）
-            "walls_max": 0,                    # WD P6: 無牆
-            "wall_length": 0.0,
-            "episode_s": 210,                  # WD P6=210（大幅延長）
+            "goals": 3,
+            "goal_distance": (3.0, 10.0),
+            "static_obstacles": 3,
+            "dynamic_obstacles": 6,             # ↑ from 5
+            "dynamic_obstacles_min": 5,         # ↑ from 3
+            "walls_min": 2,
+            "walls_max": 3,
+            "wall_length": 4.5,                 # ↑ from 4.0
+            "episode_s": 90,                    # ↑ from 75
             "gamma": 0.996,
         },
 
         "reward": {
-            "penalty_hit": -15.0,              # WD P6=-15
-            "reward_get_goal": 40.0,           # WD P6=40
-            "cost_operate": 0.0,               # WD P6=0.0
+            "penalty_hit": -25.0,               # ↑ from -15（漸進，非 -15→-85 跳躍）
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.0,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.50,            # WD P6=0.50
-            "entropy_angular": 0.375,          # WD P6=0.375
+            "entropy_linear": 0.008,
+            "entropy_angular": 0.015,
         },
 
-        # ── behavior ──
-        # WD P6 只有全局 speed=0.85，無 behavior_mix / speed_overrides。
-        # SA6 沿用 SA5 的 7-behavior 分佈，配合 10 個動態障礙的 dense 場景。
         "behavior": {
-            "obstacle_speed": 0.85,            # WD P6=0.85 | 全局動態障礙速度倍率
+            "obstacle_speed": 0.90,             # ↑ from 0.85
             "behavior_mix": {
-                "patrol": 0.15,                # WD: 無此機制 | 沿路徑巡邏，可預測動態
-                "random_walk": 0.15,           # WD: 無此機制 | 隨機方向移動，不規則干擾
-                "horizontal_crossing": 0.15,   # WD: 無此機制 | 橫向穿越 robot 路徑，訓練 timing
-                "path_crossing": 0.15,         # WD: 無此機制 | 沿 robot→goal 交叉穿越，近距離反應
-                "near_miss": 0.15,             # WD: 無此機制 | 高速擦身而過，精確空間判斷
-                "corridor_crossing": 0.10,     # WD: 無此機制 | 狹窄通道穿越，受限空間避障
-                "occlusion": 0.15,             # WD: 無此機制 | 遮蔽後突現，訓練對隱藏障礙的反應
+                "patrol": 0.15,
+                "random_walk": 0.15,
+                "static": 0.05,
+                "horizontal_crossing": 0.15,
+                "path_crossing": 0.15,
+                "corridor_crossing": 0.15,
+                "near_miss": 0.20,              # 新增：高速擦身
             },
-            "speed_overrides": {               # WD: 無此機制 | per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.35, 0.75)},              # 中高速巡邏
-                "random_walk": {"speed_range": (0.30, 0.75)},         # 中高速隨機
-                "horizontal_crossing": {"speed_range": (0.45, 0.85)}, # 快速橫穿
-                "path_crossing": {"speed_range": (0.40, 0.80)},       # 快速路徑交叉
-                "near_miss": {"speed_range": (0.40, 0.80)},           # 快速擦身
-                "corridor_crossing": {"speed_range": (0.30, 0.65)},   # 中速窄道穿越
-                "occlusion": {"speed_range": (0.25, 0.60)},           # 中低速突現
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.35, 0.75)},
+                "random_walk": {"speed_range": (0.30, 0.70)},
+                "horizontal_crossing": {"speed_range": (0.40, 0.80)},
+                "path_crossing": {"speed_range": (0.35, 0.75)},
+                "corridor_crossing": {"speed_range": (0.25, 0.55)},
+                "near_miss": {"speed_range": (0.30, 0.65)},
             },
         },
 
-        # ── trainer ──
-        # WD 全 phase 固定超參。SA6 沿用 SA5 的降低 LR + 收緊 grad clip。
         "trainer": {
-            "lr": 1.5e-4,                      # WD 全 phase 固定 2e-4 | RL 學習率；SA6 降至 1.5e-4
-            "rnn_lr": 3e-4,                    # WD 全 phase 固定 5e-4 | RNN 學習率；SA6 降至 3e-4
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 | value loss 權重係數
-            "max_grad_norm": 0.8,              # WD 全 phase 固定 1.0 | RL 梯度裁剪；收緊至 0.8
-            "aux_grad_clip": 0.4,              # WD: 無獨立 aux clip | aux/RNN 梯度裁剪；收緊至 0.4
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 | actor grad norm cap
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 | critic grad norm cap
+            "lr": 1.5e-4,
+            "rnn_lr": 3e-4,
+            "vf_coeff": 0.5,
+            "max_grad_norm": 0.8,
+            "aux_grad_clip": 0.4,
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 用固定 iteration budget 升階，無 performance 門檻。
         "transition": {
-            "upgrade_sr": 0.55,                # WD: 無 SR 門檻 | 成功率 ≥ 此值才升階；dense 場景放寬至 0.55
-            "upgrade_max_cr": 0.35,            # WD: 無 CR 門檻 | 碰撞率 ≤ 此值；收緊至 0.35
-            "upgrade_max_to": 0.35,            # WD: 無 TO 門檻 | 超時率 ≤ 此值；210s episode 放寬至 0.35
-            "upgrade_min_dyn_sr": 0.40,        # WD: 無此指標 | 動態 env SR 下限；SA6 核心是動態避障，提高至 0.40
-            "min_stage_updates": 120,          # WD: 用固定 batch budget | 最少停留更新次數
-            "downgrade_sr": 0.10,              # WD: 無降階機制 | SR < 此值觸發降階
-            "downgrade_min_cr": 0.75,          # WD: 無降階機制 | CR > 此值觸發降階
-            "downgrade_min_to": 0.70,          # WD: 無降階機制 | TO > 此值觸發降階
+            "upgrade_sr": 0.50,
+            "upgrade_max_cr": 0.30,
+            "upgrade_max_to": 0.35,
+            "upgrade_min_dyn_sr": 0.40,
+            "min_stage_updates": 120,
+            "downgrade_sr": 0.10,
+            "downgrade_min_cr": 0.75,
+            "downgrade_min_to": 0.70,
         },
     },
 
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 7 / SA7
-    # 【訓練能力】高壓綜合（避障 + 空間規劃 + 高速動態）
-    #   論文策略：penalty 暴增到 -85 + obs=10 + wall=2 + speed 提升到 1.10
-    #   → 這是「最終 reward 評估」的前置階段
-    #   所有環境參數同時加壓：obs 多、速度快、有牆、penalty 高
-    #   論文：「只有在逐步提升引導的情境下，才適合引入最終的 Reward 評估」
-    #   此 phase 就是正式引入高 penalty 的階段
-    #
-    # ── WD P7 參考 ──
-    # spots=2, goals=1, obs=10, penalty=-85, cost=0.0,
-    # ent_linear=0.50, ent_angular=0.375, speed=1.10, 210s, batch=168K
-    # wall=2/3.5m
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=512,  timesteps=30000,  updates=100,  interactions=15.4M
-    # Formal: num_envs=1024, timesteps=450000, updates=1500, interactions=460.8M
-    # Safe:   num_envs=512,  timesteps=450000, updates=1500, interactions=230.4M
-    # 說明：SA7 高 penalty/高速/牆壁同時加壓；若 CR/RNN 不穩，先用 512 env 降低事件密度。
+    # Stage 7 / SA7 — 高壓綜合 + occlusion
+    # 【焦點】更多動態 + 延長 episode + 高 penalty + occlusion + 高速
+    # dφ from SA6: dynamic +2, goals -1, episode +30s, penalty -25,
+    #              +occlusion, obs_speed ↑
+    # WD P7: spots=2, goals=1, obs=10, penalty=-85, speed=1.10, 210s, wall=2/3.5m
+    # Budget: Formal 1024×1500=460.8M
     # ──────────────────────────────────────────────────────────────────────
     {
         "name": "SA7_high_pressure",
 
         "scene": {
-            "goals": 1,                         # WD P7=1
-            "goal_distance": (3.0, 10.0),      # 長距離
-            "static_obstacles": 0,             # WD P7: 無 static
-            "dynamic_obstacles": 10,           # WD P7=10
-            "dynamic_obstacles_min": 8,        # 每 env 至少 8 個
-            "walls_min": 2,                    # WD P7=2
-            "walls_max": 2,                    # WD P7=2
-            "wall_length": 3.5,                # WD P7=3.5m
-            "episode_s": 210,                  # WD P7=210
+            "goals": 2,
+            "goal_distance": (3.0, 10.0),
+            "static_obstacles": 3,
+            "dynamic_obstacles": 8,             # ↑ from 6
+            "dynamic_obstacles_min": 6,         # ↑ from 5
+            "walls_min": 2,
+            "walls_max": 3,
+            "wall_length": 4.5,
+            "episode_s": 120,                   # ↑ from 90（漸進，非 90→210 跳躍）
             "gamma": 0.997,
         },
 
         "reward": {
-            "penalty_hit": -85.0,              # WD P7=-85（高壓）
-            "reward_get_goal": 40.0,           # WD P7=40
-            "cost_operate": 0.0,               # WD P7=0.0
+            "penalty_hit": -50.0,               # ↑ from -25（漸進，非 -15→-85 跳躍）
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.0,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.50,            # WD P7=0.50
-            "entropy_angular": 0.375,          # WD P7=0.375
+            "entropy_linear": 0.005,
+            "entropy_angular": 0.01,
         },
 
-        # ── behavior ──
-        # WD P7 speed 從 0.85 跳增到 1.10，為高壓綜合測試。無 behavior_mix。
-        # SA7 near_miss 比例提至 0.20，強化高速擦身能力。
         "behavior": {
-            "obstacle_speed": 1.10,            # WD P7=1.10 | 全局動態障礙速度倍率；高速壓力測試
+            "obstacle_speed": 1.00,             # ↑ from 0.90
             "behavior_mix": {
-                "patrol": 0.10,                # WD: 無此機制 | 沿路徑巡邏；高壓 phase 降低可預測比例
-                "random_walk": 0.10,           # WD: 無此機制 | 隨機方向移動；降低低威脅比例
-                "horizontal_crossing": 0.15,   # WD: 無此機制 | 橫向穿越，訓練高速 timing
-                "path_crossing": 0.15,         # WD: 無此機制 | 路徑交叉穿越，近距離反應
-                "near_miss": 0.20,             # WD: 無此機制 | 高速擦身；比例最高，核心高壓訓練
-                "corridor_crossing": 0.15,     # WD: 無此機制 | 狹窄通道穿越，受限空間+牆壁
-                "occlusion": 0.15,             # WD: 無此機制 | 遮蔽後突現
+                "patrol": 0.10,
+                "random_walk": 0.10,
+                "static": 0.05,
+                "horizontal_crossing": 0.15,
+                "path_crossing": 0.10,
+                "corridor_crossing": 0.10,
+                "near_miss": 0.20,
+                "occlusion": 0.20,              # 新增：遮蔽後突現
             },
-            "speed_overrides": {               # WD: 無此機制 | per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.45, 0.90)},              # 高速巡邏
-                "random_walk": {"speed_range": (0.40, 0.85)},         # 高速隨機
-                "horizontal_crossing": {"speed_range": (0.55, 1.00)}, # 接近 v_max 橫穿
-                "path_crossing": {"speed_range": (0.50, 0.95)},       # 接近 v_max 路徑交叉
-                "near_miss": {"speed_range": (0.50, 0.95)},           # 高速擦身
-                "corridor_crossing": {"speed_range": (0.40, 0.75)},   # 中高速窄道穿越
-                "occlusion": {"speed_range": (0.35, 0.75)},           # 中速突現
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.45, 0.90)},
+                "random_walk": {"speed_range": (0.40, 0.85)},
+                "horizontal_crossing": {"speed_range": (0.50, 0.95)},
+                "path_crossing": {"speed_range": (0.45, 0.90)},
+                "corridor_crossing": {"speed_range": (0.35, 0.70)},
+                "near_miss": {"speed_range": (0.40, 0.80)},
+                "occlusion": {"speed_range": (0.25, 0.60)},
             },
         },
 
-        # ── trainer ──
-        # WD 全 phase 固定超參。SA7 進一步降低 LR + 收緊 grad clip，適應高 penalty 環境。
         "trainer": {
-            "lr": 1e-4,                        # WD 全 phase 固定 2e-4 | RL 學習率；SA7 降至 1e-4 穩定高壓訓練
-            "rnn_lr": 2e-4,                    # WD 全 phase 固定 5e-4 | RNN 學習率；SA7 降至 2e-4 防止 drift
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 | value loss 權重係數
-            "max_grad_norm": 0.6,              # WD 全 phase 固定 1.0 | RL 梯度裁剪；SA7 收緊至 0.6
-            "aux_grad_clip": 0.3,              # WD: 無獨立 aux clip | aux/RNN 梯度裁剪；SA7 收緊至 0.3
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 | actor grad norm cap
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 | critic grad norm cap
+            "lr": 1e-4,
+            "rnn_lr": 2e-4,
+            "vf_coeff": 0.5,
+            "max_grad_norm": 0.6,
+            "aux_grad_clip": 0.3,
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 用固定 iteration budget 升階，無 performance 門檻。
         "transition": {
-            "upgrade_sr": 0.50,                # WD: 無 SR 門檻 | 成功率 ≥ 此值才升階；高壓放寬至 0.50
-            "upgrade_max_cr": 0.30,            # WD: 無 CR 門檻 | 碰撞率 ≤ 此值；penalty=-85 需更嚴格
-            "upgrade_max_to": 0.35,            # WD: 無 TO 門檻 | 超時率 ≤ 此值
-            "upgrade_min_dyn_sr": 0.35,        # WD: 無此指標 | 動態 env SR 下限
-            "min_stage_updates": 130,          # WD: 用固定 batch budget | 最少停留更新次數
-            "downgrade_sr": 0.10,              # WD: 無降階機制 | SR < 此值觸發降階
-            "downgrade_min_cr": 0.80,          # WD: 無降階機制 | CR > 此值觸發降階
-            "downgrade_min_to": 0.75,          # WD: 無降階機制 | TO > 此值觸發降階
+            "upgrade_sr": 0.45,
+            "upgrade_max_cr": 0.25,
+            "upgrade_max_to": 0.35,
+            "upgrade_min_dyn_sr": 0.35,
+            "min_stage_updates": 130,
+            "downgrade_sr": 0.10,
+            "downgrade_min_cr": 0.80,
+            "downgrade_min_to": 0.75,
         },
     },
 
     # ──────────────────────────────────────────────────────────────────────
-    # Stage 8 / SA8
-    # 【訓練能力】最終績效評估級（全能力整合）
-    #   論文策略：penalty=-100 是最終評估標準
-    #   「若一開始即以最終期望值為訓練標準，Agent 難以達到最佳效果」
-    #   經過 P1-P7 逐步引導後，此處才引入最終 penalty
-    #   obs 降到 6（從 10 降回）+ speed 再提升 1.15 → 少但更快更難預測
-    #   wall=2 維持空間規劃需求，episode=210s 維持耐久需求
-    #
-    # ── WD P8 參考 ──
-    # spots=2, goals=1, obs=6, penalty=-100, cost=0.0,
-    # ent_linear=0.50, ent_angular=0.375, speed=1.15, 210s, batch=168K
-    # wall=2/3.5m
-    #
-    # ── 訓練預算建議 (run-level，不由本檔自動套用) ──
-    # rollout_length=300 固定；timesteps = updates × rollout_length；
-    # interactions = num_envs × rollout_length × updates。
-    # Sanity: num_envs=512,  timesteps=30000,  updates=100,  interactions=15.4M
-    # Formal: num_envs=1024, timesteps=450000, updates=1500, interactions=460.8M
-    # Eval:   訓練後用 deterministic play/eval 檢查 1-goal、CR、TO、heading、gV。
-    # 說明：SA8 是最終評估級；不要用過大 num_envs 掩蓋單環境失敗模式。
+    # Stage 8 / SA8 — 最終評估級
+    # 【焦點】penalty=-100 最終標準 + 最長 episode + 最高速
+    # dφ from SA7: goals -1, episode +60s, penalty -50, obs_speed ↑,
+    #              wall_length ↑
+    # WD P8: spots=2, goals=1, obs=6, penalty=-100, speed=1.15, 210s, wall=2/3.5m
+    # Budget: Formal 1024×1500=460.8M | Eval: deterministic play
     # ──────────────────────────────────────────────────────────────────────
     {
         "name": "SA8_final",
 
         "scene": {
-            "goals": 1,                         # WD P8=1
-            "goal_distance": (3.0, 10.0),      # 長距離
-            "static_obstacles": 0,             # WD P8: 無 static
-            "dynamic_obstacles": 6,            # WD P8=6（少但快）
-            "dynamic_obstacles_min": 5,        # 每 env 至少 5 個
-            "walls_min": 2,                    # WD P8=2
-            "walls_max": 2,                    # WD P8=2
-            "wall_length": 3.5,                # WD P8=3.5m
-            "episode_s": 210,                  # WD P8=210
+            "goals": 1,
+            "goal_distance": (3.0, 10.0),
+            "static_obstacles": 3,
+            "dynamic_obstacles": 8,
+            "dynamic_obstacles_min": 6,
+            "walls_min": 2,
+            "walls_max": 3,
+            "wall_length": 5.0,                 # ↑ from 4.5
+            "episode_s": 180,                   # ↑ from 120
             "gamma": 0.998,
         },
 
         "reward": {
-            "penalty_hit": -100.0,             # WD P8=-100（最終評估級）
-            "reward_get_goal": 40.0,           # WD P8=40
-            "cost_operate": 0.0,               # WD P8=0.0
+            "penalty_hit": -100.0,
+            "reward_get_goal": 40.0,
+            "cost_operate": 0.0,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.50,            # WD P8=0.50
-            "entropy_angular": 0.375,          # WD P8=0.375
+            "entropy_linear": 0.003,
+            "entropy_angular": 0.008,
         },
 
-        # ── behavior ──
-        # WD P8 speed 達最高 1.15，obstacle 數降到 6（少但快更難預測）。無 behavior_mix。
-        # SA8 沿用 SA7 的 behavior 分佈，但速度範圍全面提升。
         "behavior": {
-            "obstacle_speed": 1.15,            # WD P8=1.15 | 全局動態障礙速度倍率；最高速，最終評估級
+            "obstacle_speed": 1.15,             # ↑ from 1.00
             "behavior_mix": {
-                "patrol": 0.10,                # WD: 無此機制 | 沿路徑巡邏；最終 phase 降低可預測比例
-                "random_walk": 0.10,           # WD: 無此機制 | 隨機方向移動
-                "horizontal_crossing": 0.15,   # WD: 無此機制 | 橫向穿越，高速 timing
-                "path_crossing": 0.15,         # WD: 無此機制 | 路徑交叉穿越
-                "near_miss": 0.20,             # WD: 無此機制 | 高速擦身；最高比例，核心挑戰
-                "corridor_crossing": 0.15,     # WD: 無此機制 | 狹窄通道穿越
-                "occlusion": 0.15,             # WD: 無此機制 | 遮蔽後突現
+                "patrol": 0.10,
+                "random_walk": 0.10,
+                "static": 0.05,
+                "horizontal_crossing": 0.15,
+                "path_crossing": 0.10,
+                "corridor_crossing": 0.10,
+                "near_miss": 0.20,
+                "occlusion": 0.20,
             },
-            "speed_overrides": {               # WD: 無此機制 | per-behavior [min, max] 速度範圍覆寫
-                "patrol": {"speed_range": (0.50, 1.00)},              # 高速巡邏
-                "random_walk": {"speed_range": (0.45, 0.95)},         # 高速隨機
-                "horizontal_crossing": {"speed_range": (0.60, 1.10)}, # 超過 v_max 橫穿（最高挑戰）
-                "path_crossing": {"speed_range": (0.55, 1.00)},       # 接近 v_max 路徑交叉
-                "near_miss": {"speed_range": (0.55, 1.00)},           # 高速擦身
-                "corridor_crossing": {"speed_range": (0.45, 0.80)},   # 中高速窄道穿越
-                "occlusion": {"speed_range": (0.40, 0.80)},           # 中速突現
+            "speed_overrides": {
+                "patrol": {"speed_range": (0.50, 1.00)},
+                "random_walk": {"speed_range": (0.45, 0.95)},
+                "horizontal_crossing": {"speed_range": (0.60, 1.10)},
+                "path_crossing": {"speed_range": (0.55, 1.00)},
+                "corridor_crossing": {"speed_range": (0.45, 0.80)},
+                "near_miss": {"speed_range": (0.50, 0.95)},
+                "occlusion": {"speed_range": (0.35, 0.75)},
             },
         },
 
-        # ── trainer ──
-        # WD 全 phase 固定超參。SA8 用最保守的 LR 和最緊 grad clip，穩定最終評估訓練。
         "trainer": {
-            "lr": 1e-4,                        # WD 全 phase 固定 2e-4 | RL 學習率；SA8 降至 1e-4 微調
-            "rnn_lr": 2e-4,                    # WD 全 phase 固定 5e-4 | RNN 學習率；SA8 降至 2e-4
-            "vf_coeff": 0.5,                   # WD 全 phase 固定 0.025 | value loss 權重係數
-            "max_grad_norm": 0.5,              # WD 全 phase 固定 1.0 | RL 梯度裁剪；SA8 最緊 0.5
-            "aux_grad_clip": 0.3,              # WD: 無獨立 aux clip | aux/RNN 梯度裁剪；SA8 收緊至 0.3
-            "wd_actor_update_clip": 8.0,       # WD 全 phase 固定 8.0 | actor grad norm cap
-            "wd_critic_update_clip": 30.0,     # WD 全 phase 固定 30.0 | critic grad norm cap
+            "lr": 1e-4,
+            "rnn_lr": 2e-4,
+            "vf_coeff": 0.5,
+            "max_grad_norm": 0.5,
+            "aux_grad_clip": 0.3,
+            "wd_actor_update_clip": 8.0,
+            "wd_critic_update_clip": 30.0,
         },
 
-        # ── transition ──
-        # WD 用固定 iteration budget 升階。SA8 是最終 phase，升階條件設為不可能達到。
         "transition": {
-            "upgrade_sr": 1.0,                 # WD: 無 SR 門檻 | 成功率門檻；1.0=不可能升階（最終 phase）
-            "upgrade_max_cr": 0.0,             # WD: 無 CR 門檻 | 碰撞率門檻；0.0=不可能升階
-            "upgrade_max_to": 0.0,             # WD: 無 TO 門檻 | 超時率門檻；0.0=不可能升階
-            "upgrade_min_dyn_sr": 1.0,         # WD: 無此指標 | 動態 env SR 下限；1.0=不可能升階
-            "min_stage_updates": 9999,         # WD: 用固定 batch budget | 設極大值鎖定在最終 phase
-            "downgrade_sr": 0.08,              # WD: 無降階機制 | SR < 此值觸發降階；仍允許降回 SA7
-            "downgrade_min_cr": 0.85,          # WD: 無降階機制 | CR > 此值觸發降階
-            "downgrade_min_to": 0.80,          # WD: 無降階機制 | TO > 此值觸發降階
+            "upgrade_sr": 1.0,                  # 最終 phase，不可能升階
+            "upgrade_max_cr": 0.0,
+            "upgrade_max_to": 0.0,
+            "upgrade_min_dyn_sr": 1.0,
+            "min_stage_updates": 9999,
+            "downgrade_sr": 0.08,
+            "downgrade_min_cr": 0.85,
+            "downgrade_min_to": 0.80,
         },
     },
 ]
@@ -976,8 +795,8 @@ def _flatten_phase(phase: dict) -> dict:
         "spot_cost_operate": float(reward.get("cost_operate", 0.0)),
 
         # exploration -> entropy fields
-        "ent_coeff_linear": float(exploration.get("entropy_linear", 0.30)),
-        "ent_coeff_angular": float(exploration.get("entropy_angular", 0.375)),
+        "ent_coeff_linear": float(exploration.get("entropy_linear", 0.01)),
+        "ent_coeff_angular": float(exploration.get("entropy_angular", 0.02)),
 
         # behavior -> obstacle speed / behavior fields
         "obstacle_speed_rate": float(behavior.get("obstacle_speed", 0.8)),

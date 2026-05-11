@@ -215,3 +215,30 @@ PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_ch
 - 訓練不要用 `conda run`（會 buffer stdout），直接用 `PYTHONUNBUFFERED=1 ./isaaclab.sh`
 - 不要修改 `--task` 名稱，消融實驗全靠 CLI 參數切換
 - 所有新 CLI 參數預設值 = baseline 行為
+
+## MARL RNN 備忘
+
+- `scripts/reinforcement_learning/skrl/train_marl_rnn.py` 已支援 `--grad-clip-mode {merged,separate}`。
+- 目前預設值是 `separate`，用來保持既有行為不變。
+- `merged`：對 `policy_head + value_head` 做一次 joint `clip_grad_norm_`。
+- `separate`：分別對 `policy_head`、`value_head` 各做一次 `clip_grad_norm_`。
+- 本機已查證的參考實作：
+  - SKRL PPO: `/home/aa/miniconda3/envs/env_isaaclab/lib/python3.11/site-packages/skrl/agents/torch/ppo/ppo.py` 使用 merged clip。
+  - SKRL A2C: `/home/aa/miniconda3/envs/env_isaaclab/lib/python3.11/site-packages/skrl/agents/torch/a2c/a2c.py` 使用 merged clip。
+  - SKRL MAPPO: `/home/aa/miniconda3/envs/env_isaaclab/lib/python3.11/site-packages/skrl/multi_agents/torch/mappo/mappo.py` 使用 merged clip。
+  - Warp Drive trainer: `new_warp_drive/warp_drive/training/trainer.py` 對單一 model 做一次 clip，不是 actor/value 分開 clip。
+- `train_marl_rnn.py` 的 RL optimizer 是單一 joint loss：`policy_loss + vf_coeff * value_loss - entropy_loss`，因此 `merged` 應視為較接近標準 PPO baseline；`separate` 應視為額外 heuristic，只有在做對照實驗時才宣稱其效果。
+- `train_marl_rnn.py` 使用 GAE：
+  - `compute_gae`: `delta = r + gamma * V_next - V`
+  - `returns = advantages + values`
+- 不要把 WD 的 `a2c_ken.py` critic clamp 搬回 PPO：
+  - WD 的 return/advantage 寫法不是 GAE，而是 normalized returns 直接減 value。
+  - WD critic clamp 在 PPO 小 policy loss 條件下會把 `vf_loss` 拉到固定量級，不適合這份 `train_marl_rnn.py`。
+- 做 `merged` vs `separate` 比較時，除了 `--grad-clip-mode` 以外，其餘條件都要固定：
+  - seed
+  - timesteps / iterations
+  - `vf_coeff`
+  - `max_grad_norm`
+  - rollout / batch / epochs
+  - learning rate
+  - curriculum / eval protocol

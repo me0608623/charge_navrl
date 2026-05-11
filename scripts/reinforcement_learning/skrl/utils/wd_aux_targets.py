@@ -1,93 +1,152 @@
 """
-wd_aux_targets.py — WD-style 7D Privileged Geometry Target + Module Loss
+wd_aux_targets.py — WD-original dynamic 7D aux target + module loss
 
-Port from Warp Drive:
-  - Target: new_warp_drive/custom_envs/spot_3d/spot_3d_step.cu (preprocess_data_arr)
-  - Loss:   new_warp_drive/warp_drive/training/algorithms/module_loss.py
+═══════════════════════════════════════════════════════════════════════════
+Target 語意 — 時間動態預測（WD 原版）
+═══════════════════════════════════════════════════════════════════════════
 
-7D target layout (per env):
-  [near_1_x, near_1_y, near_1_d,   # nearest obstacle body-frame surface vector (x, y, dist)
-   near_2_x, near_2_y, near_2_d,   # 2nd nearest obstacle body-frame surface vector (x, y, dist)
-   timestep]                        # current episode step (raw integer, not normalized)
+WD 原始 preprocess target 是讓 RNN 學會「單一最近動態障礙物」的時間軌跡：
+  - 過去在哪 (t-3)
+  - 現在在哪 (t0)
+  - 未來會到哪 (v × Δt 外推)
 
-Design:
-  - Training-only privileged signal — NOT available at inference
-  - Target comes from simulator geometry, NOT from policy observation
-  - Coordinate frame: robot body-frame (forward=+x, left=+y)
-  - Distance: predicted surface distance (center_dist - obj_radius - robot_radius), clamped >= 0
-  - x/y: predicted vector from robot to obstacle surface, not obstacle center
-  - Only considers active obstacles (Z > 0)
-  - Missing obstacles filled with default=10.0 (WD convention: far away)
+這迫使 RNN hidden state 編碼：
+  1. 障礙物速度/方向估計 → 預測 next
+  2. 時間序列記憶 → 回憶 t-3
+  3. 當前空間感知 → 感知 t0
 
-WD bug fix:
-  - WD spot_3d_step.cu line 671: dim[4] writes obs_spot_x_ instead of obs_spot_y_
-  - This port correctly writes (x, y, d) for both nearest obstacles
+7D target layout（每個 env 一筆）：
+  [0] t0_obs_x      — 障礙物 NOW 的 body-frame surface x
+  [1] t0_obs_y      — 障礙物 NOW 的 body-frame surface y
+  [2] next_obs_x    — 障礙物 FUTURE (v×Δt) 的 body-frame surface x
+  [3] next_obs_y    — 障礙物 FUTURE 的 body-frame surface y
+  [4] hist_obs_x    — 障礙物 PAST (t-3) 的 body-frame surface x
+  [5] hist_obs_y    — 障礙物 PAST (t-3) 的 body-frame surface y
+  [6] total_dis     — 障礙物 PAST (t-3) 的 center distance
+
+所有 vector 都相對「robot 當前位置 + 當前朝向」(body-frame)。
+障礙物選擇：最近的 active dynamic obstacle（|v| > 閾值）。
+
+WD CUDA 原始碼對照：
+  - spot_3dmodule_step.cu 的 preprocess_data_arr (lines 683-760)
+  - loc_x_arr_t3 歷史 cache (lines 1398-1413)
+  - collision radius shrinking (lines 696-709)
+
+與前版差異：
+  前版 (spatial geometry): nearest-2 障礙物的 [x, y, d] × 2 + timestep
+  本版 (temporal dynamics): 單一最近動態障礙物的 past/now/future + distance
+═══════════════════════════════════════════════════════════════════════════
 """
 
 import torch
 import torch.nn as nn
 
 
-# WD default weight: [1.0, 1.0, 1.0, 0.7, 0.7, 0.7, 0.0]
-# dim 0-2: nearest obstacle (full weight)
-# dim 3-5: 2nd nearest obstacle (0.7 weight)
-# dim 6: timestep (weight=0, connectivity check only)
+# WD 原版 module loss 權重
+# dim 0-1: t0 (now) 權重最高 — RNN 必須準確感知當前位置
+# dim 2-3: next (future) — 預測能力核心
+# dim 4-5: hist (past) — 記憶能力，權重略低
+# dim 6: total_dis — 預設不參與訓練（weight=0）
 WD_DEFAULT_WEIGHT = [1.0, 1.0, 1.0, 0.7, 0.7, 0.7, 0.0]
 
-# WD default fill value for missing obstacles (spot_3d_step.cu lines 219-224)
+# 當沒有合適的動態障礙物時，用 FAR_DEFAULT 填充
 _FAR_DEFAULT = 10.0
 
+# 動態障礙物速度閾值：|v| > 此值才視為「動態」
+_DYNAMIC_SPEED_THRESHOLD = 0.01
 
-def build_wd_preprocess_targets(
+# 歷史 cache 深度（t-3，與 WD CUDA 的 loc_x_arr_t3 對齊）
+_HISTORY_DEPTH = 3
+
+
+def _wd_collision_shrink(
+    dx: torch.Tensor,
+    dy: torch.Tensor,
+    obs_size: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """WD-style collision radius shrinking — 把 center vector 縮短到 surface point。
+
+    WD CUDA 原版邏輯 (spot_3dmodule_step.cu lines 696-709):
+    把 obstacle 的碰撞半徑沿 dx/dy 方向分別投影並扣除，
+    使得 output vector 指向 obstacle 表面而非中心。
+    若已在碰撞距離內 (total_dis < obs_size)，output 歸零。
+
+    Args:
+        dx: [E] world-frame 相對 x
+        dy: [E] world-frame 相對 y
+        obs_size: 碰撞半徑（robot + obstacle）
+
+    Returns:
+        shrunk_dx, shrunk_dy, total_dis
+    """
+    total_dis = torch.sqrt(dx * dx + dy * dy).clamp(min=1e-6)
+
+    # 沿 x/y 方向分別投影碰撞半徑
+    obs_size_x = obs_size * torch.abs(dx) / total_dis
+    obs_size_y = obs_size * torch.abs(dy) / total_dis
+
+    # X 軸 shrink
+    out_dx = torch.where(dx > obs_size_x, dx - obs_size_x,
+             torch.where(dx < -obs_size_x, dx + obs_size_x,
+             torch.zeros_like(dx)))
+
+    # Y 軸 shrink
+    out_dy = torch.where(dy > obs_size_y, dy - obs_size_y,
+             torch.where(dy < -obs_size_y, dy + obs_size_y,
+             torch.zeros_like(dy)))
+
+    # 碰撞距離內全部歸零
+    inside = total_dis < obs_size
+    out_dx = torch.where(inside, torch.zeros_like(out_dx), out_dx)
+    out_dy = torch.where(inside, torch.zeros_like(out_dy), out_dy)
+
+    return out_dx, out_dy, total_dis
+
+
+def _to_body_frame(
+    dx_w: torch.Tensor,
+    dy_w: torch.Tensor,
+    cos_yaw: torch.Tensor,
+    sin_yaw: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """World-frame vector → robot body-frame vector.
+
+    WD CUDA: x_body = dif_x * cos_dir + dif_y * sin_dir
+             y_body = -dif_x * sin_dir + dif_y * cos_dir
+    """
+    bx = cos_yaw * dx_w + sin_yaw * dy_w
+    by = -sin_yaw * dx_w + cos_yaw * dy_w
+    return bx, by
+
+
+def _update_history_cache(
     env_unwrapped,
     max_obstacles: int,
     device: torch.device,
-    robot_radius: float = 0.33,
-    prediction_horizon_s: float = 1.0,
-) -> torch.Tensor:
-    """Build WD-style 7D privileged geometry target from simulator state.
+) -> None:
+    """更新 WD-style 3-step 歷史 position cache。
 
-    This is a training-only privileged signal. At inference time this function
-    is NOT called — the predict_head output is discarded.
+    WD CUDA (lines 1398-1413):
+      t3 ← t2, t2 ← t1, t1 ← current
+      episode_start 時全部初始化為 current
 
-    Target comes from simulator geometry (scene entity positions), not from
-    policy observations.
-
-    Geometry sources (reusing existing Isaac Lab patterns):
-      - Robot pos/quat: env.scene["robot"].data.root_pos_w / root_quat_w
-      - Obstacle pos:   env._obs_policy_cache[i].data.root_pos_w
-      - Obstacle vel:   env._obstacle_velocities[:, i] when available
-      - Obstacle radii:  env._obstacle_radii[:, i]
-      - Episode step:   env.episode_length_buf
-
-    Body-frame rotation follows obs_functions.py convention:
-      px_body =  cos(yaw) * dx + sin(yaw) * dy
-      py_body = -sin(yaw) * dx + cos(yaw) * dy
-
-    Args:
-        env_unwrapped: unwrapped Isaac Lab env (ManagerBasedRLEnv)
-        max_obstacles: maximum number of obstacle entities in scene
-        device: torch device
-        robot_radius: robot body radius for surface distance (m)
-        prediction_horizon_s: seconds to extrapolate obstacle motion before
-            computing the surface vector. WD uses a short look-ahead target.
-
-    Returns:
-        [num_envs, 7] float tensor — WD preprocess_real_data equivalent
+    Cache 存在 env_unwrapped 上，跨 step 保持。
     """
     num_envs = env_unwrapped.num_envs
 
-    # --- Robot state ---
-    robot_pos_w = env_unwrapped.scene["robot"].data.root_pos_w[:, :2]  # [E, 2]
-    robot_quat = env_unwrapped.scene["robot"].data.root_quat_w         # [E, 4] (w,x,y,z)
+    # 第一次呼叫：建立 cache
+    if not hasattr(env_unwrapped, "_wd_aux_obs_pos_t1"):
+        env_unwrapped._wd_aux_obs_pos_t1 = torch.zeros(
+            num_envs, max_obstacles, 2, device=device)
+        env_unwrapped._wd_aux_obs_pos_t2 = torch.zeros(
+            num_envs, max_obstacles, 2, device=device)
+        env_unwrapped._wd_aux_obs_pos_t3 = torch.zeros(
+            num_envs, max_obstacles, 2, device=device)
+        env_unwrapped._wd_aux_cache_initialized = torch.zeros(
+            num_envs, dtype=torch.bool, device=device)
 
-    # Yaw extraction (obs_functions.py convention)
-    w, x, y, z = robot_quat[:, 0], robot_quat[:, 1], robot_quat[:, 2], robot_quat[:, 3]
-    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))  # [E]
-    cos_yaw = torch.cos(yaw)  # [E]
-    sin_yaw = torch.sin(yaw)  # [E]
-
-    # --- Build obstacle cache if needed ---
+    # 讀取所有障礙物當前 world position
+    current_pos = torch.zeros(num_envs, max_obstacles, 2, device=device)
     if not hasattr(env_unwrapped, "_obs_policy_cache"):
         env_unwrapped._obs_policy_cache = []
         for i in range(max_obstacles):
@@ -97,117 +156,190 @@ def build_wd_preprocess_targets(
             else:
                 env_unwrapped._obs_policy_cache.append(None)
 
-    # --- Collect predicted obstacle surface vectors + surface distances ---
-    # Shape: [E, N_active, 3] where 3 = (surface_x_body, surface_y_body, surface_d)
-    n_found = 0
-    # Pre-allocate for max_obstacles
-    all_body_x = torch.full((num_envs, max_obstacles), _FAR_DEFAULT, device=device)
-    all_body_y = torch.full((num_envs, max_obstacles), _FAR_DEFAULT, device=device)
-    all_surf_d = torch.full((num_envs, max_obstacles), _FAR_DEFAULT, device=device)
-    all_active = torch.zeros(num_envs, max_obstacles, dtype=torch.bool, device=device)
+    for i, obstacle in enumerate(env_unwrapped._obs_policy_cache):
+        if obstacle is None or i >= max_obstacles:
+            break
+        pos_w = obstacle.data.root_pos_w
+        active = pos_w[:, 2] > 0.0
+        current_pos[:, i, 0] = torch.where(active, pos_w[:, 0], current_pos[:, i, 0])
+        current_pos[:, i, 1] = torch.where(active, pos_w[:, 1], current_pos[:, i, 1])
 
-    # Obstacle radii (per-env, per-obstacle)
+    # Episode 起點：所有 cache 初始化為 current
+    # 用 episode_length_buf <= 1 偵測新 episode（WD: env_timestep_arr <= 1）
+    is_new = env_unwrapped.episode_length_buf <= 1
+    new_mask = is_new.unsqueeze(-1).unsqueeze(-1)  # [E, 1, 1]
+
+    # 先做 rolling update（非新 episode 的 env）
+    # t3 ← t2, t2 ← t1, t1 ← current（WD 原版順序）
+    env_unwrapped._wd_aux_obs_pos_t3 = torch.where(
+        new_mask, current_pos, env_unwrapped._wd_aux_obs_pos_t2)
+    env_unwrapped._wd_aux_obs_pos_t2 = torch.where(
+        new_mask, current_pos, env_unwrapped._wd_aux_obs_pos_t1)
+    env_unwrapped._wd_aux_obs_pos_t1 = torch.where(
+        new_mask, current_pos, current_pos)  # t1 always ← current
+
+
+def build_wd_preprocess_targets(
+    env_unwrapped,
+    max_obstacles: int,
+    device: torch.device,
+    robot_radius: float = 0.33,
+    prediction_horizon_s: float = 0.2,
+) -> torch.Tensor:
+    """建立 WD-original dynamic 7D temporal aux target。
+
+    流程：
+    1. 更新 3-step 歷史 cache
+    2. 識別最近的 active dynamic obstacle
+    3. 對 t0 (now), next (future), hist (t-3) 分別計算 body-frame surface vector
+    4. 組成 7D target
+
+    Args:
+        env_unwrapped: IsaacLab unwrapped env
+        max_obstacles: 場景最大障礙物數量
+        device: CUDA device
+        robot_radius: 機器人半徑（用於 collision shrinking）
+        prediction_horizon_s: 外推時間（秒），用於 next position
+
+    Returns:
+        target: [num_envs, 7] — WD-original 7D temporal target
+    """
+    num_envs = env_unwrapped.num_envs
+
+    # ------------------------------------------------------------------
+    # 1. 更新歷史 cache
+    # ------------------------------------------------------------------
+    _update_history_cache(env_unwrapped, max_obstacles, device)
+
+    # ------------------------------------------------------------------
+    # 2. Robot pose → yaw → cos/sin（body-frame 旋轉）
+    # ------------------------------------------------------------------
+    robot_pos_w = env_unwrapped.scene["robot"].data.root_pos_w[:, :2]  # [E, 2]
+    robot_quat = env_unwrapped.scene["robot"].data.root_quat_w         # [E, 4] wxyz
+    w, x, y, z = robot_quat[:, 0], robot_quat[:, 1], robot_quat[:, 2], robot_quat[:, 3]
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    cos_yaw = torch.cos(yaw)
+    sin_yaw = torch.sin(yaw)
+
+    # ------------------------------------------------------------------
+    # 3. 收集所有障礙物的 current pos / velocity / active status
+    # ------------------------------------------------------------------
+    all_pos_now = torch.zeros(num_envs, max_obstacles, 2, device=device)
+    all_vel = torch.zeros(num_envs, max_obstacles, 2, device=device)
+    all_active = torch.zeros(num_envs, max_obstacles, dtype=torch.bool, device=device)
+    all_speed = torch.zeros(num_envs, max_obstacles, device=device)
+
+    # 碰撞半徑
     has_radii = hasattr(env_unwrapped, "_obstacle_radii")
+    all_col_radius = torch.full(
+        (num_envs, max_obstacles), 0.5 + robot_radius, device=device)
 
     for i, obstacle in enumerate(env_unwrapped._obs_policy_cache):
-        if obstacle is None:
-            continue
-        if i >= max_obstacles:
+        if obstacle is None or i >= max_obstacles:
             break
-
-        obs_pos_w = obstacle.data.root_pos_w  # [E, 3]
-        active = obs_pos_w[:, 2] > 0.0        # hidden obstacles at Z=-10
-
-        if not active.any():
-            continue
-
-        # WD predicts obstacle position before building preprocess_data_arr.
-        # When the obstacle velocity cache is unavailable, this falls back to
-        # the current position while still using surface-vector geometry.
-        pred_x_w = obs_pos_w[:, 0]
-        pred_y_w = obs_pos_w[:, 1]
-        if hasattr(env_unwrapped, "_obstacle_velocities"):
-            obs_vel = env_unwrapped._obstacle_velocities
-            if obs_vel.shape[1] > i:
-                pred_x_w = pred_x_w + obs_vel[:, i, 0] * prediction_horizon_s
-                pred_y_w = pred_y_w + obs_vel[:, i, 1] * prediction_horizon_s
-
-        # World-frame displacement to predicted obstacle center.
-        dx_w = pred_x_w - robot_pos_w[:, 0]  # [E]
-        dy_w = pred_y_w - robot_pos_w[:, 1]  # [E]
-
-        # Center distance in world frame.
-        center_d = torch.sqrt(dx_w * dx_w + dy_w * dy_w).clamp(min=1e-6)  # [E]
-
-        # Obstacle radius
-        if has_radii:
-            # _obstacle_radii stores collision distance (center-to-center threshold)
-            # = obj_radius + robot_radius approximately, so obj_radius ≈ radii/2
-            # But for WD convention: surface_d = center_d - obj_radius - robot_radius
-            # We use _obstacle_radii as the total collision distance directly
-            obs_r = env_unwrapped._obstacle_radii[:, i]  # [E]
-            # surface_d = center_d - collision_radius (which already includes robot+obj)
-            # But WD uses: center_d - obj_radius - robot_radius
-            # _obstacle_radii ≈ obs_collision_base (default 0.9) which is ~obj_r + robot_r
-            # So surface_d = center_d - _obstacle_radii is close to WD convention
-            collision_radius = obs_r
-        else:
-            # Fallback: assume obstacle radius ≈ 0.5m
-            collision_radius = torch.full_like(center_d, 0.5 + robot_radius)
-
-        # Vector to the closest obstacle surface point along the center ray.
-        # This matches the collision-relevant target: if the obstacle overlaps
-        # the robot collision radius, the remaining safe distance is zero.
-        surf_d = (center_d - collision_radius).clamp(min=0.0)
-        surface_scale = surf_d / center_d
-        surface_dx_w = dx_w * surface_scale
-        surface_dy_w = dy_w * surface_scale
-
-        # Body-frame rotation (obs_functions.py: R(yaw)^T * delta)
-        bx = cos_yaw * surface_dx_w + sin_yaw * surface_dy_w
-        by = -sin_yaw * surface_dx_w + cos_yaw * surface_dy_w
-
-        all_body_x[:, i] = torch.where(active, bx, torch.full_like(bx, _FAR_DEFAULT))
-        all_body_y[:, i] = torch.where(active, by, torch.full_like(by, _FAR_DEFAULT))
-        all_surf_d[:, i] = torch.where(active, surf_d, torch.full_like(surf_d, _FAR_DEFAULT))
+        pos_w = obstacle.data.root_pos_w
+        active = pos_w[:, 2] > 0.0
         all_active[:, i] = active
-        n_found += 1
+        all_pos_now[:, i, 0] = pos_w[:, 0]
+        all_pos_now[:, i, 1] = pos_w[:, 1]
+        if has_radii:
+            all_col_radius[:, i] = env_unwrapped._obstacle_radii[:, i]
 
-    # --- Sort by surface distance, take nearest 2 ---
-    # For inactive obstacles, surf_d = _FAR_DEFAULT = 10.0, so they sort last
-    _, sort_idx = all_surf_d.sort(dim=1)  # [E, N], ascending
+    # Velocity from cache（已在 apply_obstacle_actions 更新）
+    if hasattr(env_unwrapped, "_obstacle_velocities"):
+        n_vel = min(env_unwrapped._obstacle_velocities.shape[1], max_obstacles)
+        all_vel[:, :n_vel, :] = env_unwrapped._obstacle_velocities[:, :n_vel, :]
+    all_speed = torch.sqrt(all_vel[:, :, 0] ** 2 + all_vel[:, :, 1] ** 2)
 
-    # Gather sorted body-frame coordinates
-    near1_idx = sort_idx[:, 0]  # [E]
-    near2_idx = sort_idx[:, 1] if max_obstacles >= 2 else sort_idx[:, 0]
+    # ------------------------------------------------------------------
+    # 4. 選擇最近的 active dynamic obstacle
+    # ------------------------------------------------------------------
+    # 計算每個障礙物到 robot 的 center distance
+    dx_all = all_pos_now[:, :, 0] - robot_pos_w[:, 0:1]  # [E, N]
+    dy_all = all_pos_now[:, :, 1] - robot_pos_w[:, 1:2]  # [E, N]
+    center_dist = torch.sqrt(dx_all ** 2 + dy_all ** 2)   # [E, N]
 
-    # Advanced indexing: gather per-env
+    # dynamic mask: active AND speed > threshold
+    is_dynamic = all_active & (all_speed > _DYNAMIC_SPEED_THRESHOLD)
+
+    # 對非 dynamic obstacle 設距離為 FAR，讓它排在最後
+    dist_for_select = torch.where(is_dynamic, center_dist,
+                                  torch.full_like(center_dist, _FAR_DEFAULT * 2))
+
+    # 取最近 dynamic obstacle 的 index
+    nearest_idx = dist_for_select.argmin(dim=1)  # [E]
     batch_idx = torch.arange(num_envs, device=device)
 
-    near1_x = all_body_x[batch_idx, near1_idx]
-    near1_y = all_body_y[batch_idx, near1_idx]
-    near1_d = all_surf_d[batch_idx, near1_idx]
+    # 若此 env 完全沒有 dynamic obstacle，fallback 到最近的 active obstacle
+    no_dynamic = ~is_dynamic.any(dim=1)  # [E]
+    if no_dynamic.any():
+        fallback_dist = torch.where(all_active, center_dist,
+                                    torch.full_like(center_dist, _FAR_DEFAULT * 2))
+        fallback_idx = fallback_dist.argmin(dim=1)
+        nearest_idx = torch.where(no_dynamic, fallback_idx, nearest_idx)
 
-    near2_x = all_body_x[batch_idx, near2_idx]
-    near2_y = all_body_y[batch_idx, near2_idx]  # WD bug fix: correctly use y, not x
-    near2_d = all_surf_d[batch_idx, near2_idx]
+    # 取 selected obstacle 的屬性
+    sel_pos_now = all_pos_now[batch_idx, nearest_idx]      # [E, 2]
+    sel_vel = all_vel[batch_idx, nearest_idx]               # [E, 2]
+    sel_col_r = all_col_radius[batch_idx, nearest_idx]      # [E]
+    sel_active = all_active[batch_idx, nearest_idx]         # [E]
 
-    # --- Timestep (raw integer, WD: env_timestep_arr) ---
-    # WD: env_timestep_arr is 1-indexed (incremented at START of CudaSpot_3dStep,
-    #   before obs/preprocess are computed). After reset → 0, first step → 1.
-    #   Source: spot_3d_step.cu line 1181: env_timestep_arr[kEnvId] += 1
-    # IL: episode_length_buf is incremented in env.step() post-step phase, then
-    #   done envs are reset to 0. We read it AFTER env.step(), so:
-    #   - Non-done envs: step count (1-indexed, same as WD)
-    #   - Done envs: 0 (post-reset, same as WD; excluded from aux loss by done filter)
-    timestep = env_unwrapped.episode_length_buf.float()  # [E]
+    # ------------------------------------------------------------------
+    # 5. t0: obstacle NOW 相對 robot NOW（WD CUDA: t0_dx/t0_dy）
+    # ------------------------------------------------------------------
+    t0_dx_w = sel_pos_now[:, 0] - robot_pos_w[:, 0]
+    t0_dy_w = sel_pos_now[:, 1] - robot_pos_w[:, 1]
+    t0_sx, t0_sy, _ = _wd_collision_shrink(t0_dx_w, t0_dy_w, sel_col_r)
+    t0_bx, t0_by = _to_body_frame(t0_sx, t0_sy, cos_yaw, sin_yaw)
 
-    # --- Assemble 7D target ---
+    # ------------------------------------------------------------------
+    # 6. next: obstacle FUTURE 相對 robot NOW（WD CUDA: next_dx/next_dy）
+    # ------------------------------------------------------------------
+    # WD: next_dx = loc[other] + speed * cos(dir) - loc[this]
+    # IsaacLab: 直接用 velocity × horizon
+    next_pos_x = sel_pos_now[:, 0] + sel_vel[:, 0] * prediction_horizon_s
+    next_pos_y = sel_pos_now[:, 1] + sel_vel[:, 1] * prediction_horizon_s
+    next_dx_w = next_pos_x - robot_pos_w[:, 0]
+    next_dy_w = next_pos_y - robot_pos_w[:, 1]
+    next_sx, next_sy, _ = _wd_collision_shrink(next_dx_w, next_dy_w, sel_col_r)
+    next_bx, next_by = _to_body_frame(next_sx, next_sy, cos_yaw, sin_yaw)
+
+    # ------------------------------------------------------------------
+    # 7. hist: obstacle PAST (t-3) 相對 robot NOW（WD CUDA: current_dx/current_dy）
+    # ------------------------------------------------------------------
+    # WD 命名: "current" = loc_x_arr_t3（歷史 cache），confusingly named
+    hist_pos = env_unwrapped._wd_aux_obs_pos_t3[batch_idx, nearest_idx]  # [E, 2]
+    hist_dx_w = hist_pos[:, 0] - robot_pos_w[:, 0]
+    hist_dy_w = hist_pos[:, 1] - robot_pos_w[:, 1]
+    hist_sx, hist_sy, hist_total_dis = _wd_collision_shrink(
+        hist_dx_w, hist_dy_w, sel_col_r)
+    hist_bx, hist_by = _to_body_frame(hist_sx, hist_sy, cos_yaw, sin_yaw)
+
+    # ------------------------------------------------------------------
+    # 8. Inactive env → FAR_DEFAULT（沒有合適障礙物的 env）
+    # ------------------------------------------------------------------
+    inactive = ~sel_active
+    far = torch.full_like(t0_bx, _FAR_DEFAULT)
+    t0_bx = torch.where(inactive, far, t0_bx)
+    t0_by = torch.where(inactive, far, t0_by)
+    next_bx = torch.where(inactive, far, next_bx)
+    next_by = torch.where(inactive, far, next_by)
+    hist_bx = torch.where(inactive, far, hist_bx)
+    hist_by = torch.where(inactive, far, hist_by)
+    hist_total_dis = torch.where(inactive, far, hist_total_dis)
+
+    # ------------------------------------------------------------------
+    # 9. 組成 [E, 7] target
+    # ------------------------------------------------------------------
     target = torch.stack([
-        near1_x, near1_y, near1_d,
-        near2_x, near2_y, near2_d,
-        timestep,
-    ], dim=-1)  # [E, 7]
+        t0_bx,           # [0] obstacle NOW body-frame surface x
+        t0_by,           # [1] obstacle NOW body-frame surface y
+        next_bx,         # [2] obstacle FUTURE body-frame surface x
+        next_by,         # [3] obstacle FUTURE body-frame surface y
+        hist_bx,         # [4] obstacle PAST (t-3) body-frame surface x
+        hist_by,         # [5] obstacle PAST (t-3) body-frame surface y
+        hist_total_dis,  # [6] obstacle PAST center distance
+    ], dim=-1)
 
     return target
 
@@ -217,40 +349,21 @@ def compute_wd_module_loss(
     target: torch.Tensor,
     weight: list[float] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Compute WD module prediction loss — direct port from PreProcess_Module_Loss.
+    """WD-style preprocess module aux loss。
 
-    Source: new_warp_drive/warp_drive/training/algorithms/module_loss.py
+    公式（dim 0~5）：
+      L_i = mean( w_i × log(clamp(|pred_i - target_i|, min=0.01)) )
 
-    Per-dimension formula (BRANCHED by index):
-      raw_L1    = |pred[..., i] - target[..., i].detach()|    (element-wise)
-
-      if idx < 6:   (obstacle dims)
-        clamped   = clamp(raw_L1, min=0.01)                   (floor to avoid log(0))
-        loss_p    = log(clamped)                               (log scale)
-      else:          (goal/timestep dims, idx >= 6)
-        loss_p    = raw_L1 * raw_L1                            (squared L1)
-
-      weighted  = loss_p * weight[i]                           (per-dim weight)
-      dim_loss  = mean(weighted)                               (reduce to scalar)
-
-    Total: preprocess_loss = sum(dim_loss for all dims)
-
-    Source: module_loss.py lines 24-27 — `if idx < 6: log(clamp(L1))` else `L1 * L1`.
-
-    Except for the target semantic fix (dim[4] = y not x), this loss formula is
-    unchanged from WD original.
+    dim 6: L_i = mean( w_i × |pred_i - target_i|² )
+    但預設 w_6=0，不影響訓練梯度。
 
     Args:
-        pred:   [B, 7] model prediction
-        target: [B, 7] privileged geometry target (will be detached internally)
-        weight: per-dim weight list, length 7. Default: [1,1,1, 0.7,0.7,0.7, 0]
+        pred: [B, 7] or [..., 7] — model predict_head 輸出
+        target: [B, 7] or [..., 7] — 7D privileged geometry target
+        weight: 每維 loss 權重，None → WD_DEFAULT_WEIGHT
 
     Returns:
-        (preprocess_loss, display_loss) where:
-          preprocess_loss: scalar tensor (backprop-ready)
-          display_loss: dict with per-dim and total loss values
-            "module_feture_{i}_loss": float  (WD original typo preserved)
-            "preprcess_loss": tensor          (WD original typo preserved)
+        (loss_scalar, display_dict)
     """
     if weight is None:
         weight = WD_DEFAULT_WEIGHT
@@ -266,23 +379,17 @@ def compute_wd_module_loss(
     for idx in range(weight_len):
         input_flat = pred[..., idx].reshape(-1)
         target_flat = target[..., idx].reshape(-1).detach()
+        loss_ = nn.L1Loss(reduction="none")(input_flat, target_flat)
 
-        # Element-wise L1
-        loss_ = nn.L1Loss(reduction='none')(input_flat, target_flat)
-
-        # WD branch: idx < 6 → log(clamp(L1)), idx >= 6 → L1² (module_loss.py:24-27)
         if idx < 6:
             loss_ = torch.clamp(loss_, min=0.01)
             loss_ = torch.log(loss_)
         else:
             loss_ = loss_ * loss_
 
-        # Apply per-dim weight
         loss_ = loss_ * weight[idx]
-
         display_loss[f"module_feture_{idx}_loss"] = loss_.mean().item()
         preprocess_loss = preprocess_loss + loss_.mean()
 
     display_loss["preprcess_loss"] = preprocess_loss
-
     return preprocess_loss, display_loss

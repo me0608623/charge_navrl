@@ -1,0 +1,63 @@
+# WD SA2 A2C + aux mainline config
+#
+# 目前 WD-style sparse reward 主線 baseline。
+# 固定在 SA2（Stage 2）做診斷，避免 full curriculum 升降階造成變因混雜。
+#
+# 實驗問題：
+# 「在 SA2 固定場景中，WD 原始方向的 A2C + aux 是否能穩定學習？」
+
+name: wd_sa2_a2c_aux                              # config 唯一識別名，與檔名一致
+description: "Fixed SA2, A2C-WD, WD sparse reward, WD 7D aux enabled"  # 人類可讀描述，會出現在 WandB
+
+# --- Environment / curriculum（環境與課程設定） ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD  # IsaacLab gym 任務 ID，WD 版 env reward 歸零
+curriculum_version: warp_drive_single_agent_v1     # 課程 phase 定義檔，控制 8 階段場景難度
+initial_stage: 2                                   # 從 SA2 開始（有少量障礙+牆，適合診斷）
+fixed_stage: true                                  # 鎖定 stage 不升降階，避免實驗變因混雜
+obstacle_mode: rule_based                          # 障礙物由 BehaviorScheduler 規則控制，不訓練 obstacle policy
+
+# --- Profiles（模組選擇） ---
+reward_profile: wd_sparse                          # WD 稀疏獎勵：goal +40 / collision penalty / action cost
+algorithm: a2c                                     # 演算法：a2c（WD 預設）或 ppo
+aux_profile: wd_7d_geometry                        # RNN 輔助任務：預測最近 2 障礙物的 7D 幾何特徵
+encoder_profile: wd_exact_rnn                      # 編碼器：WD 原版 FC→RNN→12D（非 Conv1d extractor）
+
+# --- Training budget（訓練預算） ---
+num_envs: 1024                                     # 並行環境數，batch = num_envs × rollout_length
+rollout_length: 300                                # 每次 rollout 收集的步數
+timesteps: 180000                                  # 總 timesteps，600 updates = 180000 / 300
+seed: 42                                           # 隨機種子，固定後可重現實驗
+
+# --- RL hyperparameters（RL 超參數） ---
+lr: 2e-4                                           # policy/value head 學習率
+rnn_lr: 5e-4                                       # RNN / aux optimizer 學習率
+vf_coeff: 0.5                                      # value loss 權重：loss = policy_loss + vf_coeff × vf_loss
+gamma: 0.991                                       # 折扣因子 γ，決定 agent 多重視未來 reward
+gae_lambda: 0.95                                   # GAE λ，控制 advantage 的 bias-variance 平衡
+max_grad_norm: 1.0                                 # 全域梯度裁剪上限
+normalize_return: true                             # 歸一化 critic target，穩定 value loss scale
+value_init_bias: 0.0                               # value head 最後一層 bias 初始值
+
+# --- Entropy（探索熵係數） ---
+ent_coeff_linear: 0.05                             # 線速度 head 的 entropy 係數，促進前後移動探索
+ent_coeff_angular: 0.10                            # 角速度 head 的 entropy 係數，促進轉向探索
+
+# --- WD-style gradient caps（WD 分離梯度裁剪） ---
+wd_update_clip: true                               # 啟用 actor/critic 分離 grad cap，避免 critic spike 壓制 actor
+wd_actor_update_clip: 8.0                          # actor grad norm 上限
+wd_critic_update_clip: 30.0                        # critic grad norm 上限
+
+# --- Aux / RNN training（輔助任務訓練） ---
+aux_seq_len: 15                                    # TBPTT 展開步數，WD 原版用 15
+aux_seq_batch_size: 256                            # 每次 aux mini-batch 的序列數量
+aux_grad_clip: 0.5                                 # aux/RNN 專用梯度裁剪，隔離 RNN gradient spike
+
+# --- Sensors / logging（感測器與日誌） ---
+lidar_no_noise: true                               # 關閉 LiDAR 雜訊（distractor + Unoise），避免 Bug B
+action_table_sample_size: 0                        # 動作分佈診斷抽樣數，0=關閉
+log_interval: 10                                   # 每 N 個 iteration 輸出 console log + WandB
+save_interval: 100                                 # 每 N 個 iteration 存 checkpoint
+no_resume_optimizer: true                          # 從 checkpoint 續訓時不恢復 optimizer state
+
+# --- Metadata（WandB 標籤） ---
+tags: [wd, sa2, a2c, aux]                          # WandB run tags，方便篩選

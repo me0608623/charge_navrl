@@ -1845,6 +1845,10 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
         twl = cfg.get("target_wall_length", 0.0)
         if twl > 0:
             ec.params["target_wall_length"] = twl
+        # 若有 room_size override，同步 wall randomization boundary
+        _bnd = getattr(env, '_room_boundary', None)
+        if _bnd is not None:
+            ec.params["boundary"] = _bnd
         evt.set_term_cfg("randomize_wall_positions", ec)
     except Exception:
         pass
@@ -1861,12 +1865,13 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
             if getattr(env, '_behavior_scheduler', None) is None:
                 # 首次建立
                 max_obs = cfg.get("num_obstacles_static", 0) + cfg.get("num_obstacles_dynamic", 5)
+                _bnd = getattr(env, '_room_boundary', 8.5)
                 env._behavior_scheduler = BehaviorScheduler(
                     stage_config=cfg,
                     num_envs=env.num_envs,
                     max_obstacles=max_obs,
                     device=str(env.device),
-                    boundary=8.5,
+                    boundary=_bnd,
                 )
                 print(f"[Curriculum] BehaviorScheduler created: {max_obs} slots, mix={behavior_mix}", flush=True)
             else:

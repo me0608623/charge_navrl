@@ -77,6 +77,8 @@ class MetricsCollector:
         self._collision = 0
         self._wall_collision = 0
         self._obstacle_collision = 0
+        self._static_obstacle_collision = 0
+        self._dynamic_obstacle_collision = 0
         self._timeout = 0
         self._tipped_over = 0
         self._total_eps = 0
@@ -261,6 +263,13 @@ class MetricsCollector:
                         self._ev_reward_timeout.append(ep_rwd)
                         self._ev_length_timeout.append(ep_len)
 
+                # Static/dynamic obstacle collision attribution
+                if reward_breakdown is not None:
+                    if reward_breakdown["static_obs_collision"][idx]:
+                        self._static_obstacle_collision += 1
+                    if reward_breakdown["dynamic_obs_collision"][idx]:
+                        self._dynamic_obstacle_collision += 1
+
                 self._total_eps += 1
                 if self._ep_length[idx].item() <= 2:
                     self._first_step_deaths += 1
@@ -291,9 +300,9 @@ class MetricsCollector:
         te = self._total_eps + eps
 
         if self._completed_rewards:
-            m["charge/reward_mean"] = np.mean(self._completed_rewards)
-            m["charge/reward_max"] = np.max(self._completed_rewards)
-            m["charge/reward_min"] = np.min(self._completed_rewards)
+            m["reward/episode_mean"] = np.mean(self._completed_rewards)
+            m["reward/episode_max"] = np.max(self._completed_rewards)
+            m["reward/episode_min"] = np.min(self._completed_rewards)
         if self._completed_lengths:
             m["charge/episode_length_mean"] = np.mean(self._completed_lengths)
         m["charge/total_episodes"] = self._total_eps
@@ -305,6 +314,8 @@ class MetricsCollector:
 
         m["charge/wall_collision_rate"] = self._wall_collision / te
         m["charge/obstacle_collision_rate"] = self._obstacle_collision / te
+        m["charge/static_obstacle_collision_rate"] = self._static_obstacle_collision / te
+        m["charge/dynamic_obstacle_collision_rate"] = self._dynamic_obstacle_collision / te
         total_col = self._collision + eps
         m["charge/VR_wall"] = self._wall_collision / total_col
         m["charge/VR_obstacle"] = self._obstacle_collision / total_col
@@ -333,77 +344,66 @@ class MetricsCollector:
 
         for k, vals in self._reward_terms.items():
             if vals:
-                m[f"charge/reward_term/{k}"] = np.mean(vals)
+                m[f"reward/term/{k}"] = np.mean(vals)
 
         if "stage" in self._curriculum_info:
             m["curriculum/stage"] = self._curriculum_info["stage"]
 
-        # --- Expected Value metrics (WD 期望值) ---
-        # V_total: 總體期望值 = 所有 episode 的平均回報 (WD: V_Spot)
+        # --- Expected Value / Hit Probability metrics (WD 期望值框架) ---
+        # total_expected_value: E[reward] (WD: V_Spot)
         if self._completed_rewards:
-            m["expect_value/V_total"] = np.mean(self._completed_rewards)
+            m["expect_value/total_expected_value"] = np.mean(self._completed_rewards)
 
-        # V_navigate: 導航期望值 = E[reward | goal_reached] (WD: V_Move)
-        # 衡量「成功 episode 的回報品質」— 是快速到達還是勉強到達？
+        # navigate_expected_value: E[reward | goal_reached] (WD: V_Move)
         if self._ev_reward_goal:
-            m["expect_value/V_navigate"] = np.mean(self._ev_reward_goal)
+            m["expect_value/navigate_expected_value"] = np.mean(self._ev_reward_goal)
 
-        # V_collision: 碰撞期望值 = E[reward | collision]
-        # 衡量「碰撞 episode 積累了多少回報才死」— 越接近 0 代表早期就碰撞
+        # collision_expected_value: E[reward | collision]
         if self._ev_reward_collision:
-            m["expect_value/V_collision"] = np.mean(self._ev_reward_collision)
+            m["expect_value/collision_expected_value"] = np.mean(self._ev_reward_collision)
 
-        # V_timeout: 超時期望值 = E[reward | timeout]
-        # 衡量「超時 episode 是接近成功（reward ≈ 0）還是完全卡住（reward << 0）」
+        # timeout_expected_value: E[reward | timeout]
         if self._ev_reward_timeout:
-            m["expect_value/V_timeout"] = np.mean(self._ev_reward_timeout)
+            m["expect_value/timeout_expected_value"] = np.mean(self._ev_reward_timeout)
 
-        # V_survive: 存活期望值 = E[alive_steps / ep_length] (WD: V_Survive)
-        # 衡量 agent 在 episode 中的平均存活比例
+        # survive_expected_value: E[alive_steps / ep_length] (WD: V_Survive)
         if self._ev_alive_ratio:
-            m["expect_value/V_survive"] = np.mean(self._ev_alive_ratio)
+            m["expect_value/survive_expected_value"] = np.mean(self._ev_alive_ratio)
 
-        # p_goal: 到達目標機率 (WD: p_Spot-Goal)
-        m["expect_value/p_goal"] = self._goal_reached / te
+        # Hit Probability: 結局機率 (WD: p_Spot-Goal / p_Spot-Obs+Map)
+        m["expect_value/goal_hit_probability"] = self._goal_reached / te
+        m["expect_value/collision_hit_probability"] = self._collision / te
+        m["expect_value/timeout_hit_probability"] = self._timeout / te
 
-        # p_collision: 碰撞機率 (WD: p_Spot-Obs + p_Spot-Map)
-        m["expect_value/p_collision"] = self._collision / te
-
-        # p_timeout: 超時機率
-        m["expect_value/p_timeout"] = self._timeout / te
-
-        # VR_wall / VR_obs: 碰撞歸因佔比 (WD: VR_Spot-Map / VR_Spot-Obs)
-        # 「碰撞中有多少比例來自牆壁 vs 動態障礙」— 用於診斷 policy 弱點
+        # Collision attribution ratio (WD: VR_Spot-Map / VR_Spot-Obs)
         total_col = self._collision + eps
-        m["expect_value/VR_wall"] = self._wall_collision / total_col
-        m["expect_value/VR_obs"] = self._obstacle_collision / total_col
+        m["expect_value/wall_collision_ratio"] = self._wall_collision / total_col
+        m["expect_value/obs_collision_ratio"] = self._obstacle_collision / total_col
+        obs_col = self._obstacle_collision + eps
+        m["expect_value/static_obs_collision_ratio"] = self._static_obstacle_collision / obs_col
+        m["expect_value/dynamic_obs_collision_ratio"] = self._dynamic_obstacle_collision / obs_col
 
-        # ep_length_goal: 成功 episode 平均步數 — 導航效率
+        # goal_length_expected_value: E[ep_length | goal_reached] — 導航效率
         if self._ev_length_goal:
-            m["expect_value/ep_length_goal"] = np.mean(self._ev_length_goal)
+            m["expect_value/goal_length_expected_value"] = np.mean(self._ev_length_goal)
 
-        # ep_length_collision: 碰撞 episode 平均步數 — 碰撞前能存活多久
+        # collision_length_expected_value: E[ep_length | collision]
         if self._ev_length_collision:
-            m["expect_value/ep_length_collision"] = np.mean(self._ev_length_collision)
+            m["expect_value/collision_length_expected_value"] = np.mean(self._ev_length_collision)
 
-        # V_goal_reward: 目標獎勵期望值 = E[goal_reward 分量] (WD: V_Spot-Goal)
-        # 衡量每 episode 平均獲得多少 goal reward（≈ p_goal × reward_get_goal）
+        # --- reward/ group: reward component decomposition ---
         if self._completed_goal_reward:
-            m["expect_value/V_goal_reward"] = np.mean(self._completed_goal_reward)
+            m["reward/goal_reward_expected_value"] = np.mean(self._completed_goal_reward)
 
-        # V_penalty: 碰撞懲罰期望值 = E[wall_hit + obs_hit 分量]
-        # 衡量每 episode 平均承受多少碰撞懲罰（≈ p_collision × penalty_hit）
         if self._completed_wall_hit_reward and self._completed_obs_hit_reward:
             wall_arr = np.array(self._completed_wall_hit_reward)
             obs_arr = np.array(self._completed_obs_hit_reward)
-            m["expect_value/V_penalty"] = np.mean(wall_arr + obs_arr)
+            m["reward/penalty_expected_value"] = np.mean(wall_arr + obs_arr)
 
-        # V_action_cost: 操作成本期望值 = E[action_reward 分量]
-        # 衡量 action cost 對 episode reward 的平均貢獻（Phase 1 有 cost_operate 時才有意義）
         if self._completed_action_reward:
             action_mean = np.mean(self._completed_action_reward)
             if abs(action_mean) > 1e-6:
-                m["expect_value/V_action_cost"] = action_mean
+                m["reward/action_cost_expected_value"] = action_mean
 
         return m
 
@@ -427,6 +427,8 @@ class MetricsCollector:
         self._collision = 0
         self._wall_collision = 0
         self._obstacle_collision = 0
+        self._static_obstacle_collision = 0
+        self._dynamic_obstacle_collision = 0
         self._timeout = 0
         self._tipped_over = 0
         self._total_eps = 0

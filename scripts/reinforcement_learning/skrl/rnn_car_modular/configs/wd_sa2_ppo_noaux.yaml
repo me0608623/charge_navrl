@@ -1,0 +1,63 @@
+# WD SA2 PPO, no aux training
+#
+# PPO + WD sparse reward + no-aux 的診斷 probe。
+# 判斷「A2C 更新規則」是否是 actor 學習不穩的瓶頸。
+#
+# 限制：WD curriculum/reward scale 原本偏 A2C 設計，
+# 此結果不能當成 PPO 最終上限。
+
+name: wd_sa2_ppo_noaux                             # config 唯一識別名
+description: "Fixed SA2, PPO-clip, WD sparse reward, aux disabled"  # 實驗描述
+
+# --- Environment / curriculum（環境與課程設定） ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD  # WD 版任務
+curriculum_version: warp_drive_single_agent_v1     # 課程定義檔
+initial_stage: 2                                   # 固定 SA2
+fixed_stage: true                                  # 不升降階
+obstacle_mode: rule_based                          # 規則控制障礙物
+
+# --- Profiles（模組選擇） ---
+reward_profile: wd_sparse                          # WD 稀疏獎勵
+algorithm: ppo                                     # PPO clipped surrogate 演算法
+aux_profile: none                                  # 關閉 aux，排除 RNN drift 變因
+encoder_profile: wd_exact_rnn                      # 仍用 RNN 架構，但權重不更新
+
+# --- Training budget（訓練預算） ---
+num_envs: 1024                                     # 並行環境數
+rollout_length: 300                                # 每次 rollout 步數
+timesteps: 180000                                  # 總 timesteps = 600 updates
+seed: 42                                           # 隨機種子
+
+# --- RL hyperparameters（RL 超參數） ---
+lr: 1e-4                                           # PPO 用較低 LR，避免 multi-epoch 更新太激進
+rnn_lr: 0.0                                        # RNN 凍結，排除 aux 更新干擾
+vf_coeff: 0.5                                      # value loss 權重
+gamma: 0.991                                       # 折扣因子
+gae_lambda: 0.95                                   # GAE λ
+max_grad_norm: 1.0                                 # 全域梯度裁剪
+normalize_return: true                             # 歸一化 critic target
+value_init_bias: 0.0                               # value head bias 初始值
+
+# --- PPO specific（PPO 專屬參數） ---
+ppo_epochs: 2                                      # 每個 rollout 重複訓練的 epoch 數
+mini_batches: 16                                   # mini-batch 數，有效 batch = envs×rollout / 16
+clip_eps: 0.1                                      # PPO ratio clipping: π_new/π_old 限制在 1±0.1
+
+# --- Entropy（探索熵係數） ---
+ent_coeff_linear: 0.05                             # 線速度 entropy 係數
+ent_coeff_angular: 0.10                            # 角速度 entropy 係數
+
+# --- WD-style gradient caps（WD 分離梯度裁剪） ---
+wd_update_clip: true                               # 保留 WD grad cap 做診斷保護
+wd_actor_update_clip: 8.0                          # actor grad norm 上限
+wd_critic_update_clip: 30.0                        # critic grad norm 上限
+
+# --- Sensors / logging（感測器與日誌） ---
+lidar_no_noise: true                               # 關閉 LiDAR 雜訊
+action_table_sample_size: 0                        # 動作診斷關閉
+log_interval: 10                                   # log 間隔
+save_interval: 100                                 # checkpoint 間隔
+no_resume_optimizer: true                          # 不恢復 optimizer state
+
+# --- Metadata（WandB 標籤） ---
+tags: [wd, sa2, ppo, noaux]                        # 含 ppo + noaux 標記

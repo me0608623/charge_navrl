@@ -2,11 +2,14 @@
 
 An ExperimentConfig bundles scene/phase/reward/algorithm/aux/encoder/budget
 into a single named config. CLI args override config fields when explicitly provided.
+
+Supports both YAML (recommended) and Python config files.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from dataclasses import dataclass, asdict, fields
 from typing import Any
@@ -31,13 +34,12 @@ class ExperimentConfig:
     scene_profile: str = "warp_drive_single_agent_v1"
     obstacle_mode: str = "rule_based"
 
-    # profiles (metadata, Phase 0)
+    # profiles
     reward_profile: str = "wd_sparse"
-    algorithm_profile: str = "a2c_wd"
+    algorithm: str = "a2c"          # "a2c" | "ppo"
     aux_profile: str = "wd_7d_geometry"
     encoder_profile: str = "wd_exact_rnn"
     critic_profile: str = "symmetric"
-    budget_profile: str = "custom"
 
     # training budget
     num_envs: int = 1024
@@ -55,8 +57,7 @@ class ExperimentConfig:
     value_init_bias: float | None = 0.0
     max_grad_norm: float = 1.0
 
-    # A2C/PPO
-    use_a2c: bool = True
+    # PPO-specific (ignored when algorithm="a2c")
     ppo_epochs: int = 2
     mini_batches: int = 16
     clip_eps: float = 0.1
@@ -69,7 +70,6 @@ class ExperimentConfig:
     wd_critic_update_clip: float = 30.0
 
     # aux
-    disable_aux_training: bool = False
     aux_seq_len: int = 15
     aux_burn_in: int = 0
     aux_seq_batch_size: int = 256
@@ -89,15 +89,28 @@ class ExperimentConfig:
     tags: tuple[str, ...] = ()
     notes: str = ""
 
+    # --- Derived properties ---
+
+    @property
+    def use_a2c(self) -> bool:
+        return self.algorithm == "a2c"
+
+    @property
+    def disable_aux_training(self) -> bool:
+        return self.aux_profile == "none"
+
+    @property
+    def algorithm_profile(self) -> str:
+        return "a2c_wd" if self.algorithm == "a2c" else "ppo_clip"
+
 
 # ── Field name → CLI flag mapping ──────────────────────────────────────────
 # Most fields map 1:1 to --<field_name>. Exceptions listed here.
 _FIELD_TO_FLAGS: dict[str, list[str]] = {
-    "use_a2c": ["--use_a2c", "--a2c", "--use_ppo", "--ppo"],
+    "algorithm": ["--use_a2c", "--a2c", "--use_ppo", "--ppo", "--algorithm"],
     "normalize_return": ["--normalize_return", "--normalize_returns"],
     "wd_update_clip": ["--wd_update_clip", "--no_wd_update_clip"],
     "fixed_stage": ["--fixed_stage"],
-    "disable_aux_training": ["--disable_aux_training"],
     "lidar_no_noise": ["--lidar_no_noise"],
     "no_resume_optimizer": ["--no_resume_optimizer"],
 }
@@ -105,12 +118,19 @@ _FIELD_TO_FLAGS: dict[str, list[str]] = {
 # Fields that are metadata-only (not applied to args_cli)
 _METADATA_ONLY_FIELDS = frozenset({
     "name", "description", "tags", "notes",
-    "critic_profile", "budget_profile",
+    "critic_profile",
 })
 
 # Fields that map to a different args_cli attribute name
 _FIELD_TO_ATTR: dict[str, str] = {
-    # all field names match argparse dest names, so no remapping needed currently
+    "algorithm": "use_a2c",
+}
+
+# Derived properties to also apply to args_cli
+_DERIVED_PROPERTIES = {
+    "use_a2c": ["--use_a2c", "--a2c", "--use_ppo", "--ppo"],
+    "disable_aux_training": ["--disable_aux_training"],
+    "algorithm_profile": ["--algorithm_profile"],
 }
 
 
@@ -151,15 +171,28 @@ def apply_experiment_config(
         if f.name in _METADATA_ONLY_FIELDS:
             continue
 
-        attr_name = _FIELD_TO_ATTR.get(f.name, f.name)
-
         # If user explicitly provided this flag on CLI, keep their value
         if _was_cli_provided(f.name, argv):
             continue
 
+        attr_name = _FIELD_TO_ATTR.get(f.name, f.name)
         cfg_value = getattr(cfg, f.name)
-        setattr(args_cli, attr_name, cfg_value)
+
+        # algorithm -> use_a2c conversion
+        if f.name == "algorithm":
+            setattr(args_cli, "use_a2c", cfg.use_a2c)
+        else:
+            setattr(args_cli, attr_name, cfg_value)
         applied.append(f.name)
+
+    # Apply derived properties
+    for prop_name, flags in _DERIVED_PROPERTIES.items():
+        cli_provided = any(
+            f in argv or any(a.startswith(f + "=") for a in argv)
+            for f in flags
+        )
+        if not cli_provided and hasattr(args_cli, prop_name):
+            setattr(args_cli, prop_name, getattr(cfg, prop_name))
 
     return applied
 
@@ -170,7 +203,37 @@ def experiment_config_to_dict(cfg: ExperimentConfig) -> dict[str, Any]:
     # Convert tuples to lists for JSON serialization
     if isinstance(d.get("tags"), tuple):
         d["tags"] = list(d["tags"])
+    # Add derived fields
+    d["use_a2c"] = cfg.use_a2c
+    d["disable_aux_training"] = cfg.disable_aux_training
+    d["algorithm_profile"] = cfg.algorithm_profile
     return d
+
+
+def load_experiment_config_from_yaml(path: str) -> ExperimentConfig:
+    """Load ExperimentConfig from a YAML file."""
+    import yaml
+
+    with open(path) as f:
+        data = yaml.safe_load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML config {path} must be a mapping, got {type(data).__name__}")
+
+    # Convert tags list to tuple
+    if "tags" in data and isinstance(data["tags"], list):
+        data["tags"] = tuple(data["tags"])
+
+    # Remove fields not in ExperimentConfig (comments become None, etc.)
+    valid_fields = {f.name for f in fields(ExperimentConfig)}
+    unknown = set(data.keys()) - valid_fields
+    if unknown:
+        raise ValueError(
+            f"Unknown fields in {path}: {unknown}. "
+            f"Valid fields: {sorted(valid_fields)}"
+        )
+
+    return ExperimentConfig(**data)
 
 
 def load_experiment_config_from_file(path: str) -> ExperimentConfig:

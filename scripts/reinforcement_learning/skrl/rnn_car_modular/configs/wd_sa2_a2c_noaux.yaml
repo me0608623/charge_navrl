@@ -1,0 +1,59 @@
+# WD SA2 A2C, no aux training
+#
+# A2C + WD sparse reward 的 no-aux 對照組。
+# 隔離「aux/RNN representation learning」對 actor 學習的影響。
+#
+# 核心假設：
+# - no-aux 比 aux 穩定 → aux/RNN 更新可能干擾 actor/critic
+# - no-aux 明顯學不好 → WD-style aux 對 sparse reward 表徵很重要
+
+name: wd_sa2_a2c_noaux                             # config 唯一識別名
+description: "Fixed SA2, A2C-WD, WD sparse reward, aux disabled"  # 實驗描述
+
+# --- Environment / curriculum（環境與課程設定） ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD  # WD 版任務
+curriculum_version: warp_drive_single_agent_v1     # 課程定義檔
+initial_stage: 2                                   # 固定 SA2
+fixed_stage: true                                  # 不升降階
+obstacle_mode: rule_based                          # 規則控制障礙物
+
+# --- Profiles（模組選擇） ---
+reward_profile: wd_sparse                          # WD 稀疏獎勵
+algorithm: a2c                                     # A2C 演算法
+aux_profile: none                                  # 關閉 aux 訓練，凍結 RNN 權重
+encoder_profile: wd_exact_rnn                      # 仍用 RNN 架構，但權重不更新
+
+# --- Training budget（訓練預算） ---
+num_envs: 1024                                     # 並行環境數
+rollout_length: 300                                # 每次 rollout 步數
+timesteps: 180000                                  # 總 timesteps = 600 updates
+seed: 42                                           # 隨機種子
+
+# --- RL hyperparameters（RL 超參數） ---
+lr: 2e-4                                           # policy/value head 學習率
+rnn_lr: 0.0                                        # RNN 學習率設 0，完全凍結 RNN 權重
+vf_coeff: 0.5                                      # value loss 權重
+gamma: 0.991                                       # 折扣因子
+gae_lambda: 0.95                                   # GAE λ
+max_grad_norm: 1.0                                 # 全域梯度裁剪
+normalize_return: true                             # 歸一化 critic target
+value_init_bias: 0.0                               # value head bias 初始值
+
+# --- Entropy（探索熵係數） ---
+ent_coeff_linear: 0.05                             # 線速度 entropy 係數
+ent_coeff_angular: 0.10                            # 角速度 entropy 係數
+
+# --- WD-style gradient caps（WD 分離梯度裁剪） ---
+wd_update_clip: true                               # 啟用分離 grad cap
+wd_actor_update_clip: 8.0                          # actor grad norm 上限
+wd_critic_update_clip: 30.0                        # critic grad norm 上限
+
+# --- Sensors / logging（感測器與日誌） ---
+lidar_no_noise: true                               # 關閉 LiDAR 雜訊
+action_table_sample_size: 0                        # 動作診斷關閉
+log_interval: 10                                   # log 間隔
+save_interval: 100                                 # checkpoint 間隔
+no_resume_optimizer: true                          # 不恢復 optimizer state
+
+# --- Metadata（WandB 標籤） ---
+tags: [wd, sa2, a2c, noaux]                        # 含 noaux 標記

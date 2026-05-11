@@ -11,7 +11,7 @@ PYTHONUNBUFFERED=1 /home/aa/miniconda3/envs/env_isaaclab/bin/python \
   --use_a2c --ppo_epochs 1 \
   --lr 0.0002 --rnn_lr 0.0005 --aux_lr 0.0 \
   --gamma 0.984 --vf_coeff 0.025 \
-  --curriculum_version warp_drive_goal_first \
+  --curriculum_version warp_drive_single_agent_v1 \
   --initial_stage 1 --fixed_stage \
   --aux_mode tbptt --aux_seq_len 15 --aux_seq_batch_size 256 \
   --log_interval 5 --save_interval 200 \

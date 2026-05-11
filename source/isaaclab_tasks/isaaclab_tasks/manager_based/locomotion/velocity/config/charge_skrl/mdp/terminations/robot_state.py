@@ -269,9 +269,15 @@ def obstacle_collision_geometric(
     device = robot_pos.device
 
     overlap = torch.zeros(N, dtype=torch.bool, device=device)
+    static_overlap = torch.zeros(N, dtype=torch.bool, device=device)
+    dynamic_overlap = torch.zeros(N, dtype=torch.bool, device=device)
 
     # Per-env per-obstacle collision radii (from obs_size_rand randomization)
     has_per_obs_radii = hasattr(env, "_obstacle_radii")
+
+    # Static/dynamic classification by env difficulty + obstacle index
+    has_difficulty = hasattr(env, "_env_difficulty")
+    num_static_mixed = getattr(env, "_num_obstacles_static_mixed", 0)
 
     for i in range(max_obstacles):
         name = f"obstacle_{i}"
@@ -297,6 +303,21 @@ def obstacle_collision_geometric(
 
         hit = visible & (dist_sq < threshold_sq)
         overlap = overlap | hit
+
+        # Attribute hit to static or dynamic per-env
+        if hit.any() and has_difficulty:
+            diff = env._env_difficulty  # [N]
+            # difficulty 1 = all static, 2 = all dynamic
+            # difficulty 3 (mixed): i < num_static_mixed → static
+            is_static_env = (diff == 1) | ((diff == 3) & (i < num_static_mixed))
+            static_overlap = static_overlap | (hit & is_static_env)
+            dynamic_overlap = dynamic_overlap | (hit & ~is_static_env)
+        elif hit.any():
+            static_overlap = static_overlap | hit
+
+    # Store attribution for downstream metrics
+    env._obs_collision_static_mask = static_overlap
+    env._obs_collision_dynamic_mask = dynamic_overlap
 
     # 一次性診斷（第 1 次呼叫，確認有抓到障礙物）
     _obs_collision_diag_count += 1

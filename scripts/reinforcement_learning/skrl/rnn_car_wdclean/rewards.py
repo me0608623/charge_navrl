@@ -97,6 +97,16 @@ def compute_wd_charge_reward(
 
     any_collision = wall_collision | obs_collision | other_death  # noqa: F841
 
+    # --- Static vs dynamic obstacle collision attribution ---
+    static_obs_collision = getattr(
+        env_unwrapped, "_obs_collision_static_mask",
+        torch.zeros(N, dtype=torch.bool, device=device),
+    )
+    dynamic_obs_collision = getattr(
+        env_unwrapped, "_obs_collision_dynamic_mask",
+        torch.zeros(N, dtype=torch.bool, device=device),
+    )
+
     # --- Per-component reward ---
     goal_reward = torch.zeros(N, device=device)
     wall_hit_reward = torch.zeros(N, device=device)
@@ -139,6 +149,8 @@ def compute_wd_charge_reward(
         "goal_reached": goal_reached,
         "wall_collision": wall_collision,
         "obs_collision": obs_collision,
+        "static_obs_collision": static_obs_collision,
+        "dynamic_obs_collision": dynamic_obs_collision,
         "other_death": other_death,
     }
 

@@ -1,0 +1,64 @@
+# WD SA2 A2C + aux, low entropy variant
+#
+# 與 wd_sa2_a2c_aux 幾乎相同，但大幅降低 entropy coefficient。
+# 測試「過高 entropy 是否讓 actor 長期接近 random policy」。
+#
+# 核心差異：
+#   normal: linear=0.05, angular=0.10
+#   low:    linear=0.01, angular=0.02
+
+name: wd_sa2_a2c_aux_lowent                        # config 唯一識別名
+description: "Fixed SA2, A2C-WD, WD sparse reward, WD 7D aux, low entropy"  # 實驗描述
+
+# --- Environment / curriculum（環境與課程設定） ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD  # WD 版任務，env reward 歸零
+curriculum_version: warp_drive_single_agent_v1     # 課程 phase 定義檔
+initial_stage: 2                                   # 固定 SA2
+fixed_stage: true                                  # 不升降階
+obstacle_mode: rule_based                          # 規則控制障礙物
+
+# --- Profiles（模組選擇） ---
+reward_profile: wd_sparse                          # WD 稀疏獎勵
+algorithm: a2c                                     # A2C 演算法
+aux_profile: wd_7d_geometry                        # 保留 aux，只測 entropy 變因
+encoder_profile: wd_exact_rnn                      # WD 原版 RNN 編碼器
+
+# --- Training budget（訓練預算） ---
+num_envs: 1024                                     # 並行環境數
+rollout_length: 300                                # 每次 rollout 步數
+timesteps: 180000                                  # 總 timesteps = 600 updates
+seed: 42                                           # 隨機種子
+
+# --- RL hyperparameters（RL 超參數） ---
+lr: 2e-4                                           # policy/value head 學習率
+rnn_lr: 5e-4                                       # RNN 學習率
+vf_coeff: 0.5                                      # value loss 權重
+gamma: 0.991                                       # 折扣因子
+gae_lambda: 0.95                                   # GAE λ
+max_grad_norm: 1.0                                 # 全域梯度裁剪
+normalize_return: true                             # 歸一化 critic target
+value_init_bias: 0.0                               # value head bias 初始值
+
+# --- Entropy（低 entropy 是此 config 唯一變因） ---
+ent_coeff_linear: 0.01                             # 線速度 entropy，比 baseline 低 5 倍 (0.05→0.01)
+ent_coeff_angular: 0.02                            # 角速度 entropy，比 baseline 低 5 倍 (0.10→0.02)
+
+# --- WD-style gradient caps（WD 分離梯度裁剪） ---
+wd_update_clip: true                               # 啟用分離 grad cap
+wd_actor_update_clip: 8.0                          # actor grad norm 上限
+wd_critic_update_clip: 30.0                        # critic grad norm 上限
+
+# --- Aux / RNN training（輔助任務訓練） ---
+aux_seq_len: 15                                    # TBPTT 展開步數
+aux_seq_batch_size: 256                            # aux mini-batch 序列數
+aux_grad_clip: 0.5                                 # aux 梯度裁剪
+
+# --- Sensors / logging（感測器與日誌） ---
+lidar_no_noise: true                               # 關閉 LiDAR 雜訊
+action_table_sample_size: 0                        # 動作診斷關閉
+log_interval: 10                                   # log 間隔
+save_interval: 100                                 # checkpoint 間隔
+no_resume_optimizer: true                          # 不恢復 optimizer state
+
+# --- Metadata（WandB 標籤） ---
+tags: [wd, sa2, a2c, aux, lowent]                  # 含 lowent 標記方便篩選

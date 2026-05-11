@@ -12,7 +12,7 @@ v5 WD-principle changes:
   - PolicyHead [256,256,256,512], ValueHead [256,256,256,512,512]
   - Vanilla RNN (not GRU), memory_dim=30, module_connect_dim=12
   - vf_coeff=0.025 (WD: spot_vf_loss_coeff)
-  - A2C mode (--use_a2c): no PPO clipping, single epoch
+  - A2C mode (--use_a2c): single epoch, full batch + PPO clipping for stability
   - Per-phase obstacle_speed_rate: 0.8→0.85→1.15
   - LR: rl_head=0.0002, rnn=0.0005
 
@@ -211,9 +211,9 @@ parser.add_argument("--wd_module_entropy_eps", type=float, default=1e-12,
 # - 正常範圍：布林旗標（預設 True = A2C，對齊 WD）。
 # - 更改影響：PPO 有 clip 保護更穩但與 WD 不可直接比較；A2C 更新更直接但需 LR 搭配。
 parser.add_argument("--use_a2c", "--a2c", action="store_true", default=True,
-                    help="Use A2C (no PPO clipping). WD: A2CK mode. DEFAULT.")
+                    help="Use A2C (single epoch, full batch) + PPO clipping. DEFAULT.")
 parser.add_argument("--use_ppo", "--ppo", dest="use_a2c", action="store_false",
-                    help="Use PPO (clipped surrogate) instead of A2C.")
+                    help="Use PPO (multi-epoch mini-batch) with clipping.")
 # --tbptt_len
 # - 用意：對「主 RL 訓練」使用 truncated BPTT 的序列長度（>0 才啟用）。
 # - 正常範圍：0（逐步更新）或 8～64（WD 常用 15）。
@@ -345,6 +345,14 @@ parser.add_argument("--scene_bound_rand", type=float, default=0.0,
 # - 更改影響：太小場景擁擠碰撞率高；太大場景空曠避障壓力小。
 parser.add_argument("--scene_bound_base", type=float, default=7.0,
                     help="Base obstacle movement boundary (m)")
+# --room_size
+# - 用意：覆蓋場景物理邊界（外牆位置）。預設 None = 不覆蓋（使用 env_cfg 的 room_size=10.0 → 20×20m）。
+# - 正常範圍：3.0～10.0（實際場景 = ±room_size → 2×room_size × 2×room_size m²）。
+# - 更改影響：影響外牆位置 + LiDAR boundary 查詢 + wall/obstacle randomization boundary。
+#   也會自動調整 scene_bound_base 和 randomize_walls boundary。
+parser.add_argument("--room_size", type=float, default=None,
+                    help="Override scene physical boundary (m). None=use env_cfg default (10.0=20x20m). "
+                         "E.g. --room_size 5 → 10x10m scene.")
 
 # --- Logging ---
 # --run_name
@@ -1209,6 +1217,16 @@ def compute_wd_charge_reward(
 
     any_collision = wall_collision | obs_collision | other_death
 
+    # --- Static vs dynamic obstacle collision attribution ---
+    static_obs_collision = getattr(
+        env_unwrapped, "_obs_collision_static_mask",
+        torch.zeros(N, dtype=torch.bool, device=device),
+    )
+    dynamic_obs_collision = getattr(
+        env_unwrapped, "_obs_collision_dynamic_mask",
+        torch.zeros(N, dtype=torch.bool, device=device),
+    )
+
     # --- Per-component reward ---
     goal_reward = torch.zeros(N, device=device)
     wall_hit_reward = torch.zeros(N, device=device)
@@ -1251,6 +1269,8 @@ def compute_wd_charge_reward(
         "goal_reached": goal_reached,
         "wall_collision": wall_collision,
         "obs_collision": obs_collision,
+        "static_obs_collision": static_obs_collision,
+        "dynamic_obs_collision": dynamic_obs_collision,
         "other_death": other_death,
     }
 
@@ -1494,6 +1514,8 @@ class MetricsCollector:
         self._collision = 0           # total: wall + obstacle + geometric
         self._wall_collision = 0
         self._obstacle_collision = 0
+        self._static_obstacle_collision = 0
+        self._dynamic_obstacle_collision = 0
         self._timeout = 0
         self._tipped_over = 0
         self._total_eps = 0
@@ -1698,7 +1720,10 @@ class MetricsCollector:
         if "log" in info:
             for key, val in info["log"].items():
                 if key.startswith("Curriculum/"):
-                    k = key.replace("Curriculum/", "")
+                    # IsaacLab CurriculumManager format: "Curriculum/{term_name}/{key}"
+                    # Extract the leaf key after the last '/'
+                    parts = key.split("/")
+                    k = parts[-1] if len(parts) >= 3 else key.replace("Curriculum/", "")
                     try:
                         self._curriculum_info[k] = val.item() if isinstance(val, torch.Tensor) else float(val)
                     except (ValueError, TypeError):
@@ -1784,6 +1809,13 @@ class MetricsCollector:
                         self._ev_reward_timeout.append(ep_rwd)
                         self._ev_length_timeout.append(ep_len)
 
+                # Static/dynamic obstacle collision attribution
+                if reward_breakdown is not None:
+                    if reward_breakdown["static_obs_collision"][idx]:
+                        self._static_obstacle_collision += 1
+                    if reward_breakdown["dynamic_obs_collision"][idx]:
+                        self._dynamic_obstacle_collision += 1
+
                 self._total_eps += 1
                 # dies_at_birth: episode ended within 2 steps
                 if self._ep_length[idx].item() <= 2:
@@ -1828,9 +1860,9 @@ class MetricsCollector:
         # ==============================================================
 
         if self._completed_rewards:
-            m["charge/reward_mean"] = np.mean(self._completed_rewards)
-            m["charge/reward_max"] = np.max(self._completed_rewards)
-            m["charge/reward_min"] = np.min(self._completed_rewards)
+            m["reward/episode_mean"] = np.mean(self._completed_rewards)
+            m["reward/episode_max"] = np.max(self._completed_rewards)
+            m["reward/episode_min"] = np.min(self._completed_rewards)
         if self._completed_lengths:
             m["charge/episode_length_mean"] = np.mean(self._completed_lengths)
         m["charge/total_episodes"] = self._total_eps
@@ -1840,9 +1872,11 @@ class MetricsCollector:
         m["charge/survival_probability"] = 1.0 - self._collision / te
         m["charge/dies_at_birth_rate"] = self._first_step_deaths / te
 
-        # 碰撞分解: wall vs obstacle
+        # 碰撞分解: wall vs obstacle (overall + static/dynamic)
         m["charge/wall_collision_rate"] = self._wall_collision / te
         m["charge/obstacle_collision_rate"] = self._obstacle_collision / te
+        m["charge/static_obstacle_collision_rate"] = self._static_obstacle_collision / te
+        m["charge/dynamic_obstacle_collision_rate"] = self._dynamic_obstacle_collision / te
         total_col = self._collision + eps
         m["charge/VR_wall"] = self._wall_collision / total_col
         m["charge/VR_obstacle"] = self._obstacle_collision / total_col
@@ -1894,68 +1928,69 @@ class MetricsCollector:
         # --- All Isaac Lab reward terms (raw) ---
         for k, vals in self._reward_terms.items():
             if vals:
-                m[f"charge/reward_term/{k}"] = np.mean(vals)
+                m[f"reward/term/{k}"] = np.mean(vals)
 
         # --- Curriculum info (only log stage — rest is constant under --fixed_stage) ---
         if "stage" in self._curriculum_info:
             m["curriculum/stage"] = self._curriculum_info["stage"]
 
         # ==============================================================
-        # expect_value/ — WD 期望值 (Expected Value metrics)
+        # expect_value/ — WD 期望值 (Expected Value / Hit Probability)
         # ==============================================================
         # WD 論文用 V_Survive / V_Move / V_Spot-Goal 等期望值追蹤訓練進程。
         # 以下為 charge 版本，將 episode reward 按結局分類計算條件期望值。
 
-        # V_total: 總體期望值 = E[reward] (WD: V_Spot)
+        # total_expected_value: E[reward] (WD: V_Spot)
         if self._completed_rewards:
-            m["expect_value/V_total"] = np.mean(self._completed_rewards)
+            m["expect_value/total_expected_value"] = np.mean(self._completed_rewards)
 
-        # V_navigate: 導航期望值 = E[reward | goal_reached] (WD: V_Move)
+        # navigate_expected_value: E[reward | goal_reached] (WD: V_Move)
         if self._ev_reward_goal:
-            m["expect_value/V_navigate"] = np.mean(self._ev_reward_goal)
+            m["expect_value/navigate_expected_value"] = np.mean(self._ev_reward_goal)
 
-        # V_collision: 碰撞期望值 = E[reward | collision]
+        # collision_expected_value: E[reward | collision]
         if self._ev_reward_collision:
-            m["expect_value/V_collision"] = np.mean(self._ev_reward_collision)
+            m["expect_value/collision_expected_value"] = np.mean(self._ev_reward_collision)
 
-        # V_timeout: 超時期望值 = E[reward | timeout]
+        # timeout_expected_value: E[reward | timeout]
         if self._ev_reward_timeout:
-            m["expect_value/V_timeout"] = np.mean(self._ev_reward_timeout)
+            m["expect_value/timeout_expected_value"] = np.mean(self._ev_reward_timeout)
 
-        # V_survive: 存活期望值 = E[alive_ratio] (WD: V_Survive)
+        # survive_expected_value: E[alive_ratio] (WD: V_Survive)
         if self._ev_alive_ratio:
-            m["expect_value/V_survive"] = np.mean(self._ev_alive_ratio)
+            m["expect_value/survive_expected_value"] = np.mean(self._ev_alive_ratio)
 
-        # p_goal / p_collision / p_timeout: 結局機率
-        m["expect_value/p_goal"] = self._goal_reached / te
-        m["expect_value/p_collision"] = self._collision / te
-        m["expect_value/p_timeout"] = self._timeout / te
+        # Hit Probability: 結局機率 (WD: p_Spot-Goal / p_Spot-Obs+Map)
+        m["expect_value/goal_hit_probability"] = self._goal_reached / te
+        m["expect_value/collision_hit_probability"] = self._collision / te
+        m["expect_value/timeout_hit_probability"] = self._timeout / te
 
-        # VR_wall / VR_obs: 碰撞歸因佔比 (WD: VR_Spot-Map / VR_Spot-Obs)
-        m["expect_value/VR_wall"] = self._wall_collision / total_col
-        m["expect_value/VR_obs"] = self._obstacle_collision / total_col
+        # Collision attribution ratio (WD: VR_Spot-Map / VR_Spot-Obs)
+        m["expect_value/wall_collision_ratio"] = self._wall_collision / total_col
+        m["expect_value/obs_collision_ratio"] = self._obstacle_collision / total_col
+        obs_col = self._obstacle_collision + eps
+        m["expect_value/static_obs_collision_ratio"] = self._static_obstacle_collision / obs_col
+        m["expect_value/dynamic_obs_collision_ratio"] = self._dynamic_obstacle_collision / obs_col
 
-        # ep_length_goal / ep_length_collision: 按結局分類的 episode 長度
+        # goal_length_expected_value / collision_length_expected_value
         if self._ev_length_goal:
-            m["expect_value/ep_length_goal"] = np.mean(self._ev_length_goal)
+            m["expect_value/goal_length_expected_value"] = np.mean(self._ev_length_goal)
         if self._ev_length_collision:
-            m["expect_value/ep_length_collision"] = np.mean(self._ev_length_collision)
+            m["expect_value/collision_length_expected_value"] = np.mean(self._ev_length_collision)
 
-        # V_goal_reward: 目標獎勵期望值 = E[goal_reward 分量] (WD: V_Spot-Goal)
+        # --- reward/ group: reward component decomposition ---
         if self._completed_goal_reward:
-            m["expect_value/V_goal_reward"] = np.mean(self._completed_goal_reward)
+            m["reward/goal_reward_expected_value"] = np.mean(self._completed_goal_reward)
 
-        # V_penalty: 碰撞懲罰期望值 = E[wall_hit + obs_hit 分量]
         if self._completed_wall_hit_reward and self._completed_obs_hit_reward:
             wall_arr = np.array(self._completed_wall_hit_reward)
             obs_arr = np.array(self._completed_obs_hit_reward)
-            m["expect_value/V_penalty"] = np.mean(wall_arr + obs_arr)
+            m["reward/penalty_expected_value"] = np.mean(wall_arr + obs_arr)
 
-        # V_action_cost: 操作成本期望值（Phase 1 有 cost_operate 時才有意義）
         if self._completed_action_reward:
             action_mean = np.mean(self._completed_action_reward)
             if abs(action_mean) > 1e-6:
-                m["expect_value/V_action_cost"] = action_mean
+                m["reward/action_cost_expected_value"] = action_mean
 
         return m
 
@@ -1992,6 +2027,8 @@ class MetricsCollector:
         self._collision = 0
         self._wall_collision = 0
         self._obstacle_collision = 0
+        self._static_obstacle_collision = 0
+        self._dynamic_obstacle_collision = 0
         self._timeout = 0
         self._tipped_over = 0
         self._total_eps = 0
@@ -2038,6 +2075,53 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # --- Env config overrides：在 gym.make 之前修改 cfg ---
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs  # 覆蓋 YAML 裡的 num_envs
+
+    # --room_size: 覆蓋場景物理邊界（外牆位置 + LiDAR boundary 查詢）
+    if args_cli.room_size is not None:
+        _rs = args_cli.room_size
+        _wt = 1.0  # wall_thickness
+        _wl = _rs * 2 + _wt  # wall_length
+        _wh = 3.0  # wall_height (match VLP16 visibility)
+
+        # 1) 覆蓋 scene cfg 物理牆位置
+        scene = env_cfg.scene
+        for wall_attr, pos in [
+            ("wall_north", (0.0, _rs, _wh / 2)),
+            ("wall_south", (0.0, -_rs, _wh / 2)),
+            ("wall_east", (_rs, 0.0, _wh / 2)),
+            ("wall_west", (-_rs, 0.0, _wh / 2)),
+        ]:
+            wall = getattr(scene, wall_attr, None)
+            if wall is not None:
+                wall.init_state.pos = pos
+                # 更新牆壁尺寸
+                if "North" in wall_attr or "South" in wall_attr or "north" in wall_attr or "south" in wall_attr:
+                    wall.spawn.size = (_wl, _wt, _wh)
+                else:
+                    wall.spawn.size = (_wt, _wl, _wh)
+
+        # 2) Monkey-patch wall_layout module-level constants (用於 LiDAR/collision 查詢)
+        import isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.wall_layout as _wl_mod
+        _wl_mod.BOUNDARY_WALLS_20x20 = [
+            (0.0,  _rs, _wl, _wt),   # North
+            (0.0, -_rs, _wl, _wt),   # South
+            (_rs,  0.0, _wt, _wl),   # East
+            (-_rs, 0.0, _wt, _wl),   # West
+        ]
+        # 過濾超出新邊界的 maze walls
+        _margin = _rs - 1.0
+        _wl_mod.MAZE_WALLS_20x20 = [
+            w for w in _wl_mod.MAZE_WALLS_20x20
+            if abs(w[0]) + w[2] / 2 < _margin and abs(w[1]) + w[3] / 2 < _margin
+        ]
+        _wl_mod.ALL_WALLS_20x20 = _wl_mod.MAZE_WALLS_20x20 + _wl_mod.BOUNDARY_WALLS_20x20
+
+        # 3) 自動調整 scene_bound_base（障礙物移動範圍 < 外牆）
+        if not any(a.startswith("--scene_bound_base") for a in sys.argv):
+            args_cli.scene_bound_base = max(2.0, _rs - 2.0)
+
+        print(f"[INFO] room_size={_rs} → scene {_rs*2}×{_rs*2}m, "
+              f"boundary_walls at ±{_rs}, scene_bound_base={args_cli.scene_bound_base}")
 
     if args_cli.lidar_no_noise:
         # --lidar_no_noise: 關閉 LiDAR 三種噪聲（displacement_std / hole_rate / distractor_rate）。
@@ -2086,6 +2170,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = SkrlVecEnvWrapper(env, ml_framework="torch")
     num_envs = env.num_envs   # 實際並行 env 數（可能與 cfg 設定略有不同）
     device = env.device        # GPU device（Isaac Sim 固定在 CUDA:0）
+
+    # --room_size: 設定 _room_boundary 供 curriculum + BehaviorScheduler 使用
+    if args_cli.room_size is not None:
+        _env_unwrapped = env.unwrapped if hasattr(env, 'unwrapped') else env
+        _env_unwrapped._room_boundary = args_cli.room_size - 1.5  # 牆內安全邊距
 
     # --- Obstacle mode setup：設定障礙物控制模式 ---
     # 優先順序: CLI 明確指定 > phase config (GLOBAL) > CLI default
@@ -2631,10 +2720,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         "spot_cost_operate": _spot_cost_operate,
     })
 
-    # --- WD entropy params (initial, Phase 1 defaults) ---
-    # A2CK per-head: spot_entropy_coeff=0.04×2.5=0.10, action2=0.15×2.5=0.375
-    _ent_coeff_linear = args_cli.ent_coeff_linear if args_cli.ent_coeff_linear > 0 else 0.10
-    _ent_coeff_angular = args_cli.ent_coeff_angular if args_cli.ent_coeff_angular > 0 else 0.375
+    # --- WD entropy params (initial, safe defaults) ---
+    # Conservative defaults (0.01/0.02) prevent entropy explosion on iter 0
+    # before curriculum sync kicks in at iter 1. Old WD defaults (0.10/0.375)
+    # were too large and caused catastrophic entropy bonus > policy loss.
+    _ent_coeff_linear = args_cli.ent_coeff_linear if args_cli.ent_coeff_linear > 0 else 0.01
+    _ent_coeff_angular = args_cli.ent_coeff_angular if args_cli.ent_coeff_angular > 0 else 0.02
     if args_cli.ent_coeff > 0:  # Legacy single coeff override
         _ent_coeff_linear = args_cli.ent_coeff
         _ent_coeff_angular = args_cli.ent_coeff
@@ -2719,14 +2810,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _reward_module.update_params(metrics._curriculum_info)
 
         # Sync WD entropy params from curriculum (per-phase, A2CK per-head)
+        _ent_before_lin = _ent_coeff_linear
+        _ent_before_ang = _ent_coeff_angular
         if args_cli.ent_coeff_linear == 0.0:
-            _ent_coeff_linear = metrics._curriculum_info.get("ent_coeff_linear", 0.30)
+            _ent_coeff_linear = metrics._curriculum_info.get("ent_coeff_linear", 0.01)
         if args_cli.ent_coeff_angular == 0.0:
-            _ent_coeff_angular = metrics._curriculum_info.get("ent_coeff_angular", 0.375)
+            _ent_coeff_angular = metrics._curriculum_info.get("ent_coeff_angular", 0.02)
         # Legacy fallback: if --ent_coeff is set, use it for both heads
         if args_cli.ent_coeff > 0:
             _ent_coeff_linear = args_cli.ent_coeff
             _ent_coeff_angular = args_cli.ent_coeff
+        # DEBUG: log ent_coeff sync result (first 5 iters + every 50)
+        if iteration <= 5 or iteration % 50 == 0:
+            _ci_has = "ent_coeff_linear" in metrics._curriculum_info
+            print(
+                f"[DEBUG ent_coeff sync] iter={iteration} "
+                f"before=({_ent_before_lin:.4f},{_ent_before_ang:.4f}) "
+                f"after=({_ent_coeff_linear:.4f},{_ent_coeff_angular:.4f}) "
+                f"ci_has_key={_ci_has} "
+                f"ci_val={metrics._curriculum_info.get('ent_coeff_linear', 'MISSING')}"
+            )
 
         # Sync obstacle speed rate from curriculum (per-phase)
         # WD: obs_speed_rate 0.8 → 0.85 → 1.15 across phases
@@ -2833,6 +2936,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # 重置障礙物速度 cache（避免舊 episode 的速度污染新 episode）
                 if hasattr(env.unwrapped, "_obstacle_velocities"):
                     env.unwrapped._obstacle_velocities[done_ids] = 0.0
+                # 重置 WD aux 歷史 position cache（t-1/t-2/t-3）
+                if hasattr(env.unwrapped, "_wd_aux_obs_pos_t1"):
+                    env.unwrapped._wd_aux_obs_pos_t1[done_ids] = 0.0
+                    env.unwrapped._wd_aux_obs_pos_t2[done_ids] = 0.0
+                    env.unwrapped._wd_aux_obs_pos_t3[done_ids] = 0.0
                 # 每次 episode reset 重新隨機化障礙物大小和場景邊界（WD: obs_size_rand）
                 _randomize_obstacle_sizes(done_ids, _obs_size_rand)
                 _randomize_scene_bounds(done_ids, _scene_bound_rand)
@@ -2854,7 +2962,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _aux_already_done = False  # flag: True 表示 WD-order 已在 RL 之前完成 aux 更新
 
             # =============================================================
-            # WD-order: Aux FIRST → Fresh forward → RL（wd_exact_rnn + A2C 模式）
+            # WD-order: Aux FIRST → Fresh forward → RL（A2C 模式自動啟用）
             # =============================================================
             # WD 原版流程 (custom_trainer.py):
             #   1. Rollout（收集 obs/actions/rewards）
@@ -2862,8 +2970,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             #   3. Fresh RL forward（用更新後的 RNN 重新 forward obs → 取得新 features）
             #   4. RL update（用新 features 做 A2C 更新）
             # 這確保 RL head 永遠看到「最新 RNN feature」，不是延遲一個 iteration 的舊 feature。
-            # 只在 A2C 模式有效：PPO 需要舊 log_probs 和舊 features 對應，WD-order 會打破這個假設。
-            if wd_exact_mode and args_cli.use_a2c and not args_cli.disable_aux_training:
+            # A2C 無 importance sampling ratio，不需要 π_old/features 對應，可安全使用 WD-order。
+            # PPO 模式仍走 legacy order（RL → Aux），因為需要舊 log_probs 和舊 features 對應。
+            if args_cli.use_a2c and not args_cli.disable_aux_training:
                 # --- Run aux update (same logic as the section below) ---
                 if use_extractor: extractor.train()
                 preprocess_rnn.train()
@@ -3057,23 +3166,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     with torch.no_grad():
                         _approx_kl = (flat_lp[mb] - nlp).mean().item()
 
-                    if args_cli.use_a2c:
-                        # A2CK（WD 原版）：無 PPO clip，純 policy gradient
-                        # loss = -E[log π(a|s) * A(s,a)]（on-policy）
-                        pl = -(nlp * flat_adv[mb].detach()).mean()
-                    else:
-                        # PPO clipped surrogate：
-                        # ratio = π_new(a|s) / π_old(a|s)
-                        # loss = -min(ratio*A, clip(ratio, 1±ε)*A)
-                        ratio = (nlp - flat_lp[mb]).exp()
-                        s1 = ratio * flat_adv[mb]
-                        s2 = torch.clamp(ratio, 1 - args_cli.clip_eps, 1 + args_cli.clip_eps) * flat_adv[mb]
-                        pl = -torch.min(s1, s2).mean()
-                        # Patch 3: PPO-only 指標（A2C 不計算）
-                        with torch.no_grad():
-                            _clip_frac = ((ratio - 1.0).abs() > args_cli.clip_eps).float().mean().item()
-                            ppo_clip_frac_l.append(_clip_frac)
-                            ppo_ratio_l.append(ratio.mean().item())
+                    # PPO clipped surrogate（A2C/PPO 共用）：
+                    # ratio = π_new(a|s) / π_old(a|s)
+                    # loss = -min(ratio*A, clip(ratio, 1±ε)*A)
+                    # A2C 模式：single-epoch full-batch + clipping 防護
+                    # PPO 模式：multi-epoch mini-batch + clipping
+                    ratio = (nlp - flat_lp[mb]).exp()
+                    s1 = ratio * flat_adv[mb]
+                    s2 = torch.clamp(ratio, 1 - args_cli.clip_eps, 1 + args_cli.clip_eps) * flat_adv[mb]
+                    pl = -torch.min(s1, s2).mean()
+                    with torch.no_grad():
+                        _clip_frac = ((ratio - 1.0).abs() > args_cli.clip_eps).float().mean().item()
+                        ppo_clip_frac_l.append(_clip_frac)
+                        ppo_ratio_l.append(ratio.mean().item())
 
                     vl = F.mse_loss(nv, flat_value_target[mb])  # critic MSE loss
                     vl_raw = vl.item()  # Patch 1: 記錄 clamp 前的原始 vf_loss（用於診斷）
