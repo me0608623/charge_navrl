@@ -206,6 +206,19 @@ parser.add_argument("--wd_critic_update_clip", type=float, default=30.0,
 # - 更改影響：通常不需要動。
 parser.add_argument("--wd_module_entropy_eps", type=float, default=1e-12,
                     help="Numerical epsilon for module_entropy = log10(actor_update) - log10(critic_update).")
+# --policy_loss_clamp
+# - 用意：WD A2CK 動態 loss 夾緊（policy loss 項）。
+# - 當 |policy_loss| 超過此閾值，等比例縮放以保留梯度方向但限制量級。
+# - 正常範圍：5.0～50.0（WD 原版 20.0）。
+parser.add_argument("--policy_loss_clamp", type=float, default=20.0,
+                    help="WD A2CK: clamp policy loss magnitude. Scale down if |pl| > threshold.")
+# --vf_term_clamp
+# - 用意：WD A2CK 動態 loss 夾緊（vf_coeff × vf_loss 項）。
+# - 當 |vf_coeff × vf_loss| 超過此閾值，動態縮放 vf_loss。
+# - 正常範圍：3.0～30.0。注意：與 vf_coeff 相乘後判定。
+# - vf_coeff=0.5 + vf_loss≈10 → vf_term≈5.0。設 8.0 可在 spike 時觸發。
+parser.add_argument("--vf_term_clamp", type=float, default=8.0,
+                    help="WD A2CK: clamp vf_coeff*vf_loss magnitude. Scale down if |vf_term| > threshold.")
 # --use_a2c / --use_ppo
 # - 用意：選擇 RL 演算法。A2C=WD 原版（無 PPO clip），PPO=標準 clip surrogate。
 # - 正常範圍：布林旗標（預設 True = A2C，對齊 WD）。
@@ -563,7 +576,8 @@ if args_cli.experiment_config is not None:
     print(f"[EXPERIMENT_CONFIG] name={_experiment_cfg.name} description={_experiment_cfg.description}")
     if _experiment_applied_fields:
         _applied_summary = " ".join(
-            f"{k}={getattr(args_cli, k)}" for k in _experiment_applied_fields[:15]
+            f"{k}={getattr(args_cli, k, getattr(_experiment_cfg, k, None))}"
+            for k in _experiment_applied_fields[:15]
         )
         print(f"[EXPERIMENT_CONFIG] applied fields ({len(_experiment_applied_fields)}): {_applied_summary}"
               + ("..." if len(_experiment_applied_fields) > 15 else ""))
@@ -2306,12 +2320,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if _cur != _wd_rnn_lr:
                 _wd_overrides.append(f"{_attr} {_cur}->{_wd_rnn_lr}")
                 setattr(args_cli, _attr, _wd_rnn_lr)
-        # WD uses A2C (A2CK mode), force if not already set
-        if not args_cli.use_a2c:
-            _wd_overrides.append("use_a2c False->True (WD: A2CK)")
-            args_cli.use_a2c = True
+        # wd_exact_rnn 只代表 encoder/obs-layout 對齊 WD，不應覆蓋 algorithm。
+        # algorithm 應由 --experiment_config 的 algorithm 欄位或 CLI --use_a2c/--use_ppo 決定。
+        # A2C 仍會使用 WD-order Aux→FreshForward→RL；PPO 則保留 PPO 所需的 RL→Aux order。
         if _wd_overrides:
-            print(f"[INFO] wd_exact_rnn forced WD params: {', '.join(_wd_overrides)}")
+            print(f"[INFO] wd_exact_rnn forced encoder params: {', '.join(_wd_overrides)}")
 
     def _legacy_policy_obs(obs_normed: torch.Tensor) -> torch.Tensor:
         return obs_normed.index_select(-1, _policy_obs_idx)
@@ -2637,6 +2650,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "wd_update_clip": args_cli.wd_update_clip and not args_cli.wd_update_monitor_only,
                     "wd_actor_grad_cap": args_cli.wd_actor_update_clip,
                     "wd_critic_grad_cap": args_cli.wd_critic_update_clip,
+                    "policy_loss_clamp": args_cli.policy_loss_clamp,
+                    "vf_term_clamp": args_cli.vf_term_clamp,
                     "vf_coeff": args_cli.vf_coeff,
                     "normalize_return": args_cli.normalize_return,
                     "value_init_bias": args_cli.value_init_bias,
@@ -3017,11 +3032,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         total_loss = total_loss + l_t
                     total_loss = total_loss / max(effective_len, 1)
                     charge_opt_aux.zero_grad()
-                    for _aux_state in charge_opt_aux.state.values():
-                        if "exp_avg" in _aux_state:
-                            _aux_state["exp_avg"].zero_()
-                        if "exp_avg_sq" in _aux_state:
-                            _aux_state["exp_avg_sq"].zero_()
+                    # WD: reset_model_mentum 只在訓練啟動時一次性 reset（預設 False）
+                    # 之前誤解為每步 reset → Adam 退化為無 momentum SGD → RNN 無法收斂
+                    # 修正：移除 unconditional momentum reset，保留 Adam 正常累積
                     total_loss.backward()
                     nn.utils.clip_grad_norm_(
                         charge_params_aux,
@@ -3188,18 +3201,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     entropy_loss = (_ent_coeff_linear * ent_lin.mean()
                                     + _ent_coeff_angular * ent_ang.mean())
 
-                    # WD loss clamping: 防止 catastrophic gradient spikes（WD 論文 §4.2）
-                    # policy loss > 20 → 縮放到 20（等比例保留方向）
-                    _pl_clamp_triggered = abs(pl.item()) > 20.0
+                    # WD A2CK loss clamping: 防止 catastrophic gradient spikes（WD 論文 §4.2）
+                    # 閾值由 --policy_loss_clamp / --vf_term_clamp 控制
+                    _pl_clamp_threshold = args_cli.policy_loss_clamp
+                    _vf_clamp_threshold = args_cli.vf_term_clamp
+                    _pl_clamp_triggered = abs(pl.item()) > _pl_clamp_threshold
                     pl_clamped = pl
                     if _pl_clamp_triggered:
-                        pl_clamped = pl * (20.0 / abs(pl.item()))
-                    # vf term > 30 → 縮放（按 policy loss 量級動態調整 max_coeff）
+                        pl_clamped = pl * (_pl_clamp_threshold / abs(pl.item()))
+                    # vf_coeff × vf_loss 超過閾值 → 縮放（按 policy loss 量級動態調整）
                     vf_term = _current_vf_coeff * vl
-                    _vf_clamp_triggered = abs(vf_term.item()) > 30.0
+                    _vf_clamp_triggered = abs(vf_term.item()) > _vf_clamp_threshold
                     if _vf_clamp_triggered:
-                        max_30 = abs(max(min(30.0, abs(pl.item())), 10.0) / vl.item())
-                        vl = vl * max_30
+                        _vf_scale = abs(max(min(_vf_clamp_threshold, abs(pl.item())), _vf_clamp_threshold / 3.0) / vl.item())
+                        vl = vl * _vf_scale
 
                     # 最終 joint loss = policy + value - entropy（WD 標準公式）
                     loss = pl_clamped + _current_vf_coeff * vl - entropy_loss
@@ -3494,14 +3509,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     # Backward + step with monitoring
                     _snaps = {k: _snapshot_params(ps) for k, ps in _mon_modules.items()}
                     charge_opt_aux.zero_grad()
-                    # WD: reset_model_mentum — zero Adam momentum before every aux step
-                    # to prevent directional accumulation that causes RNN feature drift.
-                    # (custom_trainer.py:985-988)
-                    for _aux_state in charge_opt_aux.state.values():
-                        if "exp_avg" in _aux_state:
-                            _aux_state["exp_avg"].zero_()
-                        if "exp_avg_sq" in _aux_state:
-                            _aux_state["exp_avg_sq"].zero_()
+                    # WD: reset_model_mentum 只在訓練啟動時一次性 reset（預設 False）
+                    # 之前誤解為每步 reset → Adam 退化為無 momentum SGD → RNN 無法收斂
+                    # 修正：移除 unconditional momentum reset，保留 Adam 正常累積
                     total_loss.backward()
                     nn.utils.clip_grad_norm_(
                         charge_params_aux,
@@ -3719,15 +3729,97 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "train/ent_coeff_angular": _ent_coeff_angular,
             })
 
-            # --- phase_parameter/* = 當前 phase 的訓練進度與環境配置 ---
-            log_data.update({
-                "phase_parameter/timesteps": total_steps,
-                "phase_parameter/updates": iteration + 1,
-                "phase_parameter/interactions": total_steps,
-                "phase_parameter/batch_size": batch_size,
-                "phase_parameter/rollout_length": RL,
-                "phase_parameter/num_envs": num_envs,
-            })
+            # --- phase_parameter/* = 當前 phase 的訓練進度 + 實際生效超參數 ---
+            # 目的：讓 W&B 的 phase_parameter 分組直接看到「這一個 phase / iteration
+            # 實際用到的訓練參數」，不只看 CLI 初始 config。
+            # 注意：有些參數會被 curriculum runtime sync 改掉（例如 entropy、reward、lr、clip caps），
+            # 因此這裡記錄 runtime effective value，而不是只記 args_cli。
+            _phase_param_log = {
+                # Progress / budget
+                "phase_parameter/stage": float(wd.get("curriculum/stage", metrics._curriculum_info.get("stage", 0))),
+                "phase_parameter/initial_stage": float(args_cli.initial_stage),
+                "phase_parameter/fixed_stage": float(args_cli.fixed_stage),
+                "phase_parameter/timesteps": float(total_steps),  # legacy alias: W&B step axis used by old runs
+                "phase_parameter/timesteps_current": float(total_steps),
+                "phase_parameter/timesteps_target": float(total_timesteps),
+                "phase_parameter/updates": float(iteration + 1),  # legacy alias
+                "phase_parameter/updates_current": float(iteration + 1),
+                "phase_parameter/updates_target": float(num_iterations),
+                "phase_parameter/interactions": float(total_steps * num_envs),  # true env interactions = E × T × updates
+                "phase_parameter/interactions_current": float(total_steps * num_envs),
+                "phase_parameter/interactions_per_update": float(batch_size),
+                "phase_parameter/interactions_target": float(batch_size * num_iterations),
+                "phase_parameter/batch_size": float(batch_size),
+                "phase_parameter/mini_batch_size": float(mini_batch_size),
+                "phase_parameter/rollout_length": float(RL),
+                "phase_parameter/num_envs": float(num_envs),
+                "phase_parameter/ppo_epochs": float(args_cli.ppo_epochs),
+                "phase_parameter/mini_batches": float(args_cli.mini_batches),
+                "phase_parameter/train_goal_rate": float(args_cli.train_goal_rate),
+                # RL / optimizer effective hyperparameters
+                "phase_parameter/gamma": float(current_gamma),
+                "phase_parameter/gae_lambda": float(args_cli.gae_lambda),
+                "phase_parameter/use_a2c": float(args_cli.use_a2c),
+                "phase_parameter/clip_eps": float(args_cli.clip_eps),
+                "phase_parameter/lr": float(_current_rl_lr),
+                "phase_parameter/rnn_lr": float(_current_rnn_lr),
+                "phase_parameter/vf_coeff": float(_current_vf_coeff),
+                "phase_parameter/normalize_return": float(args_cli.normalize_return),
+                "phase_parameter/max_grad_norm": float(_current_max_grad_norm),
+                "phase_parameter/aux_grad_clip": float(_current_aux_grad_clip),
+                "phase_parameter/wd_update_clip": float(args_cli.wd_update_clip and not args_cli.wd_update_monitor_only),
+                "phase_parameter/wd_actor_update_clip": float(_current_wd_actor_update_clip),
+                "phase_parameter/wd_critic_update_clip": float(_current_wd_critic_update_clip),
+                "phase_parameter/policy_loss_clamp": float(args_cli.policy_loss_clamp),
+                "phase_parameter/vf_term_clamp": float(args_cli.vf_term_clamp),
+                "phase_parameter/ent_coeff": float(args_cli.ent_coeff),
+                "phase_parameter/ent_coeff_linear": float(_ent_coeff_linear),
+                "phase_parameter/ent_coeff_angular": float(_ent_coeff_angular),
+                "phase_parameter/cli_ent_coeff_linear": float(args_cli.ent_coeff_linear),
+                "phase_parameter/cli_ent_coeff_angular": float(args_cli.ent_coeff_angular),
+                # Aux / RNN module
+                "phase_parameter/disable_aux_training": float(args_cli.disable_aux_training),
+                "phase_parameter/aux_seq_len": float(args_cli.aux_seq_len),
+                "phase_parameter/aux_seq_batch_size": float(args_cli.aux_seq_batch_size),
+                "phase_parameter/aux_burn_in": float(args_cli.aux_burn_in),
+                "phase_parameter/aux_lr": float(args_cli.aux_lr),
+                "phase_parameter/aux_lr_predict_head": float(_lr_predict_head),
+                "phase_parameter/aux_lr_fc_middle": float(_lr_fc_middle),
+                "phase_parameter/aux_lr_fc_front": float(_lr_fc_front),
+                "phase_parameter/aux_lr_extractor": float(_lr_extractor if use_extractor else 0.0),
+                "phase_parameter/tbptt_len": float(args_cli.tbptt_len),
+                # Model / action-space
+                "phase_parameter/hidden_dim": float(args_cli.hidden_dim),
+                "phase_parameter/preprocess_dim": float(args_cli.preprocess_dim),
+                "phase_parameter/fc_dim": float(args_cli.fc_dim),
+                "phase_parameter/policy_obs_dim": float(policy_obs_dim),
+                "phase_parameter/rl_input_dim": float(rl_input_dim),
+                "phase_parameter/action_linear_bins": 19.0,
+                "phase_parameter/action_angular_bins": 19.0,
+                # Reward / scene / obstacle effective phase params
+                "phase_parameter/reward_get_goal": float(_spot_reward_get_goal),
+                "phase_parameter/penalty_hit": float(_spot_penalty_hit),
+                "phase_parameter/cost_operate": float(_spot_cost_operate),
+                "phase_parameter/obstacle_speed_rate": float(_obs_speed_limit),
+                "phase_parameter/obs_size_rand": float(_obs_size_rand),
+                "phase_parameter/obs_collision_base": float(args_cli.obs_collision_base),
+                "phase_parameter/scene_bound_rand": float(_scene_bound_rand),
+                "phase_parameter/scene_bound_base": float(args_cli.scene_bound_base),
+                "phase_parameter/obs_lr": float(args_cli.obs_lr),
+                "phase_parameter/obs_ent_coeff": float(args_cli.obs_ent_coeff),
+            }
+            # Curriculum registry 裡的 numeric/bool phase fields 也全部攤平成 W&B scalar。
+            # 這會捕捉 num_goals / obstacle counts / walls / trainer_* 等後續新增欄位。
+            for _k, _v in metrics._curriculum_info.items():
+                _wb_key = f"phase_parameter/curriculum/{_k}"
+                if isinstance(_v, bool):
+                    _phase_param_log[_wb_key] = float(_v)
+                elif isinstance(_v, (int, float)):
+                    _phase_param_log[_wb_key] = float(_v)
+                elif isinstance(_v, (list, tuple)) and len(_v) == 2 and all(isinstance(x, (int, float)) for x in _v):
+                    _phase_param_log[f"{_wb_key}_min"] = float(_v[0])
+                    _phase_param_log[f"{_wb_key}_max"] = float(_v[1])
+            log_data.update(_phase_param_log)
 
             # --- behavior/* from BehaviorScheduler (rule_based mode) ---
             if _obstacle_mode == "rule_based" and hasattr(env.unwrapped, '_behavior_scheduler'):
