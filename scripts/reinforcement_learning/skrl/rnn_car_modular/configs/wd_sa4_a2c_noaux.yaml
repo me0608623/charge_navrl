@@ -1,20 +1,20 @@
-# wd_sa2_a2c_noaux — WD fixed SA2 A2C + noaux
+# wd_sa4_a2c_noaux — WD fixed SA4 A2C + noaux
 #
 # 用法：
 #   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
-#     --experiment_config wd_sa2_a2c_noaux --headless --run_name <run_name>
+#     --experiment_config wd_sa4_a2c_noaux --headless --run_name <run_name>
 #
 # 注意：batch_size 不是直接設定欄位，而是由程式自動計算：
 #   batch_size = num_envs × rollout_length = 1024 × 300 = 307200
-# update 數 = timesteps / rollout_length = 180000 / 300 = 600
+# update 數 = timesteps / rollout_length = 270000 / 300 = 900
 
-name: wd_sa2_a2c_noaux                                                  # config 唯一識別名；與檔名一致，方便 registry / WandB 搜尋
-description: "Fixed SA2 (SA2_nav_static), A2C, WD sparse reward, aux disabled"  # 實驗描述；寫入 WandB config
+name: wd_sa4_a2c_noaux                                                  # config 唯一識別名；與檔名一致，方便 registry / WandB 搜尋
+description: "Fixed SA4 (SA4_spatial_plan), A2C, WD sparse reward, aux disabled"  # 實驗描述；寫入 WandB config
 
 # --- Environment / curriculum（環境與課程設定） ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD             # WD 版 task；env reward 歸零，訓練 reward 由 trainer module 計算
 curriculum_version: warp_drive_single_agent_v1                # 課程版本；使用 wd_single_agent_v1.py 的 SA1~SA8 設定
-initial_stage: 2                                              # 固定訓練的 SA stage；此檔對應 SA2_nav_static
+initial_stage: 4                                              # 固定訓練的 SA stage；此檔對應 SA4_spatial_plan
 fixed_stage: true                                             # 鎖定 stage，不做自動升降階；固定 phase 實驗必須 true
 scene_profile: warp_drive_single_agent_v1                     # 場景 profile metadata；通常與 curriculum_version 相同
 obstacle_mode: rule_based                                     # 使用 rule-based obstacle；避免同時訓練 obstacle policy 混入變因
@@ -29,7 +29,7 @@ critic_profile: symmetric                                     # critic profile m
 # --- Training budget（訓練預算） ---
 num_envs: 1024                                                # 平行環境數；增加會提高每次 update 的資料量，不增加 update 次數
 rollout_length: 300                                           # 每個 env 每次 rollout 收集步數；影響 GAE horizon 與 RNN 序列資料
-timesteps: 180000                                             # 控制 update 數；updates = timesteps / rollout_length = 600
+timesteps: 270000                                             # 控制 update 數；updates = timesteps / rollout_length = 900
 seed: 42                                                      # 隨機種子；固定後方便跨 stage / algorithm 比較
 
 # --- RL optimizer / return（RL 核心超參數） ---
@@ -110,5 +110,5 @@ checkpoint: null                                              # checkpoint path�
 no_resume_optimizer: true                                     # 換 stage/algorithm 時不載入舊 optimizer state
 
 # --- Metadata（WandB 標籤與備註） ---
-tags: [wd, sa2, a2c, noaux, wd_exact_rnn]                          # WandB tags；方便依 stage / algorithm / aux 篩選
-notes: "wd_sa2_a2c_noaux: fixed SA2_nav_static. batch_size is derived as num_envs * rollout_length = 307200."  # 實驗備註；會寫入 WandB config metadata
+tags: [wd, sa4, a2c, noaux, wd_exact_rnn]                          # WandB tags；方便依 stage / algorithm / aux 篩選
+notes: "wd_sa4_a2c_noaux: fixed SA4_spatial_plan. batch_size is derived as num_envs * rollout_length = 307200."  # 實驗備註；會寫入 WandB config metadata

@@ -1,39 +1,39 @@
-# wd_sa2_a2c_noaux — WD fixed SA2 A2C + noaux
+# wd_sa5_ppo_noaux — WD fixed SA5 PPO + noaux
 #
 # 用法：
 #   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
-#     --experiment_config wd_sa2_a2c_noaux --headless --run_name <run_name>
+#     --experiment_config wd_sa5_ppo_noaux --headless --run_name <run_name>
 #
 # 注意：batch_size 不是直接設定欄位，而是由程式自動計算：
 #   batch_size = num_envs × rollout_length = 1024 × 300 = 307200
-# update 數 = timesteps / rollout_length = 180000 / 300 = 600
+# update 數 = timesteps / rollout_length = 270000 / 300 = 900
 
-name: wd_sa2_a2c_noaux                                                  # config 唯一識別名；與檔名一致，方便 registry / WandB 搜尋
-description: "Fixed SA2 (SA2_nav_static), A2C, WD sparse reward, aux disabled"  # 實驗描述；寫入 WandB config
+name: wd_sa5_ppo_noaux                                                  # config 唯一識別名；與檔名一致，方便 registry / WandB 搜尋
+description: "Fixed SA5 (SA5_endurance), PPO, WD sparse reward, aux disabled"  # 實驗描述；寫入 WandB config
 
 # --- Environment / curriculum（環境與課程設定） ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD             # WD 版 task；env reward 歸零，訓練 reward 由 trainer module 計算
 curriculum_version: warp_drive_single_agent_v1                # 課程版本；使用 wd_single_agent_v1.py 的 SA1~SA8 設定
-initial_stage: 2                                              # 固定訓練的 SA stage；此檔對應 SA2_nav_static
+initial_stage: 5                                              # 固定訓練的 SA stage；此檔對應 SA5_endurance
 fixed_stage: true                                             # 鎖定 stage，不做自動升降階；固定 phase 實驗必須 true
 scene_profile: warp_drive_single_agent_v1                     # 場景 profile metadata；通常與 curriculum_version 相同
 obstacle_mode: rule_based                                     # 使用 rule-based obstacle；避免同時訓練 obstacle policy 混入變因
 
 # --- Profiles（LEGO 模組選擇） ---
 reward_profile: wd_sparse                                     # WD sparse reward：goal reward / collision penalty / action cost
-algorithm: a2c                                                # 演算法；a2c=WD-style 單次 full-batch，ppo=PPO clipped surrogate
+algorithm: ppo                                                # 演算法；a2c=WD-style 單次 full-batch，ppo=PPO clipped surrogate
 aux_profile: none                                   # aux 任務；wd_7d_geometry=開啟 7D 幾何預測，none=關閉 aux
-encoder_profile: wd_exact_rnn                                # encoder metadata；PPO 目前用 extractor_rnn 避免 wd_exact_rnn 強制 A2C
+encoder_profile: wd_exact_rnn                                 # encoder metadata；WD-like 113D obs + FC64→RNN30→FC32→12D
 critic_profile: symmetric                                     # critic profile metadata；目前 actor/critic 使用相同 deployable obs
 
 # --- Training budget（訓練預算） ---
 num_envs: 1024                                                # 平行環境數；增加會提高每次 update 的資料量，不增加 update 次數
 rollout_length: 300                                           # 每個 env 每次 rollout 收集步數；影響 GAE horizon 與 RNN 序列資料
-timesteps: 180000                                             # 控制 update 數；updates = timesteps / rollout_length = 600
+timesteps: 270000                                             # 控制 update 數；updates = timesteps / rollout_length = 900
 seed: 42                                                      # 隨機種子；固定後方便跨 stage / algorithm 比較
 
 # --- RL optimizer / return（RL 核心超參數） ---
-lr: 0.0002                                                    # policy/value head 學習率；PPO 通常比 A2C 保守
+lr: 0.0001                                                    # policy/value head 學習率；PPO 通常比 A2C 保守
 rnn_lr: 0.0                                                # aux/RNN 學習率；noaux 時設 0 讓 RNN 不更新
 aux_lr: 0.0                                                   # legacy aux lr fallback；實際以 aux_lr_* 細部設定為主
 aux_lr_predict_head: 0.0                                   # aux predict head 學習率；aux 開啟時可讓輸出映射一起學
@@ -50,29 +50,29 @@ tbptt_len: 0                                                  # 主 RL loss 的 
 lr_decay: 0.0                                                 # LR decay；0=關閉，避免 phase config 混入額外變因
 
 # --- PPO specific（PPO 專屬；A2C 下大多不生效） ---
-ppo_epochs: 1                                                 # 每包 rollout batch 重複訓練幾輪；PPO 資料利用率主要來自這裡
-mini_batches: 1                                              # 每個 epoch 切幾個 mini-batch；mini_batch_size = batch_size / mini_batches
-clip_eps: 0.2                                                 # PPO ratio clip 範圍；A2C 設定時主要作為記錄/兼容
+ppo_epochs: 4                                                 # 每包 rollout batch 重複訓練幾輪；PPO 資料利用率主要來自這裡
+mini_batches: 32                                              # 每個 epoch 切幾個 mini-batch；mini_batch_size = batch_size / mini_batches
+clip_eps: 0.1                                                 # PPO ratio clip 範圍；A2C 設定時主要作為記錄/兼容
 
 # --- Entropy（探索熵係數） ---
 ent_coeff: 0.0                                                # legacy 單一 entropy 係數；0=不覆蓋 per-head 設定
-ent_coeff_linear: 0.0                                        # linear head entropy；0 表示由 curriculum runtime 同步 phase 值
-ent_coeff_angular: 0.0                                       # angular head entropy；0 表示由 curriculum runtime 同步 phase 值
+ent_coeff_linear: 0.02                                        # linear head entropy；0 表示由 curriculum runtime 同步 phase 值
+ent_coeff_angular: 0.05                                       # angular head entropy；0 表示由 curriculum runtime 同步 phase 值
 
 # --- WD-style gradient caps / loss guards（WD 分離裁剪與 loss 保護） ---
 wd_update_clip: true                                          # 啟用 actor/critic 分離 grad cap；避免 critic spike 壓制 actor
 wd_update_monitor_only: false                                 # false=真的套用 cap；true=只記錄不裁剪
-wd_actor_update_clip: 8.0                                     # actor grad norm cap；PPO 使用較保守 4，A2C 使用 WD-style 8
+wd_actor_update_clip: 4.0                                     # actor grad norm cap；PPO 使用較保守 4，A2C 使用 WD-style 8
 wd_critic_update_clip: 30.0                                   # critic grad norm cap；WD 常用 30
 wd_module_entropy_eps: 0.000000000001                         # module_entropy 計算 epsilon；只防 log(0)
 policy_loss_clamp: 20.0                                       # policy loss 量級保護；|policy_loss| 太大時縮放
 vf_term_clamp: 8.0                                            # value term 量級保護；限制 vf_coeff × vf_loss spike
 
 # --- Model / encoder（模型架構） ---
-charge_encoder_mode: wd_exact_rnn                            # 實際訓練 encoder；只控制架構，不覆蓋 algorithm
+charge_encoder_mode: wd_exact_rnn                             # 實際訓練 encoder；只控制架構，不覆蓋 algorithm
 hidden_dim: 30                                                # RNN hidden state 維度；WD memory_dim=30
 preprocess_dim: 12                                            # 送給 RL head 的 RNN preprocess feature 維度；WD=12
-fc_dim: 64                                                    # RNN 前 FC 寬度；wd_exact_rnn=64，extractor_rnn=48
+fc_dim: 64                                                    # RNN 前 FC 寬度；wd_exact_rnn 會強制 64
 wd_middle_dim: 32                                             # wd_exact_rnn 專用 middle FC 維度；extractor_rnn 下基本不影響
 rnn_type: RNN                                                 # RNN cell 類型；RNN 對齊 WD，GRU 會改 checkpoint 相容性
 
@@ -110,5 +110,5 @@ checkpoint: null                                              # checkpoint path�
 no_resume_optimizer: true                                     # 換 stage/algorithm 時不載入舊 optimizer state
 
 # --- Metadata（WandB 標籤與備註） ---
-tags: [wd, sa2, a2c, noaux, wd_exact_rnn]                          # WandB tags；方便依 stage / algorithm / aux 篩選
-notes: "wd_sa2_a2c_noaux: fixed SA2_nav_static. batch_size is derived as num_envs * rollout_length = 307200."  # 實驗備註；會寫入 WandB config metadata
+tags: [wd, sa5, ppo, noaux, wd_exact_rnn]                          # WandB tags；方便依 stage / algorithm / aux 篩選
+notes: "wd_sa5_ppo_noaux: fixed SA5_endurance. batch_size is derived as num_envs * rollout_length = 307200."  # 實驗備註；會寫入 WandB config metadata

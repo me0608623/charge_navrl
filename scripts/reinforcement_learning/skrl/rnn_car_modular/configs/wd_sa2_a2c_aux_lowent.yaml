@@ -22,6 +22,7 @@ reward_profile: wd_sparse                          # WD 稀疏獎勵
 algorithm: a2c                                     # A2C 演算法
 aux_profile: wd_7d_geometry                        # 保留 aux，只測 entropy 變因
 encoder_profile: wd_exact_rnn                      # WD 原版 RNN 編碼器
+charge_encoder_mode: wd_exact_rnn                  # 實際訓練 encoder；只控制架構，不覆蓋 algorithm
 
 # --- Training budget（訓練預算） ---
 num_envs: 1024                                     # 並行環境數
@@ -35,7 +36,7 @@ rnn_lr: 5e-4                                       # RNN 學習率
 vf_coeff: 0.5                                      # value loss 權重
 gamma: 0.991                                       # 折扣因子
 gae_lambda: 0.95                                   # GAE λ
-max_grad_norm: 1.0                                 # 全域梯度裁剪
+max_grad_norm: 0.5                                 # 全域梯度裁剪（文獻共識 0.5）
 normalize_return: true                             # 歸一化 critic target
 value_init_bias: 0.0                               # value head bias 初始值
 
@@ -47,6 +48,7 @@ ent_coeff_angular: 0.02                            # 角速度 entropy，比 bas
 wd_update_clip: true                               # 啟用分離 grad cap
 wd_actor_update_clip: 8.0                          # actor grad norm 上限
 wd_critic_update_clip: 30.0                        # critic grad norm 上限
+vf_term_clamp: 8.0                                 # WD A2CK: vf_coeff×vf_loss 超過此值自動縮放
 
 # --- Aux / RNN training（輔助任務訓練） ---
 aux_seq_len: 15                                    # TBPTT 展開步數
