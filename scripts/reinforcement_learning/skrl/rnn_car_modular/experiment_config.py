@@ -50,12 +50,19 @@ class ExperimentConfig:
     # RL hyperparams
     lr: float = 2e-4
     rnn_lr: float = 5e-4
+    aux_lr: float = 0.0
+    aux_lr_predict_head: float = 0.0
+    aux_lr_fc_middle: float = 0.0
+    aux_lr_fc_front: float = 0.0
+    aux_lr_extractor: float = 0.0
     vf_coeff: float = 0.5
     gamma: float = 0.991
     gae_lambda: float = 0.95
     normalize_return: bool = True
     value_init_bias: float | None = 0.0
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 0.5
+    tbptt_len: int = 0
+    lr_decay: float = 0.0
 
     # PPO-specific (ignored when algorithm="a2c")
     ppo_epochs: int = 2
@@ -63,20 +70,50 @@ class ExperimentConfig:
     clip_eps: float = 0.1
 
     # entropy / WD update caps
+    ent_coeff: float = 0.0
     ent_coeff_linear: float = 0.0
     ent_coeff_angular: float = 0.0
     wd_update_clip: bool = True
+    wd_update_monitor_only: bool = False
     wd_actor_update_clip: float = 8.0
     wd_critic_update_clip: float = 30.0
+    wd_module_entropy_eps: float = 1e-12
+    policy_loss_clamp: float = 20.0
+    vf_term_clamp: float = 8.0
+
+    # model / encoder
+    charge_encoder_mode: str = "extractor_rnn"
+    hidden_dim: int = 30
+    preprocess_dim: int = 12
+    fc_dim: int = 48
+    wd_middle_dim: int = 32
+    rnn_type: str = "RNN"
+
+    # obstacle / scene controls
+    obs_lr: float = 3e-4
+    obs_ent_coeff: float = 0.1
+    obs_speed_limit: float = 0.8
+    train_goal_rate: int = 3
+    obs_reward_mode: str = "zero"
+    max_active_obstacles: int = 10
+    obs_size_rand: float = 0.0
+    obs_collision_base: float = 0.9
+    scene_bound_rand: float = 0.0
+    scene_bound_base: float = 7.0
+    room_size: float | None = None
 
     # aux
     aux_seq_len: int = 15
     aux_burn_in: int = 0
     aux_seq_batch_size: int = 256
     aux_grad_clip: float | None = 0.5
+    zero_preprocess_feature_for_rl: bool = False
 
-    # safety/logging
+    # safety/logging/runtime switches
     lidar_no_noise: bool = True
+    no_domain_randomization: bool = False
+    reward_speed_v05: bool = False
+    reward_mode: str = "current"
     action_table_sample_size: int = 0
     log_interval: int = 10
     save_interval: int = 100
@@ -113,6 +150,10 @@ _FIELD_TO_FLAGS: dict[str, list[str]] = {
     "fixed_stage": ["--fixed_stage"],
     "lidar_no_noise": ["--lidar_no_noise"],
     "no_resume_optimizer": ["--no_resume_optimizer"],
+    "wd_update_monitor_only": ["--wd_update_monitor_only"],
+    "zero_preprocess_feature_for_rl": ["--zero_preprocess_feature_for_rl"],
+    "no_domain_randomization": ["--no_domain_randomization"],
+    "reward_speed_v05": ["--reward_speed_v05"],
 }
 
 # Fields that are metadata-only (not applied to args_cli)

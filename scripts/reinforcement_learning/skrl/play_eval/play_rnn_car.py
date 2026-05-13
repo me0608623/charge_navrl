@@ -44,13 +44,15 @@ from isaaclab.app import AppLauncher
 # 值為 None 時沿用 curriculum stage 的預設值。
 #
 # --- 場景元素 ---
-NUM_GOALS        = 1       # 目標數量。None=用 stage 預設
+STAGE_PARAMETER  = False   # True=套用訓練時該 stage 的場景參數；False=使用下方手動設定/CLI 覆寫
+NUM_GOALS        = 1       # 目標數量。stage_parameter=True 且 CLI 未指定時用 stage 預設
 NUM_STATIC_OBS   = 5       # 靜態障礙物數量
 NUM_DYNAMIC_OBS  = 0       # 動態障礙物數量
 NUM_WALLS        = 1       # 內部牆壁數量（min=max=N）
 WALL_LENGTH      = 3.0     # 牆壁長度 m
 GOAL_DIST_MIN    = 2.0     # 最小目標距離 m
 GOAL_DIST_MAX    = 5.0     # 最大目標距離 m
+EPISODE_LENGTH_S = None    # episode 秒數。None=stage_parameter=True 時用 stage；False 時沿用 env 預設
 OBSTACLE_SPEED   = 0.8     # 障礙物速度倍率（0.0=靜止, 1.0=全速）
 OBSTACLE_BEHAVIOR = "patrol"  # 障礙物行為模式:
                            #   "static"            — 靜止不動
@@ -104,6 +106,9 @@ BEV_MAX_RANGE    = 20.0    # BEV 最大顯示範圍 m
 # ============================================================================
 parser = argparse.ArgumentParser(description="Charge RL — 模組化 RNN Play 腳本")
 
+
+_original_argv = list(sys.argv)
+
 # --- 基礎設定 ---
 parser.add_argument("--task", type=str, default="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL",
                     help="Gymnasium 環境 ID（對應 __init__.py 註冊名稱）")
@@ -126,6 +131,7 @@ parser.add_argument("--real_time", action="store_true", default=REAL_TIME,
 
 # --- 場景覆寫 ---
 # 上方設定區的值作為 default；CLI 參數可再覆寫
+# 注意：是否使用 stage 場景參數請改檔案上方 STAGE_PARAMETER，不提供 CLI flag。
 parser.add_argument("--num_goals_override", type=int, default=NUM_GOALS,
                     help="覆寫目標數量")
 parser.add_argument("--num_static_obs", type=int, default=NUM_STATIC_OBS,
@@ -140,8 +146,12 @@ parser.add_argument("--goal_distance_min", type=float, default=GOAL_DIST_MIN,
                     help="覆寫最小目標距離 (m)")
 parser.add_argument("--goal_distance_max", type=float, default=GOAL_DIST_MAX,
                     help="覆寫最大目標距離 (m)")
+parser.add_argument("--episode_length_s", type=float, default=EPISODE_LENGTH_S,
+                    help="覆寫 episode 長度（秒）。STAGE_PARAMETER=True 且未指定時使用 stage 的 episode_s")
 parser.add_argument("--obstacle_speed", type=float, default=OBSTACLE_SPEED,
                     help="覆寫障礙物速度倍率 (0.0=靜止, 1.0=全速)")
+parser.add_argument("--obstacle_boundary", type=float, default=None,
+                    help="覆寫障礙物生成邊界 (m)。例如 5.0 表示障礙物只在機器人 ±5m 內生成")
 parser.add_argument("--obstacle_behavior", type=str, default=OBSTACLE_BEHAVIOR,
                     choices=["static", "patrol", "random_walk", "horizontal_crossing",
                              "path_crossing", "near_miss", "corridor_crossing", "occlusion",
@@ -254,6 +264,7 @@ parser.add_argument("--bev_frame", type=str, default=BEV_FRAME, choices=["body",
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+args_cli.stage_parameter = STAGE_PARAMETER  # 只由檔案上方設定區控制，不做 CLI 參數
 
 # 非 headless 模式需要啟用攝影機
 if not getattr(args_cli, "headless", False):
@@ -292,12 +303,31 @@ from wd_aux_targets import build_wd_preprocess_targets  # RNN aux 7D target 計�
 POLICY_OBS_INDICES = list(range(0, 78)) + [138]
 
 
+def _cli_flag_provided(flag_names: tuple[str, ...] | list[str]) -> bool:
+    """Return True if a CLI flag was explicitly provided in the original argv."""
+    for arg in _original_argv[1:]:
+        for flag in flag_names:
+            if arg == flag or arg.startswith(flag + "="):
+                return True
+    return False
+
+
+def _scene_arg(cli_args, attr: str, default_value, flag_names: tuple[str, ...] | list[str]):
+    """stage_parameter=True 時只接受明確 CLI 覆寫；False 時使用設定區/default。"""
+    if getattr(cli_args, "stage_parameter", False):
+        return getattr(cli_args, attr) if _cli_flag_provided(flag_names) else default_value
+    return getattr(cli_args, attr) if getattr(cli_args, attr) is not None else default_value
+
+
 # ============================================================================
 # 場景參數覆寫函式 — 讓使用者調整所有場景元素
 # ============================================================================
 def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
     """
-    依 CLI 參數覆寫場景配置。未指定的參數沿用 stage_cfg 預設值。
+    依 stage_parameter / CLI 參數覆寫場景配置。
+
+    - stage_parameter=True：預設使用訓練時該 stage 的場景參數；只有明確 CLI flag 會覆寫。
+    - stage_parameter=False：使用檔案最上方手動設定區的 default / CLI 覆寫（舊行為）。
 
     可覆寫的場景參數:
       --num_goals_override : 目標數量
@@ -312,8 +342,8 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
 
     回傳: 最終生效的場景參數 dict（用於 print 確認）
     """
-    # 從 stage_cfg 讀取預設值（若 stage_cfg 為 None 則用安全預設）
-    defaults = {
+    # 從 stage_cfg 讀取訓練時 stage 預設值；stage_parameter=False 時則用手動設定區/default。
+    stage_defaults = {
         "num_goals": stage_cfg["num_goals"] if stage_cfg else 10,
         "num_static": stage_cfg["num_obstacles_static"] if stage_cfg else 0,
         "num_dynamic": stage_cfg["num_obstacles_dynamic"] if stage_cfg else 2,
@@ -322,21 +352,37 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
         "wall_length": stage_cfg.get("target_wall_length", 5.0) if stage_cfg else 5.0,
         "goal_dist_min": stage_cfg["goal_distance"][0] if stage_cfg else 2.0,
         "goal_dist_max": stage_cfg["goal_distance"][1] if stage_cfg else 10.0,
+        "episode_length_s": stage_cfg.get("episode_length_s", getattr(env_cfg, "episode_length_s", 60.0)) if stage_cfg else getattr(env_cfg, "episode_length_s", 60.0),
         "obstacle_speed": stage_cfg.get("obstacle_speed_rate", 0.8) if stage_cfg else 0.8,
     }
+    manual_defaults = {
+        "num_goals": NUM_GOALS,
+        "num_static": NUM_STATIC_OBS,
+        "num_dynamic": NUM_DYNAMIC_OBS,
+        "walls_min": NUM_WALLS,
+        "walls_max": NUM_WALLS,
+        "wall_length": WALL_LENGTH,
+        "goal_dist_min": GOAL_DIST_MIN,
+        "goal_dist_max": GOAL_DIST_MAX,
+        "episode_length_s": EPISODE_LENGTH_S if EPISODE_LENGTH_S is not None else getattr(env_cfg, "episode_length_s", 60.0),
+        "obstacle_speed": OBSTACLE_SPEED,
+    }
+    defaults = stage_defaults if cli_args.stage_parameter else manual_defaults
 
-    # CLI 覆寫（指定時生效，未指定時保留預設）
+    # CLI 覆寫：stage_parameter=True 時只接受「明確寫在 CLI」的覆寫，避免上方手動 default 蓋掉 stage。
     final = {}
-    final["num_goals"] = cli_args.num_goals_override if cli_args.num_goals_override is not None else defaults["num_goals"]
-    final["num_static"] = cli_args.num_static_obs if cli_args.num_static_obs is not None else defaults["num_static"]
-    final["num_dynamic"] = cli_args.num_dynamic_obs if cli_args.num_dynamic_obs is not None else defaults["num_dynamic"]
-    final["walls_min"] = cli_args.num_walls if cli_args.num_walls is not None else defaults["walls_min"]
-    final["walls_max"] = cli_args.num_walls if cli_args.num_walls is not None else defaults["walls_max"]
-    final["wall_length"] = cli_args.wall_length if cli_args.wall_length is not None else defaults["wall_length"]
-    final["goal_dist_min"] = cli_args.goal_distance_min if cli_args.goal_distance_min is not None else defaults["goal_dist_min"]
-    final["goal_dist_max"] = cli_args.goal_distance_max if cli_args.goal_distance_max is not None else defaults["goal_dist_max"]
-    final["obstacle_speed"] = cli_args.obstacle_speed if cli_args.obstacle_speed is not None else defaults["obstacle_speed"]
-    final["obstacle_behavior"] = cli_args.obstacle_behavior  # None = 不變更
+    final["num_goals"] = _scene_arg(cli_args, "num_goals_override", defaults["num_goals"], ("--num_goals_override",))
+    final["num_static"] = _scene_arg(cli_args, "num_static_obs", defaults["num_static"], ("--num_static_obs",))
+    final["num_dynamic"] = _scene_arg(cli_args, "num_dynamic_obs", defaults["num_dynamic"], ("--num_dynamic_obs",))
+    _num_walls_override = _scene_arg(cli_args, "num_walls", None, ("--num_walls",))
+    final["walls_min"] = _num_walls_override if _num_walls_override is not None else defaults["walls_min"]
+    final["walls_max"] = _num_walls_override if _num_walls_override is not None else defaults["walls_max"]
+    final["wall_length"] = _scene_arg(cli_args, "wall_length", defaults["wall_length"], ("--wall_length",))
+    final["goal_dist_min"] = _scene_arg(cli_args, "goal_distance_min", defaults["goal_dist_min"], ("--goal_distance_min",))
+    final["goal_dist_max"] = _scene_arg(cli_args, "goal_distance_max", defaults["goal_dist_max"], ("--goal_distance_max",))
+    final["episode_length_s"] = _scene_arg(cli_args, "episode_length_s", defaults["episode_length_s"], ("--episode_length_s",))
+    final["obstacle_speed"] = _scene_arg(cli_args, "obstacle_speed", defaults["obstacle_speed"], ("--obstacle_speed",))
+    final["obstacle_behavior"] = _scene_arg(cli_args, "obstacle_behavior", None, ("--obstacle_behavior",))  # None = 不變更
 
     # --- 套用到 env_cfg ---
 
@@ -375,30 +421,53 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
     # 目標距離範圍
     env_cfg.commands.goal_command.ranges.distance = (final["goal_dist_min"], final["goal_dist_max"])
     env_cfg.commands.goal_command.num_obstacles = total_obs
+    if final["episode_length_s"] is not None:
+        env_cfg.episode_length_s = float(final["episode_length_s"])
+
+    # 障礙物生成邊界覆寫（讓障礙物在機器人附近生成）
+    obs_boundary = getattr(cli_args, "obstacle_boundary", None)
+    if obs_boundary is not None:
+        for evt_attr in ["randomize_obstacles", "randomize_obstacles_startup"]:
+            evt_term = getattr(env_cfg.events, evt_attr, None)
+            if evt_term is not None:
+                evt_term.params["boundary"] = obs_boundary
+        # 同步縮小機器人生成範圍，確保機器人和障礙物在同一區域
+        reset_evt = getattr(env_cfg.events, "reset_base", None)
+        if reset_evt is not None:
+            spawn_limit = max(1.0, obs_boundary - 1.5)
+            reset_evt.params["pose_range"]["x"] = (-spawn_limit, spawn_limit)
+            reset_evt.params["pose_range"]["y"] = (-spawn_limit, spawn_limit)
+        print(f"[PLAY] obstacle_boundary={obs_boundary:.1f}m (robot spawn ±{spawn_limit:.1f}m)")
 
     # 印出最終場景配置
     changed = []
-    for key in final:
-        cli_val = getattr(cli_args, {
-            "num_goals": "num_goals_override",
-            "num_static": "num_static_obs",
-            "num_dynamic": "num_dynamic_obs",
-            "walls_min": "num_walls",
-            "walls_max": "num_walls",
-            "wall_length": "wall_length",
-            "goal_dist_min": "goal_distance_min",
-            "goal_dist_max": "goal_distance_max",
-            "obstacle_speed": "obstacle_speed",
-            "obstacle_behavior": "obstacle_behavior",
-        }.get(key, ""), None)
-        if cli_val is not None:
-            changed.append(key)
+    scene_flag_map = {
+        "num_goals": ("num_goals_override", ("--num_goals_override",)),
+        "num_static": ("num_static_obs", ("--num_static_obs",)),
+        "num_dynamic": ("num_dynamic_obs", ("--num_dynamic_obs",)),
+        "walls_min": ("num_walls", ("--num_walls",)),
+        "walls_max": ("num_walls", ("--num_walls",)),
+        "wall_length": ("wall_length", ("--wall_length",)),
+        "goal_dist_min": ("goal_distance_min", ("--goal_distance_min",)),
+        "goal_dist_max": ("goal_distance_max", ("--goal_distance_max",)),
+        "episode_length_s": ("episode_length_s", ("--episode_length_s",)),
+        "obstacle_speed": ("obstacle_speed", ("--obstacle_speed",)),
+        "obstacle_behavior": ("obstacle_behavior", ("--obstacle_behavior",)),
+    }
+    for key, (_attr, _flags) in scene_flag_map.items():
+        if cli_args.stage_parameter:
+            if _cli_flag_provided(_flags):
+                changed.append(key)
+        else:
+            cli_val = getattr(cli_args, _attr, None)
+            if cli_val is not None:
+                changed.append(key)
 
-    print(f"[PLAY] 場景配置:")
+    print(f"[PLAY] 場景配置 (stage_parameter={cli_args.stage_parameter}):")
     print(f"  目標數={final['num_goals']}  靜態障礙={final['num_static']}  動態障礙={final['num_dynamic']}")
     print(f"  牆壁={final['walls_min']}~{final['walls_max']}  牆長={final['wall_length']:.1f}m")
     print(f"  目標距離={final['goal_dist_min']:.1f}~{final['goal_dist_max']:.1f}m  "
-          f"障礙速度={final['obstacle_speed']:.2f}")
+          f"episode={final['episode_length_s']:.1f}s  障礙速度={final['obstacle_speed']:.2f}")
     if changed:
         print(f"  CLI 覆寫: {', '.join(changed)}")
     if final["obstacle_behavior"]:
@@ -471,10 +540,11 @@ def resolve_env_cfg(task: str):
     raise ValueError(f"不支援的 task: {task}")
 
 
-def apply_stage_to_env_cfg(env_cfg, curriculum_version: str | None, stage: int):
-    """將 curriculum 固定在指定 stage，並把該 stage 的場景參數套用到 env_cfg。
+def apply_stage_to_env_cfg(env_cfg, curriculum_version: str | None, stage: int, apply_scene_params: bool = True):
+    """固定 curriculum stage，並可選擇是否把該 stage 的場景參數套用到 env_cfg。
 
-    Play 時不需要 curriculum 自動升級，所以讀取 stage config 後直接套用，
+    apply_scene_params=True：完全帶入訓練時該 stage 的場景參數。
+    apply_scene_params=False：只讀取 stage_cfg / 關閉自動晉級；實際場景由手動設定區或 CLI 決定。
     並將 env_cfg.curriculum 設為 None（關閉自動晉級）。
 
     回傳: (resolved_version, stage_cfg_dict) 或 (None, None) 若無 curriculum。
@@ -499,6 +569,10 @@ def apply_stage_to_env_cfg(env_cfg, curriculum_version: str | None, stage: int):
     stage = max(1, min(stage, max_stage))  # 限制在合法範圍
     cfg = stages[stage]
 
+    if not apply_scene_params:
+        env_cfg.curriculum = None
+        return resolved_version, cfg
+
     # --- 套用障礙物參數 ---
     for evt_attr in ["randomize_obstacles", "randomize_obstacles_startup"]:
         evt_term = getattr(env_cfg.events, evt_attr, None)
@@ -516,6 +590,8 @@ def apply_stage_to_env_cfg(env_cfg, curriculum_version: str | None, stage: int):
     if wall_evt is not None:
         wall_evt.params["min_walls"] = cfg["min_walls"]
         wall_evt.params["max_walls"] = cfg["max_walls"]
+        if cfg.get("target_wall_length") is not None:
+            wall_evt.params["target_wall_length"] = cfg["target_wall_length"]
 
     # --- 套用目標/回合參數 ---
     env_cfg.commands.goal_command.num_goals = cfg["num_goals"]
@@ -973,6 +1049,7 @@ class LiveBEVVisualizer:
         # 建立 matplotlib 互動視窗
         self.plt.ion()
         self.fig, self.ax = self.plt.subplots(figsize=(7, 7))
+        self.fig.subplots_adjust(top=0.93)  # more room for title
         try:
             self.fig.canvas.manager.set_window_title("Charge RL BEV — 72-bin LiDAR")
         except Exception:
@@ -1026,15 +1103,15 @@ class LiveBEVVisualizer:
         # 依 frame 設定選擇顯示座標系
         if self.frame == "world":
             plot_x, plot_y = self._body_to_world(x_forward, y_left, yaw)
-            xlabel = "世界 X 相對機器人 (m)"
-            ylabel = "世界 Y 相對機器人 (m)"
-            title_suffix = "世界座標"
+            xlabel = "World X rel. robot (m)"
+            ylabel = "World Y rel. robot (m)"
+            title_suffix = "World"
         else:
             # 車體座標：x 軸=左右, y 軸=前後。0° 永遠是機器人正前方
             plot_x, plot_y = y_left, x_forward
-            xlabel = "左右 y (m)"
-            ylabel = "前方 x (m)"
-            title_suffix = "車體座標（前方為上）"
+            xlabel = "Left-Right y (m)"
+            ylabel = "Forward x (m)"
+            title_suffix = "Body (fwd=up)"
 
         # 檢查視窗是否仍存在
         if not self.plt.fignum_exists(self.fig.number):
@@ -1107,26 +1184,26 @@ class LiveBEVVisualizer:
         echo_bins = int(((real_dist >= self.ground_echo_dist - 0.3) & (real_dist <= self.ground_echo_dist + 0.3)).sum())
         action_text = actions[0].detach().cpu().tolist() if actions is not None else ["?", "?"]
 
-        # 終止目標狀態文字
-        goal_line = "終止目標: 不可用"
+        # Termination goal status text
+        goal_line = "Term. goal: N/A"
         if goal_info is not None:
-            status = "到達" if goal_info["success"] else "未到"
+            status = "reached" if goal_info["success"] else "not yet"
             goal_line = (
-                f"終止目標[{goal_info['source']}] 中心={goal_info['center_dist']:.2f}m "
-                f"邊緣={goal_info['effective_dist']:.2f}m<{self.goal_threshold:.2f}? {status}"
+                f"Term.[{goal_info['source']}] center={goal_info['center_dist']:.2f}m "
+                f"edge={goal_info['effective_dist']:.2f}m<{self.goal_threshold:.2f}? {status}"
             )
             if goal_info.get("idx") is not None:
                 goal_line += f" idx={goal_info['idx']}"
 
         text_lines = [
-            f"步驟={step} 動作={action_text}",
-            f"座標系={self.frame}  航向角={np.degrees(yaw):+.1f}°",
+            f"Step={step} Action={action_text}",
+            f"Frame={self.frame}  Yaw={np.degrees(yaw):+.1f}°",
             goal_line,
-            f"最近障礙: {near_d:.2f}m @ bin {near_idx} ({near_angle:+.0f}°)",
-            f"平均={real_dist.mean():.2f}m  <2m={int((real_dist < 2.0).sum())}/72  "
+            f"Nearest: {near_d:.2f}m @ bin {near_idx} ({near_angle:+.0f}°)",
+            f"Mean={real_dist.mean():.2f}m  <2m={int((real_dist < 2.0).sum())}/72  "
             f"2~5m={int(((real_dist >= 2.0) & (real_dist < 5.0)).sum())}/72",
-            f"地板回波5.6m={echo_bins}/72  max-range={int((real_dist >= self.max_range - 0.5).sum())}/72",
-            "白=機器人  黃=導航目標  洋紅=終止判定目標",
+            f"Ground echo 5.6m={echo_bins}/72  max-range={int((real_dist >= self.max_range - 0.5).sum())}/72",
+            "White=robot  Yellow=nav goal  Magenta=term. goal",
         ]
         ax.text(
             0.02, 0.98, "\n".join(text_lines),
@@ -1275,10 +1352,13 @@ def main():
     # 套用消融實驗 CLI 覆寫（reward 權重、gate 模式等）
     apply_charge_env_overrides(env_cfg, args_cli)
 
-    # 套用 curriculum stage 配置
-    resolved_curriculum, stage_cfg = apply_stage_to_env_cfg(env_cfg, args_cli.curriculum_version, args_cli.stage)
+    # 套用 curriculum stage 配置；--stage_parameter 控制是否把訓練時該 stage 的場景參數帶入 play。
+    resolved_curriculum, stage_cfg = apply_stage_to_env_cfg(
+        env_cfg, args_cli.curriculum_version, args_cli.stage,
+        apply_scene_params=args_cli.stage_parameter,
+    )
 
-    # 套用場景參數 CLI 覆寫（障礙物/牆壁/目標數量等）
+    # 套用場景參數：stage_parameter=True 時保留 stage 預設，只有明確 CLI 才覆寫；False 時用手動設定區/CLI。
     configure_play_scene(env_cfg, stage_cfg, args_cli)
 
     # 套用攝影機視角

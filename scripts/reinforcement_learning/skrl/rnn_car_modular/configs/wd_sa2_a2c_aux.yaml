@@ -112,3 +112,31 @@ no_resume_optimizer: true                                     # 換 stage/algori
 # --- Metadata（WandB 標籤與備註） ---
 tags: [wd, sa2, a2c, aux, wd_exact_rnn]                          # WandB tags；方便依 stage / algorithm / aux 篩選
 notes: "wd_sa2_a2c_aux: fixed SA2_nav_static. batch_size is derived as num_envs * rollout_length = 307200."  # 實驗備註；會寫入 WandB config metadata
+
+# ===========================================================================
+# SA2 規劃筆記（基於 SA1 momentum-fix run 觀察，2026-05-13）
+# ===========================================================================
+#
+# 【問題】SA1 回合長度僅 ~14.5 步（2.9 秒），原因：num_goals=10 在場景中密度過高，
+#         agent 幾乎不需導航就碰到下一個 goal。導致：
+#         (a) aux valid_seq 從 200k 降到 ~19k（14.5 步 ≈ seq_len=15，幾乎切不出有效序列）
+#         (b) RNN memory 沒有被充分利用（不需要長程記憶就能完成任務）
+#         (c) 無法考驗 agent 的長程規劃能力
+#
+# 【計劃調整】
+#   1. 減少 goal 數量 — 降低 num_goals，讓 agent 需要實際導航才能到達
+#   2. 增加 goal 最遠距離 — 讓 goal 可以出現在場景更遠的位置，延長導航時間
+#   3. Goal 隨機移動 — 增加追蹤難度，RNN 需記住 goal 移動方向來預測下一步
+#      → 正好對齊 aux 的 FUTURE(bx,by) 預測目標
+#
+# 【目標】回合長度回到 30-60 步以上，確保：
+#   - valid_seq ≥ 50k（aux 訓練品質）
+#   - RNN 有足夠長的序列發揮記憶優勢
+#   - SA2 的靜態障礙物需要 agent 規劃繞行路線
+#
+# 【SA1 momentum-fix 參考數據】（run 854bo6eb，iter 594/900）
+#   - SR_norm: 0.993, CR: 0.7%, VE: 0.782
+#   - aux loss: 0.28 (bug) → 0.133 (fix 後 ATL)，下降 52%
+#   - rnn_param_delta: 0.005~0.007（持續活躍）
+#   - 線性熵: 1.29（已深度收斂）
+# ===========================================================================

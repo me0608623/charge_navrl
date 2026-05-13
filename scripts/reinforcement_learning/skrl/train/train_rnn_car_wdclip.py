@@ -2379,13 +2379,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         lidar36 = lidar72.reshape(*leading, 36, 2).mean(dim=-1)
         return torch.cat([base, obstacles, lidar36], dim=-1)
 
+    def _select_79d(obs_normed: torch.Tensor) -> torch.Tensor:
+        """從 139D env obs 中選取部署可用的 79D: ego(4) + goal(2) + LiDAR(72) + time(1)。
+        跳過 obstacles 60D（index 78:138），因為部署不可用且 WD 也是 placeholder。"""
+        return obs_normed.index_select(-1, _policy_obs_idx)
+
     def _charge_obs_for_rl(obs_normed: torch.Tensor) -> torch.Tensor:
-        return _wd_like_obs(obs_normed) if wd_exact_mode else _legacy_policy_obs(obs_normed)
+        if wd_exact_mode:
+            return _wd_like_obs(obs_normed)
+        return _select_79d(obs_normed)
 
     def _charge_features_for_rnn(obs_normed: torch.Tensor) -> torch.Tensor:
         if use_extractor:
-            return extractor(obs_normed)
-        return _wd_like_obs(obs_normed) if wd_exact_mode else _legacy_policy_obs(obs_normed)
+            return extractor(_select_79d(obs_normed))
+        if wd_exact_mode:
+            return _wd_like_obs(obs_normed)
+        return _select_79d(obs_normed)
 
     policy_obs_dim = 113 if wd_exact_mode else len(POLICY_OBS_INDICES)
 
