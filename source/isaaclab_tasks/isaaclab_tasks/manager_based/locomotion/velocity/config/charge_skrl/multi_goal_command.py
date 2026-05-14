@@ -124,12 +124,12 @@ class MultiGoalCommand(GoalCommand):
             all_env_ids = torch.tensor(env_ids, device=self.device, dtype=torch.long)
 
         min_spacing = self.cfg.min_goal_spacing
-        max_retries = 20
+        max_retries = 8
 
         for i in range(self.cfg.num_goals):
             # 第 0 個目標不需要檢查間距
             if i == 0:
-                super()._resample_command(all_env_ids.tolist())
+                super()._resample_command(all_env_ids)
                 self.all_goals_pos_w[all_env_ids, i] = self.goal_pos_w[all_env_ids].clone()
                 continue
 
@@ -141,7 +141,7 @@ class MultiGoalCommand(GoalCommand):
                     break
 
                 # 為 pending envs 生成候選目標
-                super()._resample_command(pending.tolist())
+                super()._resample_command(pending)
 
                 # 檢查候選目標與前 i 個目標的最小距離
                 candidate_xy = self.goal_pos_w[pending, :2]  # [P, 2]

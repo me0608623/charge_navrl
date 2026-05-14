@@ -280,78 +280,54 @@ class GoalCommand(CommandTerm):
         best_goals_local = torch.zeros(num_envs, 2, device=self.device)
         best_min_clearance = torch.full((num_envs,), -1.0, device=self.device)
 
+        # 預計算常數（避免每次迴圈重複存取）
+        d_min, d_max = self.cfg.ranges.distance[0], self.cfg.ranges.distance[1]
+        a_min, a_max = self.cfg.ranges.angle[0], self.cfg.ranges.angle[1]
+        valid_boundary = wall_boundary - wall_safe_margin
+
+        # 預計算障礙物 required_distances（不隨迴圈變化）
+        if all_obstacles is not None and all_obstacle_radii is not None:
+            obstacle_radii_expanded = all_obstacle_radii.unsqueeze(0).expand(num_envs, -1)
+            required_distances = obstacle_safe_distance + obstacle_radii_expanded
+        else:
+            required_distances = None
+
         for attempt in range(max_attempts):
-            # 找出還需要重新採樣的環境
-            resample_mask = needs_resample
-            num_resample = resample_mask.sum().item()
-            
-            if num_resample == 0:
+            if not needs_resample.any():
                 break  # 所有環境都已生成有效目標
-            
-            # 生成隨機距離和角度
-            distance = (
-                torch.rand(num_resample, device=self.device)
-                * (self.cfg.ranges.distance[1] - self.cfg.ranges.distance[0])
-                + self.cfg.ranges.distance[0]
-            )
-            angle = (
-                torch.rand(num_resample, device=self.device)
-                * (self.cfg.ranges.angle[1] - self.cfg.ranges.angle[0])
-                + self.cfg.ranges.angle[0]
-            )
-            
+
+            # 對全部 envs 生成隨機距離和角度（GPU 利用率低，不需節省）
+            distance = torch.rand(num_envs, device=self.device) * (d_max - d_min) + d_min
+            angle = torch.rand(num_envs, device=self.device) * (a_max - a_min) + a_min
+
             # 計算候選目標位置（環境局部座標系）
-            robot_pos_resample = robot_pos_local[resample_mask]  # [num_resample, 2]
-            goal_x = robot_pos_resample[:, 0] + distance * torch.cos(angle)
-            goal_y = robot_pos_resample[:, 1] + distance * torch.sin(angle)
-            
-            # 更新候選位置
-            candidate_goals_local[resample_mask, 0] = goal_x
-            candidate_goals_local[resample_mask, 1] = goal_y
-            
+            goal_x = robot_pos_local[:, 0] + distance * torch.cos(angle)
+            goal_y = robot_pos_local[:, 1] + distance * torch.sin(angle)
+
+            # 只更新仍需重新採樣的環境
+            candidate_goals_local[needs_resample, 0] = goal_x[needs_resample]
+            candidate_goals_local[needs_resample, 1] = goal_y[needs_resample]
+
             # ------------------------------------------------------------------------
             # 檢查 1：牆壁邊界（環境局部座標系）
             # ------------------------------------------------------------------------
-            valid_boundary = wall_boundary - wall_safe_margin
             within_walls = (
                 (candidate_goals_local[:, 0].abs() < valid_boundary) &
                 (candidate_goals_local[:, 1].abs() < valid_boundary)
             )
             
             # ------------------------------------------------------------------------
-            # 檢查 2：障礙物碰撞（✅ 修復：考慮障礙物半徑）
+            # 檢查 2：障礙物碰撞（考慮障礙物半徑）
             # ------------------------------------------------------------------------
             if all_obstacles is not None:
-                # 計算目標與所有障礙物中心的距離
-                # candidate_goals_local: [num_envs, 2]
-                # all_obstacles: [num_envs, num_obstacles, 2]
                 goal_expanded = candidate_goals_local.unsqueeze(1)  # [num_envs, 1, 2]
                 distances_to_obstacle_centers = torch.norm(goal_expanded - all_obstacles, dim=2)  # [num_envs, num_obstacles]
-                
-                # ✅ 修復：考慮障礙物半徑（防止目標與障礙物重疊）
-                # 問題：原邏輯只檢查目標與障礙物中心點的距離，沒有考慮障礙物的實際半徑
-                # 結果：目標可能生成在障礙物內部或邊緣，導致重疊
-                # 
-                # 修復邏輯：
-                # 目標與障礙物的最小距離 = 目標與障礙物中心的距離 - 障礙物半徑
-                # 必須大於 obstacle_safe_distance 才算安全
-                # 即：distance_to_center - obstacle_radius > obstacle_safe_distance
-                # 即：distance_to_center > obstacle_safe_distance + obstacle_radius
-                if all_obstacle_radii is not None:
-                    # 擴展障礙物半徑到 [num_envs, num_obstacles]
-                    obstacle_radii_expanded = all_obstacle_radii.unsqueeze(0).expand(num_envs, -1)  # [num_envs, num_obstacles]
-                    # 計算所需的最小距離（安全距離 + 障礙物半徑）
-                    required_distances = obstacle_safe_distance + obstacle_radii_expanded  # [num_envs, num_obstacles]
-                    # 檢查每個障礙物：目標與障礙物中心的距離是否大於所需距離
-                    clear_per_obstacle = distances_to_obstacle_centers > required_distances  # [num_envs, num_obstacles]
-                    # 所有障礙物都必須滿足條件
-                    clear_of_obstacles = clear_per_obstacle.all(dim=1)  # [num_envs]
+
+                if required_distances is not None:
+                    clear_of_obstacles = (distances_to_obstacle_centers > required_distances).all(dim=1)
                 else:
-                    # 如果無法獲取障礙物半徑，使用保守估計（最大半徑 0.5 米）
-                    conservative_radius = 0.5
-                    required_distance = obstacle_safe_distance + conservative_radius
-                    min_dist_to_obstacle = distances_to_obstacle_centers.min(dim=1)[0]  # [num_envs]
-                    clear_of_obstacles = min_dist_to_obstacle > required_distance
+                    conservative_distance = obstacle_safe_distance + 0.5
+                    clear_of_obstacles = distances_to_obstacle_centers.min(dim=1)[0] > conservative_distance
             else:
                 clear_of_obstacles = torch.ones(num_envs, device=self.device, dtype=torch.bool)
             
@@ -653,7 +629,7 @@ class GoalCommandCfg(CommandTermCfg):
     # 障礙物安全距離（米）
     # 目標與任何障礙物中心的最小距離
 
-    max_resample_attempts: int = 200
+    max_resample_attempts: int = 30
     # 最大重試次數
     # 密集障礙物場景需要更多嘗試；fallback 使用歷史最佳候選（離障礙最遠的位置）
 
