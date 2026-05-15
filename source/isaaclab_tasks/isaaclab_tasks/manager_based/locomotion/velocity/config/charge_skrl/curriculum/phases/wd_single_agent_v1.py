@@ -199,7 +199,7 @@ STAGES = [
 
         "scene": {
             "goals": 8,
-            "goal_distance": (2.0, 7.0),
+            "goal_distance": (5.0, 9.0),
             "static_obstacles": 3,              # ↑ from 2，提高密度
             "dynamic_obstacles": 3,             # ↑ from 2
             "dynamic_obstacles_min": 2,         # ↑ from 1

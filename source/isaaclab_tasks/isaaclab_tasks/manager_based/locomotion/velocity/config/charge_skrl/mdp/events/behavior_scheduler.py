@@ -205,9 +205,13 @@ class BehaviorScheduler:
         # 計算每種 behavior 分配幾個 slot
         counts = self._allocate_counts(self.behavior_mix, self.max_obstacles)
 
-        # 依序分配 slot
+        # 依序分配 slot — static 排前面，與 mixed_parallel 一致
+        # （robot_state.py 用 i < num_static_mixed 判斷 static vs dynamic）
+        sorted_names = sorted(counts.keys(),
+                              key=lambda n: 0 if n == "static" else 1)
         slot_idx = 0
-        for btype_name, count in counts.items():
+        for btype_name in sorted_names:
+            count = counts[btype_name]
             if count == 0:
                 continue
 

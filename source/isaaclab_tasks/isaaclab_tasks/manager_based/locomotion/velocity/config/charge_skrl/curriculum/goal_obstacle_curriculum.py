@@ -1914,10 +1914,23 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
                     device=str(env.device),
                     boundary=_bnd,
                 )
+                # 同步碰撞歸類所需的 metadata（robot_state.py 用來區分 static/dynamic）
+                import torch as _torch
+                env._env_difficulty = _torch.full(
+                    (env.num_envs,), 3, device=env.device, dtype=_torch.long
+                )  # 3 = mixed (static + dynamic 同場)
+                # static slot 數量 = BehaviorScheduler 分配的 static count
+                _counts = env._behavior_scheduler._allocate_counts(behavior_mix, max_obs)
+                env._num_obstacles_static_mixed = _counts.get("static", 0)
                 print(f"[Curriculum] BehaviorScheduler created: {max_obs} slots, mix={behavior_mix}", flush=True)
             else:
                 # 升階時更新
                 env._behavior_scheduler.update_stage(cfg)
+                _counts = env._behavior_scheduler._allocate_counts(
+                    env._behavior_scheduler.behavior_mix,
+                    env._behavior_scheduler.max_obstacles,
+                )
+                env._num_obstacles_static_mixed = _counts.get("static", 0)
                 print(f"[Curriculum] BehaviorScheduler updated: mix={behavior_mix}", flush=True)
         except Exception as e:
             print(f"[Curriculum] BehaviorScheduler init failed: {e}", flush=True)
