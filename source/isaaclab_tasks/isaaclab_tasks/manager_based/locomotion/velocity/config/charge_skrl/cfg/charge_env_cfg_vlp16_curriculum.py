@@ -94,6 +94,7 @@ from ..mdp.rewards.navrl_rewards import (
 from ..mdp.events import (
     randomize_obstacles_by_difficulty,
     move_obstacles_vectorized,
+    move_goal_positions,
 )
 from ..mdp.events.reset import reset_root_state_random_safe
 from ..mdp.events.walls import init_perenv_walls, randomize_walls
@@ -363,6 +364,24 @@ class EventCfgVLP16Curriculum:
             "move_dt": 0.2, "speed_min": 0.3, "speed_max": 1.2,
             "goal_reach_threshold": 0.5, "speed_resample_steps": 10,
             "area_limit": 8.0, "max_obstacles": 50, "bound_limit": 9.0,
+        },
+    )
+
+    # Goal 隨機移動（預設 speed=0 關閉，由 curriculum phase 動態啟用）
+    move_goal = EventTerm(
+        func=move_goal_positions,
+        mode="interval",
+        interval_range_s=(0.2, 0.2),
+        params={
+            "goal_move_speed": 0.0,
+            "goal_move_max_radius": 3.0,
+            "goal_move_behavior": "random_walk",
+            "goal_move_angular_speed": 0.5,
+            "goal_move_dt": 0.2,
+            "goal_move_wall_margin": 0.5,
+            "goal_move_obs_margin": 0.8,
+            "goal_move_dir_steps_min": 15,
+            "goal_move_dir_steps_max": 40,
         },
     )
 

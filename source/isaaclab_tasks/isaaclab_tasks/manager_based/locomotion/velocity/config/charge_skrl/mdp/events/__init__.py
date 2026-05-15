@@ -45,6 +45,8 @@ from .walls import (
     randomize_walls,
 )
 
+from .goal_movement import move_goal_positions
+
 __all__ = [
     # 障礙物事件
     "reset_obstacles",
@@ -74,4 +76,6 @@ __all__ = [
     # 牆壁隨機化事件
     "init_perenv_walls",
     "randomize_walls",
+    # Goal 移動事件
+    "move_goal_positions",
 ]

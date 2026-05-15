@@ -27,6 +27,7 @@ VLP16 訓練使用的函數:
 from __future__ import annotations
 
 import math
+import random
 import torch
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,9 @@ def randomize_obstacles_by_difficulty(
     boundary: float = 7.5,  # Phase 0 房間半徑 8m，留 0.5m 邊距
     # Active density masking: fraction of dynamic obstacles that are active
     active_obstacle_ratio: float = 1.0,
+    # Goal 附近障礙物：>=1 為確定數量，0<p<1 為 Bernoulli 機率（放 1 個）
+    obs_near_goal_count: float = 0,
+    obs_near_goal_radius: float = 2.0,
     # 🔥 Debug 模式
     debug: bool = False,
 ):
@@ -341,13 +345,33 @@ def randomize_obstacles_by_difficulty(
         # 對可見的障礙物進行隨機位置採樣（含碰撞檢查）
         # -------------------------------------------------------------------
         if visible_mask.any():
-            # 獲取此障礙物應該在的象限
-            quadrant_idx = i % 4
-            x_min, x_max, y_min, y_max = quadrants[quadrant_idx]
+            # 判斷此障礙物是否應放在 goal 附近
+            # >=1: 確定前 N 個放在 goal 附近；0<p<1: Bernoulli 機率放 1 個
+            if obs_near_goal_count >= 1:
+                place_near_goal = (i < int(obs_near_goal_count)) and has_goal
+            elif obs_near_goal_count > 0:
+                place_near_goal = (i == 0 and random.random() < obs_near_goal_count) and has_goal
+            else:
+                place_near_goal = False
 
-            # 生成隨機 XY 座標（局部座標）
-            rand_x = torch.rand(N, device=device) * (x_max - x_min) + x_min
-            rand_y = torch.rand(N, device=device) * (y_max - y_min) + y_min
+            if place_near_goal:
+                # 在 goal 附近 [min_near_dist, obs_near_goal_radius] 環形區域生成
+                min_near_dist = 0.8  # 不要太貼 goal 中心
+                angle = torch.rand(N, device=device) * 2.0 * math.pi
+                dist = (torch.rand(N, device=device)
+                        * (obs_near_goal_radius - min_near_dist) + min_near_dist)
+                # goal_pos_xy 是局部座標（相對 env_origin）
+                rand_x = goal_pos_xy[:, 0] + dist * torch.cos(angle)
+                rand_y = goal_pos_xy[:, 1] + dist * torch.sin(angle)
+                # clamp 到場景邊界
+                rand_x = rand_x.clamp(-spawn_range, spawn_range)
+                rand_y = rand_y.clamp(-spawn_range, spawn_range)
+            else:
+                # 原本的象限隨機放置
+                quadrant_idx = i % 4
+                x_min, x_max, y_min, y_max = quadrants[quadrant_idx]
+                rand_x = torch.rand(N, device=device) * (x_max - x_min) + x_min
+                rand_y = torch.rand(N, device=device) * (y_max - y_min) + y_min
 
             pos[:, 0] = rand_x
             pos[:, 1] = rand_y
@@ -395,8 +419,18 @@ def randomize_obstacles_by_difficulty(
                 # 對無效位置重新採樣
                 if needs_resample.any():
                     num_resample = needs_resample.sum().item()
-                    new_x = torch.rand(num_resample, device=device) * (x_max - x_min) + x_min
-                    new_y = torch.rand(num_resample, device=device) * (y_max - y_min) + y_min
+                    if place_near_goal:
+                        # near-goal resample: 重新在 goal 附近生成
+                        r_angle = torch.rand(num_resample, device=device) * 2.0 * math.pi
+                        r_dist = (torch.rand(num_resample, device=device)
+                                  * (obs_near_goal_radius - min_near_dist) + min_near_dist)
+                        new_x = (goal_pos_xy[needs_resample, 0]
+                                 + r_dist * torch.cos(r_angle)).clamp(-spawn_range, spawn_range)
+                        new_y = (goal_pos_xy[needs_resample, 1]
+                                 + r_dist * torch.sin(r_angle)).clamp(-spawn_range, spawn_range)
+                    else:
+                        new_x = torch.rand(num_resample, device=device) * (x_max - x_min) + x_min
+                        new_y = torch.rand(num_resample, device=device) * (y_max - y_min) + y_min
                     pos[needs_resample, 0] = new_x
                     pos[needs_resample, 1] = new_y
 

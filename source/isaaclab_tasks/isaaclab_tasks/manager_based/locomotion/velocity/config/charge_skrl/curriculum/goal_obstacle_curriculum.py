@@ -1149,6 +1149,11 @@ def _apply_open_ended(env, level: int):
                 ec.params["num_obstacles_static"] = cfg["num_obstacles_static"]
                 ec.params["num_obstacles_dynamic"] = cfg["num_obstacles_dynamic"]
                 ec.params["boundary"] = cfg["boundary"]
+                # goal 附近障礙物
+                if "obs_near_goal_count" in cfg:
+                    ec.params["obs_near_goal_count"] = cfg["obs_near_goal_count"]
+                if "obs_near_goal_radius" in cfg:
+                    ec.params["obs_near_goal_radius"] = cfg["obs_near_goal_radius"]
                 evt.set_term_cfg(name, ec)
             except Exception:
                 continue
@@ -1163,6 +1168,20 @@ def _apply_open_ended(env, level: int):
             ec = evt.get_term_cfg("move_dynamic_obstacles")
             ec.params["speed_max"] = cfg["speed_range"]
             evt.set_term_cfg("move_dynamic_obstacles", ec)
+        except Exception:
+            pass
+        # goal 隨機移動
+        try:
+            ec = evt.get_term_cfg("move_goal")
+            if "goal_move_speed" in cfg:
+                ec.params["goal_move_speed"] = cfg["goal_move_speed"]
+            if "goal_move_max_radius" in cfg:
+                ec.params["goal_move_max_radius"] = cfg["goal_move_max_radius"]
+            if "goal_move_behavior" in cfg:
+                ec.params["goal_move_behavior"] = cfg["goal_move_behavior"]
+            if "goal_move_angular_speed" in cfg:
+                ec.params["goal_move_angular_speed"] = cfg["goal_move_angular_speed"]
+            evt.set_term_cfg("move_goal", ec)
         except Exception:
             pass
     except Exception:
@@ -1826,6 +1845,11 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
                 ec.params["num_obstacles_static"] = cfg["num_obstacles_static"]
                 ec.params["num_obstacles_dynamic"] = cfg["num_obstacles_dynamic"]
                 ec.params["min_obstacles_dynamic"] = cfg.get("min_obstacles_dynamic", cfg["num_obstacles_dynamic"])
+                # goal 附近障礙物
+                if "obs_near_goal_count" in cfg:
+                    ec.params["obs_near_goal_count"] = cfg["obs_near_goal_count"]
+                if "obs_near_goal_radius" in cfg:
+                    ec.params["obs_near_goal_radius"] = cfg["obs_near_goal_radius"]
                 evt.set_term_cfg(name, ec)
             except Exception:
                 continue
@@ -1833,6 +1857,22 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
         env._num_obstacles = cfg["num_obstacles_static"] + cfg["num_obstacles_dynamic"]
         if hasattr(env, "_obstacle_cache"):
             del env._obstacle_cache
+    except Exception:
+        pass
+
+    # goal 隨機移動
+    try:
+        evt = env.event_manager
+        ec = evt.get_term_cfg("move_goal")
+        if "goal_move_speed" in cfg:
+            ec.params["goal_move_speed"] = cfg["goal_move_speed"]
+        if "goal_move_max_radius" in cfg:
+            ec.params["goal_move_max_radius"] = cfg["goal_move_max_radius"]
+        if "goal_move_behavior" in cfg:
+            ec.params["goal_move_behavior"] = cfg["goal_move_behavior"]
+        if "goal_move_angular_speed" in cfg:
+            ec.params["goal_move_angular_speed"] = cfg["goal_move_angular_speed"]
+        evt.set_term_cfg("move_goal", ec)
     except Exception:
         pass
 
@@ -1865,7 +1905,8 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
             if getattr(env, '_behavior_scheduler', None) is None:
                 # 首次建立
                 max_obs = cfg.get("num_obstacles_static", 0) + cfg.get("num_obstacles_dynamic", 5)
-                _bnd = getattr(env, '_room_boundary', 8.5)
+                _bnd = cfg.get("boundary", getattr(env, '_room_boundary', 8.5))
+                env._room_boundary = _bnd  # 同步給其他系統
                 env._behavior_scheduler = BehaviorScheduler(
                     stage_config=cfg,
                     num_envs=env.num_envs,

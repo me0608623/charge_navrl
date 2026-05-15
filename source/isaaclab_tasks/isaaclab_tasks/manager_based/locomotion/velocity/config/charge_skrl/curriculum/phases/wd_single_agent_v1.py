@@ -93,7 +93,7 @@ STAGES = [
     # |----------------|-----|-----|-----|-----|-----|-----|-----|-----|
     # | goals          |  10 |   8 |   6 |   4 |   4 |   3 |   2 |   1 |
     # | goal_dist_max  |   6 |   7 |   8 |   9 |   9 |  10 |  10 |  10 |
-    # | static_obs     |   1 |   1 |   2 |   2 |   3 |   3 |   3 |   3 |
+    # | static_obs     |   1 |   2 |   2 |   2 |   3 |   3 |   3 |   3 |
     # | dynamic_obs    |   2 |   2 |   3 |   4 |   5 |   6 |   8 |   8 |
     # | dynamic_min    |   1 |   1 |   2 |   3 |   3 |   5 |   6 |   6 |
     # | walls_max      |   1 |   1 |   2 |   2 |   3 |   3 |   3 |   3 |
@@ -105,6 +105,9 @@ STAGES = [
     # | signal (g/ep)  |.167 |.133 |.100 |.067 |.053 |.033 |.017 |.006 |
     # | signal Δ%      |  —  | -20 | -25 | -33 | -20 | -37 | -48 | -67 |
     # | density obs/m² |.03  |.03  |.05  |.06  |.08  |.09  |.11  |.11  |
+    # | goal_mv_speed  | 0   |0.30 |0.05 |0.10 |0.15 |0.20 |0.25 |0.25 |
+    # | goal_mv_radius | 0   | 2.0 | 1.0 | 1.5 | 2.0 | 2.5 | 3.0 | 3.0 |
+    # | goal_mv_behav  |  —  | rw  |drift| rw  | rw  | rw  |patrl|patrl|
     # ═══════════════════════════════════════════════════════════════════════
 
     # ──────────────────────────────────────────────────────────────────────
@@ -127,6 +130,13 @@ STAGES = [
             "walls_min": 0,
             "walls_max": 1,
             "wall_length": 3.0,                 # v2: 5.0→3.0，短牆降低初期阻擋
+            "obs_near_goal_count": 0,           # 在 goal 附近強制生成的障礙物數量（0=關閉）
+            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # goal 隨機移動（SA1: 關閉，agent 先學靜態 goal 導航）
+            "goal_move_speed": 0.0,             # 線速度 (m/s)，0=關閉
+            "goal_move_max_radius": 0.0,        # 最大漫遊半徑 (m)
+            "goal_move_behavior": "random_walk", # random_walk / drift / patrol
+            "goal_move_angular_speed": 0.0,     # 方向變換角速度 (rad/s)
             "episode_s": 60,
             "gamma": 0.984,
         },
@@ -190,12 +200,21 @@ STAGES = [
         "scene": {
             "goals": 8,
             "goal_distance": (2.0, 7.0),
-            "static_obstacles": 1,              # 同 SA1
-            "dynamic_obstacles": 2,
-            "dynamic_obstacles_min": 1,
+            "static_obstacles": 3,              # ↑ from 2，提高密度
+            "dynamic_obstacles": 3,             # ↑ from 2
+            "dynamic_obstacles_min": 2,         # ↑ from 1
             "walls_min": 0,
             "walls_max": 1,
             "wall_length": 3.0,
+            "boundary": 7.0,                    # ↓ from 8.5，縮小活動範圍提高障礙密度
+            # 目標附近障礙物
+            "obs_near_goal_count": 2,             # ↑ from 1，goal 附近放 2 個障礙
+            "obs_near_goal_radius": 2.5,        # ↑ from 2.0，稍擴大環形範圍
+            # goal 隨機移動（SA2: 關閉，專注靜態辨識）
+            "goal_move_speed": 0.3,             # 線速度 (m/s)，robot 30% v_max
+            "goal_move_max_radius": 2.0,        # 最大漫遊半徑 (m)
+            "goal_move_behavior": "random_walk", # random_walk / drift / patrol
+            "goal_move_angular_speed": 0.5,     # 方向變換角速度 (rad/s)
             "episode_s": 60,
             "gamma": 0.984,
         },
@@ -203,7 +222,7 @@ STAGES = [
         "reward": {
             "penalty_hit": -8.0,
             "reward_get_goal": 40.0,
-            "cost_operate": 0.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
@@ -267,6 +286,14 @@ STAGES = [
             "walls_min": 1,                     # ↑ from 0
             "walls_max": 2,                     # ↑ from 1
             "wall_length": 3.5,                 # ↑ from 3.0
+            # 目標附近障礙物
+            "obs_near_goal_count": 1,           # goal 附近強制生成的障礙物數量（0=關閉）
+            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # goal 隨機移動（SA3: 引入極慢 drift）
+            "goal_move_speed": 0.05,            # 線速度 (m/s)，極慢飄移
+            "goal_move_max_radius": 1.0,        # 最大漫遊半徑 (m)
+            "goal_move_behavior": "drift",      # 緩慢線性飄移，少量方向變化
+            "goal_move_angular_speed": 0.2,     # 方向變換角速度 (rad/s)
             "episode_s": 60,                    # v2: 90→60，保持短 episode 維持 signal
             "gamma": 0.990,
         },
@@ -274,7 +301,7 @@ STAGES = [
         "reward": {
             "penalty_hit": -10.0,               # v2: -8→-10，漸進增加
             "reward_get_goal": 40.0,
-            "cost_operate": 0.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
@@ -339,6 +366,14 @@ STAGES = [
             "walls_min": 1,
             "walls_max": 2,
             "wall_length": 4.0,                 # ↑ from 3.5
+            # 目標附近障礙物
+            "obs_near_goal_count": 1,           # goal 附近強制生成的障礙物數量（0=關閉）
+            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # goal 隨機移動（SA4: 慢速 random_walk）
+            "goal_move_speed": 0.10,            # 線速度 (m/s)，↑ from 0.05
+            "goal_move_max_radius": 1.5,        # 最大漫遊半徑 (m)，↑ from 1.0
+            "goal_move_behavior": "random_walk", # 隨機方向 + 平滑轉向
+            "goal_move_angular_speed": 0.3,     # 方向變換角速度 (rad/s)
             "episode_s": 60,
             "gamma": 0.994,
         },
@@ -346,7 +381,7 @@ STAGES = [
         "reward": {
             "penalty_hit": -12.0,               # ↑ from -10
             "reward_get_goal": 40.0,
-            "cost_operate": 0.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
@@ -415,6 +450,14 @@ STAGES = [
             "walls_min": 2,                     # ↑ from 1
             "walls_max": 3,                     # ↑ from 2
             "wall_length": 4.0,
+            # 目標附近障礙物
+            "obs_near_goal_count": 1,           # goal 附近強制生成的障礙物數量（0=關閉）
+            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # goal 隨機移動（SA5: 中速 random_walk）
+            "goal_move_speed": 0.15,            # 線速度 (m/s)，↑ from 0.10
+            "goal_move_max_radius": 2.0,        # 最大漫遊半徑 (m)，↑ from 1.5
+            "goal_move_behavior": "random_walk", # 隨機方向 + 平滑轉向
+            "goal_move_angular_speed": 0.4,     # 方向變換角速度 (rad/s)
             "episode_s": 75,                    # ↑ from 60（漸進，非 60→90 跳躍）
             "gamma": 0.995,
         },
@@ -422,7 +465,7 @@ STAGES = [
         "reward": {
             "penalty_hit": -15.0,               # ↑ from -12
             "reward_get_goal": 40.0,
-            "cost_operate": 0.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
@@ -492,6 +535,14 @@ STAGES = [
             "walls_min": 2,
             "walls_max": 3,
             "wall_length": 4.5,                 # ↑ from 4.0
+            # 目標附近障礙物
+            "obs_near_goal_count": 2,           # goal 附近強制生成的障礙物數量（0=關閉）
+            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # goal 隨機移動（SA6: 中快速 random_walk）
+            "goal_move_speed": 0.20,            # 線速度 (m/s)，↑ from 0.15
+            "goal_move_max_radius": 2.5,        # 最大漫遊半徑 (m)，↑ from 2.0
+            "goal_move_behavior": "random_walk", # 隨機方向 + 平滑轉向
+            "goal_move_angular_speed": 0.5,     # 方向變換角速度 (rad/s)
             "episode_s": 90,                    # ↑ from 75
             "gamma": 0.996,
         },
@@ -499,7 +550,7 @@ STAGES = [
         "reward": {
             "penalty_hit": -25.0,               # ↑ from -15（漸進，非 -15→-85 跳躍）
             "reward_get_goal": 40.0,
-            "cost_operate": 0.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
@@ -571,6 +622,14 @@ STAGES = [
             "walls_min": 2,
             "walls_max": 3,
             "wall_length": 4.5,
+            # 目標附近障礙物
+            "obs_near_goal_count": 2,           # goal 附近強制生成的障礙物數量（0=關閉）
+            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # goal 隨機移動（SA7: 快速 patrol）
+            "goal_move_speed": 0.25,            # 線速度 (m/s)，↑ from 0.20
+            "goal_move_max_radius": 3.0,        # 最大漫遊半徑 (m)，↑ from 2.5
+            "goal_move_behavior": "patrol",     # waypoint 間巡邏（切換自 random_walk）
+            "goal_move_angular_speed": 0.5,     # 方向變換角速度 (rad/s)
             "episode_s": 120,                   # ↑ from 90（漸進，非 90→210 跳躍）
             "gamma": 0.997,
         },
@@ -578,7 +637,7 @@ STAGES = [
         "reward": {
             "penalty_hit": -50.0,               # ↑ from -25（漸進，非 -15→-85 跳躍）
             "reward_get_goal": 40.0,
-            "cost_operate": 0.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
@@ -652,6 +711,14 @@ STAGES = [
             "walls_min": 2,
             "walls_max": 3,
             "wall_length": 5.0,                 # ↑ from 4.5
+            # 目標附近障礙物
+            "obs_near_goal_count": 2,           # goal 附近強制生成的障礙物數量（0=關閉）
+            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # goal 隨機移動（SA8: 最終標準 patrol）
+            "goal_move_speed": 0.25,            # 線速度 (m/s)，同 SA7
+            "goal_move_max_radius": 3.0,        # 最大漫遊半徑 (m)，同 SA7
+            "goal_move_behavior": "patrol",     # waypoint 間巡邏
+            "goal_move_angular_speed": 0.5,     # 方向變換角速度 (rad/s)
             "episode_s": 180,                   # ↑ from 120
             "gamma": 0.998,
         },
@@ -659,7 +726,7 @@ STAGES = [
         "reward": {
             "penalty_hit": -100.0,
             "reward_get_goal": 40.0,
-            "cost_operate": 0.0,
+            "cost_operate": 0.03,
             "reward_weights": None,
         },
 
@@ -750,24 +817,38 @@ def _flatten_phase(phase: dict) -> dict:
     transition = phase.get("transition", {})
 
     # 障礙物數量與 ratio 轉換。
-    # 既有 curriculum event 需要的是 static_ratio / dynamic_ratio / empty_ratio，
-    # 所以這裡從數量推回比例。
+    # 既有 curriculum event 需要的是 static_ratio / dynamic_ratio / empty_ratio / mixed_ratio，
+    # 當同時有 static 和 dynamic 障礙物時，必須用 mixed mode (difficulty=3)
+    # 才能在同一個 env 內正確區分：i < num_static 靜止，i >= num_static 移動。
+    # 參照 goal_obstacle_curriculum.py L1049-1053 的邏輯。
     n_s = int(scene.get("static_obstacles", 0))
     n_d = int(scene.get("dynamic_obstacles", 0))
     total = n_s + n_d
 
-    # 若完全沒障礙物，empty_ratio = 1。
-    empty = 1.0 if total == 0 else 0.0
-
-    if total > 0:
-        # static_ratio = static 佔非空障礙物的比例
-        s_ratio = round((1.0 - empty) * n_s / total, 2)
-
-        # dynamic_ratio = 剩餘比例
-        d_ratio = round(1.0 - empty - s_ratio, 2)
-    else:
+    if total == 0:
+        # 無障礙物 → 全部 empty
+        empty = 1.0
         s_ratio = 0.0
         d_ratio = 0.0
+        m_ratio = 0.0
+    elif n_s > 0 and n_d > 0:
+        # 同時有 static + dynamic → mixed mode，所有 env 都混合配置
+        empty = 0.0
+        s_ratio = 0.0
+        d_ratio = 0.0
+        m_ratio = 1.0
+    elif n_d > 0:
+        # 純 dynamic
+        empty = 0.0
+        s_ratio = 0.0
+        d_ratio = 1.0
+        m_ratio = 0.0
+    else:
+        # 純 static
+        empty = 0.0
+        s_ratio = 1.0
+        d_ratio = 0.0
+        m_ratio = 0.0
 
     # 主要 flat schema。
     flat = {
@@ -783,6 +864,7 @@ def _flatten_phase(phase: dict) -> dict:
         "empty_ratio": empty,
         "static_ratio": s_ratio,
         "dynamic_ratio": d_ratio,
+        "mixed_ratio": m_ratio,
         "gamma": float(scene["gamma"]),
         "episode_length_s": float(scene["episode_s"]),
         "min_walls": int(scene["walls_min"]),
@@ -800,6 +882,19 @@ def _flatten_phase(phase: dict) -> dict:
 
         # behavior -> obstacle speed / behavior fields
         "obstacle_speed_rate": float(behavior.get("obstacle_speed", 0.8)),
+
+        # boundary (obstacle spawn range)
+        "boundary": float(scene.get("boundary", 8.5)),
+
+        # goal 附近障礙物
+        "obs_near_goal_count": float(scene.get("obs_near_goal_count", 0)),
+        "obs_near_goal_radius": float(scene.get("obs_near_goal_radius", 2.0)),
+
+        # goal 隨機移動
+        "goal_move_speed": float(scene.get("goal_move_speed", 0.0)),
+        "goal_move_max_radius": float(scene.get("goal_move_max_radius", 0.0)),
+        "goal_move_behavior": str(scene.get("goal_move_behavior", "random_walk")),
+        "goal_move_angular_speed": float(scene.get("goal_move_angular_speed", 0.0)),
 
         # 目前單車任務不主用，但保留 legacy 欄位相容性
         "num_virtual_spots": float(scene.get("virtual_spots", 0)),

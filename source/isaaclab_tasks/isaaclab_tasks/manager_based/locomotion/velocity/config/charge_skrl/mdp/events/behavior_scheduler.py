@@ -95,6 +95,10 @@ class BehaviorScheduler:
         speed_overrides = stage_config.get("speed_overrides", {})
         safety_overrides = stage_config.get("safety_overrides", {})
 
+        # Near-goal obstacle placement (from curriculum config)
+        self.obs_near_goal_count = int(stage_config.get("obs_near_goal_count", 0))
+        self.obs_near_goal_radius = float(stage_config.get("obs_near_goal_radius", 2.0))
+
         # 建立 config + apply overrides
         self.cfg = BehaviorConfig()
         all_overrides = {**speed_overrides, **safety_overrides}
@@ -217,6 +221,10 @@ class BehaviorScheduler:
                 self._spawn_single(env_ids, slot_idx, btype_id)
                 slot_idx += 1
 
+        # Near-goal placement: 覆寫前 N 個 active slot 位置到 goal 附近
+        if self.obs_near_goal_count > 0:
+            self._place_near_goal(env_ids, env)
+
         # Rejection sampling: 確保 safety constraints
         self._enforce_spawn_constraints(env_ids, env)
 
@@ -227,7 +235,8 @@ class BehaviorScheduler:
         active_count = (self.behavior_type[env_ids] != BEHAVIOR_INACTIVE).sum().item()
         if N_envs <= 4:  # play 模式少 env 才印
             print(f"[BehaviorScheduler] reset {N_envs} envs → {active_count} active obstacles "
-                  f"(max_slots={self.max_obstacles}, mix={self.behavior_mix})")
+                  f"(max_slots={self.max_obstacles}, mix={self.behavior_mix}, "
+                  f"near_goal={self.obs_near_goal_count})")
 
     def step(self, env: ManagerBasedRLEnv, dt: float = 0.2) -> None:
         """每個 env step 呼叫一��，向量化移動��有 obstacle。
@@ -309,6 +318,11 @@ class BehaviorScheduler:
         all_overrides = {**speed_overrides, **safety_overrides}
         if all_overrides:
             self.cfg.apply_stage_overrides(all_overrides)
+        # Near-goal placement params
+        if "obs_near_goal_count" in stage_config:
+            self.obs_near_goal_count = int(stage_config["obs_near_goal_count"])
+        if "obs_near_goal_radius" in stage_config:
+            self.obs_near_goal_radius = float(stage_config["obs_near_goal_radius"])
 
     # ══════════════���════════════════════════���══════════════════════════════
     # Private
@@ -388,6 +402,46 @@ class BehaviorScheduler:
         # Final clamp
         pos[:, :, 0].clamp_(-b, b)
         pos[:, :, 1].clamp_(-b, b)
+
+    def _place_near_goal(self, env_ids: Tensor, env: ManagerBasedRLEnv) -> None:
+        """將前 obs_near_goal_count 個 active slot 放到最近 goal 附近。
+
+        在 goal 周圍 [min_near_dist, obs_near_goal_radius] 環形區域隨機放置。
+        """
+        K = len(env_ids)
+        n_place = self.obs_near_goal_count
+        radius = self.obs_near_goal_radius
+        min_near_dist = 0.8  # 不要太貼 goal 中心
+
+        # 取得 goal 位置並轉成 local frame（相對 env origin）
+        try:
+            goal_cmd = env.command_manager.get_command("goal_command")
+            goal_world = goal_cmd[env_ids, :2]  # [K, 2] world frame
+            env_origins_xy = env.scene.env_origins[env_ids, :2]  # [K, 2]
+            goal_xy = goal_world - env_origins_xy  # → local frame
+        except (AttributeError, KeyError, IndexError):
+            return  # 沒有 goal command → 跳過
+
+        placed = 0
+        for slot_idx in range(self.max_obstacles):
+            if placed >= n_place:
+                break
+            # 只覆寫 active slot
+            active = self.behavior_type[env_ids, slot_idx] != BEHAVIOR_INACTIVE
+            if not active.any():
+                continue
+
+            # 環形隨機：角度 uniform，距離 uniform in [min_near_dist, radius]
+            angle = torch.rand(K, device=self.device) * 2.0 * math.pi
+            dist = (torch.rand(K, device=self.device)
+                    * (radius - min_near_dist) + min_near_dist)
+            new_x = (goal_xy[:, 0] + dist * torch.cos(angle)).clamp(-self.boundary, self.boundary)
+            new_y = (goal_xy[:, 1] + dist * torch.sin(angle)).clamp(-self.boundary, self.boundary)
+
+            # 只覆寫 active 的 env
+            self.positions[env_ids[active], slot_idx, 0] = new_x[active]
+            self.positions[env_ids[active], slot_idx, 1] = new_y[active]
+            placed += 1
 
     def _enforce_spawn_constraints(self, env_ids: Tensor, env: ManagerBasedRLEnv) -> None:
         """Spawn 後檢查 safety constraints，不合法的重新採樣。

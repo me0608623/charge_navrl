@@ -46,12 +46,12 @@ from isaaclab.app import AppLauncher
 # --- 場景元素 ---
 STAGE_PARAMETER  = False   # True=套用訓練時該 stage 的場景參數；False=使用下方手動設定/CLI 覆寫
 NUM_GOALS        = 1       # 目標數量。stage_parameter=True 且 CLI 未指定時用 stage 預設
-NUM_STATIC_OBS   = 5       # 靜態障礙物數量
-NUM_DYNAMIC_OBS  = 0       # 動態障礙物數量
+NUM_STATIC_OBS   = 1       # 靜態障礙物數量
+NUM_DYNAMIC_OBS  = 2       # 動態障礙物數量
 NUM_WALLS        = 1       # 內部牆壁數量（min=max=N）
 WALL_LENGTH      = 3.0     # 牆壁長度 m
 GOAL_DIST_MIN    = 2.0     # 最小目標距離 m
-GOAL_DIST_MAX    = 5.0     # 最大目標距離 m
+GOAL_DIST_MAX    = 6.0     # 最大目標距離 m
 EPISODE_LENGTH_S = None    # episode 秒數。None=stage_parameter=True 時用 stage；False 時沿用 env 預設
 OBSTACLE_SPEED   = 0.8     # 障礙物速度倍率（0.0=靜止, 1.0=全速）
 OBSTACLE_BEHAVIOR = "patrol"  # 障礙物行為模式:
@@ -66,6 +66,10 @@ OBSTACLE_BEHAVIOR = "patrol"  # 障礙物行為模式:
                            #   "mixed"              — 用 stage config 的比例混合
                            #   None                 — 不變更
 NO_WALLS         = False   # True=移除所有內部牆壁
+
+# --- 目標附近障礙物 ---
+OBS_NEAR_GOAL_COUNT = 1    # 在 goal 附近強制生成的障礙物數量（0=關閉）
+OBS_NEAR_GOAL_RADIUS = 2.0 # goal 附近多少米範圍內生成障礙物
 
 # --- 障礙物運動 ---
 SCRIPTED_OBSTACLES = False # True=啟用 interval events 讓障礙物動
@@ -89,7 +93,7 @@ DETERMINISTIC    = True    # True=確定性動作 / False=隨機探索
 REAL_TIME        = False   # True=以真實時間步進（插入 sleep）
 
 # --- 診斷工具 ---
-AUX_DEBUG        = False   # True=印出 RNN aux 7D 預測 vs 真實值
+AUX_DEBUG        = True   # True=印出 RNN aux 7D 預測 vs 真實值
 AUX_DEBUG_INTERVAL = 25    # 每 N 步印一次 aux debug
 PLAY_DIAG        = False   # True=累積航向/速度/距離導航診斷
 DIAGNOSTIC       = False   # True=LiDAR 可觀察性診斷
@@ -229,6 +233,12 @@ parser.add_argument("--scripted_obstacles", action="store_true", default=SCRIPTE
                          "注意：未來將被 BehaviorScheduler 取代")
 parser.add_argument("--no_walls", action="store_true", default=NO_WALLS,
                     help="移除所有內部牆壁")
+
+# --- 目標附近障礙物 ---
+parser.add_argument("--obs_near_goal_count", type=int, default=OBS_NEAR_GOAL_COUNT,
+                    help="在 goal 附近強制生成的障礙物數量（0=關閉）")
+parser.add_argument("--obs_near_goal_radius", type=float, default=OBS_NEAR_GOAL_RADIUS,
+                    help="goal 附近多少米範圍內生成障礙物")
 
 # --- LiDAR 設定 ---
 parser.add_argument("--lidar_no_noise", action="store_true", default=LIDAR_NO_NOISE,
@@ -472,6 +482,8 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
         print(f"  CLI 覆寫: {', '.join(changed)}")
     if final["obstacle_behavior"]:
         print(f"  障礙物行為: {final['obstacle_behavior']}（需要 BehaviorScheduler）")
+    if cli_args.obs_near_goal_count > 0:
+        print(f"  目標附近障礙: {cli_args.obs_near_goal_count} 個在 goal ≤{cli_args.obs_near_goal_radius:.1f}m 內")
 
     return final
 
@@ -1600,6 +1612,70 @@ def main():
     CAUSE_NAMES = {0: "執行中", 1: "到達", 2: "撞牆", 3: "撞障礙", 4: "超時", 5: "其他"}
 
     # ================================================================
+    # 9b. 目標附近障礙物放置
+    # ================================================================
+    def place_obstacles_near_goal(env_ids_to_place=None):
+        """將前 N 個障礙物強制放置在 goal 附近。
+
+        每次 episode reset 後呼叫，把指定數量的障礙物移到 goal 周圍
+        obs_near_goal_radius 範圍內。
+        """
+        count = args_cli.obs_near_goal_count
+        radius = args_cli.obs_near_goal_radius
+        if count <= 0:
+            return
+
+        if env_ids_to_place is None:
+            env_ids_to_place = torch.arange(raw_env.num_envs, device=device)
+        elif not isinstance(env_ids_to_place, torch.Tensor):
+            env_ids_to_place = torch.tensor(env_ids_to_place, device=device, dtype=torch.long)
+
+        N = len(env_ids_to_place)
+        if N == 0:
+            return
+
+        # 取得 goal 世界座標
+        try:
+            goal_cmd = raw_env.command_manager.get_command("goal_command")
+            goal_xy = goal_cmd[env_ids_to_place, :2]  # [N, 2]
+        except (AttributeError, KeyError, IndexError):
+            return
+
+        min_dist = 0.8  # 不要太貼 goal 中心
+
+        for i in range(count):
+            obs_name = f"obstacle_{i}"
+            try:
+                obstacle = raw_env.scene[obs_name]
+            except KeyError:
+                break
+
+            # 在 goal 附近 [min_dist, radius] 環形區域隨機生成
+            angle = torch.rand(N, device=device) * 2.0 * 3.14159265
+            dist = torch.rand(N, device=device) * (radius - min_dist) + min_dist
+            offset_x = dist * torch.cos(angle)
+            offset_y = dist * torch.sin(angle)
+
+            # pose [N, 7] = [x, y, z, qw, qx, qy, qz]
+            pose = torch.zeros(N, 7, device=device)
+            pose[:, 0] = goal_xy[:, 0] + offset_x
+            pose[:, 1] = goal_xy[:, 1] + offset_y
+            pose[:, 2] = 0.9  # 可見高度
+            pose[:, 3] = 1.0  # quat w
+
+            obstacle.write_root_pose_to_sim(pose, env_ids=env_ids_to_place)
+            # 歸零速度
+            vel = torch.zeros(N, 6, device=device)
+            obstacle.write_root_velocity_to_sim(vel, env_ids=env_ids_to_place)
+
+        if not hasattr(place_obstacles_near_goal, "_printed"):
+            place_obstacles_near_goal._printed = True
+            print(f"[PLAY] obs_near_goal: {count} 個障礙物強制放置在 goal {min_dist:.1f}~{radius:.1f}m 範圍內")
+
+    # 初始 reset 後立即放置
+    place_obstacles_near_goal()
+
+    # ================================================================
     # 10. 主 Play 迴圈
     # ================================================================
     step = 0
@@ -1704,6 +1780,9 @@ def main():
             rnn_state.reset(done_ids)
             episode_reward[done_ids] = 0.0
             episode_step[done_ids] = 0
+
+            # 新 episode 開始 → 將障礙物放置到 goal 附近
+            place_obstacles_near_goal(done_ids)
 
         # --- 每 200 步印出進度摘要 ---
         if step % 200 == 0:
