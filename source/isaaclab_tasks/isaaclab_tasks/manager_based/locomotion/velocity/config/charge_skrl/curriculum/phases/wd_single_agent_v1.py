@@ -278,36 +278,37 @@ STAGES = [
         "name": "SA3_walls_crossing",
 
         "scene": {
-            "goals": 6,                         # v2: 3→6，保持 reward signal
-            "goal_distance": (2.0, 8.0),
-            "static_obstacles": 2,              # ↑ from 1
-            "dynamic_obstacles": 3,             # ↑ from 2
-            "dynamic_obstacles_min": 2,         # ↑ from 1
-            "walls_min": 1,                     # ↑ from 0
-            "walls_max": 2,                     # ↑ from 1
-            "wall_length": 3.5,                 # ↑ from 3.0
+            "goals": 6,                         # 保持足夠 reward signal
+            "goal_distance": (5.0, 9.0),        # 同 SA2，維持長距離導航
+            "static_obstacles": 3,              # 同 SA2，保持密度
+            "dynamic_obstacles": 4,             # ↑ from SA2(3)，增加動態挑戰
+            "dynamic_obstacles_min": 3,         # ↑ from SA2(2)
+            "walls_min": 1,                     # ↑ from SA2(0)
+            "walls_max": 2,                     # ↑ from SA2(1)
+            "wall_length": 3.5,                 # ↑ from SA2(3.0)
+            "boundary": 7.0,                    # 同 SA2
             # 目標附近障礙物
-            "obs_near_goal_count": 1,           # goal 附近強制生成的障礙物數量（0=關閉）
-            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            "obs_near_goal_count": 2,           # 同 SA2，goal 附近 2 個障礙
+            "obs_near_goal_radius": 2.5,        # 同 SA2
             # goal 隨機移動（SA3: 引入極慢 drift）
             "goal_move_speed": 0.05,            # 線速度 (m/s)，極慢飄移
             "goal_move_max_radius": 1.0,        # 最大漫遊半徑 (m)
-            "goal_move_behavior": "drift",      # 緩慢線性飄移，少量方向變化
+            "goal_move_behavior": "drift",      # 緩慢線性飄移
             "goal_move_angular_speed": 0.2,     # 方向變換角速度 (rad/s)
-            "episode_s": 60,                    # v2: 90→60，保持短 episode 維持 signal
+            "episode_s": 60,
             "gamma": 0.990,
         },
 
         "reward": {
-            "penalty_hit": -10.0,               # v2: -8→-10，漸進增加
+            "penalty_hit": -12.0,               # ↑ from SA2(-8)，WD P3 = -12
             "reward_get_goal": 40.0,
             "cost_operate": 0.03,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.01,
-            "entropy_angular": 0.02,
+            "entropy_linear": 0.03,             # 同 SA2 v4，維持探索
+            "entropy_angular": 0.05,            # 同 SA2 v4
         },
 
         "behavior": {
@@ -326,7 +327,7 @@ STAGES = [
         },
 
         "trainer": {
-            "lr": 2e-4,
+            "lr": 5e-4,                         # 同 SA2 v4，避免 policy 凍結
             "rnn_lr": 5e-4,
             "vf_coeff": 0.5,
             "max_grad_norm": 1.0,
