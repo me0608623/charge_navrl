@@ -290,11 +290,11 @@ STAGES = [
             # 目標附近障礙物
             "obs_near_goal_count": 2,           # 同 SA2，goal 附近 2 個障礙
             "obs_near_goal_radius": 2.5,        # 同 SA2
-            # goal 隨機移動（SA3: 引入極慢 drift）
-            "goal_move_speed": 0.05,            # 線速度 (m/s)，極慢飄移
-            "goal_move_max_radius": 1.0,        # 最大漫遊半徑 (m)
-            "goal_move_behavior": "drift",      # 緩慢線性飄移
-            "goal_move_angular_speed": 0.2,     # 方向變換角速度 (rad/s)
+            # goal 隨機移動（SA3: 朝障礙物移動，迫使 agent 在 obs 附近導航）
+            "goal_move_speed": 0.15,            # 線速度 (m/s)，中等速度朝 obs 靠近
+            "goal_move_max_radius": 3.0,        # 最大漫遊半徑 (m)
+            "goal_move_behavior": "toward_obstacle",  # 主動靠近障礙物
+            "goal_move_angular_speed": 0.3,     # 方向變換角速度 (rad/s)
             "episode_s": 60,
             "gamma": 0.990,
         },

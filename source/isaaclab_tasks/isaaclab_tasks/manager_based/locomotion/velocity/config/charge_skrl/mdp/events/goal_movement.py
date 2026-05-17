@@ -252,6 +252,44 @@ def move_goal_positions(
         dx = goal_move_speed * goal_move_dt * dir_x
         dy = goal_move_speed * goal_move_dt * dir_y
 
+    elif goal_move_behavior == "toward_obstacle":
+        # ---- toward_obstacle: 朝最近的 obstacle 移動 ----
+        # 讓 goal 主動靠近障礙物，迫使 agent 在 obstacle 附近導航
+        obs_xy, obs_vis = _gather_obstacle_positions(env)
+        if obs_xy is not None and obs_xy.shape[0] > 0:
+            # 找每個 goal 最近的 visible obstacle
+            goal_2d = goal_pos[:, :2]  # [N_goals, 2]
+            # obs_xy: [N_obs, 2] — 取所有可見的
+            vis_mask = obs_vis.any(dim=0) if obs_vis.dim() > 1 else obs_vis
+            vis_obs = obs_xy[vis_mask] if vis_mask.any() else obs_xy[:1]
+
+            # 距離計算：每個 goal 到每個 visible obs
+            diff = vis_obs.unsqueeze(0) - goal_2d.unsqueeze(1)  # [G, O, 2]
+            dists = diff.norm(dim=2)  # [G, O]
+            nearest_idx = dists.argmin(dim=1)  # [G]
+            nearest_obs = vis_obs[nearest_idx]  # [G, 2]
+
+            # 朝 nearest obstacle 方向移動
+            to_obs = nearest_obs - goal_2d
+            dist_to_obs = to_obs.norm(dim=1, keepdim=True).clamp(min=1e-6)
+            direction = to_obs / dist_to_obs
+
+            # 到了 obstacle 附近 (< 1.5m) 就停下或繞行
+            too_close = dist_to_obs.squeeze() < 1.5
+            if too_close.any():
+                # 太近時轉為隨機繞行（避免重疊）
+                n_close = too_close.sum().item()
+                random_angle = torch.rand(n_close, device=device) * 2 * math.pi
+                direction[too_close, 0] = torch.cos(random_angle)
+                direction[too_close, 1] = torch.sin(random_angle)
+
+            dx = goal_move_speed * goal_move_dt * direction[:, 0]
+            dy = goal_move_speed * goal_move_dt * direction[:, 1]
+        else:
+            # 沒有 obstacle → fallback to random_walk
+            dx = goal_move_speed * goal_move_dt * torch.cos(heading)
+            dy = goal_move_speed * goal_move_dt * torch.sin(heading)
+
     else:
         # unknown behavior → 不移動
         return
