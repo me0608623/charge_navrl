@@ -1797,10 +1797,10 @@ def main():
         # --- Per-step 行為診斷 logging ---
         if hasattr(args_cli, 'play_diag') and args_cli.play_diag and step < args_cli.steps:
             _obs_flat = obs_tensor.reshape(raw_env.num_envs, -1)
-            _lidar = _obs_flat[:, 6:78]  # 72 rays
+            _lidar = _obs_flat[:, 6:78]  # 72 rays (normalized by max_range)
             _lidar_min = _lidar.min(dim=1).values
-            _speed = _obs_flat[:, 0]  # ego linear velocity
-            _omega = _obs_flat[:, 1]  # ego angular velocity
+            _speed = _obs_flat[:, 1]  # ego linear velocity (normalized by v_max=1.0)
+            _omega = _obs_flat[:, 2]  # ego angular velocity (normalized by omega_max=1.5)
             # 最近障礙物距離（從 BehaviorScheduler）
             if _play_behavior_scheduler is not None:
                 _robot_pos = raw_env.scene["robot"].data.root_pos_w[:, :2]
@@ -1936,31 +1936,37 @@ def main():
         print(f"[DIAG] Per-step 行為分析 ({len(lidar_arr)} samples)")
         print("=" * 60)
 
-        print("\n[DIAG] === LiDAR 最近距離 vs 速度 ===")
-        bins = [0, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]
-        for i in range(len(bins)-1):
-            mask = (lidar_arr >= bins[i]) & (lidar_arr < bins[i+1])
-            if mask.sum() > 0:
-                print(f"  [{bins[i]:.1f}, {bins[i+1]:.1f})m: "
-                      f"speed={speed_arr[mask].mean():.3f}±{speed_arr[mask].std():.3f} "
-                      f"|ω|={np.abs(omega_arr[mask]).mean():.3f} "
-                      f"(n={mask.sum()}, {mask.sum()/len(lidar_arr)*100:.1f}%)")
+        # 反 normalize: speed_arr 是 normalized (÷v_max=1.0)，lidar 是 normalized (÷max_range≈18m)
+        # obs_dist_arr 已是 actual meters (from BehaviorScheduler positions)
+        speed_actual = speed_arr  # v_max=1.0, so normalized = actual m/s
+        omega_actual = omega_arr * 1.5  # omega_max=1.5 rad/s
+        lidar_actual = lidar_arr * 18.0  # max_range ≈ 18m (VLP16 config)
 
-        print("\n[DIAG] === 最近障礙物距離 vs 速度 ===")
+        print("\n[DIAG] === LiDAR 最近距離(m) vs 速度(m/s) ===")
+        bins = [0, 1.0, 2.0, 3.0, 4.0, 6.0, 9.0, 18.0]
+        for i in range(len(bins)-1):
+            mask = (lidar_actual >= bins[i]) & (lidar_actual < bins[i+1])
+            if mask.sum() > 0:
+                print(f"  [{bins[i]:.0f}, {bins[i+1]:.0f})m: "
+                      f"speed={speed_actual[mask].mean():.3f}±{speed_actual[mask].std():.3f} "
+                      f"|ω|={omega_actual[mask].mean():.3f} "
+                      f"(n={mask.sum()}, {mask.sum()/len(lidar_actual)*100:.1f}%)")
+
+        print("\n[DIAG] === 最近障礙物距離(m) vs 速度(m/s) ===")
         obs_bins = [0, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 10.0]
         for i in range(len(obs_bins)-1):
             mask = (obs_dist_arr >= obs_bins[i]) & (obs_dist_arr < obs_bins[i+1])
             if mask.sum() > 0:
                 print(f"  [{obs_bins[i]:.1f}, {obs_bins[i+1]:.1f})m: "
-                      f"speed={speed_arr[mask].mean():.3f}±{speed_arr[mask].std():.3f} "
-                      f"|ω|={np.abs(omega_arr[mask]).mean():.3f} "
+                      f"speed={speed_actual[mask].mean():.3f}±{speed_actual[mask].std():.3f} "
+                      f"|ω|={omega_actual[mask].mean():.3f} "
                       f"(n={mask.sum()}, {mask.sum()/len(obs_dist_arr)*100:.1f}%)")
 
         print("\n[DIAG] === 全局統計 ===")
-        print(f"  Speed: mean={speed_arr.mean():.3f} std={speed_arr.std():.3f} max={speed_arr.max():.3f}")
-        print(f"  |Omega|: mean={np.abs(omega_arr).mean():.3f} std={np.abs(omega_arr).std():.3f}")
-        print(f"  LiDAR min: mean={lidar_arr.mean():.3f} std={lidar_arr.std():.3f}")
-        print(f"  Obs dist: mean={obs_dist_arr[obs_dist_arr<100].mean():.3f} std={obs_dist_arr[obs_dist_arr<100].std():.3f}")
+        print(f"  Speed (m/s): mean={speed_actual.mean():.3f} std={speed_actual.std():.3f} max={speed_actual.max():.3f}")
+        print(f"  |Omega| (rad/s): mean={np.abs(omega_actual).mean():.3f} std={np.abs(omega_actual).std():.3f}")
+        print(f"  LiDAR min (m): mean={lidar_actual.mean():.2f} std={lidar_actual.std():.2f}")
+        print(f"  Obs dist (m): mean={obs_dist_arr[obs_dist_arr<100].mean():.2f} std={obs_dist_arr[obs_dist_arr<100].std():.2f}")
 
     # 清理資源
     if bev_visualizer is not None:
