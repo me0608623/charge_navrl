@@ -29,11 +29,11 @@ critic_profile: symmetric                                     # critic profile m
 # --- Training budget（訓練預算） ---
 num_envs: 1024                                                # 平行環境數；增加會提高每次 update 的資料量，不增加 update 次數
 rollout_length: 300                                           # 每個 env 每次 rollout 收集步數；影響 GAE horizon 與 RNN 序列資料
-timesteps: 270000                                             # 控制 update 數；updates = timesteps / rollout_length = 900
+timesteps: 420000                                             # 控制 update 數；updates = timesteps / rollout_length = 1400（含 500 iter continuation）
 seed: 42                                                      # 隨機種子；固定後方便跨 stage / algorithm 比較
 
 # --- RL optimizer / return（RL 核心超參數） ---
-lr: 0.0002                                                    # policy/value head 學習率；PPO 通常比 A2C 保守
+lr: 0.0005                                                    # policy/value head 學習率；↑ from 0.0002，加大 actor gradient 效果
 rnn_lr: 0.0005                                                # aux/RNN 學習率；noaux 時設 0 讓 RNN 不更新
 aux_lr: 0.0                                                   # legacy aux lr fallback；實際以 aux_lr_* 細部設定為主
 aux_lr_predict_head: 0.0005                                   # aux predict head 學習率；aux 開啟時可讓輸出映射一起學

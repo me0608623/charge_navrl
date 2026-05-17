@@ -227,8 +227,8 @@ STAGES = [
         },
 
         "exploration": {
-            "entropy_linear": 0.01,
-            "entropy_angular": 0.02,
+            "entropy_linear": 0.03,             # ↑ from 0.01，打破 policy 僵化
+            "entropy_angular": 0.05,            # ↑ from 0.02
         },
 
         "behavior": {
@@ -245,7 +245,7 @@ STAGES = [
         },
 
         "trainer": {
-            "lr": 2e-4,
+            "lr": 5e-4,                         # ↑ from 2e-4，加大 actor gradient 效果
             "rnn_lr": 5e-4,
             "vf_coeff": 0.5,
             "max_grad_norm": 1.0,

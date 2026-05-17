@@ -41,18 +41,26 @@ from isaaclab.app import AppLauncher
 # ★★★ 場景參數設定區 — 直接在這裡改，不用打 CLI ★★★
 # ============================================================================
 # 數字直接填數字，文字要加引號 "..."，True/False 不加引號。
-# 值為 None 時沿用 curriculum stage 的預設值。
 #
-# --- 場景元素 ---
-STAGE_PARAMETER  = False   # True=套用訓練時該 stage 的場景參數；False=使用下方手動設定/CLI 覆寫
-NUM_GOALS        = 1       # 目標數量。stage_parameter=True 且 CLI 未指定時用 stage 預設
+# --- 基礎設定 ---
+CHECKPOINT       = None    # checkpoint .pt 路徑。None=自動搜尋最新
+STAGE            = 1       # 固定 curriculum 階段（1-indexed）
+STAGE_PARAMETER  = True    # True=完整載入訓練時 STAGE 的場景參數（下方場景元素區全部忽略）
+                           # False=使用下方手動設定區 / CLI 覆寫
+STEPS            = 3000    # 最大 play 步數
+CAMERA           = "top"   # "top"=俯視 / "follow"=跟隨 / "side"=側視
+DETERMINISTIC    = True    # True=確定性動作 / False=隨機探索
+REAL_TIME        = False   # True=以真實時間步進（插入 sleep）
+
+# --- 場景元素（STAGE_PARAMETER=True 時此區全部忽略，直接用 stage 定義） ---
+NUM_GOALS        = 1       # 目標數量
 NUM_STATIC_OBS   = 1       # 靜態障礙物數量
 NUM_DYNAMIC_OBS  = 2       # 動態障礙物數量
 NUM_WALLS        = 1       # 內部牆壁數量（min=max=N）
 WALL_LENGTH      = 3.0     # 牆壁長度 m
 GOAL_DIST_MIN    = 2.0     # 最小目標距離 m
 GOAL_DIST_MAX    = 6.0     # 最大目標距離 m
-EPISODE_LENGTH_S = None    # episode 秒數。None=stage_parameter=True 時用 stage；False 時沿用 env 預設
+EPISODE_LENGTH_S = None    # episode 秒數。None=沿用 env 預設
 OBSTACLE_SPEED   = 0.8     # 障礙物速度倍率（0.0=靜止, 1.0=全速）
 OBSTACLE_BEHAVIOR = "patrol"  # 障礙物行為模式:
                            #   "static"            — 靜止不動
@@ -83,14 +91,6 @@ SHIELD_MODE      = "soft"  # "soft"=線性降速 / "hard"=強制停止
 # --- LiDAR ---
 LIDAR_NO_NOISE   = False   # True=關閉 LiDAR 雜訊
 LIDAR_VIS        = True    # True=顯示 LiDAR 射線
-
-# --- 基礎設定 ---
-CHECKPOINT       = None    # checkpoint .pt 路徑。None=自動搜尋最新
-STAGE            = 1       # 固定 curriculum 階段（1-indexed）
-STEPS            = 3000    # 最大 play 步數
-CAMERA           = "top"   # "top"=俯視 / "follow"=跟隨 / "side"=側視
-DETERMINISTIC    = True    # True=確定性動作 / False=隨機探索
-REAL_TIME        = False   # True=以真實時間步進（插入 sleep）
 
 # --- 診斷工具 ---
 AUX_DEBUG        = True   # True=印出 RNN aux 7D 預測 vs 真實值
@@ -399,15 +399,22 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
     # 目標數量
     env_cfg.commands.goal_command.num_goals = final["num_goals"]
 
-    # 障礙物數量（套用到 randomize_obstacles 事件）
+    # 障礙物數量與比例（套用到 randomize_obstacles 事件）
     total_obs = final["num_static"] + final["num_dynamic"]
-    if total_obs > 0:
-        empty_ratio = 0.0
-        static_ratio = round(final["num_static"] / total_obs, 2)
-        dynamic_ratio = round(1.0 - static_ratio, 2)
+    if cli_args.stage_parameter and stage_cfg is not None:
+        # 嚴格對齊訓練 stage：直接用 stage 的原始 ratios
+        empty_ratio = stage_cfg["empty_ratio"]
+        static_ratio = stage_cfg["static_ratio"]
+        dynamic_ratio = stage_cfg["dynamic_ratio"]
     else:
-        empty_ratio = 1.0
-        static_ratio = dynamic_ratio = 0.0
+        # 手動模式：從 counts 重算 ratios
+        if total_obs > 0:
+            empty_ratio = 0.0
+            static_ratio = round(final["num_static"] / total_obs, 2)
+            dynamic_ratio = round(1.0 - static_ratio, 2)
+        else:
+            empty_ratio = 1.0
+            static_ratio = dynamic_ratio = 0.0
 
     for evt_attr in ["randomize_obstacles", "randomize_obstacles_startup"]:
         evt_term = getattr(env_cfg.events, evt_attr, None)
@@ -1494,9 +1501,47 @@ def main():
     # 預設關閉 scripted 運動（與訓練行為一致）
     # --scripted_obstacles 時啟用 interval events 讓障礙物動起來（VO 測試用）
     raw_env._obstacle_policy_active = not args_cli.scripted_obstacles
+
+    # 建立 BehaviorScheduler（與訓練一致）
+    # 訓練時由 curriculum 建立，play 時手動建立
+    _play_behavior_scheduler = None
+    if args_cli.obstacle_behavior and args_cli.obstacle_behavior != "static":
+        try:
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.behavior_scheduler import BehaviorScheduler
+            _play_stage_config = {
+                "behavior_mix": {
+                    "patrol": 0.45,
+                    "random_walk": 0.30,
+                    "static": 0.25,
+                },
+                "obs_near_goal_count": args_cli.obs_near_goal_count,
+                "obs_near_goal_radius": args_cli.obs_near_goal_radius,
+            }
+            _n_obs = args_cli.num_static_obs + args_cli.num_dynamic_obs
+            _bnd = getattr(raw_env, '_room_boundary', 7.0)
+            _play_behavior_scheduler = BehaviorScheduler(
+                stage_config=_play_stage_config,
+                num_envs=raw_env.num_envs,
+                max_obstacles=_n_obs,
+                device=str(device),
+                boundary=_bnd,
+            )
+            raw_env._behavior_scheduler = _play_behavior_scheduler
+            # 初始 reset
+            _all_ids = torch.arange(raw_env.num_envs, device=device)
+            _play_behavior_scheduler.reset(_all_ids, raw_env)
+            print(f"[PLAY] BehaviorScheduler 啟用: {_n_obs} slots, mix={_play_stage_config['behavior_mix']}")
+        except Exception as e:
+            print(f"[PLAY] BehaviorScheduler 建立失敗: {e}")
+            _play_behavior_scheduler = None
+    else:
+        print("[PLAY] 障礙物行為: static（無 BehaviorScheduler）")
+
     print(
         "[PLAY] 障礙物運動: "
-        + ("scripted interval events 啟用" if args_cli.scripted_obstacles else "scripted interval events 停用")
+        + ("scripted interval events 啟用" if args_cli.scripted_obstacles else
+           "BehaviorScheduler 控制" if _play_behavior_scheduler else
+           "全部靜止")
     )
 
     # ================================================================
@@ -1738,6 +1783,9 @@ def main():
 
         # --- 環境步進 ---
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
+        # BehaviorScheduler 每步移動障礙物（與訓練一致）
+        if _play_behavior_scheduler is not None:
+            _play_behavior_scheduler.step(raw_env, dt=step_dt)
         # 合併 terminated + truncated 為 done 旗標
         done = (terminated.squeeze(-1) | truncated.squeeze(-1)) if terminated.ndim > 1 else (terminated | truncated)
 
@@ -1745,6 +1793,34 @@ def main():
         episode_reward += reward.squeeze(-1) if reward.ndim > 1 else reward
         episode_step += 1
         rnn_state.update(new_hidden)  # 更新 RNN 隱藏狀態
+
+        # --- Per-step 行為診斷 logging ---
+        if hasattr(args_cli, 'play_diag') and args_cli.play_diag and step < args_cli.steps:
+            _obs_flat = obs_tensor.reshape(raw_env.num_envs, -1)
+            _lidar = _obs_flat[:, 6:78]  # 72 rays
+            _lidar_min = _lidar.min(dim=1).values
+            _speed = _obs_flat[:, 0]  # ego linear velocity
+            _omega = _obs_flat[:, 1]  # ego angular velocity
+            # 最近障礙物距離（從 BehaviorScheduler）
+            if _play_behavior_scheduler is not None:
+                _robot_pos = raw_env.scene["robot"].data.root_pos_w[:, :2]
+                _env_origins = raw_env.scene.env_origins[:, :2]
+                _robot_local = _robot_pos - _env_origins
+                _obs_pos = _play_behavior_scheduler.positions[:, :, :2]
+                _diff = _obs_pos - _robot_local.unsqueeze(1)
+                _dists = _diff.norm(dim=2)
+                _active = _play_behavior_scheduler.behavior_type != 0
+                _dists[~_active] = 999.0
+                _obs_min_dist = _dists.min(dim=1).values
+            else:
+                _obs_min_dist = torch.full((raw_env.num_envs,), 999.0, device=device)
+            # 寫入全局 list（在結束時輸出統計）
+            if not hasattr(main, '_diag_data'):
+                main._diag_data = {'lidar_min': [], 'speed': [], 'omega': [], 'obs_dist': []}
+            main._diag_data['lidar_min'].append(_lidar_min.cpu().numpy())
+            main._diag_data['speed'].append(_speed.cpu().numpy())
+            main._diag_data['omega'].append(_omega.cpu().numpy())
+            main._diag_data['obs_dist'].append(_obs_min_dist.cpu().numpy())
 
         # --- 回合結束處理 ---
         if done.any():
@@ -1781,8 +1857,11 @@ def main():
             episode_reward[done_ids] = 0.0
             episode_step[done_ids] = 0
 
-            # 新 episode 開始 → 將障礙物放置到 goal 附近
-            place_obstacles_near_goal(done_ids)
+            # 新 episode 開始 → BehaviorScheduler reset + near-goal placement
+            if _play_behavior_scheduler is not None:
+                _play_behavior_scheduler.reset(done_ids, raw_env)
+            else:
+                place_obstacles_near_goal(done_ids)
 
         # --- 每 200 步印出進度摘要 ---
         if step % 200 == 0:
@@ -1844,6 +1923,44 @@ def main():
         print(f"    線性動作 idx 均值:    {diag_action_linear_sum/diag_samples:.4f}")
         print(f"    角度動作 idx 均值:    {diag_action_angular_sum/diag_samples:.4f}")
     print("=" * 60)
+
+    # --- Per-step 行為診斷統計輸出 ---
+    if hasattr(main, '_diag_data') and main._diag_data['lidar_min']:
+        import numpy as np
+        lidar_arr = np.concatenate(main._diag_data['lidar_min'])
+        speed_arr = np.concatenate(main._diag_data['speed'])
+        omega_arr = np.concatenate(main._diag_data['omega'])
+        obs_dist_arr = np.concatenate(main._diag_data['obs_dist'])
+
+        print("\n" + "=" * 60)
+        print(f"[DIAG] Per-step 行為分析 ({len(lidar_arr)} samples)")
+        print("=" * 60)
+
+        print("\n[DIAG] === LiDAR 最近距離 vs 速度 ===")
+        bins = [0, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]
+        for i in range(len(bins)-1):
+            mask = (lidar_arr >= bins[i]) & (lidar_arr < bins[i+1])
+            if mask.sum() > 0:
+                print(f"  [{bins[i]:.1f}, {bins[i+1]:.1f})m: "
+                      f"speed={speed_arr[mask].mean():.3f}±{speed_arr[mask].std():.3f} "
+                      f"|ω|={np.abs(omega_arr[mask]).mean():.3f} "
+                      f"(n={mask.sum()}, {mask.sum()/len(lidar_arr)*100:.1f}%)")
+
+        print("\n[DIAG] === 最近障礙物距離 vs 速度 ===")
+        obs_bins = [0, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 10.0]
+        for i in range(len(obs_bins)-1):
+            mask = (obs_dist_arr >= obs_bins[i]) & (obs_dist_arr < obs_bins[i+1])
+            if mask.sum() > 0:
+                print(f"  [{obs_bins[i]:.1f}, {obs_bins[i+1]:.1f})m: "
+                      f"speed={speed_arr[mask].mean():.3f}±{speed_arr[mask].std():.3f} "
+                      f"|ω|={np.abs(omega_arr[mask]).mean():.3f} "
+                      f"(n={mask.sum()}, {mask.sum()/len(obs_dist_arr)*100:.1f}%)")
+
+        print("\n[DIAG] === 全局統計 ===")
+        print(f"  Speed: mean={speed_arr.mean():.3f} std={speed_arr.std():.3f} max={speed_arr.max():.3f}")
+        print(f"  |Omega|: mean={np.abs(omega_arr).mean():.3f} std={np.abs(omega_arr).std():.3f}")
+        print(f"  LiDAR min: mean={lidar_arr.mean():.3f} std={lidar_arr.std():.3f}")
+        print(f"  Obs dist: mean={obs_dist_arr[obs_dist_arr<100].mean():.3f} std={obs_dist_arr[obs_dist_arr<100].std():.3f}")
 
     # 清理資源
     if bev_visualizer is not None:
