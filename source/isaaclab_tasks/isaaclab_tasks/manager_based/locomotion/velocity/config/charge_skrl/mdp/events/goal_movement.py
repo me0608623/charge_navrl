@@ -209,22 +209,45 @@ def move_goal_positions(
         dx_all = pg_speed * goal_move_dt * torch.cos(pg_heading)  # [N, G]
         dy_all = pg_speed * goal_move_dt * torch.sin(pg_heading)  # [N, G]
 
-        # 寫入新位置
+        # 取得牆壁資料（一次，所有 goal 共用）
         env_origins_xy = env.scene.env_origins[:, :2]  # [N, 2]
         boundary = getattr(env, '_room_boundary', 8.5)
         lim = boundary - goal_move_wall_margin
+        try:
+            wall_centers, wall_sizes, wall_mask = get_combined_wall_data(env)
+            has_walls = True
+        except Exception:
+            has_walls = False
 
         for gi in range(num_goals):
+            # 記住舊位置（碰牆時退回）
+            old_pos = goal_cmd.all_goals_pos_w[:, gi, :2].clone()
+
+            # 移動
             goal_cmd.all_goals_pos_w[:, gi, 0] += dx_all[:, gi]
             goal_cmd.all_goals_pos_w[:, gi, 1] += dy_all[:, gi]
-            # clamp 到邊界
+
+            # 邊界 clamp
             local_xy = goal_cmd.all_goals_pos_w[:, gi, :2] - env_origins_xy
             clamped = (local_xy.abs() > lim).any(dim=1)
             local_xy = torch.clamp(local_xy, -lim, lim)
             goal_cmd.all_goals_pos_w[:, gi, :2] = local_xy + env_origins_xy
-            # 碰邊界反彈
             if clamped.any():
                 pg_heading[clamped, gi] += math.pi
+
+            # 牆壁碰撞檢查 — 碰牆的 goal 退回原位 + 反轉方向
+            if has_walls:
+                try:
+                    new_local = goal_cmd.all_goals_pos_w[:, gi, :2] - env_origins_xy
+                    in_wall = check_wall_proximity_perenv(
+                        new_local, wall_centers, wall_sizes, wall_mask,
+                        goal_move_wall_margin,
+                    )
+                    if in_wall.any():
+                        goal_cmd.all_goals_pos_w[in_wall, gi, :2] = old_pos[in_wall]
+                        pg_heading[in_wall, gi] += math.pi
+                except Exception:
+                    pass
 
         # 更新 marker
         try:
