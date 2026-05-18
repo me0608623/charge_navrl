@@ -1544,6 +1544,48 @@ def main():
            "全部靜止")
     )
 
+    # Goal movement（與訓練一致）
+    _play_goal_mover = None
+    if hasattr(args_cli, 'stage') and args_cli.stage is not None:
+        try:
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.goal_movement import move_goal_positions
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases.wd_single_agent_v1 import STAGES, _flatten_phase
+            _stage_idx = args_cli.stage - 1  # 0-indexed
+            if 0 <= _stage_idx < len(STAGES):
+                _phase_cfg = _flatten_phase(STAGES[_stage_idx])
+                _gm_speed = _phase_cfg.get("goal_move_speed", 0.0)
+                _gm_behavior = _phase_cfg.get("goal_move_behavior", "random_walk")
+                if _gm_speed > 0:
+                    _gm_params = {
+                        "goal_move_speed": _gm_speed,
+                        "goal_move_max_radius": _phase_cfg.get("goal_move_max_radius", 3.0),
+                        "goal_move_behavior": _gm_behavior,
+                        "goal_move_angular_speed": _phase_cfg.get("goal_move_angular_speed", 0.5),
+                        "goal_move_dt": 0.2,
+                        "goal_move_wall_margin": 0.5,
+                        "goal_move_obs_margin": 0.8,
+                        "goal_move_dir_steps_min": 15,
+                        "goal_move_dir_steps_max": 40,
+                    }
+                    _all_env_ids = torch.arange(raw_env.num_envs, device=device)
+                    _gm_call_count = [0]
+                    def _goal_mover_fn(env_ref, params=_gm_params, eids=_all_env_ids, cc=_gm_call_count):
+                        move_goal_positions(env_ref, env_ids=eids, **params)
+                        cc[0] += 1
+                        if cc[0] <= 3 or cc[0] % 100 == 0:
+                            try:
+                                g = env_ref.command_manager.get_term("goal_command")
+                                gp = g.goal_pos_w[0, :2].tolist()
+                                print(f"[GOAL_MOVE] call#{cc[0]} goal[0]=({gp[0]:.1f},{gp[1]:.1f})", flush=True)
+                            except Exception:
+                                pass
+                    _play_goal_mover = _goal_mover_fn
+                    print(f"[PLAY] Goal movement 啟用: behavior={_gm_behavior}, speed={_gm_speed}")
+                else:
+                    print("[PLAY] Goal movement: speed=0，關閉")
+        except Exception as e:
+            print(f"[PLAY] Goal movement 建立失敗: {e}")
+
     # ================================================================
     # 8. Play 迴圈前置變數
     # ================================================================
@@ -1786,6 +1828,9 @@ def main():
         # BehaviorScheduler 每步移動障礙物（與訓練一致）
         if _play_behavior_scheduler is not None:
             _play_behavior_scheduler.step(raw_env, dt=step_dt)
+        # Goal movement 每步移動 goal（與訓練一致）
+        if _play_goal_mover is not None:
+            _play_goal_mover(raw_env)
         # 合併 terminated + truncated 為 done 旗標
         done = (terminated.squeeze(-1) | truncated.squeeze(-1)) if terminated.ndim > 1 else (terminated | truncated)
 
