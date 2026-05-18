@@ -143,6 +143,98 @@ def move_goal_positions(
     except Exception:
         return
 
+    # MultiGoalCommand 用 all_goals_pos_w [N, num_goals, 3]，
+    # command property 從 all_goals_pos_w 取最近 goal。
+    # 必須修改 all_goals_pos_w 才能真正移動 goal。
+    is_multi = hasattr(goal_cmd, 'all_goals_pos_w')
+    if is_multi:
+        num_goals = goal_cmd.cfg.num_goals
+        N = goal_cmd.all_goals_pos_w.shape[0]
+        device = goal_cmd.all_goals_pos_w.device
+
+        # ── Per-goal 獨立移動 ──
+        # Lazy init: per-goal 隨機速度、方向、移動 flag
+        if not hasattr(env, '_goal_move_per_goal_speed'):
+            # 隨機數量的 goal 會移動（50%~100%）
+            n_moving = torch.randint(max(1, num_goals // 2), num_goals + 1, (N,), device=device)
+            move_mask = torch.zeros(N, num_goals, dtype=torch.bool, device=device)
+            for i in range(N):
+                perm = torch.randperm(num_goals, device=device)[:n_moving[i]]
+                move_mask[i, perm] = True
+            env._goal_move_per_goal_mask = move_mask  # [N, num_goals]
+
+            # 隨機速度 [0.3, 0.6] m/s per goal
+            env._goal_move_per_goal_speed = (
+                torch.rand(N, num_goals, device=device) * 0.3 + 0.3
+            )  # [N, num_goals]
+            env._goal_move_per_goal_speed[~move_mask] = 0.0
+
+            # 隨機方向 per goal
+            env._goal_move_per_goal_heading = (
+                torch.rand(N, num_goals, device=device) * 2 * math.pi - math.pi
+            )
+
+            # 方向變換 timer
+            env._goal_move_per_goal_timer = torch.randint(
+                goal_move_dir_steps_min, goal_move_dir_steps_max + 1,
+                (N, num_goals), device=device,
+            )
+            env._goal_move_per_goal_step = torch.zeros(N, num_goals, device=device, dtype=torch.long)
+
+            n_total = move_mask.sum().item()
+            print(f"[GOAL_MOVE] Per-goal init: {n_total}/{N*num_goals} goals moving, "
+                  f"speed range [{env._goal_move_per_goal_speed[move_mask].min():.2f}, "
+                  f"{env._goal_move_per_goal_speed[move_mask].max():.2f}] m/s", flush=True)
+
+        pg_speed = env._goal_move_per_goal_speed  # [N, G]
+        pg_heading = env._goal_move_per_goal_heading  # [N, G]
+        pg_timer = env._goal_move_per_goal_timer  # [N, G]
+        pg_step = env._goal_move_per_goal_step  # [N, G]
+        pg_mask = env._goal_move_per_goal_mask  # [N, G]
+
+        # 更新方向（expired timer → 隨機偏轉）
+        pg_step += 1
+        expired = pg_step >= pg_timer
+        if expired.any():
+            n_exp = expired.sum().item()
+            delta = (torch.rand(n_exp, device=device) - 0.5) * 2.0 * goal_move_angular_speed * goal_move_dt * 10
+            pg_heading[expired] += delta
+            pg_step[expired] = 0
+            pg_timer[expired] = torch.randint(
+                goal_move_dir_steps_min, goal_move_dir_steps_max + 1,
+                (n_exp,), device=device,
+            )
+
+        # 計算位移 [N, G, 2]
+        dx_all = pg_speed * goal_move_dt * torch.cos(pg_heading)  # [N, G]
+        dy_all = pg_speed * goal_move_dt * torch.sin(pg_heading)  # [N, G]
+
+        # 寫入新位置
+        env_origins_xy = env.scene.env_origins[:, :2]  # [N, 2]
+        boundary = getattr(env, '_room_boundary', 8.5)
+        lim = boundary - goal_move_wall_margin
+
+        for gi in range(num_goals):
+            goal_cmd.all_goals_pos_w[:, gi, 0] += dx_all[:, gi]
+            goal_cmd.all_goals_pos_w[:, gi, 1] += dy_all[:, gi]
+            # clamp 到邊界
+            local_xy = goal_cmd.all_goals_pos_w[:, gi, :2] - env_origins_xy
+            clamped = (local_xy.abs() > lim).any(dim=1)
+            local_xy = torch.clamp(local_xy, -lim, lim)
+            goal_cmd.all_goals_pos_w[:, gi, :2] = local_xy + env_origins_xy
+            # 碰邊界反彈
+            if clamped.any():
+                pg_heading[clamped, gi] += math.pi
+
+        # 更新 marker
+        try:
+            if hasattr(goal_cmd, '_update_goal_markers'):
+                goal_cmd._update_goal_markers()
+        except Exception:
+            pass
+        return  # multi-goal 處理完畢，不走下面的 single-goal 邏輯
+
+    # ── Single GoalCommand fallback ──
     goal_pos = goal_cmd.goal_pos_w  # [N, 3] world frame
     N = goal_pos.shape[0]
     device = goal_pos.device
@@ -369,18 +461,28 @@ def move_goal_positions(
     # ══════════════════════════════════════════════════════════════════════
     # 寫入新位置 + 更新 marker
     # ══════════════════════════════════════════════════════════════════════
-    goal_pos[:, 0] = candidate[:, 0]
-    goal_pos[:, 1] = candidate[:, 1]
+    # 計算已過 safety check 的淨位移
+    net_displacement = candidate - goal_pos[:, :2]  # [N, 2]
 
-    # NOTE: goal_pos_w 的 in-place 修改不會反映在 GUI marker 上
-    # 因為 multi_goal_command 的 visualization (point instancer) 讀的是
-    # 獨立的 marker 資料，不是 goal_pos_w。
-    # TODO: 需要修改 multi_goal_command 的 compute() 或 visualization
-    #       才能讓 goal movement 真正在訓練和 play 中生效。
-    # 目前 goal movement 是 BROKEN — goal_pos_w 值會改但不影響：
-    #   1. agent 看到的 goal 位置（command_manager 回傳的 goal observation）
-    #   2. GUI 的 green arrow 位置
-    #   3. goal_reached 的判定位置
+    if is_multi:
+        # 移動 ALL goals — 每個 goal 加上相同位移，個別 clamp
+        num_goals = goal_cmd.cfg.num_goals
+        for gi in range(num_goals):
+            goal_cmd.all_goals_pos_w[:, gi, 0] += net_displacement[:, 0]
+            goal_cmd.all_goals_pos_w[:, gi, 1] += net_displacement[:, 1]
+        # 個別 clamp 到場景邊界
+        env_origins_xy = env.scene.env_origins[:, :2]  # [N, 2]
+        boundary = getattr(env, '_room_boundary', 8.5)
+        lim = boundary - goal_move_wall_margin
+        for gi in range(num_goals):
+            local_xy = goal_cmd.all_goals_pos_w[:, gi, :2] - env_origins_xy
+            local_xy = torch.clamp(local_xy, -lim, lim)
+            goal_cmd.all_goals_pos_w[:, gi, :2] = local_xy + env_origins_xy
+    else:
+        goal_pos[:, 0] = candidate[:, 0]
+        goal_pos[:, 1] = candidate[:, 1]
+
+    # 更新 marker
     try:
         if hasattr(goal_cmd, '_update_goal_markers'):
             goal_cmd._update_goal_markers()
