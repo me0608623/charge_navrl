@@ -278,7 +278,7 @@ def move_goal_positions(
             direction = to_obs / dist_to_obs
 
             # 到了 obstacle 附近 (< 1.5m) 就隨機繞行（避免重疊）
-            too_close = dist_to_obs.squeeze() < 1.5
+            too_close = (dist_to_obs.squeeze(-1) < 1.5).reshape(-1)  # 確保 1D
             if too_close.any():
                 n_close = too_close.sum().item()
                 random_angle = torch.rand(n_close, device=device) * 2 * math.pi

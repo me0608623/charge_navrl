@@ -1873,8 +1873,10 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
         if "goal_move_angular_speed" in cfg:
             ec.params["goal_move_angular_speed"] = cfg["goal_move_angular_speed"]
         evt.set_term_cfg("move_goal", ec)
-    except Exception:
-        pass
+        print(f"[Curriculum] move_goal sync: speed={cfg.get('goal_move_speed', '?')} "
+              f"behavior={cfg.get('goal_move_behavior', '?')}", flush=True)
+    except Exception as e:
+        print(f"[Curriculum] move_goal sync FAILED: {e}", flush=True)
 
     try:
         evt = env.event_manager
@@ -1914,6 +1916,8 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
                     device=str(env.device),
                     boundary=_bnd,
                 )
+                # 同步 _num_obstacles（goal_movement.py 的 _gather_obstacle_positions 需要）
+                env._num_obstacles = max_obs
                 # 同步碰撞歸類所需的 metadata（robot_state.py 用來區分 static/dynamic）
                 import torch as _torch
                 env._env_difficulty = _torch.full(
