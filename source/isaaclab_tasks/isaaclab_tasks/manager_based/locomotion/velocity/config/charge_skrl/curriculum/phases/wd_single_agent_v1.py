@@ -359,7 +359,7 @@ STAGES = [
         "name": "SA4_spatial_plan",
 
         "scene": {
-            "goals": 4,                         # ↓ from SA3(6)，減少 goals 增加導航距離
+            "goals": 2,                         # ↓ from SA3(6)，大幅減少 → 更長導航路徑
             "goal_distance": (5.0, 9.0),        # 同 SA2/SA3，維持長距離
             "static_obstacles": 3,              # 同 SA3
             "dynamic_obstacles": 5,             # ↑ from SA3(4)，漸進增加

@@ -1376,7 +1376,7 @@ def ppo_update_continuous(policy, value_fn, buffer, optimizer, epochs, mini_batc
     advantages, returns = compute_gae(
         buffer.rewards[:T], buffer.values[:T], buffer.dones[:T],
         last_value, gamma, gae_lambda)
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    advantages = advantages - advantages.mean()  # mean-only normalization（不除 std）
 
     flat_obs = buffer.obs[:T].reshape(-1, buffer.obs.shape[-1])
     flat_actions = buffer.actions[:T].reshape(-1, buffer.actions.shape[-1])
@@ -3108,7 +3108,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 value_targets = returns  # 不歸一化：使用 raw GAE returns 作為 critic target
             _raw_adv_std = advantages.std().item()  # 歸一化前的 advantage std（用於診斷）
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)  # 標準化 advantage
+            # 只做 mean subtraction，不除 std — 保留 raw advantage 量級
+            # 原版: advantages = (advantages - mean) / (std + 1e-8)  → std=1，gradient 被壓縮 11x
+            # 修改: advantages = advantages - mean  → std=raw_std≈11，gradient 保持原始量級
+            advantages = advantages - advantages.mean()
 
             policy_head.train(); value_head.train()
             # extractor/preprocess_rnn 維持 eval()：RL 只訓練 RL heads，不更新 aux module
