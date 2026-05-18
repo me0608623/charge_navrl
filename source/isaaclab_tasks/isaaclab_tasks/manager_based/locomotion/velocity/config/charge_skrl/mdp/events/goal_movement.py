@@ -372,9 +372,17 @@ def move_goal_positions(
     goal_pos[:, 0] = candidate[:, 0]
     goal_pos[:, 1] = candidate[:, 1]
 
-    # 更新綠色箭頭 marker
+    # NOTE: goal_pos_w 的 in-place 修改不會反映在 GUI marker 上
+    # 因為 multi_goal_command 的 visualization (point instancer) 讀的是
+    # 獨立的 marker 資料，不是 goal_pos_w。
+    # TODO: 需要修改 multi_goal_command 的 compute() 或 visualization
+    #       才能讓 goal movement 真正在訓練和 play 中生效。
+    # 目前 goal movement 是 BROKEN — goal_pos_w 值會改但不影響：
+    #   1. agent 看到的 goal 位置（command_manager 回傳的 goal observation）
+    #   2. GUI 的 green arrow 位置
+    #   3. goal_reached 的判定位置
     try:
-        if hasattr(goal_cmd, '_update_goal_markers') and goal_cmd.cfg.debug_vis:
+        if hasattr(goal_cmd, '_update_goal_markers'):
             goal_cmd._update_goal_markers()
     except Exception:
         pass
