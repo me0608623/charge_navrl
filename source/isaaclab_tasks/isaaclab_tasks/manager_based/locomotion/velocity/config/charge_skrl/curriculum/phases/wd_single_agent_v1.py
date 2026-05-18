@@ -359,36 +359,37 @@ STAGES = [
         "name": "SA4_spatial_plan",
 
         "scene": {
-            "goals": 4,
-            "goal_distance": (2.0, 9.0),
+            "goals": 4,                         # ↓ from SA3(6)，減少 goals 增加導航距離
+            "goal_distance": (5.0, 9.0),        # 同 SA2/SA3，維持長距離
             "static_obstacles": 3,              # 同 SA3
-            "dynamic_obstacles": 8,             # ↑ from 3
-            "dynamic_obstacles_min": 3,         # ↑ from 2
+            "dynamic_obstacles": 5,             # ↑ from SA3(4)，漸進增加
+            "dynamic_obstacles_min": 4,         # ↑ from SA3(3)
             "walls_min": 1,
             "walls_max": 2,
-            "wall_length": 4.0,                 # ↑ from 3.5
+            "wall_length": 4.0,                 # ↑ from SA3(3.5)
+            "boundary": 7.0,                    # 同 SA2/SA3
             # 目標附近障礙物
-            "obs_near_goal_count": 1,           # goal 附近強制生成的障礙物數量（0=關閉）
-            "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
-            # goal 隨機移動（SA4: 慢速 random_walk）
-            "goal_move_speed": 0.50,            # 線速度 (m/s)，↑ from 0.05
-            "goal_move_max_radius": 1.5,        # 最大漫遊半徑 (m)，↑ from 1.0
-            "goal_move_behavior": "random_walk", # 隨機方向 + 平滑轉向
-            "goal_move_angular_speed": 0.3,     # 方向變換角速度 (rad/s)
+            "obs_near_goal_count": 2,           # 同 SA3
+            "obs_near_goal_radius": 2.5,        # 同 SA3
+            # goal 隨機移動（SA4: 首次真正啟用！per-goal random [0.3,0.6] m/s）
+            "goal_move_speed": 0.1,             # > 0 即啟用 per-goal movement
+            "goal_move_max_radius": 3.0,        # 最大漫遊半徑
+            "goal_move_behavior": "random_walk",
+            "goal_move_angular_speed": 0.3,
             "episode_s": 60,
             "gamma": 0.994,
         },
 
         "reward": {
-            "penalty_hit": -20.0,               # ↑ from -10
+            "penalty_hit": -15.0,               # ↑ from SA3(-12)，漸進增加
             "reward_get_goal": 40.0,
             "cost_operate": 0.03,
             "reward_weights": None,
         },
 
         "exploration": {
-            "entropy_linear": 0.01,
-            "entropy_angular": 0.02,
+            "entropy_linear": 0.005,            # 同 SA3 low-ent
+            "entropy_angular": 0.01,            # 同 SA3 low-ent
         },
 
         "behavior": {
@@ -409,8 +410,8 @@ STAGES = [
         },
 
         "trainer": {
-            "lr": 2e-4,
-            "rnn_lr": 4e-4,                     # ↓ from 5e-4
+            "lr": 5e-4,                         # 同 SA2/SA3，避免 policy 凍結
+            "rnn_lr": 5e-4,
             "vf_coeff": 0.5,
             "max_grad_norm": 1.0,
             "aux_grad_clip": 0.5,

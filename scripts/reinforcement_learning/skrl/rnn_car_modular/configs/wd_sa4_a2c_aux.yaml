@@ -9,12 +9,12 @@
 # update 數 = timesteps / rollout_length = 270000 / 300 = 900
 
 name: wd_sa4_a2c_aux                                                  # config 唯一識別名；與檔名一致，方便 registry / WandB 搜尋
-description: "Fixed SA4 (SA4_spatial_plan), A2C, WD sparse reward, WD 7D aux enabled"  # 實驗描述；寫入 WandB config
+description: "Fixed SA4 (SA4_walls_crossing), A2C, WD sparse reward, WD 7D aux enabled"  # 實驗描述；寫入 WandB config
 
 # --- Environment / curriculum（環境與課程設定） ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD             # WD 版 task；env reward 歸零，訓練 reward 由 trainer module 計算
 curriculum_version: warp_drive_single_agent_v1                # 課程版本；使用 wd_single_agent_v1.py 的 SA1~SA8 設定
-initial_stage: 4                                              # 固定訓練的 SA stage；此檔對應 SA4_spatial_plan
+initial_stage: 4                                              # 固定訓練的 SA stage；此檔對應 SA4_nav_static
 fixed_stage: true                                             # 鎖定 stage，不做自動升降階；固定 phase 實驗必須 true
 scene_profile: warp_drive_single_agent_v1                     # 場景 profile metadata；通常與 curriculum_version 相同
 obstacle_mode: rule_based                                     # 使用 rule-based obstacle；避免同時訓練 obstacle policy 混入變因
@@ -23,7 +23,7 @@ obstacle_mode: rule_based                                     # 使用 rule-base
 reward_profile: wd_sparse                                     # WD sparse reward：goal reward / collision penalty / action cost
 algorithm: a2c                                                # 演算法；a2c=WD-style 單次 full-batch，ppo=PPO clipped surrogate
 aux_profile: wd_7d_geometry                                   # aux 任務；wd_7d_geometry=開啟 7D 幾何預測，none=關閉 aux
-encoder_profile: wd_exact_rnn                                # encoder metadata；PPO 目前用 extractor_rnn 避免 wd_exact_rnn 強制 A2C
+encoder_profile: extractor_rnn                                # 79D obs → Conv1d+MLP extractor → RNN；接續 SA1 checkpoint
 critic_profile: symmetric                                     # critic profile metadata；目前 actor/critic 使用相同 deployable obs
 
 # --- Training budget（訓練預算） ---
@@ -33,7 +33,7 @@ timesteps: 270000                                             # 控制 update �
 seed: 42                                                      # 隨機種子；固定後方便跨 stage / algorithm 比較
 
 # --- RL optimizer / return（RL 核心超參數） ---
-lr: 0.0002                                                    # policy/value head 學習率；PPO 通常比 A2C 保守
+lr: 0.0005                                                    # policy/value head 學習率；↑ from 0.0002，加大 actor gradient 效果
 rnn_lr: 0.0005                                                # aux/RNN 學習率；noaux 時設 0 讓 RNN 不更新
 aux_lr: 0.0                                                   # legacy aux lr fallback；實際以 aux_lr_* 細部設定為主
 aux_lr_predict_head: 0.0005                                   # aux predict head 學習率；aux 開啟時可讓輸出映射一起學
@@ -41,11 +41,11 @@ aux_lr_fc_middle: 0.0005                                     # RNN 後 fc_middle
 aux_lr_fc_front: 0.0005                                          # RNN 前 fc_front 學習率；PPO/保守設定通常先凍結
 aux_lr_extractor: 0.0                                         # extractor 學習率；通常凍結以避免輸入表徵漂移
 vf_coeff: 0.5                                                 # value loss 權重；critic 太弱可提高，但太高會壓制 actor
-gamma: 0.984                                                  # 折扣因子 γ；WD constant，越接近 1 越重視長期 reward
+gamma: 0.994                                                  # 折扣因子 γ；WD constant，越接近 1 越重視長期 reward
 gae_lambda: 0.95                                              # GAE λ；控制 advantage 的 bias-variance tradeoff
 normalize_return: true                                        # normalize critic target；穩定 sparse reward 的 value scale
 value_init_bias: 0.0                                          # value head 初始 bias；normalize_return=true 時建議 0
-max_grad_norm: 0.5                                            # 全域梯度裁剪；目前採文獻常用 0.5 保守值
+max_grad_norm: 1.0                                            # 全域梯度裁剪；對齊 SA1 curriculum trainer.max_grad_norm=1.0
 tbptt_len: 0                                                  # 主 RL loss 的 TBPTT；0=關閉，aux 序列另由 aux_seq_len 控制
 lr_decay: 0.0                                                 # LR decay；0=關閉，避免 phase config 混入額外變因
 
@@ -56,8 +56,8 @@ clip_eps: 0.2                                                 # PPO ratio clip �
 
 # --- Entropy（探索熵係數） ---
 ent_coeff: 0.0                                                # legacy 單一 entropy 係數；0=不覆蓋 per-head 設定
-ent_coeff_linear: 0.0                                        # linear head entropy；0 表示由 curriculum runtime 同步 phase 值
-ent_coeff_angular: 0.0                                       # angular head entropy；0 表示由 curriculum runtime 同步 phase 值
+ent_coeff_linear: 0.0                                         # linear head entropy；0 表示由 curriculum runtime 同步 phase 值
+ent_coeff_angular: 0.0                                        # angular head entropy；0 表示由 curriculum runtime 同步 phase 值
 
 # --- WD-style gradient caps / loss guards（WD 分離裁剪與 loss 保護） ---
 wd_update_clip: true                                          # 啟用 actor/critic 分離 grad cap；避免 critic spike 壓制 actor
@@ -69,11 +69,11 @@ policy_loss_clamp: 20.0                                       # policy loss 量�
 vf_term_clamp: 8.0                                            # value term 量級保護；限制 vf_coeff × vf_loss spike
 
 # --- Model / encoder（模型架構） ---
-charge_encoder_mode: wd_exact_rnn                            # 實際訓練 encoder；只控制架構，不覆蓋 algorithm
+charge_encoder_mode: extractor_rnn                            # 79D → Conv1d+MLP(96D) → RNN；接續 SA1 checkpoint
 hidden_dim: 30                                                # RNN hidden state 維度；WD memory_dim=30
 preprocess_dim: 12                                            # 送給 RL head 的 RNN preprocess feature 維度；WD=12
-fc_dim: 64                                                    # RNN 前 FC 寬度；wd_exact_rnn=64，extractor_rnn=48
-wd_middle_dim: 32                                             # wd_exact_rnn 專用 middle FC 維度；extractor_rnn 下基本不影響
+fc_dim: 48                                                    # RNN 前 FC 寬度；extractor_rnn=48（96D → 48D）
+wd_middle_dim: 0                                              # extractor_rnn 不使用雙層 fc_middle
 rnn_type: RNN                                                 # RNN cell 類型；RNN 對齊 WD，GRU 會改 checkpoint 相容性
 
 # --- Obstacle / scene controls（障礙物與場景控制） ---
@@ -110,5 +110,33 @@ checkpoint: null                                              # checkpoint path�
 no_resume_optimizer: true                                     # 換 stage/algorithm 時不載入舊 optimizer state
 
 # --- Metadata（WandB 標籤與備註） ---
-tags: [wd, sa4, a2c, aux, wd_exact_rnn]                          # WandB tags；方便依 stage / algorithm / aux 篩選
-notes: "wd_sa4_a2c_aux: fixed SA4_spatial_plan. batch_size is derived as num_envs * rollout_length = 307200."  # 實驗備註；會寫入 WandB config metadata
+tags: [wd, sa4, a2c, aux, extractor_rnn, path_crossing, goal_movement]               # WandB tags；方便依 stage / algorithm / aux 篩選
+notes: "wd_sa4_a2c_aux: fixed SA4_nav_static. batch_size is derived as num_envs * rollout_length = 307200."  # 實驗備註；會寫入 WandB config metadata
+
+# ===========================================================================
+# SA4 規劃筆記（基於 SA1 momentum-fix run 觀察，2026-05-13）
+# ===========================================================================
+#
+# 【問題】SA1 回合長度僅 ~14.5 步（2.9 秒），原因：num_goals=10 在場景中密度過高，
+#         agent 幾乎不需導航就碰到下一個 goal。導致：
+#         (a) aux valid_seq 從 200k 降到 ~19k（14.5 步 ≈ seq_len=15，幾乎切不出有效序列）
+#         (b) RNN memory 沒有被充分利用（不需要長程記憶就能完成任務）
+#         (c) 無法考驗 agent 的長程規劃能力
+#
+# 【計劃調整】
+#   1. 減少 goal 數量 — 降低 num_goals，讓 agent 需要實際導航才能到達
+#   2. 增加 goal 最遠距離 — 讓 goal 可以出現在場景更遠的位置，延長導航時間
+#   3. Goal 隨機移動 — 增加追蹤難度，RNN 需記住 goal 移動方向來預測下一步
+#      → 正好對齊 aux 的 FUTURE(bx,by) 預測目標
+#
+# 【目標】回合長度回到 30-60 步以上，確保：
+#   - valid_seq ≥ 50k（aux 訓練品質）
+#   - RNN 有足夠長的序列發揮記憶優勢
+#   - SA4 的靜態障礙物需要 agent 規劃繞行路線
+#
+# 【SA1 momentum-fix 參考數據】（run 854bo6eb，iter 594/900）
+#   - SR_norm: 0.993, CR: 0.7%, VE: 0.782
+#   - aux loss: 0.28 (bug) → 0.133 (fix 後 ATL)，下降 52%
+#   - rnn_param_delta: 0.005~0.007（持續活躍）
+#   - 線性熵: 1.29（已深度收斂）
+# ===========================================================================
