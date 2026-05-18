@@ -307,8 +307,8 @@ STAGES = [
         },
 
         "exploration": {
-            "entropy_linear": 0.03,             # 同 SA2 v4，維持探索
-            "entropy_angular": 0.05,            # 同 SA2 v4
+            "entropy_linear": 0.005,            # ↓ 6x from 0.03，避免 entropy 主導 total_loss
+            "entropy_angular": 0.01,            # ↓ 5x from 0.05
         },
 
         "behavior": {
@@ -361,8 +361,8 @@ STAGES = [
         "scene": {
             "goals": 4,
             "goal_distance": (2.0, 9.0),
-            "static_obstacles": 2,              # 同 SA3
-            "dynamic_obstacles": 4,             # ↑ from 3
+            "static_obstacles": 3,              # 同 SA3
+            "dynamic_obstacles": 8,             # ↑ from 3
             "dynamic_obstacles_min": 3,         # ↑ from 2
             "walls_min": 1,
             "walls_max": 2,
@@ -371,7 +371,7 @@ STAGES = [
             "obs_near_goal_count": 1,           # goal 附近強制生成的障礙物數量（0=關閉）
             "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
             # goal 隨機移動（SA4: 慢速 random_walk）
-            "goal_move_speed": 0.10,            # 線速度 (m/s)，↑ from 0.05
+            "goal_move_speed": 0.50,            # 線速度 (m/s)，↑ from 0.05
             "goal_move_max_radius": 1.5,        # 最大漫遊半徑 (m)，↑ from 1.0
             "goal_move_behavior": "random_walk", # 隨機方向 + 平滑轉向
             "goal_move_angular_speed": 0.3,     # 方向變換角速度 (rad/s)
@@ -380,7 +380,7 @@ STAGES = [
         },
 
         "reward": {
-            "penalty_hit": -12.0,               # ↑ from -10
+            "penalty_hit": -20.0,               # ↑ from -10
             "reward_get_goal": 40.0,
             "cost_operate": 0.03,
             "reward_weights": None,
