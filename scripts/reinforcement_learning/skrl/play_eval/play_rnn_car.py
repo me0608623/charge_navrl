@@ -88,6 +88,11 @@ USE_SAFETY_SHIELD = False  # True=距離安全護盾（限速/停止）
 USE_VO_SHIELD    = False  # True=VO 預測式護盾（預設關閉，避免污染純 policy play）
 SHIELD_MODE      = "soft"  # "soft"=線性降速 / "hard"=強制停止
 
+# --- RVO2 (ORCA) Safety Filter ---
+USE_RVO2_FILTER      = False  # True=啟用 RVO2 ORCA 多障礙物安全過濾
+RVO2_TIME_HORIZON    = 2.0    # ORCA 預測時域（秒）
+RVO2_ANGLE_THRESHOLD = 60.0   # 非全向 fallback 角度閾值（度）
+
 # --- LiDAR ---
 LIDAR_NO_NOISE   = False   # True=關閉 LiDAR 雜訊
 LIDAR_VIS        = True    # True=顯示 LiDAR 射線
@@ -225,6 +230,14 @@ parser.add_argument("--vo_safety_radius", type=float, default=0.45,
                     help="VO 安全半徑 (m)，= body_radius + buffer")
 parser.add_argument("--vo_evade_gain", type=float, default=1.0,
                     help="VO 角度迴避增益")
+
+# --- RVO2 (ORCA) Safety Filter ---
+parser.add_argument("--use_rvo2_filter", action="store_true", default=USE_RVO2_FILTER,
+                    help="啟用 RVO2 ORCA 多障礙物安全過濾（需要 pyrvo2）")
+parser.add_argument("--rvo2_time_horizon", type=float, default=RVO2_TIME_HORIZON,
+                    help="ORCA 預測時域（秒）：越長越保守")
+parser.add_argument("--rvo2_angle_threshold", type=float, default=RVO2_ANGLE_THRESHOLD,
+                    help="非全向 fallback 角度閾值（度）：v_safe 方向偏離 heading 超過此值時減速轉向")
 
 # --- 障礙物運動控制 ---
 parser.add_argument("--scripted_obstacles", action="store_true", default=SCRIPTED_OBSTACLES,
@@ -556,6 +569,16 @@ def resolve_env_cfg(task: str):
             ChargeNavigationEnvCfgVLP16CurriculumWD,
         )
         return ChargeNavigationEnvCfgVLP16CurriculumWD()
+    if task == "Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY,
+        )
+        return ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY()
+    if task == "Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play-TCorridor":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY_TCorridor,
+        )
+        return ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY_TCorridor()
     raise ValueError(f"不支援的 task: {task}")
 
 
@@ -1027,7 +1050,7 @@ class LiveBEVVisualizer:
       - 目標位置（cyan X）+ 當前導航目標（黃色箭頭）
       - 終止判定目標（洋紅 / 綠色 P 標記 + 虛線圓）
       - 距離環（2/5/10/15/20m）
-      - 資訊面板（步數、動作、最近距離、frame）
+      - 上方獨立資料面板（Step/Action、目標終止、LiDAR、ORCA 指標），不遮擋 BEV 網格
 
     座標系:
       body = 車體座標（前方為上），world = 世界座標（北為上）
@@ -1065,10 +1088,14 @@ class LiveBEVVisualizer:
         self.goal_threshold = 0.35     # 到達目標距離門檻
         self.goal_success_center_dist = self.goal_body_radius + self.goal_threshold
 
-        # 建立 matplotlib 互動視窗
+        # 建立 matplotlib 互動視窗。
+        # 版面原則：上方 text_ax 是純文字資料層；下方 ax 是完全不遮擋的 BEV 視覺層。
         self.plt.ion()
-        self.fig, self.ax = self.plt.subplots(figsize=(7, 7))
-        self.fig.subplots_adjust(top=0.93)  # more room for title
+        self.fig = self.plt.figure(figsize=(10.5, 10.0), constrained_layout=True)
+        gs = self.fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.25, 5.6], hspace=0.03)
+        self.text_ax = self.fig.add_subplot(gs[0])
+        self.ax = self.fig.add_subplot(gs[1])
+        self.fig.patch.set_facecolor("#141414")
         try:
             self.fig.canvas.manager.set_window_title("Charge RL BEV — 72-bin LiDAR")
         except Exception:
@@ -1099,8 +1126,14 @@ class LiveBEVVisualizer:
         y_left = -sin_y * rel_w[..., 0] + cos_y * rel_w[..., 1]
         return y_left, x_forward  # 繪圖：x 軸=左右, y 軸=前後
 
-    def update(self, step: int, obs_tensor: torch.Tensor, actions: torch.Tensor):
-        """更新 BEV 圖。回傳 False 表示使用者已關閉視窗。"""
+    def update(self, step: int, obs_tensor: torch.Tensor, actions: torch.Tensor,
+               rvo2_filter=None):
+        """更新 BEV 圖。回傳 False 表示使用者已關閉視窗。
+
+        Args:
+            rvo2_filter: 可選，RVO2SafetyFilter 實例。若提供，在 LiDAR 圖上疊加
+                         v_pref（藍）、v_safe（綠）、偏差虛線（紅）箭頭。
+        """
         np = self.np
 
         # --- 重算 72-bin sweep（與訓練觀測完全相同的處理流程）---
@@ -1148,13 +1181,12 @@ class LiveBEVVisualizer:
         ax.set_ylabel(ylabel, color="white")
         ax.tick_params(colors="white")
         ax.grid(True, color="#383838", linewidth=0.7)
-        ax.set_title(f"Charge RL BEV — 72-bin LiDAR ({title_suffix})", color="white")
+        # 標題與狀態文字移到上方 text_ax，BEV 視覺層不放任何資訊框。
 
         # 距離環（2/5/10/15/20m 同心圓）
         for r_m in [2, 5, 10, 15, 20]:
             circle = self.plt.Circle((0, 0), r_m, fill=False, color="#4a4a4a", linewidth=0.8)
             ax.add_patch(circle)
-            ax.text(0.2, r_m, f"{r_m}m", color="#888888", fontsize=8)
 
         # LiDAR 點雲折線
         ax.plot(plot_x, plot_y, color="#7fbf7f", linewidth=1.2, alpha=0.8)
@@ -1196,45 +1228,201 @@ class LiveBEVVisualizer:
             ax.arrow(0, 0, goal_x, goal_y, color="#ffd040", width=0.035, head_width=0.45, length_includes_head=True, zorder=4)
             ax.scatter([goal_x], [goal_y], c=["#ffd040"], s=80, zorder=5)
 
-        # --- 資訊面板 ---
+        # --- 上方資料面板內容（不畫在 BEV 網格上）---
         near_idx = int(real_dist.argmin())
         near_d = float(real_dist[near_idx])
         near_angle = -180.0 + near_idx * 5.0
         echo_bins = int(((real_dist >= self.ground_echo_dist - 0.3) & (real_dist <= self.ground_echo_dist + 0.3)).sum())
         action_text = actions[0].detach().cpu().tolist() if actions is not None else ["?", "?"]
 
-        # Termination goal status text
-        goal_line = "Term. goal: N/A"
+        goal_status = "N/A"
+        goal_center = "N/A"
+        goal_edge = "N/A"
+        goal_threshold = f"{self.goal_threshold:.2f}m"
+        goal_idx = "N/A"
         if goal_info is not None:
-            status = "reached" if goal_info["success"] else "not yet"
-            goal_line = (
-                f"Term.[{goal_info['source']}] center={goal_info['center_dist']:.2f}m "
-                f"edge={goal_info['effective_dist']:.2f}m<{self.goal_threshold:.2f}? {status}"
-            )
-            if goal_info.get("idx") is not None:
-                goal_line += f" idx={goal_info['idx']}"
+            goal_status = "reached" if goal_info["success"] else "not yet"
+            goal_center = f"{goal_info['center_dist']:.2f}m"
+            goal_edge = f"{goal_info['effective_dist']:.2f}m"
+            goal_idx = str(goal_info.get("idx")) if goal_info.get("idx") is not None else "N/A"
+            goal_status = f"{goal_info['source']} / {goal_status}"
 
-        text_lines = [
-            f"Step={step} Action={action_text}",
-            f"Frame={self.frame}  Yaw={np.degrees(yaw):+.1f}°",
-            goal_line,
-            f"Nearest: {near_d:.2f}m @ bin {near_idx} ({near_angle:+.0f}°)",
-            f"Mean={real_dist.mean():.2f}m  <2m={int((real_dist < 2.0).sum())}/72  "
-            f"2~5m={int(((real_dist >= 2.0) & (real_dist < 5.0)).sum())}/72",
-            f"Ground echo 5.6m={echo_bins}/72  max-range={int((real_dist >= self.max_range - 0.5).sum())}/72",
-            "White=robot  Yellow=nav goal  Magenta=term. goal",
-        ]
-        ax.text(
-            0.02, 0.98, "\n".join(text_lines),
-            transform=ax.transAxes, va="top", ha="left",
-            color="white", fontsize=9,
-            bbox={"facecolor": "#202020", "edgecolor": "#606060", "alpha": 0.85},
-        )
+        rl_info = {
+            "title": f"Charge RL BEV — 72-bin LiDAR ({title_suffix})",
+            "step": str(step),
+            "action": str(action_text),
+            "cmd": self._agent_command_info(actions, rvo2_filter),
+            "frame": self.frame,
+            "yaw": f"{np.degrees(yaw):+.1f}°",
+            "term": goal_status,
+            "term_idx": goal_idx,
+            "center": goal_center,
+            "edge": goal_edge,
+            "threshold": goal_threshold,
+            "nearest": f"{near_d:.2f}m @ bin {near_idx} ({near_angle:+.0f}°)",
+            "lidar_mean": f"{real_dist.mean():.2f}m",
+            "lt2": f"{int((real_dist < 2.0).sum())}/72",
+            "mid2_5": f"{int(((real_dist >= 2.0) & (real_dist < 5.0)).sum())}/72",
+            "ground_echo": f"{echo_bins}/72",
+            "max_range": f"{int((real_dist >= self.max_range - 0.5).sum())}/72",
+            "legend": "White=robot  Yellow=nav goal  Magenta=term. goal",
+        }
+
+        # RVO2 向量疊加（藍=v_pref, 綠=v_safe, 紅虛線=偏差）。文字狀態改由上方面板顯示。
+        if rvo2_filter is not None:
+            rvo2_filter.draw_on_bev(ax, yaw, self.frame, show_overlay_text=False)
+
+        self._draw_top_panel(rl_info, self._rvo2_panel_info(rvo2_filter))
 
         # 刷新畫面
         self.fig.canvas.draw_idle()
         self.plt.pause(0.001)
         return self.plt.fignum_exists(self.fig.number)
+
+    def _agent_command_info(self, actions: torch.Tensor | None, rvo2_filter=None) -> dict:
+        """讀取 env[0] 目前 action term 的物理指令，讓 BEV 明確顯示 agent 輸出。
+
+        MultiDiscrete 動作本身是 [accel_idx, omega_idx]；真正送進車體的是
+        DiscreteDifferentialDriveAction.processed_actions = [v_next, omega]。
+        若 ORCA/RVO2 已介入，processed_actions 可能是過濾後實際套用值；面板會用 label 說明。
+        """
+        np = self.np
+        info = {
+            "v": "N/A",
+            "omega": "N/A",
+            "omega_deg": "N/A",
+            "accel": "N/A",
+            "raw_idx": "N/A",
+            "label": "AGENT CMD",
+        }
+        if actions is not None:
+            try:
+                info["raw_idx"] = str(actions[0].detach().cpu().tolist())
+            except Exception:
+                pass
+
+        try:
+            action_term = list(self.raw_env.action_manager._terms.values())[0]
+            processed = action_term.processed_actions[0].detach().cpu().numpy()
+            applied = action_term.applied_accelerations[0].detach().cpu().numpy()
+            if rvo2_filter is not None and hasattr(rvo2_filter, "last_agent_linear"):
+                # ORCA 開啟時，processed_actions 可能是 post-filter；這裡明確顯示 ORCA 前 agent 原始輸出。
+                v_cmd = float(rvo2_filter.last_agent_linear)
+                omega_cmd = float(rvo2_filter.last_agent_omega)
+            else:
+                v_cmd = float(processed[0])
+                omega_cmd = float(applied[1])
+            accel_cmd = float(applied[0])
+            info.update({
+                "v": f"{v_cmd:+.3f} m/s",
+                "omega": f"{omega_cmd:+.3f} rad/s",
+                "omega_deg": f"{float(np.degrees(omega_cmd)):+.1f}°/s",
+                "accel": f"{accel_cmd:+.3f} m/s²",
+            })
+        except Exception:
+            pass
+        return info
+
+    def _rvo2_panel_info(self, rvo2_filter) -> dict:
+        """整理 ORCA/RVO2 指標給上方資料面板；不在 BEV grid 疊文字。"""
+        np = self.np
+        if rvo2_filter is None:
+            return {
+                "status": "disabled",
+                "v_pref": "N/A",
+                "v_safe": "N/A",
+                "rate": "N/A",
+                "mean_distance": "N/A",
+            }
+
+        v_pref = float(np.linalg.norm(getattr(rvo2_filter, "v_pref_world", np.zeros(2))))
+        v_safe = float(np.linalg.norm(getattr(rvo2_filter, "v_safe_world", np.zeros(2))))
+        total_steps = max(1, int(getattr(rvo2_filter, "total_steps", 0)))
+        intervention_steps = int(getattr(rvo2_filter, "intervention_steps", 0))
+        rate = intervention_steps / total_steps
+        active = bool(getattr(rvo2_filter, "orca_active", False))
+        status = "RVO active" if active else "RL pass-through"
+
+        vo_cones = getattr(rvo2_filter, "_vo_cone_data", [])
+        if vo_cones:
+            distances = [float(np.linalg.norm(rel_xy)) for rel_xy, _ in vo_cones]
+            mean_distance = f"{float(np.mean(distances)):.2f}m"
+        else:
+            mean_distance = "N/A"
+
+        return {
+            "status": status,
+            "v_pref": f"{v_pref:.2f}",
+            "v_safe": f"{v_safe:.2f}",
+            "rate": f"{rate:.1%}",
+            "mean_distance": mean_distance,
+        }
+
+    def _draw_top_panel(self, rl_info: dict, orca_info: dict) -> None:
+        """上方固定資料面板：左側 RL/LiDAR，右側 ORCA，避免遮擋 BEV 視覺資料。"""
+        ax = self.text_ax
+        ax.cla()
+        ax.set_facecolor("#101214")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.axis("off")
+
+        # 面板底線，清楚分隔資料層與 BEV 視覺層。
+        ax.axhline(0.02, color="#3c3f44", linewidth=1.0)
+
+        ax.text(
+            0.015, 0.90, rl_info["title"],
+            color="white", fontsize=11.5, fontweight="bold", ha="left", va="center",
+        )
+
+        cmd = rl_info["cmd"]
+        ax.text(
+            0.015, 0.70,
+            f"AGENT OUTPUT  v={cmd['v']}    ω={cmd['omega']}  ({cmd['omega_deg']})",
+            color="#fff4a8", fontsize=13.5, fontweight="bold", ha="left", va="center",
+            bbox={"facecolor": "#3a3100", "edgecolor": "#ffd040", "alpha": 0.95, "boxstyle": "round,pad=0.28"},
+        )
+        ax.text(
+            0.015, 0.51,
+            f"linear accel={cmd['accel']}    raw action idx={cmd['raw_idx']}",
+            color="#ffe9a8", fontsize=8.8, ha="left", va="center",
+        )
+        ax.text(
+            0.015, 0.36,
+            f"Step: {rl_info['step']}    Action: {rl_info['action']}\n"
+            f"Frame: {rl_info['frame']}    Yaw: {rl_info['yaw']}",
+            color="#d8e6ff", fontsize=8.8, ha="left", va="top",
+        )
+        ax.text(
+            0.34, 0.36,
+            f"Term: {rl_info['term']}    idx: {rl_info['term_idx']}\n"
+            f"Center: {rl_info['center']}    Edge: {rl_info['edge']}    dist<th: {rl_info['threshold']}",
+            color="#ffe6c0", fontsize=9, ha="left", va="top",
+        )
+        ax.text(
+            0.015, 0.19,
+            f"Nearest: {rl_info['nearest']}    LiDAR mean: {rl_info['lidar_mean']}    "
+            f"<2m: {rl_info['lt2']}    2~5m: {rl_info['mid2_5']}",
+            color="#c9f7c9", fontsize=8.5, ha="left", va="center",
+        )
+        ax.text(
+            0.015, 0.06,
+            f"Ground echo 5.6m: {rl_info['ground_echo']}    max-range: {rl_info['max_range']}    {rl_info['legend']}",
+            color="#aaaaaa", fontsize=8.2, ha="left", va="center",
+        )
+
+        ax.text(0.72, 0.82, "ORCA / RVO2", color="#88ccff", fontsize=11, fontweight="bold", ha="left", va="center")
+        ax.text(
+            0.72, 0.54,
+            f"Status: {orca_info['status']}\n"
+            f"|v_pref|: {orca_info['v_pref']}    |v_safe|: {orca_info['v_safe']}",
+            color="#d8e6ff", fontsize=9, ha="left", va="top",
+        )
+        ax.text(
+            0.72, 0.19,
+            f"Rate: {orca_info['rate']}    Mean distance: {orca_info['mean_distance']}",
+            color="#c9f7c9", fontsize=8.8, ha="left", va="center",
+        )
 
     def close(self):
         """關閉 BEV 視窗。"""
@@ -1269,11 +1457,9 @@ class LiveBEVVisualizer:
         rel_w = goals_w - robot_w[None, :]
         goal_plot_x, goal_plot_y = self._world_rel_to_plot(rel_w, yaw)
 
-        # 所有目標用 cyan X 標示
+        # 所有目標用 cyan X 標示；不疊文字索引，避免遮擋 BEV 視覺資料。
         selected_idx = self._selected_goal_index()
         ax.scatter(goal_plot_x, goal_plot_y, c="#40d8ff", s=38, marker="x", linewidths=1.2, zorder=4)
-        for i, (gx, gy) in enumerate(zip(goal_plot_x, goal_plot_y)):
-            ax.text(gx + 0.12, gy + 0.12, str(i), color="#40d8ff", fontsize=7, zorder=4)
 
         # 最近目標用黃色星號標示
         if selected_idx is not None and 0 <= selected_idx < len(goal_plot_x):
@@ -1378,7 +1564,7 @@ def main():
     )
 
     # 套用場景參數：stage_parameter=True 時保留 stage 預設，只有明確 CLI 才覆寫；False 時用手動設定區/CLI。
-    configure_play_scene(env_cfg, stage_cfg, args_cli)
+    scene_final = configure_play_scene(env_cfg, stage_cfg, args_cli)
 
     # 套用攝影機視角
     configure_camera(env_cfg, args_cli.camera)
@@ -1517,8 +1703,11 @@ def main():
                 "obs_near_goal_count": args_cli.obs_near_goal_count,
                 "obs_near_goal_radius": args_cli.obs_near_goal_radius,
             }
-            _n_obs = args_cli.num_static_obs + args_cli.num_dynamic_obs
+            _n_obs = scene_final["num_static"] + scene_final["num_dynamic"]
             _bnd = getattr(raw_env, '_room_boundary', 7.0)
+            # BehaviorScheduler 只支援 scalar boundary — 非對稱場景取最小軸
+            if isinstance(_bnd, (list, tuple)):
+                _bnd = min(_bnd)
             _play_behavior_scheduler = BehaviorScheduler(
                 stage_config=_play_stage_config,
                 num_envs=raw_env.num_envs,
@@ -1609,6 +1798,24 @@ def main():
     diag_action_linear_sum = 0.0        # 累積線性動作 index
     diag_action_angular_sum = 0.0       # 累積角度動作 index
     diag_samples = 0                    # 診斷樣本數
+
+    # --- RVO2 (ORCA) Safety Filter 初始化 ---
+    rvo2_filter = None
+    if args_cli.use_rvo2_filter:
+        try:
+            from rvo2_safety_filter import RVO2SafetyFilter
+            action_term = list(raw_env.action_manager._terms.values())[0]
+            rvo2_filter = RVO2SafetyFilter(
+                raw_env,
+                num_envs=raw_env.num_envs,
+                time_horizon=args_cli.rvo2_time_horizon,
+                angle_threshold_deg=args_cli.rvo2_angle_threshold,
+            )
+            rvo2_filter.install(action_term)
+        except ImportError:
+            print("[RVO2] 警告: pyrvo2 未安裝，RVO2 filter 跳過。請執行: pip install pyrvo2")
+        except Exception as e:
+            print(f"[RVO2] 初始化失敗: {e}")
 
     # --- BEV 俯視圖初始化 ---
     bev_visualizer = None
@@ -1926,7 +2133,7 @@ def main():
 
         # --- BEV 視窗更新 ---
         if bev_visualizer is not None and step % max(1, args_cli.bev_update_interval) == 0:
-            if not bev_visualizer.update(step, obs_tensor, actions):
+            if not bev_visualizer.update(step, obs_tensor, actions, rvo2_filter=rvo2_filter):
                 print("[PLAY] BEV 視窗已關閉，停止 play。")
                 break
 
@@ -1967,6 +2174,10 @@ def main():
         print(f"    目標距離均值:         {diag_goal_distance_sum/diag_samples:.4f}")
         print(f"    線性動作 idx 均值:    {diag_action_linear_sum/diag_samples:.4f}")
         print(f"    角度動作 idx 均值:    {diag_action_angular_sum/diag_samples:.4f}")
+    # --- RVO2 Safety Filter 統計 ---
+    if rvo2_filter is not None:
+        rvo2_filter.print_stats()
+
     print("=" * 60)
 
     # --- Per-step 行為診斷統計輸出 ---
