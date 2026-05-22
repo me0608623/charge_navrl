@@ -59,6 +59,7 @@ class ExperimentConfig:
     gamma: float = 0.991
     gae_lambda: float = 0.95
     normalize_return: bool = True
+    adv_norm_mode: str = "mean_only"     # mean_only | partial | full
     value_init_bias: float | None = 0.0
     max_grad_norm: float = 0.5
     tbptt_len: int = 0

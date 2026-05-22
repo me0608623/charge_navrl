@@ -1890,7 +1890,8 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
         # 若有 room_size override，同步 wall randomization boundary
         _bnd = getattr(env, '_room_boundary', None)
         if _bnd is not None:
-            ec.params["boundary"] = _bnd
+            # randomize_walls 只支援 scalar — 非對稱場景取最小軸
+            ec.params["boundary"] = min(_bnd) if isinstance(_bnd, (list, tuple)) else _bnd
         evt.set_term_cfg("randomize_wall_positions", ec)
     except Exception:
         pass
@@ -1908,13 +1909,18 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
                 # 首次建立
                 max_obs = cfg.get("num_obstacles_static", 0) + cfg.get("num_obstacles_dynamic", 5)
                 _bnd = cfg.get("boundary", getattr(env, '_room_boundary', 8.5))
-                env._room_boundary = _bnd  # 同步給其他系統
+                # 不覆蓋 tuple _room_boundary（T 走廊等非對稱場景由 init_perenv_walls 設定）
+                _existing_rb = getattr(env, '_room_boundary', None)
+                if _existing_rb is None or not isinstance(_existing_rb, (list, tuple)):
+                    env._room_boundary = _bnd  # 同步給其他系統
+                # BehaviorScheduler 只支援 scalar boundary
+                _sched_bnd = min(_bnd) if isinstance(_bnd, (list, tuple)) else _bnd
                 env._behavior_scheduler = BehaviorScheduler(
                     stage_config=cfg,
                     num_envs=env.num_envs,
                     max_obstacles=max_obs,
                     device=str(env.device),
-                    boundary=_bnd,
+                    boundary=_sched_bnd,
                 )
                 # 同步 _num_obstacles（goal_movement.py 的 _gather_obstacle_positions 需要）
                 env._num_obstacles = max_obs

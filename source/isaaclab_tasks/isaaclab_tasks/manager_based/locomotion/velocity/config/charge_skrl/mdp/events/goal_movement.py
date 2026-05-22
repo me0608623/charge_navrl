@@ -211,8 +211,12 @@ def move_goal_positions(
 
         # 取得牆壁資料（一次，所有 goal 共用）
         env_origins_xy = env.scene.env_origins[:, :2]  # [N, 2]
-        boundary = getattr(env, '_room_boundary', 8.5)
-        lim = boundary - goal_move_wall_margin
+        _rb = getattr(env, '_room_boundary', 8.5)
+        if isinstance(_rb, (list, tuple)):
+            lim_x = _rb[0] - goal_move_wall_margin
+            lim_y = _rb[1] - goal_move_wall_margin
+        else:
+            lim_x = lim_y = _rb - goal_move_wall_margin
         try:
             wall_centers, wall_sizes, wall_mask = get_combined_wall_data(env)
             has_walls = True
@@ -227,10 +231,13 @@ def move_goal_positions(
             goal_cmd.all_goals_pos_w[:, gi, 0] += dx_all[:, gi]
             goal_cmd.all_goals_pos_w[:, gi, 1] += dy_all[:, gi]
 
-            # 邊界 clamp
+            # 邊界 clamp（支援非對稱 T 走廊）
             local_xy = goal_cmd.all_goals_pos_w[:, gi, :2] - env_origins_xy
-            clamped = (local_xy.abs() > lim).any(dim=1)
-            local_xy = torch.clamp(local_xy, -lim, lim)
+            clamped_x = local_xy[:, 0].abs() > lim_x
+            clamped_y = local_xy[:, 1].abs() > lim_y
+            clamped = clamped_x | clamped_y
+            local_xy[:, 0] = local_xy[:, 0].clamp(-lim_x, lim_x)
+            local_xy[:, 1] = local_xy[:, 1].clamp(-lim_y, lim_y)
             goal_cmd.all_goals_pos_w[:, gi, :2] = local_xy + env_origins_xy
             if clamped.any():
                 pg_heading[clamped, gi] += math.pi
@@ -431,14 +438,22 @@ def move_goal_positions(
         heading[too_far] = torch.atan2(toward_origin[:, 1], toward_origin[:, 0])
 
     # ══════════════════════════════════════════════════════════════════════
-    # 安全檢查 2: 場景邊界 clamp
+    # 安全檢查 2: 場景邊界 clamp（支援非對稱 T 走廊）
     # ══════════════════════════════════════════════════════════════════════
     env_origins_xy = env.scene.env_origins[:, :2]  # [N, 2]
     candidate_local = candidate - env_origins_xy
-    boundary = getattr(env, '_room_boundary', 8.5)
-    limit = boundary - goal_move_wall_margin
-    clamped = (candidate_local.abs() > limit).any(dim=1)
-    candidate_local = torch.clamp(candidate_local, -limit, limit)
+    _rb = getattr(env, '_room_boundary', 8.5)
+    if isinstance(_rb, (list, tuple)):
+        limit_x = _rb[0] - goal_move_wall_margin
+        limit_y = _rb[1] - goal_move_wall_margin
+    else:
+        limit_x = limit_y = _rb - goal_move_wall_margin
+    clamped = (
+        (candidate_local[:, 0].abs() > limit_x) |
+        (candidate_local[:, 1].abs() > limit_y)
+    )
+    candidate_local[:, 0] = candidate_local[:, 0].clamp(-limit_x, limit_x)
+    candidate_local[:, 1] = candidate_local[:, 1].clamp(-limit_y, limit_y)
     candidate = candidate_local + env_origins_xy
     # 碰邊界 → 反轉方向
     if clamped.any():
@@ -493,13 +508,18 @@ def move_goal_positions(
         for gi in range(num_goals):
             goal_cmd.all_goals_pos_w[:, gi, 0] += net_displacement[:, 0]
             goal_cmd.all_goals_pos_w[:, gi, 1] += net_displacement[:, 1]
-        # 個別 clamp 到場景邊界
+        # 個別 clamp 到場景邊界（支援非對稱 T 走廊）
         env_origins_xy = env.scene.env_origins[:, :2]  # [N, 2]
-        boundary = getattr(env, '_room_boundary', 8.5)
-        lim = boundary - goal_move_wall_margin
+        _rb = getattr(env, '_room_boundary', 8.5)
+        if isinstance(_rb, (list, tuple)):
+            _lim_x = _rb[0] - goal_move_wall_margin
+            _lim_y = _rb[1] - goal_move_wall_margin
+        else:
+            _lim_x = _lim_y = _rb - goal_move_wall_margin
         for gi in range(num_goals):
             local_xy = goal_cmd.all_goals_pos_w[:, gi, :2] - env_origins_xy
-            local_xy = torch.clamp(local_xy, -lim, lim)
+            local_xy[:, 0] = local_xy[:, 0].clamp(-_lim_x, _lim_x)
+            local_xy[:, 1] = local_xy[:, 1].clamp(-_lim_y, _lim_y)
             goal_cmd.all_goals_pos_w[:, gi, :2] = local_xy + env_origins_xy
     else:
         goal_pos[:, 0] = candidate[:, 0]

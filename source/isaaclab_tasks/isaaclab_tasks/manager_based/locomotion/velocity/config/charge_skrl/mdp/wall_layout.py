@@ -75,6 +75,24 @@ BOUNDARY_WALLS_20x20: list[tuple[float, float, float, float]] = [
 
 ALL_WALLS_20x20 = MAZE_WALLS_20x20 + BOUNDARY_WALLS_20x20
 
+# T 字型走廊：58×20m 場景 + 2 個填充塊創造 T 形走道
+# 走廊規格: 水平 bar 寬 3.5m (y 方向), 垂直 stem 寬 5.0m (x 方向)
+# 橫向 bar 長度 = 57m（原 arena 寬 19m × 3 倍）
+# 可行走區域:
+#   Bar:  x ∈ [-28.5, +28.5], y ∈ [+6.0, +9.5]  → 57m × 3.5m
+#   Stem: x ∈ [-2.5, +2.5],  y ∈ [-9.5, +6.0]   → 5m × 15.5m
+BOUNDARY_WALLS_T_CORRIDOR: list[tuple[float, float, float, float]] = [
+    # 4 面外牆（58m × 20m 場景，wall_thickness=1.0）
+    ( 0.0,  10.0, 59.0, 1.0),   # North  (x: -29.5 to +29.5)
+    ( 0.0, -10.0, 59.0, 1.0),   # South
+    ( 29.0,  0.0,  1.0, 21.0),  # East   (y: -10.5 to +10.5)
+    (-29.0,  0.0,  1.0, 21.0),  # West
+    # 2 個填充塊（填滿 T 形走道以外的死區）
+    # Left fill:  x ∈ [-28.5, -2.5], y ∈ [-9.5, +6.0]
+    (-15.5, -1.75, 26.0, 15.5),  # Left dead zone fill
+    ( 15.5, -1.75, 26.0, 15.5),  # Right dead zone fill
+]
+
 # ============================================================================
 # Per-env randomized wall slot specifications
 # ============================================================================
@@ -394,9 +412,10 @@ def get_combined_wall_data(env) -> tuple[Tensor, Tensor, Tensor]:
         bs = env._boundary_wall_sizes    # [4, 2]
 
         N = mc.shape[0]
-        bc_exp = bc.unsqueeze(0).expand(N, -1, -1)   # [N, 4, 2]
-        bs_exp = bs.unsqueeze(0).expand(N, -1, -1)   # [N, 4, 2]
-        bm = torch.ones(N, 4, dtype=torch.bool, device=mc.device)
+        B = bc.shape[0]  # boundary wall count (4 for arena, 6 for T-corridor)
+        bc_exp = bc.unsqueeze(0).expand(N, -1, -1)   # [N, B, 2]
+        bs_exp = bs.unsqueeze(0).expand(N, -1, -1)   # [N, B, 2]
+        bm = torch.ones(N, B, dtype=torch.bool, device=mc.device)
 
         centers = torch.cat([mc, bc_exp], dim=1)  # [N, W_total, 2]
         sizes = torch.cat([ms, bs_exp], dim=1)

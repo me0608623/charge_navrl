@@ -87,6 +87,19 @@ gym.register(
 )
 
 # ============================================================================
+# VLP-16 Curriculum WD Sparse + T Corridor（train_rnn_car_wdclip.py 專用）
+# ============================================================================
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum-WD-TCorridor",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.cfg.charge_env_cfg_wd_sparse:ChargeNavigationEnvCfgVLP16CurriculumWD_TCorridor",
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+# ============================================================================
 # VLP-16 Curriculum NavRL: NavRL-Style Dense Rewards（主力 baseline）
 # 消融實驗用 CLI 參數切換: --v_gate_mode / --progress_gate_mode / --use_gap_reward / --use_safety_shield
 # ============================================================================
@@ -108,6 +121,32 @@ gym.register(
         "env_cfg_entry_point": (
             f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:"
             "ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY"
+        ),
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-TCorridor",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:"
+            "ChargeNavigationEnvCfgVLP16CurriculumNavRL_TCorridor"
+        ),
+        "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
+    },
+)
+
+gym.register(
+    id="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play-TCorridor",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.cfg.charge_env_cfg_vlp16_curriculum:"
+            "ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY_TCorridor"
         ),
         "skrl_cfg_entry_point": f"{_skrl_agents}:skrl_ppo_cfg_vlp16.yaml",
     },

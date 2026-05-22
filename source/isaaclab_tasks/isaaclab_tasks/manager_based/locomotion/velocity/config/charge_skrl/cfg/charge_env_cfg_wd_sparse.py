@@ -14,6 +14,8 @@ from isaaclab.utils import configclass
 
 from .charge_env_cfg_vlp16_curriculum import (
     ChargeNavigationEnvCfgVLP16Curriculum,
+    EventCfgVLP16TCorridor,
+    MySceneCfgVLP16_TCorridor,
     RewardsCfgVLP16,
     COLLISION_THRESHOLD,
 )
@@ -57,3 +59,18 @@ class ChargeNavigationEnvCfgVLP16CurriculumWD(ChargeNavigationEnvCfgVLP16Curricu
     """
 
     rewards: RewardsCfgWDSparse = RewardsCfgWDSparse()
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumWD_TCorridor(ChargeNavigationEnvCfgVLP16CurriculumWD):
+    """WD Sparse + T Corridor 場景
+
+    繼承 WD (rewards 歸零)，僅替換場景(T 走廊牆壁)與事件(無隨機內牆)。
+    """
+
+    scene: MySceneCfgVLP16_TCorridor = MySceneCfgVLP16_TCorridor()
+    events: EventCfgVLP16TCorridor = EventCfgVLP16TCorridor()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.env_spacing = 65.0

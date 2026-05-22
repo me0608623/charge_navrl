@@ -64,7 +64,7 @@ def randomize_obstacles_by_difficulty(
     min_goal_distance: float = 1.0,
     min_obstacle_spacing: float = 1.0,
     max_spawn_attempts: int = 50,
-    boundary: float = 7.5,  # Phase 0 房間半徑 8m，留 0.5m 邊距
+    boundary: float | tuple[float, float] = 7.5,  # Phase 0 房間半徑 8m，留 0.5m 邊距
     # Active density masking: fraction of dynamic obstacles that are active
     active_obstacle_ratio: float = 1.0,
     # Goal 附近障礙物：>=1 為確定數量，0<p<1 為 Bernoulli 機率（放 1 個）
@@ -201,18 +201,23 @@ def randomize_obstacles_by_difficulty(
     # ========================================================================
     # 第四步：批量準備障礙物位置和速度張量
     # ========================================================================
-    # 場景參數
+    # 場景參數（支援非對稱邊界）
     safe_margin = 1.5
-    spawn_range = boundary - safe_margin
+    if isinstance(boundary, (list, tuple)):
+        spawn_range_x = boundary[0] - safe_margin
+        spawn_range_y = boundary[1] - safe_margin
+    else:
+        spawn_range_x = spawn_range_y = boundary - safe_margin
+    spawn_range = min(spawn_range_x, spawn_range_y)  # 兼容舊 fallback 路徑
     HIDDEN_Z = -10.0
     VISIBLE_Z = 0.9  # ★ 行人高度 1.6~1.8m 中心，底部 z≥0，頂部 z≥1.6m (高於 VLP16)
 
     # 定義 4 個象限（用於分層採樣，確保障礙物分布均勻）
     quadrants = [
-        (0.3, spawn_range, 0.3, spawn_range),      # 第一象限
-        (-spawn_range, -0.3, 0.3, spawn_range),    # 第二象限
-        (-spawn_range, -0.3, -spawn_range, -0.3),  # 第三象限
-        (0.3, spawn_range, -spawn_range, -0.3),    # 第四象限
+        (0.3, spawn_range_x, 0.3, spawn_range_y),          # 第一象限
+        (-spawn_range_x, -0.3, 0.3, spawn_range_y),        # 第二象限
+        (-spawn_range_x, -0.3, -spawn_range_y, -0.3),      # 第三象限
+        (0.3, spawn_range_x, -spawn_range_y, -0.3),        # 第四象限
     ]
 
     # 創建難度掩碼
@@ -364,8 +369,8 @@ def randomize_obstacles_by_difficulty(
                 rand_x = goal_pos_xy[:, 0] + dist * torch.cos(angle)
                 rand_y = goal_pos_xy[:, 1] + dist * torch.sin(angle)
                 # clamp 到場景邊界
-                rand_x = rand_x.clamp(-spawn_range, spawn_range)
-                rand_y = rand_y.clamp(-spawn_range, spawn_range)
+                rand_x = rand_x.clamp(-spawn_range_x, spawn_range_x)
+                rand_y = rand_y.clamp(-spawn_range_y, spawn_range_y)
             else:
                 # 原本的象限隨機放置
                 quadrant_idx = i % 4
@@ -425,9 +430,9 @@ def randomize_obstacles_by_difficulty(
                         r_dist = (torch.rand(num_resample, device=device)
                                   * (obs_near_goal_radius - min_near_dist) + min_near_dist)
                         new_x = (goal_pos_xy[needs_resample, 0]
-                                 + r_dist * torch.cos(r_angle)).clamp(-spawn_range, spawn_range)
+                                 + r_dist * torch.cos(r_angle)).clamp(-spawn_range_x, spawn_range_x)
                         new_y = (goal_pos_xy[needs_resample, 1]
-                                 + r_dist * torch.sin(r_angle)).clamp(-spawn_range, spawn_range)
+                                 + r_dist * torch.sin(r_angle)).clamp(-spawn_range_y, spawn_range_y)
                     else:
                         new_x = torch.rand(num_resample, device=device) * (x_max - x_min) + x_min
                         new_y = torch.rand(num_resample, device=device) * (y_max - y_min) + y_min
@@ -437,8 +442,8 @@ def randomize_obstacles_by_difficulty(
             # 降級策略：最終仍失敗的位置使用隨機座標
             if needs_resample.any():
                 num_failed = needs_resample.sum().item()
-                fallback_x = torch.rand(num_failed, device=device) * (2 * spawn_range) - spawn_range
-                fallback_y = torch.rand(num_failed, device=device) * (2 * spawn_range) - spawn_range
+                fallback_x = torch.rand(num_failed, device=device) * (2 * spawn_range_x) - spawn_range_x
+                fallback_y = torch.rand(num_failed, device=device) * (2 * spawn_range_y) - spawn_range_y
                 pos[needs_resample, 0] = fallback_x
                 pos[needs_resample, 1] = fallback_y
 

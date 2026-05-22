@@ -140,6 +140,17 @@ parser.add_argument("--normalize_return", "--normalize_returns", dest="normalize
                     help="Normalize critic value targets per rollout before value MSE. "
                          "This keeps vf_coeff unchanged but tests whether raw return scale "
                          "is driving critic loss/gradient spikes.")
+# --adv_norm_mode
+# - 用意：控制 advantage normalization 方式，影響 actor gradient 量級。
+# - mean_only：A = A - mean（SA4 預設，raw std≈11，actor gradient 大）
+# - partial：A = (A - mean) / sqrt(std)（折中，ME≈0.5 目標）
+# - full：A = (A - mean) / (std + 1e-8)（標準 PPO，std=1，gradient 被壓縮）
+parser.add_argument("--adv_norm_mode", type=str, default="mean_only",
+                    choices=["mean_only", "partial", "full"],
+                    help="Advantage normalization mode. "
+                         "mean_only: A-mean (SA4 default). "
+                         "partial: A/sqrt(std) (balanced gradient). "
+                         "full: (A-mean)/(std+eps) (standard PPO).")
 # --value_init_bias
 # - 用意：覆寫 value head 最後一層 bias 的初始值（只對 fresh run 有效）。
 # - 正常範圍：None（保持模型預設）或 0.0（搭配 --normalize_return，因為目標均值≈0）。
@@ -366,6 +377,12 @@ parser.add_argument("--scene_bound_base", type=float, default=7.0,
 parser.add_argument("--room_size", type=float, default=None,
                     help="Override scene physical boundary (m). None=use env_cfg default (10.0=20x20m). "
                          "E.g. --room_size 5 → 10x10m scene.")
+# --scene_layout
+# - 用意：切換場景佈局。arena = 預設 20×20m 方形場景，t_corridor = T 字型走廊。
+# - 設為 t_corridor 時自動切換 --task 為 *-Play-TCorridor 並設定 --play。
+parser.add_argument("--scene_layout", type=str, default="arena",
+                    choices=["arena", "t_corridor"],
+                    help="Scene layout: arena (default 20x20) or t_corridor (T-shaped corridor)")
 
 # --- Logging ---
 # --run_name
@@ -510,6 +527,12 @@ parser.add_argument("--print_experiment_config", action="store_true", default=Fa
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 _original_argv = list(sys.argv)  # Save before hydra strips args (for experiment_config CLI detection)
+
+# --scene_layout: 自動切換 task 為對應的場景佈局
+if args_cli.scene_layout == "t_corridor":
+    args_cli.task = "Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play-TCorridor"
+    args_cli.play = True
+    print(f"[INFO] scene_layout=t_corridor → task={args_cli.task}, play=True")
 
 headless_mode = getattr(args_cli, "headless", False) or "--headless" in sys.argv
 sys.argv = [sys.argv[0]] + hydra_args
@@ -3108,10 +3131,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 value_targets = returns  # 不歸一化：使用 raw GAE returns 作為 critic target
             _raw_adv_std = advantages.std().item()  # 歸一化前的 advantage std（用於診斷）
-            # 只做 mean subtraction，不除 std — 保留 raw advantage 量級
-            # 原版: advantages = (advantages - mean) / (std + 1e-8)  → std=1，gradient 被壓縮 11x
-            # 修改: advantages = advantages - mean  → std=raw_std≈11，gradient 保持原始量級
-            advantages = advantages - advantages.mean()
+            _adv_mean = advantages.mean()
+            if args_cli.adv_norm_mode == "full":
+                # 標準 PPO normalization: std=1, gradient 被壓縮
+                advantages = (advantages - _adv_mean) / (advantages.std() + 1e-8)
+            elif args_cli.adv_norm_mode == "partial":
+                # 折中: 除 sqrt(std)，保留部分量級，目標 ME≈0.5
+                advantages = (advantages - _adv_mean) / (math.sqrt(_raw_adv_std) + 1e-8)
+            else:
+                # mean_only (SA4 default): 保留 raw advantage 量級
+                advantages = advantages - _adv_mean
 
             policy_head.train(); value_head.train()
             # extractor/preprocess_rnn 維持 eval()：RL 只訓練 RL heads，不更新 aux module

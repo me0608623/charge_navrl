@@ -26,12 +26,21 @@ from ..wall_layout import (
 )
 
 
-def init_perenv_walls(env: ManagerBasedRLEnv, env_ids):
+def init_perenv_walls(env: ManagerBasedRLEnv, env_ids, boundary_walls_spec=None, room_boundary=None):
     """Startup event: 初始化 per-env 牆壁數據結構。
 
     在環境建立時呼叫一次，建立 env 上的牆壁 tensor 屬性。
     所有 wall slots 初始設為隱藏 (mask=False, Z=-10)。
+
+    Args:
+        boundary_walls_spec: 邊界牆壁定義 list[(cx, cy, sx, sy)]。
+            None = BOUNDARY_WALLS_20x20 (預設 20×20m 場景)。
+        room_boundary: 場景邊界半徑。float 或 (float, float) 非對稱邊界。
+            設為 env._room_boundary 供 goal_movement 等使用。
     """
+    if boundary_walls_spec is None:
+        boundary_walls_spec = BOUNDARY_WALLS_20x20
+
     N = env.num_envs
     device = env.device
 
@@ -45,14 +54,20 @@ def init_perenv_walls(env: ManagerBasedRLEnv, env_ids):
         env._maze_wall_sizes[:, i, 0] = length
         env._maze_wall_sizes[:, i, 1] = width
 
-    # Global boundary walls (1.0m thickness, shared by all envs)
-    bw_data = torch.tensor(BOUNDARY_WALLS_20x20, dtype=torch.float32, device=device)
-    env._boundary_wall_centers = bw_data[:, :2]   # [4, 2]
-    env._boundary_wall_sizes = bw_data[:, 2:]     # [4, 2]
+    # Global boundary walls (shared by all envs)
+    bw_data = torch.tensor(boundary_walls_spec, dtype=torch.float32, device=device)
+    env._boundary_wall_centers = bw_data[:, :2]   # [B, 2]
+    env._boundary_wall_sizes = bw_data[:, 2:]     # [B, 2]
+
+    B = bw_data.shape[0]
+
+    # 設定場景邊界（供 goal_movement, obstacle_movement 使用）
+    if room_boundary is not None:
+        env._room_boundary = room_boundary
 
     print(
         f"[init_perenv_walls] N={N} | {MAX_WALL_SLOTS} wall slots | "
-        f"boundary thickness=1.0m | all slots hidden (Z=-10)",
+        f"{B} boundary walls | room_boundary={room_boundary} | all slots hidden (Z=-10)",
         flush=True,
     )
 

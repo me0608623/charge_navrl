@@ -105,7 +105,7 @@ from ..mdp.events.state import set_obstacle_metadata
 from ..curriculum.goal_obstacle_curriculum import goal_obstacle_curriculum
 
 # 牆壁
-from ..mdp.wall_layout import WALL_SLOT_SPECS, MAX_WALL_SLOTS
+from ..mdp.wall_layout import WALL_SLOT_SPECS, MAX_WALL_SLOTS, BOUNDARY_WALLS_T_CORRIDOR
 
 
 # ============================================================================
@@ -632,8 +632,153 @@ class ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY(ChargeNavigationEnvCfgVLP1
         self.scene.num_envs = 1
         self.scene.env_spacing = 20.0
         self.scene.lidar.debug_vis = True
-        self.viewer.eye = (0.0, -18.0, 14.0)
+        # Top-down view (正上方俯視)
+        self.viewer.eye = (0.0, 0.0, 25.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)
+
+
+# ============================================================================
+# T 字型走廊場景 (Play 專用)
+# ============================================================================
+@configclass
+class MySceneCfgVLP16_TCorridor(MySceneCfgVLP16_20x20):
+    """T 字型走廊場景 — 58×20m 外牆 + 2 個填充塊形成 T 形走道
+
+    可行走區域:
+      Bar:  x ∈ [-28.5, +28.5], y ∈ [+6.0, +9.5]  → 57m × 3.5m
+      Stem: x ∈ [-2.5, +2.5],  y ∈ [-9.5, +6.0]   → 5m × 15.5m
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # --- 加寬外牆: 20×20m → 58×20m ---
+        room_x = 29.0   # ±29m (x 方向)
+        room_y = 10.0    # ±10m (y 方向，不變)
+        wall_thickness = 1.0
+        wall_height = 3.0
+        wall_length_x = room_x * 2 + wall_thickness  # 59m
+        wall_length_y = room_y * 2 + wall_thickness   # 21m
+
+        wall_rigid_props = sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
+        wall_collision_props = sim_utils.CollisionPropertiesCfg()
+        wall_color = (0.5, 0.5, 0.5)
+        wall_visual = sim_utils.PreviewSurfaceCfg(diffuse_color=wall_color, metallic=0.1)
+
+        # 覆蓋繼承的 4 面外牆（從 20×20 擴大到 58×20）
+        self.wall_north = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Wall_North",
+            spawn=sim_utils.CuboidCfg(size=(wall_length_x, wall_thickness, wall_height),
+                                       rigid_props=wall_rigid_props, collision_props=wall_collision_props, visual_material=wall_visual),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, room_y, wall_height / 2)),
+        )
+        self.wall_south = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Wall_South",
+            spawn=sim_utils.CuboidCfg(size=(wall_length_x, wall_thickness, wall_height),
+                                       rigid_props=wall_rigid_props, collision_props=wall_collision_props, visual_material=wall_visual),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(0.0, -room_y, wall_height / 2)),
+        )
+        self.wall_east = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Wall_East",
+            spawn=sim_utils.CuboidCfg(size=(wall_thickness, wall_length_y, wall_height),
+                                       rigid_props=wall_rigid_props, collision_props=wall_collision_props, visual_material=wall_visual),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(room_x, 0.0, wall_height / 2)),
+        )
+        self.wall_west = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Wall_West",
+            spawn=sim_utils.CuboidCfg(size=(wall_thickness, wall_length_y, wall_height),
+                                       rigid_props=wall_rigid_props, collision_props=wall_collision_props, visual_material=wall_visual),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(-room_x, 0.0, wall_height / 2)),
+        )
+
+        # --- 填充塊: 填滿 T 形走道以外的死區 ---
+        fill_color = (0.45, 0.45, 0.45)
+        fill_visual = sim_utils.PreviewSurfaceCfg(diffuse_color=fill_color, metallic=0.1)
+
+        # 左側填充塊: x ∈ [-28.5, -2.5], y ∈ [-9.5, +6.0]
+        self.wall_fill_left = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Wall_Fill_Left",
+            spawn=sim_utils.CuboidCfg(
+                size=(26.0, 15.5, wall_height),
+                rigid_props=wall_rigid_props,
+                collision_props=wall_collision_props,
+                visual_material=fill_visual,
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(-15.5, -1.75, wall_height / 2)),
+        )
+
+        # 右側填充塊: x ∈ [+2.5, +28.5], y ∈ [-9.5, +6.0]
+        self.wall_fill_right = AssetBaseCfg(
+            prim_path="{ENV_REGEX_NS}/Wall_Fill_Right",
+            spawn=sim_utils.CuboidCfg(
+                size=(26.0, 15.5, wall_height),
+                rigid_props=wall_rigid_props,
+                collision_props=wall_collision_props,
+                visual_material=fill_visual,
+            ),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(15.5, -1.75, wall_height / 2)),
+        )
+
+
+@configclass
+class EventCfgVLP16TCorridor(EventCfgVLP16Curriculum):
+    """T 走廊事件配置: 只改牆壁幾何 + 無隨機內牆，其餘全繼承。"""
+
+    init_walls = EventTerm(
+        func=init_perenv_walls,
+        mode="startup",
+        params={"boundary_walls_spec": BOUNDARY_WALLS_T_CORRIDOR},
+    )
+
+    randomize_wall_positions = EventTerm(
+        func=randomize_walls,
+        mode="reset",
+        params={
+            "min_walls": 0, "max_walls": 0,
+            "boundary": 8.5, "min_wall_spacing": 2.0,
+            "max_spawn_attempts": 30, "robot_safe_dist": 1.5,
+        },
+    )
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY_TCorridor(
+    ChargeNavigationEnvCfgVLP16CurriculumNavRL
+):
+    """NavRL T 字型走廊播放配置。
+
+    CLI: --task Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play-TCorridor
+    """
+
+    scene: MySceneCfgVLP16_TCorridor = MySceneCfgVLP16_TCorridor()
+    events: EventCfgVLP16TCorridor = EventCfgVLP16TCorridor()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 1
+        self.scene.env_spacing = 65.0  # 58m 場景 + 安全間距
+        self.scene.lidar.debug_vis = True
+        # 俯瞰 58×20m T 走廊（高度 50m 可覽全景）
+        self.viewer.eye = (0.0, 0.0, 50.0)
+        self.viewer.lookat = (0.0, 0.0, 0.0)
+
+
+@configclass
+class ChargeNavigationEnvCfgVLP16CurriculumNavRL_TCorridor(
+    ChargeNavigationEnvCfgVLP16CurriculumNavRL
+):
+    """NavRL T 字型走廊訓練配置。
+
+    與 NavRL 完全一致，只改牆壁幾何（T 走廊 + 無隨機內牆）。
+    Curriculum、reward、obstacle 全部繼承。
+    """
+
+    scene: MySceneCfgVLP16_TCorridor = MySceneCfgVLP16_TCorridor()
+    events: EventCfgVLP16TCorridor = EventCfgVLP16TCorridor()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.env_spacing = 65.0  # 58m 場景 + 安全間距
 
 
 # ============================================================================

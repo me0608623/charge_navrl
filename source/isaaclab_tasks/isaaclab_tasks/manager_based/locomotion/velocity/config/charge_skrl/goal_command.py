@@ -199,8 +199,12 @@ class GoalCommand(CommandTerm):
         else:
             env_ids_tensor = torch.tensor(env_ids, device=self.device, dtype=torch.long)
         
-        # 獲取配置參數
-        wall_boundary = self.cfg.wall_boundary
+        # 獲取配置參數（支援非對稱邊界）
+        _wb = self.cfg.wall_boundary
+        if isinstance(_wb, (list, tuple)):
+            wall_boundary_x, wall_boundary_y = _wb
+        else:
+            wall_boundary_x = wall_boundary_y = _wb
         wall_safe_margin = self.cfg.wall_safe_margin
         num_obstacles = self.cfg.num_obstacles
         max_attempts = self.cfg.max_resample_attempts
@@ -283,7 +287,8 @@ class GoalCommand(CommandTerm):
         # 預計算常數（避免每次迴圈重複存取）
         d_min, d_max = self.cfg.ranges.distance[0], self.cfg.ranges.distance[1]
         a_min, a_max = self.cfg.ranges.angle[0], self.cfg.ranges.angle[1]
-        valid_boundary = wall_boundary - wall_safe_margin
+        valid_boundary_x = wall_boundary_x - wall_safe_margin
+        valid_boundary_y = wall_boundary_y - wall_safe_margin
 
         # 預計算障礙物 required_distances（不隨迴圈變化）
         if all_obstacles is not None and all_obstacle_radii is not None:
@@ -312,8 +317,8 @@ class GoalCommand(CommandTerm):
             # 檢查 1：牆壁邊界（環境局部座標系）
             # ------------------------------------------------------------------------
             within_walls = (
-                (candidate_goals_local[:, 0].abs() < valid_boundary) &
-                (candidate_goals_local[:, 1].abs() < valid_boundary)
+                (candidate_goals_local[:, 0].abs() < valid_boundary_x) &
+                (candidate_goals_local[:, 1].abs() < valid_boundary_y)
             )
             
             # ------------------------------------------------------------------------
@@ -385,11 +390,11 @@ class GoalCommand(CommandTerm):
             # 兜底: clamp 到邊界內
             candidate_goals_local[failed_envs, 0] = torch.clamp(
                 candidate_goals_local[failed_envs, 0],
-                -valid_boundary, valid_boundary
+                -valid_boundary_x, valid_boundary_x
             )
             candidate_goals_local[failed_envs, 1] = torch.clamp(
                 candidate_goals_local[failed_envs, 1],
-                -valid_boundary, valid_boundary
+                -valid_boundary_y, valid_boundary_y
             )
         
         # ------------------------------------------------------------------------
@@ -617,9 +622,11 @@ class GoalCommandCfg(CommandTermCfg):
     # ------------------------------------------------------------------------
     # 碰撞檢查配置（避免目標生成在障礙物或牆壁附近）
     # ------------------------------------------------------------------------
-    wall_boundary: float = 5.0
+    wall_boundary: float | tuple[float, float] = 5.0
     # 牆壁邊界距離（米）
-    # 目標不會生成在 |X| > boundary 或 |Y| > boundary 的位置
+    # float → 對稱 (x, y 同值)
+    # (float, float) → 非對稱 (boundary_x, boundary_y)，用於 T 走廊等非正方形場景
+    # 目標不會生成在 |X| > boundary_x 或 |Y| > boundary_y 的位置
 
     wall_safe_margin: float = 0.5
     # 牆壁安全邊距（米）

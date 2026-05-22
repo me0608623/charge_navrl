@@ -34,7 +34,7 @@ from .state import (
 )
 
 # 迷宮牆壁 proximity 檢查（原 core/wall_layout.py → mdp/wall_layout.py）
-from ..wall_layout import get_wall_tensors, check_wall_proximity_batch
+from ..wall_layout import get_wall_tensors, check_wall_proximity_batch, get_combined_wall_data, check_wall_proximity_perenv
 
 
 def reset_obstacles(
@@ -599,7 +599,7 @@ def enforce_obstacle_bounds(
     obs_velocities: torch.Tensor,  # [D, N, 2] (vx, vy)
     env_origins: torch.Tensor,     # [D, 3]
     visible_mask: torch.Tensor,    # [D, N] bool
-    bound_limit: float = 4.0,
+    bound_limit: float | tuple[float, float] = 4.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Vectorized geofencing: keep obstacles within per-env bounds.
 
@@ -613,25 +613,32 @@ def enforce_obstacle_bounds(
         env_origins: [D, 3] world-frame origin of each environment.
         visible_mask: [D, N] boolean mask — only visible obstacles are processed.
         bound_limit: Half-width of the allowed region in local frame.
+            float → symmetric (same for x and y).
+            (float, float) → asymmetric (bound_x, bound_y).
 
     Returns:
         Tuple of (reflected_x, reflected_y) boolean masks [D, N] indicating
         which obstacles had their velocity reflected on each axis.
     """
+    if isinstance(bound_limit, (list, tuple)):
+        bound_x, bound_y = bound_limit
+    else:
+        bound_x = bound_y = bound_limit
+
     # World → local
     rel_xy = obs_positions[:, :, :2] - env_origins[:, None, :2]  # [D, N, 2]
 
     # Per-axis boundary detection (only for visible obstacles)
-    hit_x = (rel_xy[:, :, 0].abs() > bound_limit) & visible_mask  # [D, N]
-    hit_y = (rel_xy[:, :, 1].abs() > bound_limit) & visible_mask  # [D, N]
+    hit_x = (rel_xy[:, :, 0].abs() > bound_x) & visible_mask  # [D, N]
+    hit_y = (rel_xy[:, :, 1].abs() > bound_y) & visible_mask  # [D, N]
 
     # Velocity reflection
     obs_velocities[:, :, 0] = torch.where(hit_x, -obs_velocities[:, :, 0], obs_velocities[:, :, 0])
     obs_velocities[:, :, 1] = torch.where(hit_y, -obs_velocities[:, :, 1], obs_velocities[:, :, 1])
 
     # Position clamp in local frame
-    rel_xy[:, :, 0].clamp_(-bound_limit, bound_limit)
-    rel_xy[:, :, 1].clamp_(-bound_limit, bound_limit)
+    rel_xy[:, :, 0].clamp_(-bound_x, bound_x)
+    rel_xy[:, :, 1].clamp_(-bound_y, bound_y)
 
     # Local → world
     obs_positions[:, :, :2] = rel_xy + env_origins[:, None, :2]
@@ -649,7 +656,7 @@ def move_obstacles_vectorized(
     speed_resample_steps: int = 10,
     area_limit: float = 6.0,
     max_obstacles: int = 10,
-    bound_limit: float = 7.0,
+    bound_limit: float | tuple[float, float] = 7.0,
 ):
     """Vectorized goal-directed obstacle movement with correct geofencing.
 
@@ -679,6 +686,7 @@ def move_obstacles_vectorized(
         area_limit: Goal generation range in local frame.
         max_obstacles: Maximum obstacle count in scene.
         bound_limit: Geofencing half-width in local frame.
+            float → symmetric. (float, float) → (bound_x, bound_y).
     """
     # Guard: obstacle policy active → skip scripted motion
     if getattr(env, '_obstacle_policy_active', False):
@@ -842,12 +850,34 @@ def move_obstacles_vectorized(
     # Position update (world frame, only visible)
     all_pos[:, :, 0:2] += vel * move_dt * visible.unsqueeze(2).float()
 
-    # Internal maze wall bounce: revert displacement if new position is inside a wall
-    wall_c, wall_s = get_wall_tensors(device)
+    # Wall bounce: revert displacement if new position is inside any wall
+    # Uses per-env combined walls (maze walls + boundary walls incl. T-corridor fill blocks)
     local_new = all_pos[:, :, :2] - env_origins[:, None, :2]  # [D, N_eff, 2]
-    in_wall = check_wall_proximity_batch(
-        local_new.reshape(-1, 2), wall_c, wall_s, 0.3
-    ).reshape(D, N_eff) & visible
+    try:
+        cw_centers, cw_sizes, cw_mask = get_combined_wall_data(env)
+        # cw_centers: [N_total, W, 2], need to index by dyn_env_ids → [D, W, 2]
+        cw_c = cw_centers[dyn_env_ids]  # [D, W, 2]
+        cw_s = cw_sizes[dyn_env_ids]    # [D, W, 2]
+        cw_m = cw_mask[dyn_env_ids]     # [D, W]
+        # Check each obstacle against per-env walls
+        # local_new: [D, N_eff, 2] → check per obstacle per env
+        W = cw_c.shape[1]
+        # Expand for broadcasting: [D, N_eff, 1, 2] vs [D, 1, W, 2]
+        pos_exp = local_new.unsqueeze(2)        # [D, N_eff, 1, 2]
+        wc_exp = cw_c.unsqueeze(1)              # [D, 1, W, 2]
+        ws_exp = cw_s.unsqueeze(1)              # [D, 1, W, 2]
+        wm_exp = cw_m.unsqueeze(1)              # [D, 1, W]
+        delta = (pos_exp - wc_exp).abs() - ws_exp * 0.5  # [D, N_eff, W, 2]
+        delta = delta.clamp(min=0.0)
+        dist = torch.norm(delta, dim=3)         # [D, N_eff, W]
+        dist = torch.where(wm_exp, dist, torch.full_like(dist, 1e6))
+        in_wall = (dist < 0.3).any(dim=2) & visible  # [D, N_eff]
+    except Exception:
+        # Fallback to static maze walls only
+        wall_c, wall_s = get_wall_tensors(device)
+        in_wall = check_wall_proximity_batch(
+            local_new.reshape(-1, 2), wall_c, wall_s, 0.3
+        ).reshape(D, N_eff) & visible
 
     if in_wall.any():
         # Undo displacement and reverse velocity
@@ -859,24 +889,29 @@ def move_obstacles_vectorized(
         all_pos, vel, env_origins, visible, bound_limit
     )
 
+    # Compute per-axis goal range for resampling
+    if isinstance(bound_limit, (list, tuple)):
+        _goal_range_x = bound_limit[0] - 1.0
+        _goal_range_y = bound_limit[1] - 1.0
+    else:
+        _goal_range_x = _goal_range_y = bound_limit - 1.0
+
     # For reflected obstacles, sample new LOCAL-frame goals
     reflected = reflected_x | reflected_y  # [D, N_eff]
     num_reflected = reflected.sum().item()
     if num_reflected > 0:
-        goal_range = bound_limit - 1.0
         new_goals = torch.zeros(D, N_eff, 2, device=device)
-        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
-        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
+        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_x - _goal_range_x
+        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_y - _goal_range_y
         goals[reflected] = new_goals[reflected]
 
     # Goal reaching: where dist_to_goal < threshold, sample new LOCAL goals
     reached = visible & (dist_to_goal < goal_reach_threshold)  # [D, N_eff]
     num_reached = reached.sum().item()
     if num_reached > 0:
-        goal_range = bound_limit - 1.0
         new_goals = torch.zeros(D, N_eff, 2, device=device)
-        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
-        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * goal_range - goal_range
+        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_x - _goal_range_x
+        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_y - _goal_range_y
         goals[reached] = new_goals[reached]
 
     # Speed resampling every speed_resample_steps

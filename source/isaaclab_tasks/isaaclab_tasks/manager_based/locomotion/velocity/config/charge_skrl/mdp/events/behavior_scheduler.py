@@ -275,6 +275,9 @@ class BehaviorScheduler:
         active_mask = (self.behavior_type != BEHAVIOR_INACTIVE)
         self._boundary_bounce(active_mask)
 
+        # 牆壁反彈 (含 T 走廊 fill blocks 等 boundary walls)
+        self._wall_bounce(active_mask, env, dt)
+
         # 遞增 phase timer
         self.phase_timer[active_mask] += 1
 
@@ -406,6 +409,38 @@ class BehaviorScheduler:
         # Final clamp
         pos[:, :, 0].clamp_(-b, b)
         pos[:, :, 1].clamp_(-b, b)
+
+    def _wall_bounce(self, mask: Tensor, env: ManagerBasedRLEnv, dt: float) -> None:
+        """牆壁反彈: 碰到 boundary walls / fill blocks 時回退 + 反轉速度。"""
+        try:
+            from ..wall_layout import get_combined_wall_data
+            cw_centers, cw_sizes, cw_mask = get_combined_wall_data(env)
+        except Exception:
+            return  # 無牆壁資料 → 跳過
+
+        pos = self.positions   # [E, N, 2] local frame
+        vel = self.velocities  # [E, N, 2]
+        E, N, _ = pos.shape
+        W = cw_centers.shape[1]
+
+        # [E, N, 1, 2] vs [E, 1, W, 2]
+        pos_exp = pos.unsqueeze(2)                   # [E, N, 1, 2]
+        wc = cw_centers[:E].unsqueeze(1)             # [E, 1, W, 2]
+        ws = cw_sizes[:E].unsqueeze(1)               # [E, 1, W, 2]
+        wm = cw_mask[:E].unsqueeze(1)                # [E, 1, W]
+
+        delta = (pos_exp - wc).abs() - ws * 0.5      # [E, N, W, 2]
+        delta = delta.clamp(min=0.0)
+        dist = torch.norm(delta, dim=3)               # [E, N, W]
+        dist = torch.where(wm, dist, torch.full_like(dist, 1e6))
+        in_wall = (dist < 0.3).any(dim=2) & mask     # [E, N]
+
+        if in_wall.any():
+            # 回退一步 + 反轉速度
+            pos[:, :, 0] = torch.where(in_wall, pos[:, :, 0] - vel[:, :, 0] * dt, pos[:, :, 0])
+            pos[:, :, 1] = torch.where(in_wall, pos[:, :, 1] - vel[:, :, 1] * dt, pos[:, :, 1])
+            vel[:, :, 0] = torch.where(in_wall, -vel[:, :, 0], vel[:, :, 0])
+            vel[:, :, 1] = torch.where(in_wall, -vel[:, :, 1], vel[:, :, 1])
 
     def _place_near_goal(self, env_ids: Tensor, env: ManagerBasedRLEnv) -> None:
         """將前 obs_near_goal_count 個 active slot 放到最近 goal 附近。
