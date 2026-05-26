@@ -126,6 +126,11 @@ actuator_delay_range: [0, 3]                                  # SA8: 延遲 → 
 actuator_velocity_scale: [0.85, 1.15]                         # SA8: 速度縮放範圍加寬
 actuator_motor_lag: 0.35                                      # SA8: 馬達慣性 lag
 
+# Observation latency DR
+obs_delay_steps: [0, 2]                                       # SA8: 最多 2 步延遲（400ms extreme robustness）
+# Heading stability reward
+heading_stability_weight: -0.1                                 # SA8: 中等懲罰角速度震盪
+
 # --- Runtime / logging ---
 no_domain_randomization: false
 reward_speed_v05: false

@@ -516,6 +516,9 @@ parser.add_argument("--aux_profile", type=str, default=None,
                     help="Aux training profile. Default: inferred from --disable_aux_training.")
 parser.add_argument("--encoder_profile", type=str, default=None,
                     help="Encoder profile. Default: inferred from --charge_encoder_mode.")
+parser.add_argument("--critic_profile", type=str, default="symmetric",
+                    choices=["symmetric", "asymmetric"],
+                    help="Critic profile: symmetric (same obs as policy) or asymmetric (+ privileged obs).")
 
 # --- Experiment Config (LEGO-style run composition) ---
 parser.add_argument("--experiment_config", type=str, default=None,
@@ -583,6 +586,7 @@ from modular_rnn_models import (
 from wd_aux_targets import build_wd_preprocess_targets, compute_wd_module_loss
 # build_wd_preprocess_targets: 每步計算「最近 2 個障礙物」的 7D 特權幾何資訊 (aux loss target)
 # compute_wd_module_loss: Warp Drive module loss = log(clamp(L1, 0.01)) per-dim weighted
+from privileged_obs import extract_privileged_obs, PRIVILEGED_OBS_DIM
 
 from rnn_car_modular.profiles import resolve_profiles, validate_profiles, profiles_to_dict
 from rnn_car_modular.experiment_config import (
@@ -751,7 +755,8 @@ class RunningNormalizer:
 #   - ptr 指向下一個寫入位置，每次 rollout 開始時 reset() 歸零
 
 class ChargeRolloutBuffer:
-    def __init__(self, num_steps, num_envs, rl_input_dim, obs_dim, hidden_dim, device):
+    def __init__(self, num_steps, num_envs, rl_input_dim, obs_dim, hidden_dim, device,
+                 privileged_dim: int = 0):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.device = device
@@ -768,10 +773,14 @@ class ChargeRolloutBuffer:
         # WD-style 7D privileged geometry target for module loss
         # 7D = near1(x,y,d) + near2(x,y,d) + timestep
         self.aux_targets = torch.zeros(num_steps, num_envs, 7, device=device)
+        # Asymmetric critic privileged obs
+        self._privileged_dim = privileged_dim
+        if privileged_dim > 0:
+            self.privileged_obs = torch.zeros(num_steps, num_envs, privileged_dim, device=device)
         self.ptr = 0  # 下一個寫入步數的 pointer
 
     def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden,
-            aux_target=None):
+            aux_target=None, privileged=None):
         """儲存一個 rollout step 的所有資料。每次 env.step() 後呼叫。"""
         i = self.ptr
         self.rl_inputs[i] = rl_input
@@ -784,6 +793,8 @@ class ChargeRolloutBuffer:
         self.hiddens[i] = hidden.squeeze(0)  # 去掉 RNN 的 [1, E, H] 前導維度
         if aux_target is not None:
             self.aux_targets[i] = aux_target
+        if privileged is not None and self._privileged_dim > 0:
+            self.privileged_obs[i] = privileged
         self.ptr += 1
 
     def reset(self):
@@ -2437,9 +2448,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     ).to(device)
     rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # WD principle: concat(obs, preprocess_feat)
     policy_head = PolicyHead(input_dim=rl_input_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
-    value_head = ValueHead(input_dim=rl_input_dim).to(device)     # 輸出 1 scalar（critic）
+    _use_asymmetric_critic = getattr(args_cli, 'critic_profile', 'symmetric') == 'asymmetric'
+    _priv_dim = PRIVILEGED_OBS_DIM if _use_asymmetric_critic else 0
+    value_head = ValueHead(input_dim=rl_input_dim, privileged_dim=_priv_dim).to(device)
+    if _use_asymmetric_critic:
+        print(f"[INFO] Asymmetric critic: rl_input={rl_input_dim} + privileged={_priv_dim} = {rl_input_dim + _priv_dim}D")
     if args_cli.value_init_bias is not None:
-        # --normalize_return 時，value target 均值 ≈ 0，value head bias 設 0 加快早期穩定
         nn.init.constant_(value_head.net[-1].bias, args_cli.value_init_bias)
         print(f"[INFO] Value head final bias override: {args_cli.value_init_bias}")
     rnn_state = RNNStateManager(num_envs, args_cli.hidden_dim, device)  # 管理每個 env 的 RNN hidden state
@@ -2645,7 +2659,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
 
     # --- Buffers ---
-    charge_buf = ChargeRolloutBuffer(RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device)
+    charge_buf = ChargeRolloutBuffer(RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device,
+                                      privileged_dim=_priv_dim)
     obs_buf = ObstacleRolloutBuffer(RL, num_envs, N_obs, OBS_POLICY_OBS_DIM, 2, device) if _obstacle_mode == "learned" else None
 
     # --- Metrics ---
@@ -2723,7 +2738,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             extractor.load_state_dict(ckpt["extractor"])
         preprocess_rnn.load_state_dict(ckpt["preprocess_rnn"])
         policy_head.load_state_dict(ckpt["policy_head"])
-        value_head.load_state_dict(ckpt["value_head"])
+        _vh_strict = not _use_asymmetric_critic
+        _vh_missing, _vh_unexpected = value_head.load_state_dict(ckpt["value_head"], strict=_vh_strict)
+        if _vh_missing:
+            print(f"[INFO] ValueHead: new params (cold start): {_vh_missing}")
         if "obs_policy" in ckpt and obs_policy is not None:
             obs_policy.load_state_dict(ckpt["obs_policy"])
             obs_value.load_state_dict(ckpt["obs_value"])
@@ -2799,6 +2817,56 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _prev_stage = -1         # 追蹤上一個 curriculum stage（用於偵測 phase 切換）
     _prev_obs_agent_active = True  # 追蹤 obs_agent 是否活躍（用於 logging）
     _prev_rnn_feature_mean = None  # 追蹤 RNN feature 分佈，偵測漂移
+
+    # --- Obs Delay DR：模擬真實感測器管線延遲（20-50ms → 0-2 steps）---
+    # 真實世界 LiDAR→policy 有 ~30ms 延遲，sim 裡 policy 看到即時觀測。
+    # 用 tensor ring buffer 人為延遲 policy 收到的觀測，讓 policy 學到更保守的安全邊距。
+    _delay_cfg = getattr(args_cli, 'obs_delay_steps', (0, 0))
+    if isinstance(_delay_cfg, (list, tuple)):
+        _delay_lo, _delay_hi = int(_delay_cfg[0]), int(_delay_cfg[1])
+    else:
+        _delay_lo = _delay_hi = 0
+    _use_obs_delay = _delay_hi > 0
+    if _use_obs_delay:
+        _obs_ring = torch.zeros(_delay_hi + 1, num_envs, obs_dim, device=device)
+        _obs_ring_ptr = torch.zeros(num_envs, dtype=torch.long, device=device)
+        _delay_per_env = torch.randint(
+            _delay_lo, _delay_hi + 1, (num_envs,), device=device)
+        _env_arange = torch.arange(num_envs, device=device)  # 快取索引避免每步重建
+        print(f"[SIM2REAL] Obs delay DR: delay∈[{_delay_lo}, {_delay_hi}] steps "
+              f"(real latency ~30ms, dt=200ms → 1 step ≈ 200ms)")
+
+    # --- Heading Stability：懲罰角速度符號翻轉（抗震盪）---
+    _heading_stability_weight = getattr(args_cli, 'heading_stability_weight', 0.0)
+    _prev_omega = torch.zeros(num_envs, device=device)
+    if _heading_stability_weight != 0:
+        print(f"[REWARD] Heading stability: weight={_heading_stability_weight} "
+              f"(penalize omega sign flips)")
+
+    # --- DORAEMON：自動 DR 擴展（基於 SR 回饋）---
+    _doraemon_enabled = getattr(args_cli, 'doraemon_enabled', False)
+    _doraemon_ctrl = None
+    if _doraemon_enabled:
+        from auto_dr_controller import AutoDRController
+        _doraemon_ctrl = AutoDRController(
+            threshold=getattr(args_cli, 'doraemon_sr_threshold', 0.85),
+            check_interval=getattr(args_cli, 'doraemon_check_interval', 50),
+            expansion_rate=getattr(args_cli, 'doraemon_expansion_rate', 0.1),
+        )
+        print(f"[DORAEMON] Auto DR enabled: τ={_doraemon_ctrl.threshold}, "
+              f"interval={_doraemon_ctrl.check_interval}, "
+              f"rate={_doraemon_ctrl.expansion_rate}")
+
+    # --- RGDR：Reward-Guided Loss Weighting（聚焦失敗環境）---
+    # 低 reward 的 env → 高 weight → A2C loss 集中訓練困難場景
+    _rgdr_enabled = getattr(args_cli, 'rgdr_enabled', False)
+    if _rgdr_enabled:
+        _rgdr_env_returns = torch.zeros(num_envs, device=device)
+        _rgdr_episode_reward = torch.zeros(num_envs, device=device)
+        _rgdr_alpha = 0.1  # EMA decay for episode return tracking
+        _rgdr_clamp = getattr(args_cli, 'rgdr_weight_clamp', (0.5, 2.0))
+        _rgdr_warmup = 10  # 前 N 個 iteration 不啟用（讓 EMA 穩定）
+        print(f"[RGDR] Enabled: weight clamp={_rgdr_clamp}, EMA α={_rgdr_alpha}")
 
     for iteration in range(num_iterations):
         iter_start = time.time()
@@ -2885,6 +2953,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Sync safe trainer hyperparameters from phase/task registry
         _sync_phase_trainer_params(metrics._curriculum_info, stage_changed=_stage_changed)
 
+        # === DORAEMON：檢查是否擴展 DR 範圍 ===
+        if _doraemon_ctrl is not None and not _doraemon_ctrl.fully_expanded:
+            _recent_sr = metrics.get_success_rate() if hasattr(metrics, 'get_success_rate') else 0.0
+            if _recent_sr == 0.0:
+                _sr_data = metrics._curriculum_info.get("success_rate", 0.0)
+                if _sr_data > 0:
+                    _recent_sr = _sr_data
+            expanded = _doraemon_ctrl.maybe_expand(iteration, _recent_sr)
+            if expanded:
+                _doraemon_ctrl.apply_to_env(env.unwrapped)
+                print(_doraemon_ctrl.summary())
+
         # === LR decay (WD: ParamScheduler) ===
         if args_cli.lr_decay > 0 and iteration > 0:
             decay = max(0.01, 1.0 - args_cli.lr_decay * iteration)
@@ -2900,10 +2980,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs_policy.eval(); obs_value.eval()
 
         for step in range(RL):
+            # --- 0. Obs delay DR：policy 看到延遲觀測，模擬真實感測器管線延遲 ---
+            if _use_obs_delay:
+                _w = _obs_ring_ptr % (_delay_hi + 1)
+                _obs_ring[_w, _env_arange] = obs              # 寫入當前真實觀測
+                _r = (_obs_ring_ptr - _delay_per_env) % (_delay_hi + 1)
+                policy_obs = _obs_ring[_r, _env_arange]       # 讀取延遲觀測
+                _obs_ring_ptr += 1
+            else:
+                policy_obs = obs
+
             # --- 1. Charge forward（推論模式，torch.no_grad() 加速）---
             with torch.no_grad():
-                obs_normalizer.update(obs)          # 更新 running stats（用新的 obs batch）
-                obs_normed = obs_normalizer.normalize(obs)  # 標準化觀測
+                obs_normalizer.update(policy_obs)   # 更新 running stats（用 policy 看到的觀測）
+                obs_normed = obs_normalizer.normalize(policy_obs)  # 標準化觀測
                 features = _charge_features_for_rnn(obs_normed)  # 提取 RNN 輸入特徵（extractor 或 raw）
                 hidden = rnn_state.get()                          # 取得當前 hidden state [1, E, H]
                 rnn_feat, _, new_hidden = preprocess_rnn(features, hidden)  # RNN forward → 12D preprocess feature
@@ -2913,7 +3003,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
                 rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)  # concat obs + preprocess_feat → RL input
                 logits = policy_head(rl_in)                       # [E, 38] policy logits（雙頭各 19）
-                value = value_head(rl_in).squeeze(-1)             # [E] critic value
+                _priv_obs = extract_privileged_obs(env.unwrapped) if _use_asymmetric_critic else None
+                value = value_head(rl_in, _priv_obs).squeeze(-1)  # [E] critic value
                 actions, log_prob, _ = sample_action(logits)     # 採樣動作 + joint log_prob
                 goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)  # 目標診斷（不影響 reward）
 
@@ -2927,6 +3018,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             reward_flat, reward_breakdown = _reward_module.compute(
                 env.unwrapped, actions, terminated, truncated,
             )
+
+            # --- 2b. Heading stability：懲罰角速度符號翻轉（抗震盪）---
+            # obs layout: [0]=accel [1]=speed [2]=omega ...
+            # 用真實 obs 的 omega（不是 delayed），因為要量測實際機器人行為
+            if _heading_stability_weight != 0:
+                _curr_omega = obs[:, 2]
+                _sign_flip = (_prev_omega * _curr_omega < 0).float()
+                _heading_pen = _heading_stability_weight * _sign_flip * _curr_omega.abs()
+                reward_flat = reward_flat + _heading_pen
+                reward_breakdown["heading_stability"] = _heading_pen
+                _prev_omega = _curr_omega.clone()
 
             # --- 3. Obstacle forward + apply（若無動態障礙物則跳過）---
             if _obs_agent_active:
@@ -2960,9 +3062,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 wd_aux_tgt = build_wd_preprocess_targets(
                     env.unwrapped, N_obs, device)  # [E, 7]：最近 2 障礙物的 body-frame 幾何資訊
             charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
-                           aux_target=wd_aux_tgt)
+                           aux_target=wd_aux_tgt, privileged=_priv_obs)
             if obs_buf is not None:
                 obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
+
+            # --- RGDR：累積 per-env episode reward ---
+            if _rgdr_enabled:
+                _rgdr_episode_reward += reward_flat.detach()
 
             # --- 5. Metrics：記錄本步指標 ---
             metrics.step(obs, reward, done, info,
@@ -2989,6 +3095,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # 每次 episode reset 重新隨機化障礙物大小和場景邊界（WD: obs_size_rand）
                 _randomize_obstacle_sizes(done_ids, _obs_size_rand)
                 _randomize_scene_bounds(done_ids, _scene_bound_rand)
+                # Obs delay DR：重置 ring buffer + 重新抽 delay（per-episode DR）
+                if _use_obs_delay:
+                    _obs_ring[:, done_ids] = 0.0
+                    _obs_ring_ptr[done_ids] = 0
+                    _delay_per_env[done_ids] = torch.randint(
+                        _delay_lo, _delay_hi + 1, (len(done_ids),), device=device)
+                # Heading stability：重置 prev_omega（新 episode 無歷史）
+                _prev_omega[done_ids] = 0.0
+                # RGDR：更新 per-env EMA episode return + 重置累積器
+                if _rgdr_enabled:
+                    _rgdr_env_returns[done_ids] = (
+                        (1 - _rgdr_alpha) * _rgdr_env_returns[done_ids]
+                        + _rgdr_alpha * _rgdr_episode_reward[done_ids])
+                    _rgdr_episode_reward[done_ids] = 0.0
             obs = next_obs  # 更新當前觀測
 
         # === Charge PPO Update（play 模式跳過所有訓練）===
@@ -3098,8 +3218,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         if args_cli.zero_preprocess_feature_for_rl:
                             _rnn_feat_t = torch.zeros_like(_rnn_feat_t)
                         charge_buf.rl_inputs[t] = torch.cat([_p_obs_t, _rnn_feat_t], dim=-1)
-                        # Recompute values with fresh features
-                        charge_buf.values[t] = value_head(charge_buf.rl_inputs[t]).squeeze(-1)
+                        _priv_t = charge_buf.privileged_obs[t] if _use_asymmetric_critic else None
+                        charge_buf.values[t] = value_head(charge_buf.rl_inputs[t], _priv_t).squeeze(-1)
                         # Handle episode resets: zero hidden for envs that were done at step t
                         _done_mask = charge_buf.dones[t].unsqueeze(0).unsqueeze(-1)  # [1,E,1]
                         _fresh_h = _fresh_h * (1.0 - _done_mask)
@@ -3115,7 +3235,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _rnn_for_rl = (torch.zeros_like(rnn_feat)
                                if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
                 rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)
-                last_value = value_head(rl_in).squeeze(-1)  # [E] bootstrap value V_{T+1}
+                _priv_bootstrap = extract_privileged_obs(env.unwrapped) if _use_asymmetric_critic else None
+                last_value = value_head(rl_in, _priv_bootstrap).squeeze(-1)  # [E] bootstrap value V_{T+1}
 
             # GAE 計算（使用 WD 固定 gamma=0.984 + gae_lambda）
             advantages, returns = compute_gae(
@@ -3140,6 +3261,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # mean_only (SA4 default): 保留 raw advantage 量級
                 advantages = advantages - _adv_mean
 
+            # --- RGDR：per-env advantage weighting（聚焦失敗環境）---
+            if _rgdr_enabled and iteration >= _rgdr_warmup:
+                _rgdr_floor = _rgdr_env_returns.min()
+                _difficulty = 1.0 / (_rgdr_env_returns - _rgdr_floor + 1e-6)
+                _env_weight = (_difficulty / _difficulty.mean()).clamp(
+                    _rgdr_clamp[0], _rgdr_clamp[1])  # [E]
+                advantages = advantages * _env_weight.unsqueeze(0)  # [T, E]
+                if iteration % args_cli.log_interval == 0:
+                    print(f"[RGDR] env_weight: min={_env_weight.min():.2f} "
+                          f"max={_env_weight.max():.2f} "
+                          f"std={_env_weight.std():.3f}")
+
             policy_head.train(); value_head.train()
             # extractor/preprocess_rnn 維持 eval()：RL 只訓練 RL heads，不更新 aux module
             # WD 等價做法：concat_input = rl_in_.detach()（custom_trainer.py line 573）
@@ -3151,6 +3284,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flat_adv = advantages.reshape(-1)
             flat_ret_raw = returns.reshape(-1)
             flat_value_target = value_targets.reshape(-1)
+            flat_priv = charge_buf.privileged_obs[:RL].reshape(-1, _priv_dim) if _use_asymmetric_critic else None
 
             # --- Patch 2: returns/advantage statistics for WandB ---
             _ret_mean = flat_ret_raw.mean().item()
@@ -3212,7 +3346,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 for (mb,) in batches:
                     nl = policy_head(flat_ri[mb])
                     nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
-                    nv = value_head(flat_ri[mb]).squeeze(-1)
+                    _priv_mb = flat_priv[mb] if flat_priv is not None else None
+                    nv = value_head(flat_ri[mb], _priv_mb).squeeze(-1)
 
                     # Patch 3: approx KL (old_logprob - new_logprob)
                     with torch.no_grad():
@@ -3887,6 +4022,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         ],
                         data=action_rows,
                     )
+
+            # --- DORAEMON metrics ---
+            if _doraemon_ctrl is not None:
+                log_data.update(_doraemon_ctrl.to_wandb_dict())
+
+            # --- RGDR metrics ---
+            if _rgdr_enabled:
+                _rgdr_floor = _rgdr_env_returns.min()
+                _difficulty = 1.0 / (_rgdr_env_returns - _rgdr_floor + 1e-6)
+                _ew = (_difficulty / (_difficulty.mean() + 1e-8)).clamp(_rgdr_clamp[0], _rgdr_clamp[1])
+                log_data["rgdr/env_weight_min"] = float(_ew.min())
+                log_data["rgdr/env_weight_max"] = float(_ew.max())
+                log_data["rgdr/env_weight_std"] = float(_ew.std())
+                log_data["rgdr/env_returns_mean"] = float(_rgdr_env_returns.mean())
+                log_data["rgdr/env_returns_std"] = float(_rgdr_env_returns.std())
+
             wandb_run.log(log_data, step=total_steps)
 
         # === Save checkpoint：定期儲存模型、optimizer state、normalizer 統計 ===

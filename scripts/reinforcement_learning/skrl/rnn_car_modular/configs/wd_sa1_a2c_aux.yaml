@@ -126,6 +126,12 @@ actuator_delay_range: [0, 2]                                  # 動作延遲 0~2
 actuator_velocity_scale: [0.9, 1.1]                           # 速度縮放 ±10%
 actuator_motor_lag: 0.3                                       # 馬達回應滯後 α
 
+# Observation latency DR（感測器管線延遲模擬）
+obs_delay_steps: [0, 0]                                       # SA1: 不加延遲，先學基本能力
+
+# Heading stability reward（角速度震盪懲罰）
+heading_stability_weight: 0.0                                  # SA1: 不啟用
+
 # --- Runtime / logging（執行與日誌） ---
 no_domain_randomization: false                                # true=關閉 domain randomization；固定 phase 通常保留 false
 reward_speed_v05: false                                       # legacy reward speed ablation；false=不啟用

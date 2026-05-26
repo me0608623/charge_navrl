@@ -352,12 +352,31 @@ class ValueHead(nn.Module):
 
     WD 對齊: spot_critic = [256, 256, 256, 512, 512] (5 hidden layers)
     input = cat(obs_79D, preprocess_12D) = 91D
+
+    Asymmetric critic: input_dim = 91 + privileged_dim (96D) = 187D.
+    When privileged_dim > 0, a separate projection merges the privileged
+    features before the shared MLP, allowing checkpoint migration from
+    symmetric → asymmetric (the rl_proj weights carry over).
     """
 
-    def __init__(self, input_dim: int = 91):
+    def __init__(self, input_dim: int = 91, privileged_dim: int = 0):
         super().__init__()
+        self._privileged_dim = privileged_dim
+
+        if privileged_dim > 0:
+            self.rl_proj = nn.Linear(input_dim, 128)
+            self.priv_proj = nn.Linear(privileged_dim, 128)
+            self.merge = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(256, 256),
+                nn.ReLU(),
+            )
+            trunk_input = 256
+        else:
+            trunk_input = input_dim
+
         self.net = nn.Sequential(
-            nn.Linear(input_dim, 256),
+            nn.Linear(trunk_input, 256),
             nn.ReLU(),
             nn.Linear(256, 256),
             nn.ReLU(),
@@ -369,12 +388,21 @@ class ValueHead(nn.Module):
             nn.ReLU(),
             nn.Linear(512, 1),
         )
-        # 初始化: WD 無特殊 bias，PPO/A2C 通用 (orthogonal + bias=0)
         nn.init.orthogonal_(self.net[-1].weight, gain=0.01)
         nn.init.constant_(self.net[-1].bias, 0.0)
 
-    def forward(self, rl_input: torch.Tensor) -> torch.Tensor:
-        return self.net(rl_input)  # [B, 1]
+        if privileged_dim > 0:
+            nn.init.zeros_(self.priv_proj.weight)
+            nn.init.zeros_(self.priv_proj.bias)
+
+    def forward(self, rl_input: torch.Tensor, privileged: torch.Tensor | None = None) -> torch.Tensor:
+        if self._privileged_dim > 0 and privileged is not None:
+            h_rl = self.rl_proj(rl_input)       # [B, 128]
+            h_priv = self.priv_proj(privileged)  # [B, 128]
+            h = self.merge(torch.cat([h_rl, h_priv], dim=-1))  # [B, 256]
+        else:
+            h = rl_input
+        return self.net(h)  # [B, 1]
 
 
 # ============================================================================

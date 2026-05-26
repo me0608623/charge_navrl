@@ -126,6 +126,11 @@ actuator_delay_range: [0, 2]
 actuator_velocity_scale: [0.9, 1.1]
 actuator_motor_lag: 0.3
 
+# Observation latency DR
+obs_delay_steps: [0, 0]                                       # SA4: 不加延遲
+# Heading stability reward
+heading_stability_weight: 0.0                                  # SA4: 不啟用
+
 # --- Runtime / logging ---
 no_domain_randomization: false
 reward_speed_v05: false

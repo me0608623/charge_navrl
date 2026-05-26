@@ -153,6 +153,22 @@ class ExperimentConfig:
     actuator_velocity_scale: tuple[float, float] = (0.9, 1.1)  # velocity scaling
     actuator_motor_lag: float = 0.3                        # first-order lag α
 
+    # Observation latency DR (simulate sensor pipeline delay)
+    obs_delay_steps: tuple[int, int] = (0, 0)            # per-env random delay [lo, hi] steps
+
+    # Heading stability reward (penalize angular oscillation)
+    heading_stability_weight: float = 0.0                 # 0 = disabled; negative = penalize sign flips
+
+    # RGDR reward-guided loss weighting (focus training on failing envs)
+    rgdr_enabled: bool = False                            # enable per-env advantage weighting
+    rgdr_weight_clamp: tuple[float, float] = (0.5, 2.0)  # env_weight clamp range
+
+    # DORAEMON auto DR (entropy-maximizing DR expansion)
+    doraemon_enabled: bool = False
+    doraemon_sr_threshold: float = 0.85                   # SR >= τ → expand DR ranges
+    doraemon_check_interval: int = 50                     # iterations between expansion checks
+    doraemon_expansion_rate: float = 0.1                  # fraction of remaining range per step
+
     # checkpoint / resume
     checkpoint: str | None = None
     no_resume_optimizer: bool = True
@@ -192,12 +208,13 @@ _FIELD_TO_FLAGS: dict[str, list[str]] = {
     "lidar_distance_bias": ["--lidar_distance_bias"],
     "lidar_per_ring_bias": ["--lidar_per_ring_bias"],
     "enable_actuator_dr": ["--enable_actuator_dr"],
+    "rgdr_enabled": ["--rgdr_enabled"],
+    "doraemon_enabled": ["--doraemon_enabled"],
 }
 
 # Fields that are metadata-only (not applied to args_cli)
 _METADATA_ONLY_FIELDS = frozenset({
     "name", "description", "tags", "notes",
-    "critic_profile",
 })
 
 # Fields that map to a different args_cli attribute name

@@ -126,6 +126,11 @@ actuator_delay_range: [0, 2]
 actuator_velocity_scale: [0.9, 1.1]
 actuator_motor_lag: 0.3
 
+# Observation latency DR
+obs_delay_steps: [0, 1]                                       # SA5: 50% 機率 1 步延遲（200ms ≈ 真實 ~30ms 的 over-estimate）
+# Heading stability reward
+heading_stability_weight: -0.05                                # SA5: 輕微懲罰角速度震盪
+
 # --- Runtime / logging ---
 no_domain_randomization: false
 reward_speed_v05: false
