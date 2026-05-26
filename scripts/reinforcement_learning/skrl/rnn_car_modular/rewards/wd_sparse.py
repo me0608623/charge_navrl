@@ -34,12 +34,14 @@ class WDSparseReward:
         penalty_hit: float = -5.0,
         reward_get_goal: float = 40.0,
         cost_operate: float = 0.03,
+        penalty_timeout: float = 0.0,
         rl_fps: float = 5.0,
         cost_turn_rate: float = 0.5,
     ) -> None:
         self.penalty_hit = penalty_hit
         self.reward_get_goal = reward_get_goal
         self.cost_operate = cost_operate
+        self.penalty_timeout = penalty_timeout
         self.rl_fps = rl_fps
         self.cost_turn_rate = cost_turn_rate
 
@@ -47,7 +49,8 @@ class WDSparseReward:
         """Sync reward params from curriculum phase config.
 
         Expected keys (matching Phase Config flat schema):
-            spot_penalty_hit, spot_reward_get_goal, spot_cost_operate
+            spot_penalty_hit, spot_reward_get_goal, spot_cost_operate,
+            spot_penalty_timeout
         """
         if "spot_penalty_hit" in curriculum_info:
             self.penalty_hit = curriculum_info["spot_penalty_hit"]
@@ -55,6 +58,8 @@ class WDSparseReward:
             self.reward_get_goal = curriculum_info["spot_reward_get_goal"]
         if "spot_cost_operate" in curriculum_info:
             self.cost_operate = curriculum_info["spot_cost_operate"]
+        if "spot_penalty_timeout" in curriculum_info:
+            self.penalty_timeout = curriculum_info["spot_penalty_timeout"]
 
     def compute(
         self,
@@ -73,6 +78,7 @@ class WDSparseReward:
             penalty_hit=self.penalty_hit,
             reward_get_goal=self.reward_get_goal,
             cost_operate=self.cost_operate,
+            penalty_timeout=self.penalty_timeout,
             rl_fps=self.rl_fps,
             cost_turn_rate=self.cost_turn_rate,
         )

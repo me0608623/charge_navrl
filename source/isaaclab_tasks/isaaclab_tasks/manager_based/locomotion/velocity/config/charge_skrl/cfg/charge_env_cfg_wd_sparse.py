@@ -74,3 +74,6 @@ class ChargeNavigationEnvCfgVLP16CurriculumWD_TCorridor(ChargeNavigationEnvCfgVL
     def __post_init__(self):
         super().__post_init__()
         self.scene.env_spacing = 65.0
+        # T 走廊可行走區域：bar (|X|<28.5, Y>6) + stem (|X|<3.5, Y<6)
+        # wall_boundary 設成涵蓋 bar 全寬，fill blocks 由 Check 4 (AABB) 排除
+        self.commands.goal_command.wall_boundary = (28.0, 9.0)

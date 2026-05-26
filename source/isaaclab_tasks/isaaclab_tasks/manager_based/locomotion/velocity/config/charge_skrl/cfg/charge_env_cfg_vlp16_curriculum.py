@@ -645,8 +645,8 @@ class MySceneCfgVLP16_TCorridor(MySceneCfgVLP16_20x20):
     """T 字型走廊場景 — 58×20m 外牆 + 2 個填充塊形成 T 形走道
 
     可行走區域:
-      Bar:  x ∈ [-28.5, +28.5], y ∈ [+6.0, +9.5]  → 57m × 3.5m
-      Stem: x ∈ [-2.5, +2.5],  y ∈ [-9.5, +6.0]   → 5m × 15.5m
+      Bar:  x ∈ [-28.5, +28.5], y ∈ [+4.0, +9.5]  → 57m × 5.5m
+      Stem: x ∈ [-3.5, +3.5],  y ∈ [-9.5, +4.0]   → 7m × 13.5m
     """
 
     def __post_init__(self):
@@ -695,34 +695,38 @@ class MySceneCfgVLP16_TCorridor(MySceneCfgVLP16_20x20):
         fill_color = (0.45, 0.45, 0.45)
         fill_visual = sim_utils.PreviewSurfaceCfg(diffuse_color=fill_color, metallic=0.1)
 
-        # 左側填充塊: x ∈ [-28.5, -2.5], y ∈ [-9.5, +6.0]
+        # 左側填充塊: x ∈ [-28.5, -3.5], y ∈ [-9.5, +6.0]
         self.wall_fill_left = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/Wall_Fill_Left",
             spawn=sim_utils.CuboidCfg(
-                size=(26.0, 15.5, wall_height),
+                size=(25.0, 15.5, wall_height),
                 rigid_props=wall_rigid_props,
                 collision_props=wall_collision_props,
                 visual_material=fill_visual,
             ),
-            init_state=AssetBaseCfg.InitialStateCfg(pos=(-15.5, -1.75, wall_height / 2)),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(-16.0, -1.75, wall_height / 2)),
         )
 
-        # 右側填充塊: x ∈ [+2.5, +28.5], y ∈ [-9.5, +6.0]
+        # 右側填充塊: x ∈ [+3.5, +28.5], y ∈ [-9.5, +6.0]
         self.wall_fill_right = AssetBaseCfg(
             prim_path="{ENV_REGEX_NS}/Wall_Fill_Right",
             spawn=sim_utils.CuboidCfg(
-                size=(26.0, 15.5, wall_height),
+                size=(25.0, 15.5, wall_height),
                 rigid_props=wall_rigid_props,
                 collision_props=wall_collision_props,
                 visual_material=fill_visual,
             ),
-            init_state=AssetBaseCfg.InitialStateCfg(pos=(15.5, -1.75, wall_height / 2)),
+            init_state=AssetBaseCfg.InitialStateCfg(pos=(16.0, -1.75, wall_height / 2)),
         )
 
 
 @configclass
 class EventCfgVLP16TCorridor(EventCfgVLP16Curriculum):
-    """T 走廊事件配置: 只改牆壁幾何 + 無隨機內牆，其餘全繼承。"""
+    """T 走廊事件配置: 牆壁幾何 + 無隨機內牆 + 障礙物邊界調整為 T 走廊尺寸。
+
+    T 走廊: bar (|X|<28.5, Y∈[6,9.5]) + stem (|X|<3.5, Y∈[-9.5,6])
+    boundary=(28.0, 9.0) 涵蓋整個 T 形；fill blocks 由 check_wall_proximity_perenv 排除。
+    """
 
     init_walls = EventTerm(
         func=init_perenv_walls,
@@ -737,6 +741,55 @@ class EventCfgVLP16TCorridor(EventCfgVLP16Curriculum):
             "min_walls": 0, "max_walls": 0,
             "boundary": 8.5, "min_wall_spacing": 2.0,
             "max_spawn_attempts": 30, "robot_safe_dist": 1.5,
+        },
+    )
+
+    # T 走廊可通行區域 (留 0.8m 牆壁邊距):
+    #   Bar:  x ∈ [-27.5, +27.5], y ∈ [+6.8, +8.7]  (55m × 1.9m ≈ 104.5 m²)
+    #   Stem: x ∈ [-2.7, +2.7],  y ∈ [-8.7, +5.2]   (5.4m × 13.9m ≈ 75.1 m²)
+    # 面積加權: Bar ≈ 58%, Stem ≈ 42%
+
+    randomize_obstacles_startup = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="startup",
+        params={
+            "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
+            "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
+            "max_obstacles": 50, "speed_range": 1.2, "min_speed": 0.3,
+            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
+            "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
+            "boundary": (28.0, 9.0), "active_obstacle_ratio": 1.0,
+            "spawn_zones": [(-27.5, 27.5, 6.8, 8.7), (-2.7, 2.7, -8.7, 5.2)],
+            "debug": False,
+        },
+    )
+
+    randomize_obstacles = EventTerm(
+        func=randomize_obstacles_by_difficulty,
+        mode="reset",
+        params={
+            "empty_ratio": 1.00, "static_ratio": 0.00, "dynamic_ratio": 0.00,
+            "num_obstacles_static": 0, "num_obstacles_dynamic": 0,
+            "max_obstacles": 50, "speed_range": 1.2, "min_speed": 0.3,
+            "min_robot_distance": 1.5, "min_goal_distance": 1.0,
+            "min_obstacle_spacing": 1.5, "max_spawn_attempts": 50,
+            "boundary": (28.0, 9.0), "active_obstacle_ratio": 1.0,
+            "spawn_zones": [(-27.5, 27.5, 6.8, 8.7), (-2.7, 2.7, -8.7, 5.2)],
+            "debug": False,
+        },
+    )
+
+    # 動態障礙物移動: 目標點只在 T 走廊可通行區域內生成
+    # wall bounce 已內建（check_wall_proximity_perenv），fill blocks 會正確反彈
+    move_dynamic_obstacles = EventTerm(
+        func=move_obstacles_vectorized,
+        mode="interval",
+        interval_range_s=(0.2, 0.2),
+        params={
+            "move_dt": 0.2, "speed_min": 0.3, "speed_max": 1.2,
+            "goal_reach_threshold": 0.5, "speed_resample_steps": 10,
+            "area_limit": (27.0, 8.0), "max_obstacles": 50, "bound_limit": (28.0, 9.0),
+            "goal_zones": [(-27.5, 27.5, 6.8, 8.7), (-2.7, 2.7, -8.7, 5.2)],
         },
     )
 
@@ -761,6 +814,8 @@ class ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY_TCorridor(
         # 俯瞰 58×20m T 走廊（高度 50m 可覽全景）
         self.viewer.eye = (0.0, 0.0, 50.0)
         self.viewer.lookat = (0.0, 0.0, 0.0)
+        # T 走廊: bar (|X|<28.5, Y>6) + stem (|X|<3.5, Y<6), fill blocks 由 AABB check 排除
+        self.commands.goal_command.wall_boundary = (28.0, 9.0)
 
 
 @configclass
@@ -779,6 +834,8 @@ class ChargeNavigationEnvCfgVLP16CurriculumNavRL_TCorridor(
     def __post_init__(self):
         super().__post_init__()
         self.scene.env_spacing = 65.0  # 58m 場景 + 安全間距
+        self.commands.goal_command.wall_boundary = (28.0, 9.0)
+
 
 
 # ============================================================================

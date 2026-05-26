@@ -306,7 +306,7 @@ def safe_progress_reward(
     _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
 
     # 分段線性 gate:
-    #   d_safe < d_danger   → gate = -η        (懲罰前進)
+    #   d_safe < d_danger   → gate = -η        (懲罰「危險區前進」)
     #   d_danger ≤ d_safe ≤ d_comfort → gate ∈ [0, 1]  (線性過渡)
     #   d_safe > d_comfort  → gate = 1.0       (完整獎勵)
     gate = torch.where(
@@ -316,7 +316,17 @@ def safe_progress_reward(
     )
 
     # 最終獎勵
-    reward = progress * gate  # [N]
+    # Fix: 當 gate < 0（危險區）且 progress < 0（後退），原本 reward > 0
+    # 這會獎勵倒車行為。改為：危險區後退時 reward = 0（中性），不獎勵也不懲罰。
+    # 只保留 gate < 0 懲罰「危險區前進」的效果。
+    raw_reward = progress * gate  # [N]
+    # Clamp: 只允許 gate<0 造成負獎勵（懲罰危險前進），不允許正獎勵（獎勵倒車）
+    in_danger = d_safe < d_danger
+    reward = torch.where(
+        in_danger & (raw_reward > 0),  # 危險區且 reward > 0 → 後退被獎勵的情況
+        torch.zeros_like(raw_reward),   # 改為 0（不獎勵倒車）
+        raw_reward,
+    )
 
     # NaN 保護
     reward = torch.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=0.0)
@@ -324,8 +334,171 @@ def safe_progress_reward(
     return reward
 
 
+def reverse_near_dynamic_penalty(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    body_radius: float = 0.35,
+    front_arc_half_angle: float = 1.047,  # 60° = π/3 rad
+    detection_distance: float = 3.0,
+    reverse_speed_threshold: float = -0.02,
+    bottom_k: int = 6,
+) -> torch.Tensor:
+    """Penalize reversing when dynamic obstacles are detected in the forward sector.
+
+    設計動機：
+    ORCA 或 policy 在遇到正面動態障礙時傾向直接倒車，而非側向繞行。
+    此獎勵函數在「前方有動態障礙 + 機器人正在倒車」時施加懲罰，
+    引導 policy 學習 forward-moving detour 而非 passive retreat。
+
+    判斷邏輯：
+    1. 前方扇形區（±60°）內的 LiDAR bottom-K 距離 < detection_distance → 前方有障礙
+    2. body-frame 線速度 < reverse_speed_threshold → 正在倒車
+    3. 兩者同時成立 → penalty = |v_body| / v_max（倒車越快罰越重）
+
+    排除情況：
+    - 前方完全暢通（d_front > detection_distance）→ 不罰（自由倒車調整姿態）
+    - 機器人往前走（v_body ≥ 0）→ 不罰
+
+    範圍：[0, 1]，建議 weight = -5.0 ~ -10.0
+
+    Args:
+        env: 環境實例
+        robot_cfg: 機器人配置
+        sensor_cfg: LiDAR 感測器配置
+        body_radius: 機器人車體半徑 (m)
+        front_arc_half_angle: 前方扇形半角 (rad)，預設 60° = π/3
+        detection_distance: 前方障礙偵測距離 (m)
+        reverse_speed_threshold: 低於此速度視為倒車 (m/s)，負值
+        bottom_k: 前方扇形內取最近 K 條 ray
+
+    Returns:
+        [num_envs] in [0, 1]，倒車越快、前方越近 → 值越大
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    sensor: RayCaster = env.scene.sensors[sensor_cfg.name]
+
+    # --- Body-frame velocity: forward component ---
+    # 用 quaternion 將 world-frame vel 投影到 body-frame x 軸
+    robot_quat_w = robot.data.root_quat_w  # [N, 4]
+    vel_w = robot.data.root_lin_vel_w  # [N, 3]
+    # Inverse rotate world vel to body frame
+    quat_inv = torch.stack([robot_quat_w[:, 0], -robot_quat_w[:, 1],
+                            -robot_quat_w[:, 2], -robot_quat_w[:, 3]], dim=1)
+    from isaaclab.utils.math import quat_apply
+    vel_body = quat_apply(quat_inv, vel_w)  # [N, 3]
+    v_forward = vel_body[:, 0]  # [N] body x = forward
+
+    # --- Front-arc LiDAR distance ---
+    # Compute 2D distances for all rays
+    sensor_pos_2d = sensor.data.pos_w[:, :2]  # [N, 2]
+    hit_points_2d = sensor.data.ray_hits_w[:, :, :2]  # [N, R, 2]
+    distances_2d = torch.norm(hit_points_2d - sensor_pos_2d.unsqueeze(1), dim=-1)  # [N, R]
+    distances_2d = torch.nan_to_num(distances_2d, nan=sensor.cfg.max_distance,
+                                    posinf=sensor.cfg.max_distance)
+
+    # Determine which rays fall within the front arc
+    # Ray angles: evenly spaced around 360°, relative to robot heading
+    num_rays = distances_2d.shape[1]
+    ray_angles = torch.linspace(0, 2 * torch.pi, num_rays + 1, device=env.device)[:num_rays]
+
+    # Front arc mask: rays within ±front_arc_half_angle of 0° (forward)
+    # Rays near 0° or near 2π are "forward"
+    front_mask = (ray_angles < front_arc_half_angle) | (ray_angles > (2 * torch.pi - front_arc_half_angle))
+
+    # Apply mask to select front-arc rays only
+    front_distances = distances_2d.clone()
+    front_distances[:, ~front_mask] = sensor.cfg.max_distance  # mask out non-front rays
+
+    # Bottom-K of front-arc distances
+    actual_k = min(bottom_k, int(front_mask.sum().item()))
+    if actual_k == 0:
+        return torch.zeros(env.num_envs, device=env.device)
+    front_bottom_k = torch.topk(front_distances, k=max(1, actual_k), dim=1, largest=False).values
+    d_front_min = front_bottom_k.mean(dim=1)  # [N]
+
+    # --- Penalty logic ---
+    # Condition 1: obstacle in front (within detection distance)
+    obstacle_ahead = (d_front_min - body_radius) < detection_distance  # [N] bool
+
+    # Condition 2: robot is reversing
+    is_reversing = v_forward < reverse_speed_threshold  # [N] bool
+
+    # Penalty magnitude: proportional to reverse speed (faster reverse = larger penalty)
+    # Normalized by max_speed (1.0 m/s)
+    reverse_magnitude = (-v_forward / 1.0).clamp(0.0, 1.0)  # [N] in [0, 1]
+
+    # Combined penalty: only when both conditions are met
+    penalty = (obstacle_ahead & is_reversing).float() * reverse_magnitude  # [N]
+
+    return torch.nan_to_num(penalty, nan=0.0)
+
+
+def forward_detour_bonus(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    body_radius: float = 0.35,
+    bottom_k: int = 10,
+    d_activation: float = 2.0,
+    min_forward_speed: float = 0.1,
+) -> torch.Tensor:
+    """Bonus for maintaining forward speed while near obstacles (lateral detour behavior).
+
+    設計動機：
+    鼓勵 agent 在靠近障礙物時保持前進（繞行），而非停下或倒車。
+    只在 d_safe < d_activation 且 v_forward > min_forward_speed 時才給獎勵，
+    引導 policy 學習「邊閃邊前進」的平滑繞行策略。
+
+    範圍：[0, 1]，建議 weight = 2.0 ~ 5.0
+
+    Args:
+        env: 環境實例
+        robot_cfg: 機器人配置
+        sensor_cfg: LiDAR 感測器配置
+        body_radius: 機器人車體半徑 (m)
+        bottom_k: 取最近的 K 條 ray
+        d_activation: 低於此距離才啟動獎勵 (m)
+        min_forward_speed: 最低前進速度才算 detour (m/s)
+
+    Returns:
+        [num_envs] in [0, 1]
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    # Body-frame forward velocity
+    robot_quat_w = robot.data.root_quat_w
+    vel_w = robot.data.root_lin_vel_w
+    quat_inv = torch.stack([robot_quat_w[:, 0], -robot_quat_w[:, 1],
+                            -robot_quat_w[:, 2], -robot_quat_w[:, 3]], dim=1)
+    from isaaclab.utils.math import quat_apply
+    vel_body = quat_apply(quat_inv, vel_w)
+    v_forward = vel_body[:, 0]
+
+    # Safety distance
+    _, d_safe = _get_lidar_safety_stats(env, sensor_cfg, body_radius, bottom_k)
+
+    # Activation: only near obstacles
+    near_obstacle = (d_safe < d_activation).float()
+
+    # Forward bonus: speed normalized to [0, 1]
+    forward_speed_normalized = (v_forward / 1.0).clamp(0.0, 1.0)
+
+    # Only reward if actually moving forward above threshold
+    is_forward = (v_forward > min_forward_speed).float()
+
+    # Proximity scaling: closer obstacles → stronger bonus (incentivize active dodging)
+    proximity_scale = (1.0 - d_safe / d_activation).clamp(0.0, 1.0)
+
+    bonus = near_obstacle * is_forward * forward_speed_normalized * proximity_scale
+
+    return torch.nan_to_num(bonus, nan=0.0)
+
+
 __all__ = [
     "velocity_to_goal_reward",
     "safety_log_distance_reward",
     "safe_progress_reward",
+    "reverse_near_dynamic_penalty",
+    "forward_detour_bonus",
 ]

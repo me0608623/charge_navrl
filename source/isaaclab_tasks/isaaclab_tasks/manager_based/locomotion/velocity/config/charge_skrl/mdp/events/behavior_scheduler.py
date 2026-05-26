@@ -75,7 +75,8 @@ class BehaviorScheduler:
         num_envs: int,
         max_obstacles: int,
         device: str,
-        boundary: float = 8.5,
+        boundary: float | tuple[float, float] = 8.5,
+        spawn_zones: list[tuple[float, float, float, float]] | None = None,
     ):
         """
         Args:
@@ -83,12 +84,20 @@ class BehaviorScheduler:
             num_envs: 並行環境數
             max_obstacles: 每個 env 最大 obstacle slots
             device: "cuda:0" 等
-            boundary: obstacle 活��邊界 (m)
+            boundary: obstacle 活動邊界 (m)，scalar 或 (bx, by) tuple
         """
         self.num_envs = num_envs
         self.max_obstacles = max_obstacles
         self.device = device
-        self.boundary = boundary
+        # 支援 scalar 或 (bx, by) tuple boundary
+        if isinstance(boundary, (list, tuple)):
+            self.boundary_x = float(boundary[0])
+            self.boundary_y = float(boundary[1])
+        else:
+            self.boundary_x = float(boundary)
+            self.boundary_y = float(boundary)
+        self.boundary = max(self.boundary_x, self.boundary_y)  # 向後相容
+        self.spawn_zones = spawn_zones
 
         # 讀取 behavior_mix 和 speed overrides
         self.behavior_mix = stage_config.get("behavior_mix", {"random_walk": 1.0})
@@ -336,7 +345,7 @@ class BehaviorScheduler:
     # ═══════════════════════════════���══════════════════════════════════���═══
 
     def _spawn_single(self, env_ids: Tensor, slot_idx: int, btype_id: int) -> None:
-        """根據 behavior type dispatch 到對應 spawn 函式。"""
+        """根據 behavior type dispatch 到對應 spawn 函式，然後校正到 spawn_zones。"""
         slot_ids = torch.full((len(env_ids),), slot_idx, dtype=torch.long, device=self.device)
 
         if btype_id == BEHAVIOR_STATIC:
@@ -355,6 +364,57 @@ class BehaviorScheduler:
             spawn_corridor_crossing(self, env_ids, slot_ids, self.boundary)
         elif btype_id == BEHAVIOR_OCCLUSION:
             spawn_occlusion(self, env_ids, slot_ids, self.boundary)
+
+        # spawn_zones 校正：將不在可行走區域的 obstacle 重新採樣到合法位置
+        if self.spawn_zones is not None:
+            self._fix_positions_to_zones(env_ids, slot_idx)
+
+    def _is_in_zones(self, xy: Tensor) -> Tensor:
+        """檢查 xy [K, 2] 是否在任何 spawn_zone 內，回傳 [K] bool。"""
+        in_any = torch.zeros(xy.shape[0], dtype=torch.bool, device=self.device)
+        for (x_min, x_max, y_min, y_max) in self.spawn_zones:
+            in_any = in_any | (
+                (xy[:, 0] >= x_min) & (xy[:, 0] <= x_max) &
+                (xy[:, 1] >= y_min) & (xy[:, 1] <= y_max)
+            )
+        return in_any
+
+    def _fix_positions_to_zones(self, env_ids: Tensor, slot_idx: int) -> None:
+        """確保 positions[env_ids, slot_idx] 落在 spawn_zones 內。"""
+        pos = self.positions[env_ids, slot_idx, :]  # [K, 2]
+        bad = ~self._is_in_zones(pos)
+        n_bad = bad.sum().item()
+        if n_bad == 0:
+            return
+
+        bad_eids = env_ids[bad]
+        # 重新採樣位置
+        self.positions[bad_eids, slot_idx, :] = self._sample_from_zones(n_bad)
+
+        # Patrol waypoints 也重新採樣到合法區域
+        n_wp = self.patrol_waypoints.shape[2]
+        for w in range(n_wp):
+            self.patrol_waypoints[bad_eids, slot_idx, w, :] = self._sample_from_zones(n_bad)
+
+    def _sample_from_zones(self, n: int) -> Tensor:
+        """從 spawn_zones 面積加權隨機取 n 個位置。"""
+        areas = [(z[1] - z[0]) * (z[3] - z[2]) for z in self.spawn_zones]
+        total = sum(areas)
+        # 面積加權分配 n 個點到各 zone
+        positions = torch.empty(n, 2, device=self.device)
+        idx = 0
+        for i, (x_min, x_max, y_min, y_max) in enumerate(self.spawn_zones):
+            if i == len(self.spawn_zones) - 1:
+                count = n - idx
+            else:
+                count = round(n * areas[i] / total)
+                count = min(count, n - idx)
+            if count <= 0:
+                continue
+            positions[idx:idx+count, 0] = torch.empty(count, device=self.device).uniform_(x_min, x_max)
+            positions[idx:idx+count, 1] = torch.empty(count, device=self.device).uniform_(y_min, y_max)
+            idx += count
+        return positions
 
     def _allocate_counts(self, behavior_mix: dict, total_slots: int) -> dict:
         """根據 behavior_mix 比例分配 slot 數量。
@@ -387,28 +447,29 @@ class BehaviorScheduler:
         return name_to_id.get(name, BEHAVIOR_INACTIVE)
 
     def _boundary_bounce(self, mask: Tensor) -> None:
-        """邊界反彈: 超出 boundary 的 obstacle 反射。"""
-        b = self.boundary
+        """邊界反彈: 超出 boundary 的 obstacle 反射（支援非對稱 bx/by）。"""
+        bx = self.boundary_x
+        by = self.boundary_y
         pos = self.positions  # [E, N, 2]
         vel = self.velocities
 
         # X 方向
-        over_x = pos[:, :, 0] > b
-        under_x = pos[:, :, 0] < -b
-        pos[:, :, 0] = torch.where(over_x & mask, 2 * b - pos[:, :, 0], pos[:, :, 0])
-        pos[:, :, 0] = torch.where(under_x & mask, -2 * b - pos[:, :, 0], pos[:, :, 0])
+        over_x = pos[:, :, 0] > bx
+        under_x = pos[:, :, 0] < -bx
+        pos[:, :, 0] = torch.where(over_x & mask, 2 * bx - pos[:, :, 0], pos[:, :, 0])
+        pos[:, :, 0] = torch.where(under_x & mask, -2 * bx - pos[:, :, 0], pos[:, :, 0])
         vel[:, :, 0] = torch.where((over_x | under_x) & mask, -vel[:, :, 0], vel[:, :, 0])
 
         # Y 方向
-        over_y = pos[:, :, 1] > b
-        under_y = pos[:, :, 1] < -b
-        pos[:, :, 1] = torch.where(over_y & mask, 2 * b - pos[:, :, 1], pos[:, :, 1])
-        pos[:, :, 1] = torch.where(under_y & mask, -2 * b - pos[:, :, 1], pos[:, :, 1])
+        over_y = pos[:, :, 1] > by
+        under_y = pos[:, :, 1] < -by
+        pos[:, :, 1] = torch.where(over_y & mask, 2 * by - pos[:, :, 1], pos[:, :, 1])
+        pos[:, :, 1] = torch.where(under_y & mask, -2 * by - pos[:, :, 1], pos[:, :, 1])
         vel[:, :, 1] = torch.where((over_y | under_y) & mask, -vel[:, :, 1], vel[:, :, 1])
 
         # Final clamp
-        pos[:, :, 0].clamp_(-b, b)
-        pos[:, :, 1].clamp_(-b, b)
+        pos[:, :, 0].clamp_(-bx, bx)
+        pos[:, :, 1].clamp_(-by, by)
 
     def _wall_bounce(self, mask: Tensor, env: ManagerBasedRLEnv, dt: float) -> None:
         """牆壁反彈: 碰到 boundary walls / fill blocks 時回退 + 反轉速度。"""
@@ -483,17 +544,84 @@ class BehaviorScheduler:
             placed += 1
 
     def _enforce_spawn_constraints(self, env_ids: Tensor, env: ManagerBasedRLEnv) -> None:
-        """Spawn 後檢查 safety constraints，不合法的重新採樣。
+        """Spawn 後 rejection sampling，確保 obstacle 不與 robot / goal / 其他 obstacle 重疊。
 
         檢查:
-        - 離 robot 太近
-        - 離 goal 太近
-        - obstacle 之間太近
-        - 離牆壁太近
+        - 離 robot 太近 (< MIN_ROBOT_DIST)
+        - 離 goal 太近 (< MIN_GOAL_DIST)
+        - obstacle 之間太近 (< MIN_OBS_SPACING)
         """
-        # TODO: 實作 rejection sampling (與現有 reset_obstacles 類似邏輯)
-        # 暫時跳過 — spawn 位置的 boundary 已經提供基本安全距離
-        pass
+        MIN_ROBOT_DIST = 1.5   # 離 robot 至少 1.5m
+        MIN_GOAL_DIST = 1.0    # 離 goal 至少 1.0m
+        MIN_OBS_SPACING = 0.8  # obstacle 之間至少 0.8m
+        MAX_ATTEMPTS = 30
+
+        N = len(env_ids)
+        if N == 0:
+            return
+
+        # 取得 robot 位置 (env-local)
+        try:
+            robot = env.scene["robot"]
+            robot_pos_w = robot.data.root_pos_w[env_ids, :2]  # [N, 2]
+            env_origins_xy = env.scene.env_origins[env_ids, :2]
+            robot_local = robot_pos_w - env_origins_xy  # [N, 2]
+        except Exception:
+            robot_local = None
+
+        # 取得 goal 位置 (env-local)
+        try:
+            goal_cmd = env.command_manager.get_term("goal_command")
+            all_goals_w = goal_cmd.all_goals_pos_w[env_ids]  # [N, G, 3]
+            goal_local = all_goals_w[:, :, :2] - env_origins_xy.unsqueeze(1)  # [N, G, 2]
+        except Exception:
+            goal_local = None
+
+        # Per-slot rejection sampling
+        active_mask = (self.behavior_type[env_ids] != BEHAVIOR_INACTIVE)  # [N, max_obs]
+
+        for slot in range(self.max_obstacles):
+            slot_active = active_mask[:, slot]  # [N]
+            if not slot_active.any():
+                continue
+
+            pos = self.positions[env_ids, slot, :]  # [N, 2]
+
+            for attempt in range(MAX_ATTEMPTS):
+                bad = torch.zeros(N, dtype=torch.bool, device=self.device)
+
+                # 檢查 robot 距離
+                if robot_local is not None:
+                    dist_robot = torch.norm(pos - robot_local, dim=1)
+                    bad = bad | (slot_active & (dist_robot < MIN_ROBOT_DIST))
+
+                # 檢查 goal 距離
+                if goal_local is not None:
+                    for g in range(goal_local.shape[1]):
+                        dist_goal = torch.norm(pos - goal_local[:, g, :], dim=1)
+                        bad = bad | (slot_active & (dist_goal < MIN_GOAL_DIST))
+
+                # 檢查其他 obstacle 距離
+                for other_slot in range(slot):
+                    other_active = active_mask[:, other_slot]
+                    both = slot_active & other_active
+                    if not both.any():
+                        continue
+                    dist_obs = torch.norm(pos - self.positions[env_ids, other_slot, :], dim=1)
+                    bad = bad | (both & (dist_obs < MIN_OBS_SPACING))
+
+                if not bad.any():
+                    break
+
+                # 重新採樣 bad 的位置（respect spawn_zones）
+                n_bad = bad.sum().item()
+                if self.spawn_zones is not None:
+                    new_xy = self._sample_from_zones(n_bad)
+                else:
+                    bnd = self.boundary * 0.9
+                    new_xy = torch.empty(n_bad, 2, device=self.device).uniform_(-bnd, bnd)
+                pos[bad] = new_xy
+                self.positions[env_ids[bad], slot, :] = new_xy
 
     def _write_positions_to_sim(self, env: ManagerBasedRLEnv) -> None:
         """將 positions 寫入 Isaac Sim obstacle rigid bodies。"""

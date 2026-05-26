@@ -2,6 +2,14 @@
 
 > 給 PC-B 的 Claude Code 讀取，確保開發環境與 PC-A 一致。
 
+## 第二大腦 (Obsidian Vault)
+
+`/home/aa/Documents/Obsidian Vault/` 是用戶的知識庫（第二大腦）。
+- **訓練相關問題必須優先到此搜尋**，再回答或做決策
+- 主要子目錄：`isaaclab/`（Isaac Lab 訓練筆記）、`rnn/`（RNN 相關）
+- 包含歷次實驗分析、設計決策、debug 記錄、文獻筆記
+- 搜尋方式：`grep -r "關鍵字" "/home/aa/Documents/Obsidian Vault/"` 或讀取特定檔案
+
 ## 環境設定
 
 ### 1. Python 環境

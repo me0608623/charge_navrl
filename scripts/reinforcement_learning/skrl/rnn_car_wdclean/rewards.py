@@ -42,6 +42,7 @@ def compute_wd_charge_reward(
     penalty_hit: float,
     reward_get_goal: float,
     cost_operate: float,
+    penalty_timeout: float = 0.0,
     rl_fps: float = 5.0,
     cost_turn_rate: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -54,6 +55,7 @@ def compute_wd_charge_reward(
           - goal_reward: [N] goal reaching reward (WD: car goal reward)
           - wall_hit_reward: [N] wall/static collision penalty (WD: car static obstacle reward)
           - obs_hit_reward: [N] dynamic obstacle collision penalty (WD: car dynamic obstacle reward)
+          - timeout_reward: [N] timeout penalty (truncated & not terminated)
           - floor_reward: [N] always 0 for flat terrain (WD: car floor reward)
           - action_reward: [N] action cost (WD: car dynamic reward / cost_operate)
           - goal_reached: [N] bool
@@ -140,10 +142,18 @@ def compute_wd_charge_reward(
         action_reward = action_reward * alive.float()
         reward += action_reward
 
+    # --- Timeout penalty (truncated but not terminated = episode 時間到但未碰撞/未到達目標) ---
+    timeout_reward = torch.zeros(N, device=device)
+    if penalty_timeout != 0.0:
+        is_timeout = truncated_flat & ~terminated_flat
+        timeout_reward[is_timeout] = penalty_timeout
+        reward += timeout_reward
+
     breakdown = {
         "goal_reward": goal_reward,              # WD: car goal reward
         "wall_hit_reward": wall_hit_reward,      # WD: car static obstacle reward
         "obs_hit_reward": obs_hit_reward,        # WD: car dynamic obstacle reward
+        "timeout_reward": timeout_reward,        # timeout penalty
         "floor_reward": torch.zeros(N, device=device),  # WD: car floor reward (0 for flat)
         "action_reward": action_reward,          # WD: car dynamic reward (action cost)
         "goal_reached": goal_reached,

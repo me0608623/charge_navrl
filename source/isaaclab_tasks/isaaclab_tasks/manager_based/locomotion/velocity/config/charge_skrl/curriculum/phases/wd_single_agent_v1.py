@@ -551,6 +551,7 @@ STAGES = [
 
         "reward": {
             "penalty_hit": -25.0,               # ↑ from -15（漸進，非 -15→-85 跳躍）
+            "penalty_timeout": -12.5,           # = penalty_hit / 2（SA6+ timeout 懲罰）
             "reward_get_goal": 40.0,
             "cost_operate": 0.03,
             "reward_weights": None,
@@ -638,6 +639,7 @@ STAGES = [
 
         "reward": {
             "penalty_hit": -50.0,               # ↑ from -25（漸進，非 -15→-85 跳躍）
+            "penalty_timeout": -25.0,           # = penalty_hit / 2
             "reward_get_goal": 40.0,
             "cost_operate": 0.03,
             "reward_weights": None,
@@ -727,6 +729,7 @@ STAGES = [
 
         "reward": {
             "penalty_hit": -100.0,
+            "penalty_timeout": -50.0,           # = penalty_hit / 2
             "reward_get_goal": 40.0,
             "cost_operate": 0.03,
             "reward_weights": None,
@@ -877,6 +880,7 @@ def _flatten_phase(phase: dict) -> dict:
         "spot_penalty_hit": float(reward.get("penalty_hit", -5.0)),
         "spot_reward_get_goal": float(reward.get("reward_get_goal", 40.0)),
         "spot_cost_operate": float(reward.get("cost_operate", 0.0)),
+        "spot_penalty_timeout": float(reward.get("penalty_timeout", 0.0)),
 
         # exploration -> entropy fields
         "ent_coeff_linear": float(exploration.get("entropy_linear", 0.01)),

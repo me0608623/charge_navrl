@@ -55,9 +55,10 @@ class PerEnvORCAInput:
     v_next_body: float
     omega_rl: float
     # Nearby obstacles only (after GPU culling)
-    obs_pos: np.ndarray   # [K, 2]
-    obs_vel: np.ndarray   # [K, 2]
-    obs_radii: np.ndarray  # [K]
+    obs_pos: np.ndarray     # [K, 2]
+    obs_vel: np.ndarray     # [K, 2]
+    obs_radii: np.ndarray   # [K]
+    obs_is_static: np.ndarray  # [K] bool — True = static (|vel| < threshold)
 
 
 @dataclass
@@ -91,11 +92,30 @@ class RVO2SafetyFilter:
         culling_radius: float = 5.0,
         neighbor_dist: float = 10.0,
         max_neighbors: int = 20,
-        time_horizon: float = 2.0,
-        time_horizon_obst: float = 2.0,
+        time_horizon_dynamic: float = 3.5,
+        time_horizon_static: float = 0.5,
+        static_vel_threshold: float = 0.15,
         angle_threshold_deg: float = 60.0,
         omega_max: float = 0.25 * math.pi,
         max_workers: int | None = None,
+        # Non-cooperative obstacle inflation
+        obs_inflation: float = 1.8,
+        # Responsibility: fraction of avoidance ego must handle (1.0 = 100%)
+        ego_responsibility: float = 1.0,
+        # Tactical retreat (Zone B: forced reverse on lateral threat)
+        tactical_retreat: bool = True,
+        # Recovery behavior parameters
+        stuck_speed_threshold: float = 0.1,
+        stuck_pref_threshold: float = 0.05,
+        stuck_duration_steps: int = 10,
+        recovery_reverse_steps: int = 5,
+        recovery_rotate_steps: int = 5,
+        # Displacement-based stuck detection (catches oscillation + any stuck)
+        disp_window: int = 15,
+        disp_threshold: float = 0.3,  # if moved < 0.3m in 15 steps → stuck
+        # Legacy alias
+        time_horizon: float | None = None,
+        time_horizon_obst: float | None = None,
     ):
         self.raw_env = raw_env
         self.num_envs = num_envs
@@ -106,10 +126,38 @@ class RVO2SafetyFilter:
         self.culling_radius = culling_radius
         self.neighbor_dist = neighbor_dist
         self.max_neighbors = max_neighbors
-        self.time_horizon = time_horizon
-        self.time_horizon_obst = time_horizon_obst
+        # Solution 3: separate time horizons for dynamic vs static obstacles
+        self.time_horizon_dynamic = time_horizon or time_horizon_dynamic
+        self.time_horizon_static = time_horizon_obst or time_horizon_static
+        self.static_vel_threshold = static_vel_threshold
         self.angle_threshold = math.radians(angle_threshold_deg)
         self.omega_max = omega_max
+        # Non-cooperative obstacle inflation (scripted obs don't share ORCA 50/50)
+        self.obs_inflation = obs_inflation
+        # Ego responsibility: 1.0 = ego takes 100% avoidance (obstacles non-cooperative)
+        self.ego_responsibility = ego_responsibility
+        # Tactical retreat: Zone B 側向威脅強制倒車
+        self.tactical_retreat = tactical_retreat
+
+        # Solution 2: Recovery behavior — stuck detection + escape maneuver
+        self.stuck_speed_threshold = stuck_speed_threshold
+        self.stuck_pref_threshold = stuck_pref_threshold
+        self.stuck_duration_steps = stuck_duration_steps
+        self.recovery_reverse_steps = recovery_reverse_steps
+        self.recovery_rotate_steps = recovery_rotate_steps
+        self._stuck_counter = np.zeros(num_envs, dtype=np.int32)
+        self._recovery_counter = np.zeros(num_envs, dtype=np.int32)
+        self._recovery_mode = np.zeros(num_envs, dtype=bool)
+        self._recovery_phase = np.zeros(num_envs, dtype=np.int32)  # 0=reverse, 1=rotate
+        self.recovery_active = False  # env 0 visualization
+        self.recovery_count = 0  # total recoveries triggered
+
+        # Displacement-based stuck detection (catches oscillation + any stuck pattern)
+        self.disp_window = disp_window
+        self.disp_threshold = disp_threshold
+        self._pos_history = [[] for _ in range(num_envs)]  # ring buffer of (x, y)
+        self.displacement_stuck = False  # env 0 visualization
+        self.displacement_recovery_count = 0
 
         # ── Obstacle entity references (built once at init) ──
         self._num_obstacles = getattr(raw_env, "_num_obstacles", None) or 10
@@ -199,6 +247,11 @@ class RVO2SafetyFilter:
     ) -> torch.Tensor:
         """Compute distance mask on GPU — only nearby & active obstacles pass.
 
+        Filters out:
+          - Inactive obstacles (z < 0)
+          - Obstacles beyond culling radius
+          - Self-obstacles (dist < 0.01m) — prevents ghost intervention
+
         Args:
             robot_pos_xy: [N, 2] robot XY positions
             obs_pos:      [N, M, 2] obstacle XY positions
@@ -211,25 +264,38 @@ class RVO2SafetyFilter:
         rel = obs_pos - robot_pos_xy.unsqueeze(1)
         # [N, M] Euclidean distance
         dist = torch.norm(rel, dim=2)
-        # Combined mask: active (z >= 0) AND within culling radius
-        mask = (obs_z >= 0.0) & (dist < self.culling_radius)
+        # Combined mask: active (z >= 0) AND within culling radius AND not self
+        mask = (obs_z >= 0.0) & (dist < self.culling_radius) & (dist > 0.01)
         return mask
 
     # ══════════════════════════════════════════════════════════════════════════
     # CPU ORCA COMPUTATION (per-env worker)
     # ══════════════════════════════════════════════════════════════════════════
 
+    # Intervention threshold: norm(v_safe - v_pref) must exceed this to count
+    INTERVENTION_EPSILON = 0.05  # m/s
+
     def _solve_orca_single_env(self, inp: PerEnvORCAInput, dt: float) -> PerEnvORCAOutput:
-        """Run ORCA for one environment (designed to run in thread pool)."""
-        # Build RVO2 simulator with culled obstacles only
+        """Run ORCA for one environment (designed to run in thread pool).
+
+        ORCA only processes dynamic obstacles. Static obstacles are excluded
+        entirely and left to the RL policy. If ORCA outputs near-zero velocity
+        (freeze), lateral evasion injects perpendicular escape velocity when
+        a fast dynamic obstacle is on collision course.
+        """
+        # Dynamic maxSpeed: must be >= |v_pref| to avoid RVO2 truncation ghost
+        v_pref_mag = math.sqrt(inp.v_pref[0]**2 + inp.v_pref[1]**2)
+        agent_max_speed = max(self.max_speed, v_pref_mag + 0.1)
+
+        # Build RVO2 simulator — default params use dynamic time horizon
         sim = rvo2.PyRVOSimulator(
             dt,
             self.neighbor_dist,
             self.max_neighbors,
-            self.time_horizon,
-            self.time_horizon_obst,
+            self.time_horizon_dynamic,
+            self.time_horizon_static,
             self.rvo_radius,
-            self.max_speed,
+            agent_max_speed,
         )
 
         # Robot agent
@@ -237,44 +303,103 @@ class RVO2SafetyFilter:
         sim.setAgentVelocity(robot_agent, inp.robot_vel)
         sim.setAgentPrefVelocity(robot_agent, inp.v_pref)
 
-        # Culled obstacle agents only
+        # Culled obstacle agents — ORCA only handles dynamic obstacles.
+        # Static obstacles are left entirely to the RL policy.
         K = len(inp.obs_radii)
+        valid_count = 0
+        dynamic_indices = []  # track which k are dynamic (for lateral evasion)
         for k in range(K):
+            is_static = bool(inp.obs_is_static[k])
+            if is_static:
+                continue  # 靜態交給 RL，ORCA 不處理
+
             obs_pos_k = (float(inp.obs_pos[k, 0]), float(inp.obs_pos[k, 1]))
             obs_vel_k = (float(inp.obs_vel[k, 0]), float(inp.obs_vel[k, 1]))
             obs_r = float(inp.obs_radii[k])
+
+            th = self.time_horizon_dynamic
+            th_obst = self.time_horizon_static
+
+            # Break reciprocal assumption: scripted obstacles are non-cooperative.
+            # Setting their maxSpeed near zero tells ORCA they won't deviate from
+            # their current trajectory, forcing ego to take full avoidance responsibility.
+            # Combined with radius inflation, this produces one-sided detour trajectories.
+            effective_r = obs_r + self.safety_margin
+            if self.obs_inflation > 1.0:
+                effective_r *= self.obs_inflation
+
+            # Non-cooperative maxSpeed: ego_responsibility=1.0 → obs maxSpeed≈0
+            # ego_responsibility=0.5 → standard 50/50 (obs maxSpeed matches actual)
+            obs_speed_mag = math.sqrt(obs_vel_k[0]**2 + obs_vel_k[1]**2)
+            obs_max_speed = obs_speed_mag * (1.0 - self.ego_responsibility) + 0.01
+
             sim.addAgent(
                 obs_pos_k,
                 self.neighbor_dist,
                 self.max_neighbors,
-                self.time_horizon,
-                self.time_horizon_obst,
-                obs_r + self.safety_margin,
-                2.0,
+                th,
+                th_obst,
+                effective_r,
+                obs_max_speed,
                 obs_vel_k,
             )
-            sim.setAgentPrefVelocity(k + 1, obs_vel_k)
+            sim.setAgentPrefVelocity(valid_count + 1, obs_vel_k)
+            dynamic_indices.append(k)
+            valid_count += 1
 
-        # ORCA solve
+        # ORCA solve (skip if no dynamic obstacles in sim)
+        if valid_count == 0:
+            # No dynamic obstacles → pure pass-through
+            return PerEnvORCAOutput(
+                env_idx=inp.env_idx,
+                v_safe_linear=inp.v_next_body,
+                v_safe_omega=inp.omega_rl,
+                orca_active=False,
+                fallback_active=False,
+                v_pref_world=np.array(inp.v_pref) if inp.env_idx == 0 else None,
+                v_safe_world=np.array(inp.v_pref) if inp.env_idx == 0 else None,
+                vo_cone_data=[] if inp.env_idx == 0 else None,
+            )
+
         sim.doStep()
         v_safe = sim.getAgentVelocity(robot_agent)
-
-        # Check intervention
-        v_pref_arr = np.array(inp.v_pref)
         v_safe_arr = np.array(v_safe)
+
+        # ── Lateral evasion: if ORCA says "stop" but ego is on collision
+        # course with a fast approaching obstacle, inject perpendicular escape
+        # velocity so the ego drifts out of the threat's trajectory. ──
+        v_safe_mag = math.sqrt(v_safe[0]**2 + v_safe[1]**2)
+        if v_safe_mag < self.LATERAL_EVASION_V_THRESH:
+            v_safe_arr = self._lateral_evasion_if_frozen(
+                v_safe_arr, inp, dynamic_indices
+            )
+            v_safe = (float(v_safe_arr[0]), float(v_safe_arr[1]))
+
+        # Check intervention with proper epsilon
+        v_pref_arr = np.array(inp.v_pref)
         v_diff = float(np.linalg.norm(v_safe_arr - v_pref_arr))
-        orca_active = v_diff > 0.01
+        orca_active = v_diff > self.INTERVENTION_EPSILON
+
+        # Debug log on intervention (throttle: 每 10 次介入才印一次，避免 stdout I/O 拖慢 loop)
+        if orca_active and inp.env_idx == 0:
+            self._debug_intervene_count = getattr(self, "_debug_intervene_count", 0) + 1
+            if self._debug_intervene_count % 10 == 1:
+                print(
+                    f"[RVO2 intervene #{self._debug_intervene_count}] "
+                    f"v_pref=({inp.v_pref[0]:+.3f},{inp.v_pref[1]:+.3f}) "
+                    f"v_safe=({v_safe[0]:+.3f},{v_safe[1]:+.3f}) "
+                    f"diff={v_diff:.3f} obs_in_sim={valid_count}"
+                )
 
         # Project to body frame or pass-through
         if orca_active:
             v_safe_linear, v_safe_omega = self._project_to_body_frame(
                 v_safe, inp.yaw, dt
             )
-            fallback_active = self._last_fallback
         else:
             v_safe_linear = inp.v_next_body
             v_safe_omega = inp.omega_rl
-            fallback_active = False
+        fallback_active = False  # 連續投影無硬切 fallback
 
         # Visualization data (env 0 only)
         vis_v_pref = None
@@ -283,10 +408,10 @@ class RVO2SafetyFilter:
         if inp.env_idx == 0:
             vis_v_pref = v_pref_arr.copy()
             vis_v_safe = v_safe_arr.copy()
-            # VO cone data
+            # VO cone data (dynamic obstacles only, matching ORCA sim)
             vis_cones = []
             robot_xy = np.array(inp.robot_pos)
-            for k in range(K):
+            for k in dynamic_indices:
                 rel_xy = inp.obs_pos[k] - robot_xy
                 combined_r = self.rvo_radius + float(inp.obs_radii[k]) + self.safety_margin
                 vis_cones.append((rel_xy.copy(), combined_r))
@@ -398,6 +523,11 @@ class RVO2SafetyFilter:
                 continue
 
             nearby_idx = np.where(nearby_mask)[0]
+            nearby_vel = obs_vel_cpu[e, nearby_idx, :]  # [K, 2]
+            # Classify static vs dynamic by velocity magnitude
+            vel_mag = np.linalg.norm(nearby_vel, axis=1)  # [K]
+            is_static = vel_mag < self.static_vel_threshold  # [K] bool
+
             orca_inputs.append(PerEnvORCAInput(
                 env_idx=e,
                 robot_pos=(float(robot_pos_cpu[e, 0]), float(robot_pos_cpu[e, 1])),
@@ -407,8 +537,9 @@ class RVO2SafetyFilter:
                 v_next_body=float(v_next_body_cpu[e]),
                 omega_rl=float(omega_rl_cpu[e]),
                 obs_pos=obs_pos_cpu[e, nearby_idx, :],    # [K, 2]
-                obs_vel=obs_vel_cpu[e, nearby_idx, :],    # [K, 2]
+                obs_vel=nearby_vel,                        # [K, 2]
                 obs_radii=obs_radii_cpu[nearby_idx],       # [K]
+                obs_is_static=is_static,                   # [K] bool
             ))
 
         # ════════════════════════════════════════════════════════════════════
@@ -471,6 +602,104 @@ class RVO2SafetyFilter:
             self.last_agent_omega = float(omega_rl_cpu[0])
 
         # ════════════════════════════════════════════════════════════════════
+        # ANTI-OSCILLATION + RECOVERY BEHAVIOR
+        # Layer 1: Detect v_body sign flipping → force consistent direction
+        # Layer 2: Detect stuck (low speed for N steps) → reverse + rotate
+        # ════════════════════════════════════════════════════════════════════
+
+        robot_speed_cpu = np.linalg.norm(robot_vel_cpu, axis=1)  # [N]
+
+        for e in range(N):
+            # ── Displacement-based stuck detection ──
+            pos_xy = (float(robot_pos_cpu[e, 0]), float(robot_pos_cpu[e, 1]))
+            phist = self._pos_history[e]
+            phist.append(pos_xy)
+            if len(phist) > self.disp_window:
+                phist.pop(0)
+
+            disp_stuck = False
+            if len(phist) >= self.disp_window and not self._recovery_mode[e]:
+                dx = phist[-1][0] - phist[0][0]
+                dy = phist[-1][1] - phist[0][1]
+                displacement = math.sqrt(dx * dx + dy * dy)
+                if displacement < self.disp_threshold:
+                    disp_stuck = True
+                    # Directly trigger recovery
+                    self._recovery_mode[e] = True
+                    self._recovery_counter[e] = 0
+                    self._recovery_phase[e] = 0
+                    self._stuck_counter[e] = 0
+                    self._pos_history[e].clear()
+                    self.recovery_count += 1
+                    self.displacement_recovery_count += 1
+                    if e == 0:
+                        self.displacement_stuck = True
+                        print(
+                            f"[RVO2 DISP→REC] env {e}: moved only {displacement:.3f}m in "
+                            f"{self.disp_window} steps → reverse+rotate"
+                        )
+
+            if e == 0 and not disp_stuck:
+                self.displacement_stuck = False
+
+            # ── Recovery behavior: stuck detection + escape maneuver ──
+            if self._recovery_mode[e]:
+                # Currently in recovery — execute escape maneuver
+                rc = self._recovery_counter[e]
+                if self._recovery_phase[e] == 0:
+                    # Phase 0: reverse
+                    result_linear[e] = -0.3
+                    result_omega[e] = 0.0
+                    self._recovery_counter[e] = rc + 1
+                    if rc + 1 >= self.recovery_reverse_steps:
+                        self._recovery_phase[e] = 1
+                        self._recovery_counter[e] = 0
+                else:
+                    # Phase 1: rotate 90 degrees
+                    result_linear[e] = 0.0
+                    result_omega[e] = self.omega_max
+                    self._recovery_counter[e] = rc + 1
+                    if rc + 1 >= self.recovery_rotate_steps:
+                        # Recovery complete — hand back to RL
+                        self._recovery_mode[e] = False
+                        self._recovery_counter[e] = 0
+                        self._recovery_phase[e] = 0
+                        self._stuck_counter[e] = 0
+                        self._pos_history[e].clear()
+
+                if e == 0:
+                    self.recovery_active = True
+            else:
+                # Check if stuck: RL wants to move but robot isn't
+                v_pref_mag_e = abs(v_next_body_cpu[e])
+                actual_speed_e = robot_speed_cpu[e]
+                if v_pref_mag_e > self.stuck_pref_threshold and actual_speed_e < self.stuck_speed_threshold:
+                    self._stuck_counter[e] += 1
+                else:
+                    self._stuck_counter[e] = max(0, self._stuck_counter[e] - 1)
+
+                if self._stuck_counter[e] >= self.stuck_duration_steps:
+                    # Trigger recovery
+                    self._recovery_mode[e] = True
+                    self._recovery_counter[e] = 0
+                    self._recovery_phase[e] = 0
+                    self._stuck_counter[e] = 0
+                    self._pos_history[e].clear()
+                    self.recovery_count += 1
+                    if e == 0:
+                        print(f"[RVO2 RECOVERY] env {e}: stuck detected, "
+                              f"v_pref={v_pref_mag_e:.2f} actual={actual_speed_e:.2f} → reverse+rotate")
+
+                if e == 0:
+                    self.recovery_active = False
+
+        # ════════════════════════════════════════════════════════════════════
+        # VELOCITY CLAMPING — 確保所有路徑的輸出都在物理極限內
+        # ════════════════════════════════════════════════════════════════════
+        np.clip(result_linear, -self.max_speed, self.max_speed, out=result_linear)
+        np.clip(result_omega, -self.omega_max, self.omega_max, out=result_omega)
+
+        # ════════════════════════════════════════════════════════════════════
         # WRITE BACK TO GPU
         # ════════════════════════════════════════════════════════════════════
 
@@ -493,49 +722,163 @@ class RVO2SafetyFilter:
     # Body-frame projection (non-holonomic)
     # ══════════════════════════════════════════════════════════════════════════
 
-    # Thread-local fallback flag (avoid race in multi-thread)
-    _last_fallback: bool = False
+    # Steering proportional gain: ω = Kp * angle_err
+    STEER_KP: float = 3.0
+    # Reverse is only allowed when angle_err > this threshold (radians)
+    REVERSE_ANGLE_THRESHOLD: float = 2.6  # ~150°
+    # Minimum forward speed maintained during lateral detour (fraction of v_safe_mag)
+    FORWARD_DETOUR_BIAS: float = 0.25
+
+    # ── Lateral evasion constants ──
+    # v_safe magnitude below this → ego is "frozen" (ORCA says stop)
+    LATERAL_EVASION_V_THRESH: float = 0.08
+    # Obstacle must be approaching faster than this to trigger evasion
+    LATERAL_EVASION_OBS_SPEED: float = 0.3
+    # Time-to-collision threshold: only evade if TTC < this
+    LATERAL_EVASION_TTC: float = 4.0
+    # Perpendicular miss distance: ego is "in the path" if < this
+    LATERAL_EVASION_MISS_DIST: float = 1.2  # robot_r + obs_r + margin
+    # Escape speed injected perpendicular to threat trajectory
+    LATERAL_EVASION_SPEED: float = 0.4
+
+    def _lateral_evasion_if_frozen(
+        self,
+        v_safe_arr: np.ndarray,
+        inp: PerEnvORCAInput,
+        dynamic_indices: list[int],
+    ) -> np.ndarray:
+        """When ORCA outputs ≈ 0 velocity, check if ego sits on a collision
+        course with an approaching dynamic obstacle. If so, inject a lateral
+        escape velocity perpendicular to the threat's trajectory.
+
+        This prevents the "sitting duck" failure mode where ego brakes in-place
+        and lets a fast side-approaching obstacle crash into it.
+
+        Returns:
+            Modified v_safe_arr (or unchanged if no threat detected).
+        """
+        robot_xy = np.array(inp.robot_pos)
+        best_ttc = float("inf")
+        best_perp = None  # perpendicular escape direction
+
+        for k in dynamic_indices:
+            obs_xy = inp.obs_pos[k]
+            obs_v = inp.obs_vel[k]
+            obs_speed = float(np.linalg.norm(obs_v))
+            if obs_speed < self.LATERAL_EVASION_OBS_SPEED:
+                continue  # slow obstacle — no urgent threat
+
+            # Vector from obstacle to robot
+            rel_pos = robot_xy - obs_xy  # points obs → ego
+            obs_dir = obs_v / obs_speed  # unit velocity direction
+
+            # Project rel_pos onto obstacle's velocity to get TTC
+            along = float(np.dot(rel_pos, obs_dir))
+            if along < 0:
+                continue  # obstacle is moving away from ego
+
+            ttc = along / obs_speed
+            if ttc > self.LATERAL_EVASION_TTC:
+                continue  # plenty of time
+
+            # Perpendicular miss distance: how far will obs pass from ego
+            perp_dist = abs(float(rel_pos[0] * (-obs_dir[1]) + rel_pos[1] * obs_dir[0]))
+            combined_r = float(inp.obs_radii[k]) + self.rvo_radius
+            if perp_dist > self.LATERAL_EVASION_MISS_DIST + combined_r:
+                continue  # will miss — no danger
+
+            if ttc < best_ttc:
+                best_ttc = ttc
+                # Perpendicular direction: rotate obs_dir by +90° or -90°
+                # Choose the side closer to v_pref so we dodge toward our goal
+                perp_left = np.array([-obs_dir[1], obs_dir[0]])
+                perp_right = np.array([obs_dir[1], -obs_dir[0]])
+                v_pref_arr = np.array(inp.v_pref)
+                # Pick the perpendicular that aligns better with v_pref
+                if np.dot(perp_left, v_pref_arr) >= np.dot(perp_right, v_pref_arr):
+                    best_perp = perp_left
+                else:
+                    best_perp = perp_right
+
+        if best_perp is not None:
+            # Inject lateral escape velocity
+            escape_v = best_perp * self.LATERAL_EVASION_SPEED
+            if inp.env_idx == 0:
+                self._lateral_evasion_count = getattr(self, "_lateral_evasion_count", 0) + 1
+                if self._lateral_evasion_count % 5 == 1:
+                    print(
+                        f"[RVO2 LATERAL] ttc={best_ttc:.2f}s "
+                        f"escape=({escape_v[0]:+.3f},{escape_v[1]:+.3f})"
+                    )
+            return v_safe_arr + escape_v
+
+        return v_safe_arr
 
     def _project_to_body_frame(
         self, v_safe: tuple[float, float], yaw: float, dt: float
     ) -> tuple[float, float]:
         """World-frame v_safe → body-frame (v_linear, omega_z).
 
-        Non-holonomic handling:
-          - angle_diff < threshold: project onto heading axis
-          - angle_diff >= threshold: slow down + max turn rate
+        Forward-Biased Non-Holonomic Projection (NH-ORCA style):
+
+        Instead of naive cos(angle_err) which causes passive braking at 90° and
+        reversing at >90°, this approach maintains forward momentum during lateral
+        detours and only reverses as an absolute last resort:
+
+          angle_err   行為
+          ──────────  ────────────────────────────────────────
+            0°-60°    Full forward + gentle steering
+           60°-120°   Sustained forward (≥ 25% of |v_safe|) + aggressive steering
+          120°-150°   Reduced forward speed + max steering (strong turn-in-place)
+          150°-180°   Reverse allowed (emergency only, obstacle directly behind goal)
+
+        Pure-pursuit inspired: compute yaw rate to steer toward v_safe direction,
+        while maintaining forward speed to keep the vehicle progressing laterally.
+        This converts "dodge left/right" into "forward-arc" maneuvers.
         """
         vx_safe, vy_safe = v_safe
         v_safe_mag = math.sqrt(vx_safe**2 + vy_safe**2)
 
         if v_safe_mag < 0.01:
-            self._last_fallback = False
             return 0.0, 0.0
 
+        # 1. angle_err: signed angle from heading to v_safe, in [-π, π]
         angle_v_safe = math.atan2(vy_safe, vx_safe)
-        angle_diff = math.atan2(
+        angle_err = math.atan2(
             math.sin(angle_v_safe - yaw),
             math.cos(angle_v_safe - yaw),
         )
-        abs_angle_diff = abs(angle_diff)
+        abs_angle_err = abs(angle_err)
 
-        if abs_angle_diff < self.angle_threshold:
-            # Normal: project onto heading
-            cos_yaw = math.cos(yaw)
-            sin_yaw = math.sin(yaw)
-            v_linear = vx_safe * cos_yaw + vy_safe * sin_yaw
-            desired_omega = angle_diff / max(dt, 1e-4)
-            omega_z = max(-self.omega_max, min(self.omega_max, desired_omega))
-            v_linear = max(-self.max_speed, min(self.max_speed, v_linear))
-            self._last_fallback = False
-            return v_linear, omega_z
+        # 2. Forward-biased speed mapping
+        #    Key insight: for lateral detours (60°-150°), the robot should maintain
+        #    forward speed while steering, NOT brake to zero.
+        if abs_angle_err < math.radians(60):
+            # Zone A: Small deviation — full forward speed, gentle steering
+            v_linear = v_safe_mag * math.cos(angle_err)
+        elif abs_angle_err < self.REVERSE_ANGLE_THRESHOLD:
+            # Zone B: Large lateral deviation — maintain forward bias + aggressive steer
+            # cos gives 0 or negative here, but we override with a forward floor
+            cos_component = v_safe_mag * math.cos(angle_err)
+            forward_floor = v_safe_mag * self.FORWARD_DETOUR_BIAS
+            v_linear = max(cos_component, forward_floor)
         else:
-            # Fallback: slow + max turn
-            alignment = math.cos(angle_diff)
-            v_linear = max(0.0, alignment) * v_safe_mag * 0.2
-            omega_z = math.copysign(self.omega_max, angle_diff)
-            self._last_fallback = True
-            return v_linear, omega_z
+            # Zone C: Nearly opposite direction (>150°) — allow reverse as emergency
+            v_linear = v_safe_mag * math.cos(angle_err)
+
+        # 3. ω = Kp * angle_err (P-Controller steering toward v_safe direction)
+        #    Higher gain in the detour zone for faster turning
+        if abs_angle_err > math.radians(60):
+            # Aggressive steering during detour — use 1.5x gain
+            omega_z = self.STEER_KP * 1.5 * angle_err
+        else:
+            omega_z = self.STEER_KP * angle_err
+
+        # 4. Clamp to physical limits
+        v_linear = max(-self.max_speed, min(self.max_speed, v_linear))
+        omega_z = max(-self.omega_max, min(self.omega_max, omega_z))
+
+        return v_linear, omega_z
 
     # ══════════════════════════════════════════════════════════════════════════
     # Installation (monkey-patch)
@@ -571,8 +914,12 @@ class RVO2SafetyFilter:
             f"num_envs={self.num_envs}, "
             f"radius={self.rvo_radius:.2f}m, "
             f"culling={self.culling_radius:.1f}m, "
-            f"horizon={self.time_horizon:.1f}s, "
-            f"angle_threshold={math.degrees(self.angle_threshold):.0f}deg, "
+            f"horizon_dyn={self.time_horizon_dynamic:.1f}s (dynamic only, static excluded), "
+            f"ego_responsibility={self.ego_responsibility:.0%}, "
+            f"projection=NH-forward-biased(Kp={self.STEER_KP:.1f}, "
+            f"reverse_thresh={math.degrees(self.REVERSE_ANGLE_THRESHOLD):.0f}°), "
+            f"lateral_evasion=ON(ttc<{self.LATERAL_EVASION_TTC:.1f}s, "
+            f"v_escape={self.LATERAL_EVASION_SPEED:.1f}m/s), "
             f"workers={'single' if self._pool is None else self._pool._max_workers}"
         )
 
@@ -644,9 +991,15 @@ class RVO2SafetyFilter:
         if not show_overlay_text:
             return
 
-        # Status indicator: red "RVO" or green "RL"
+        # Status indicator: purple "OSC" / yellow "REC" / red "RVO" / green "RL"
         rate = self.intervention_steps / max(1, self.total_steps)
-        if self.orca_active:
+        if self.recovery_active:
+            label, label_color = "REC", "#ffaa00"
+            bg_color, edge_color = "#403000", "#cc8800"
+        elif self.displacement_stuck:
+            label, label_color = "DISP", "#cc77ff"
+            bg_color, edge_color = "#301040", "#9944cc"
+        elif self.orca_active:
             label, label_color = "RVO", "#ff4444"
             bg_color, edge_color = "#401010", "#cc3333"
         else:
@@ -691,6 +1044,8 @@ class RVO2SafetyFilter:
             "intervention_rate": self.intervention_steps / total,
             "fallback_steps": self.fallback_steps,
             "fallback_rate": self.fallback_steps / total,
+            "recovery_count": self.recovery_count,
+            "disp_recovery_count": self.displacement_recovery_count,
         }
 
     def print_stats(self) -> None:
@@ -699,7 +1054,10 @@ class RVO2SafetyFilter:
         print(f"  Total steps:     {s['total_steps']}")
         print(f"  ORCA intervened: {s['intervention_steps']} ({s['intervention_rate']:.1%})")
         print(f"  Fallback (turn): {s['fallback_steps']} ({s['fallback_rate']:.1%})")
+        print(f"  Recovery trigg:  {s['recovery_count']}")
+        print(f"  Disp→recovery:   {s['disp_recovery_count']}")
         print(f"  Culling radius:  {self.culling_radius:.1f}m")
+        print(f"  TimeHorizon:     dynamic={self.time_horizon_dynamic:.1f}s static={self.time_horizon_static:.1f}s")
         print(f"  Obstacles slots: {self._actual_num_obs}")
 
     def shutdown(self) -> None:

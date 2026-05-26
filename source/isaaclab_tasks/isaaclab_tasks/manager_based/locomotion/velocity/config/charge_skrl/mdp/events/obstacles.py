@@ -654,9 +654,10 @@ def move_obstacles_vectorized(
     speed_max: float = 1.2,
     goal_reach_threshold: float = 0.5,
     speed_resample_steps: int = 10,
-    area_limit: float = 6.0,
+    area_limit: float | tuple[float, float] = 6.0,
     max_obstacles: int = 10,
     bound_limit: float | tuple[float, float] = 7.0,
+    goal_zones: list[tuple[float, float, float, float]] | None = None,
 ):
     """Vectorized goal-directed obstacle movement with correct geofencing.
 
@@ -752,17 +753,53 @@ def move_obstacles_vectorized(
     # ------------------------------------------------------------------
     # Lazy-init persistent state
     # ------------------------------------------------------------------
+    # Support asymmetric area_limit (x, y) for non-square scenes (e.g. T corridor)
+    if isinstance(area_limit, (list, tuple)):
+        _area_x, _area_y = area_limit
+    else:
+        _area_x = _area_y = area_limit
+
+    # Zone-aware goal sampling helper
+    def _sample_goals_in_zones(shape: tuple[int, ...]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Sample (x, y) goals. Uses goal_zones if defined, else uniform rectangle."""
+        total = 1
+        for s in shape:
+            total *= s
+        if goal_zones is not None:
+            # Area-weighted zone sampling
+            areas = [(z[1] - z[0]) * (z[3] - z[2]) for z in goal_zones]
+            total_area = sum(areas)
+            cum = 0.0
+            cdf = []
+            for a in areas:
+                cum += a / total_area
+                cdf.append(cum)
+            # Assign each sample to a zone
+            r = torch.rand(total, device=device)
+            gx = torch.zeros(total, device=device)
+            gy = torch.zeros(total, device=device)
+            for zi, zone in enumerate(goal_zones):
+                lo = cdf[zi - 1] if zi > 0 else 0.0
+                hi = cdf[zi]
+                mask = (r >= lo) & (r < hi)
+                n = mask.sum().item()
+                if n > 0:
+                    gx[mask] = torch.rand(n, device=device) * (zone[1] - zone[0]) + zone[0]
+                    gy[mask] = torch.rand(n, device=device) * (zone[3] - zone[2]) + zone[2]
+            return gx.reshape(shape), gy.reshape(shape)
+        else:
+            gx = torch.rand(*shape, device=device) * 2 * _area_x - _area_x
+            gy = torch.rand(*shape, device=device) * 2 * _area_y - _area_y
+            return gx, gy
+
     if not hasattr(env, "_obstacle_goals_local"):
         env._obstacle_goals_local = torch.zeros(
             num_envs_total, max_obstacles, 2, device=device
         )
         # Initialize with random local-frame goals
-        env._obstacle_goals_local[:, :, 0] = (
-            torch.rand(num_envs_total, max_obstacles, device=device) * 2 * area_limit - area_limit
-        )
-        env._obstacle_goals_local[:, :, 1] = (
-            torch.rand(num_envs_total, max_obstacles, device=device) * 2 * area_limit - area_limit
-        )
+        gx, gy = _sample_goals_in_zones((num_envs_total, max_obstacles))
+        env._obstacle_goals_local[:, :, 0] = gx
+        env._obstacle_goals_local[:, :, 1] = gy
 
     if not hasattr(env, "_obstacle_goal_speeds"):
         env._obstacle_goal_speeds = (
@@ -896,23 +933,28 @@ def move_obstacles_vectorized(
     else:
         _goal_range_x = _goal_range_y = bound_limit - 1.0
 
-    # For reflected obstacles, sample new LOCAL-frame goals
+    # For wall-bounced obstacles, resample goals to avoid perpetual
+    # oscillation against fill blocks (goal inside wall → push toward wall → bounce → repeat)
+    if in_wall.any():
+        bounce_gx, bounce_gy = _sample_goals_in_zones((D, N_eff))
+        bounce_goals = torch.stack([bounce_gx, bounce_gy], dim=2)  # [D, N_eff, 2]
+        goals[in_wall] = bounce_goals[in_wall]
+
+    # For geofence-reflected obstacles, sample new LOCAL-frame goals
     reflected = reflected_x | reflected_y  # [D, N_eff]
     num_reflected = reflected.sum().item()
     if num_reflected > 0:
-        new_goals = torch.zeros(D, N_eff, 2, device=device)
-        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_x - _goal_range_x
-        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_y - _goal_range_y
-        goals[reflected] = new_goals[reflected]
+        ref_gx, ref_gy = _sample_goals_in_zones((D, N_eff))
+        ref_goals = torch.stack([ref_gx, ref_gy], dim=2)
+        goals[reflected] = ref_goals[reflected]
 
     # Goal reaching: where dist_to_goal < threshold, sample new LOCAL goals
     reached = visible & (dist_to_goal < goal_reach_threshold)  # [D, N_eff]
     num_reached = reached.sum().item()
     if num_reached > 0:
-        new_goals = torch.zeros(D, N_eff, 2, device=device)
-        new_goals[:, :, 0] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_x - _goal_range_x
-        new_goals[:, :, 1] = torch.rand(D, N_eff, device=device) * 2 * _goal_range_y - _goal_range_y
-        goals[reached] = new_goals[reached]
+        reach_gx, reach_gy = _sample_goals_in_zones((D, N_eff))
+        reach_goals = torch.stack([reach_gx, reach_gy], dim=2)
+        goals[reached] = reach_goals[reached]
 
     # Speed resampling every speed_resample_steps
     should_resample = visible & (step_counts % speed_resample_steps == 0)  # [D, N_eff]

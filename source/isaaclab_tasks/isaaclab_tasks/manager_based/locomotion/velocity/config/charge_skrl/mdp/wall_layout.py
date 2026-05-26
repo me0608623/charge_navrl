@@ -76,11 +76,11 @@ BOUNDARY_WALLS_20x20: list[tuple[float, float, float, float]] = [
 ALL_WALLS_20x20 = MAZE_WALLS_20x20 + BOUNDARY_WALLS_20x20
 
 # T 字型走廊：58×20m 場景 + 2 個填充塊創造 T 形走道
-# 走廊規格: 水平 bar 寬 3.5m (y 方向), 垂直 stem 寬 5.0m (x 方向)
+# 走廊規格: 水平 bar 寬 3.5m (y 方向), 垂直 stem 寬 7.0m (x 方向)
 # 橫向 bar 長度 = 57m（原 arena 寬 19m × 3 倍）
 # 可行走區域:
 #   Bar:  x ∈ [-28.5, +28.5], y ∈ [+6.0, +9.5]  → 57m × 3.5m
-#   Stem: x ∈ [-2.5, +2.5],  y ∈ [-9.5, +6.0]   → 5m × 15.5m
+#   Stem: x ∈ [-3.5, +3.5],  y ∈ [-9.5, +6.0]   → 7m × 15.5m
 BOUNDARY_WALLS_T_CORRIDOR: list[tuple[float, float, float, float]] = [
     # 4 面外牆（58m × 20m 場景，wall_thickness=1.0）
     ( 0.0,  10.0, 59.0, 1.0),   # North  (x: -29.5 to +29.5)
@@ -88,9 +88,9 @@ BOUNDARY_WALLS_T_CORRIDOR: list[tuple[float, float, float, float]] = [
     ( 29.0,  0.0,  1.0, 21.0),  # East   (y: -10.5 to +10.5)
     (-29.0,  0.0,  1.0, 21.0),  # West
     # 2 個填充塊（填滿 T 形走道以外的死區）
-    # Left fill:  x ∈ [-28.5, -2.5], y ∈ [-9.5, +6.0]
-    (-15.5, -1.75, 26.0, 15.5),  # Left dead zone fill
-    ( 15.5, -1.75, 26.0, 15.5),  # Right dead zone fill
+    # Left fill:  x ∈ [-28.5, -3.5], y ∈ [-9.5, +6.0]
+    (-16.0, -1.75, 25.0, 15.5),  # Left dead zone fill
+    ( 16.0, -1.75, 25.0, 15.5),  # Right dead zone fill
 ]
 
 # ============================================================================

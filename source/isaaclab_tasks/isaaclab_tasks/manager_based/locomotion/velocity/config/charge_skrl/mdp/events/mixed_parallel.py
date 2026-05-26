@@ -70,6 +70,10 @@ def randomize_obstacles_by_difficulty(
     # Goal 附近障礙物：>=1 為確定數量，0<p<1 為 Bernoulli 機率（放 1 個）
     obs_near_goal_count: float = 0,
     obs_near_goal_radius: float = 2.0,
+    # 可通行區域定義 (取代盲目象限採樣)
+    # 格式: [(x_min, x_max, y_min, y_max), ...] — 多個矩形區域
+    # None → 使用傳統象限採樣 (正方形/矩形場景)
+    spawn_zones: list[tuple[float, float, float, float]] | None = None,
     # 🔥 Debug 模式
     debug: bool = False,
 ):
@@ -212,13 +216,27 @@ def randomize_obstacles_by_difficulty(
     HIDDEN_Z = -10.0
     VISIBLE_Z = 0.9  # ★ 行人高度 1.6~1.8m 中心，底部 z≥0，頂部 z≥1.6m (高於 VLP16)
 
-    # 定義 4 個象限（用於分層採樣，確保障礙物分布均勻）
-    quadrants = [
-        (0.3, spawn_range_x, 0.3, spawn_range_y),          # 第一象限
-        (-spawn_range_x, -0.3, 0.3, spawn_range_y),        # 第二象限
-        (-spawn_range_x, -0.3, -spawn_range_y, -0.3),      # 第三象限
-        (0.3, spawn_range_x, -spawn_range_y, -0.3),        # 第四象限
-    ]
+    # 定義採樣區域
+    if spawn_zones is not None:
+        # 使用者定義的可通行區域 — 直接在合法區域內採樣，不浪費 rejection
+        _zones = spawn_zones
+        _zone_areas = [(z[1] - z[0]) * (z[3] - z[2]) for z in _zones]
+        _zone_total_area = sum(_zone_areas)
+        # 累積分佈函數 — 用於面積加權隨機選區
+        _zone_cdf = []
+        _cum = 0.0
+        for a in _zone_areas:
+            _cum += a / _zone_total_area
+            _zone_cdf.append(_cum)
+    else:
+        # 傳統象限採樣（正方形/矩形場景）
+        _zones = [
+            (0.3, spawn_range_x, 0.3, spawn_range_y),          # 第一象限
+            (-spawn_range_x, -0.3, 0.3, spawn_range_y),        # 第二象限
+            (-spawn_range_x, -0.3, -spawn_range_y, -0.3),      # 第三象限
+            (0.3, spawn_range_x, -spawn_range_y, -0.3),        # 第四象限
+        ]
+        _zone_cdf = None  # 象限模式用 round-robin，不用 cdf
 
     # 創建難度掩碼
     is_empty = (difficulty == 0)
@@ -372,9 +390,19 @@ def randomize_obstacles_by_difficulty(
                 rand_x = rand_x.clamp(-spawn_range_x, spawn_range_x)
                 rand_y = rand_y.clamp(-spawn_range_y, spawn_range_y)
             else:
-                # 原本的象限隨機放置
-                quadrant_idx = i % 4
-                x_min, x_max, y_min, y_max = quadrants[quadrant_idx]
+                # 選擇採樣區域
+                if _zone_cdf is not None:
+                    # spawn_zones 模式: 面積加權隨機選區（確保障礙物按區域面積比例分佈）
+                    r = random.random()
+                    zone_idx = 0
+                    for zi, c in enumerate(_zone_cdf):
+                        if r < c:
+                            zone_idx = zi
+                            break
+                else:
+                    # 象限模式: round-robin
+                    zone_idx = i % len(_zones)
+                x_min, x_max, y_min, y_max = _zones[zone_idx]
                 rand_x = torch.rand(N, device=device) * (x_max - x_min) + x_min
                 rand_y = torch.rand(N, device=device) * (y_max - y_min) + y_min
 
@@ -433,19 +461,50 @@ def randomize_obstacles_by_difficulty(
                                  + r_dist * torch.cos(r_angle)).clamp(-spawn_range_x, spawn_range_x)
                         new_y = (goal_pos_xy[needs_resample, 1]
                                  + r_dist * torch.sin(r_angle)).clamp(-spawn_range_y, spawn_range_y)
+                    elif _zone_cdf is not None:
+                        # spawn_zones 模式: 重採樣時隨機選區（不限於原區域）
+                        new_x = torch.zeros(num_resample, device=device)
+                        new_y = torch.zeros(num_resample, device=device)
+                        for ri in range(num_resample):
+                            r = random.random()
+                            zi = 0
+                            for zj, c in enumerate(_zone_cdf):
+                                if r < c:
+                                    zi = zj
+                                    break
+                            zx0, zx1, zy0, zy1 = _zones[zi]
+                            new_x[ri] = random.random() * (zx1 - zx0) + zx0
+                            new_y[ri] = random.random() * (zy1 - zy0) + zy0
                     else:
                         new_x = torch.rand(num_resample, device=device) * (x_max - x_min) + x_min
                         new_y = torch.rand(num_resample, device=device) * (y_max - y_min) + y_min
                     pos[needs_resample, 0] = new_x
                     pos[needs_resample, 1] = new_y
 
-            # 降級策略：最終仍失敗的位置使用隨機座標
+            # 降級策略：最終仍失敗的位置 — 在合法區域內重採樣
             if needs_resample.any():
                 num_failed = needs_resample.sum().item()
-                fallback_x = torch.rand(num_failed, device=device) * (2 * spawn_range_x) - spawn_range_x
-                fallback_y = torch.rand(num_failed, device=device) * (2 * spawn_range_y) - spawn_range_y
-                pos[needs_resample, 0] = fallback_x
-                pos[needs_resample, 1] = fallback_y
+                if _zone_cdf is not None:
+                    # spawn_zones 模式: fallback 也在合法區域內
+                    fb_x = torch.zeros(num_failed, device=device)
+                    fb_y = torch.zeros(num_failed, device=device)
+                    for fi in range(num_failed):
+                        r = random.random()
+                        zi = 0
+                        for zj, c in enumerate(_zone_cdf):
+                            if r < c:
+                                zi = zj
+                                break
+                        zx0, zx1, zy0, zy1 = _zones[zi]
+                        fb_x[fi] = random.random() * (zx1 - zx0) + zx0
+                        fb_y[fi] = random.random() * (zy1 - zy0) + zy0
+                    pos[needs_resample, 0] = fb_x
+                    pos[needs_resample, 1] = fb_y
+                else:
+                    fallback_x = torch.rand(num_failed, device=device) * (2 * spawn_range_x) - spawn_range_x
+                    fallback_y = torch.rand(num_failed, device=device) * (2 * spawn_range_y) - spawn_range_y
+                    pos[needs_resample, 0] = fallback_x
+                    pos[needs_resample, 1] = fallback_y
 
         # 快取此障礙物的局部 XY（用於後續障礙物的碰撞檢查）
         placed_pos_cache[i] = pos[:, :2]

@@ -74,6 +74,10 @@ OBSTACLE_BEHAVIOR = "patrol"  # 障礙物行為模式:
                            #   "mixed"              — 用 stage config 的比例混合
                            #   None                 — 不變更
 NO_WALLS         = False   # True=移除所有內部牆壁
+USD_SCENE        = None    # USD 場景路徑：None=程式化迷宮（預設）
+                           #   "warehouse"  → Isaac Sim 倉庫
+                           #   "hospital"   → Isaac Sim 醫院
+                           #   "/abs/path"  → 自訂 USD 檔案
 
 # --- 目標附近障礙物 ---
 OBS_NEAR_GOAL_COUNT = 1    # 在 goal 附近強制生成的障礙物數量（0=關閉）
@@ -83,6 +87,11 @@ OBS_NEAR_GOAL_RADIUS = 2.0 # goal 附近多少米範圍內生成障礙物
 SCRIPTED_OBSTACLES = False # True=啟用 interval events 讓障礙物動
                            # False=凍結不動（與訓練一致）
 
+# --- LiDAR Distance Bias (Play-only) ---
+LIDAR_DIST_BIAS  = 0.0     # 加到 LiDAR 距離的偏移量 (m)，讓 agent 覺得障礙物更遠
+                           # 例如 0.2 → 實際 0.25m 碰撞邊界 agent 感知為 0.45m
+                           # 0.0 = 關閉（預設）
+
 # --- Safety Shield ---
 USE_SAFETY_SHIELD = False  # True=距離安全護盾（限速/停止）
 USE_VO_SHIELD    = False  # True=VO 預測式護盾（預設關閉，避免污染純 policy play）
@@ -90,12 +99,22 @@ SHIELD_MODE      = "soft"  # "soft"=線性降速 / "hard"=強制停止
 
 # --- RVO2 (ORCA) Safety Filter ---
 USE_RVO2_FILTER      = False  # True=啟用 RVO2 ORCA 多障礙物安全過濾
-RVO2_TIME_HORIZON    = 2.0    # ORCA 預測時域（秒）
+RVO2_TIME_HORIZON    = 2.5    # ORCA 動態障礙物預測時域（秒）
+RVO2_TIME_HORIZON_STATIC = 0.3  # ORCA 靜態障礙物預測時域（秒）
 RVO2_ANGLE_THRESHOLD = 60.0   # 非全向 fallback 角度閾值（度）
+RVO2_SAFETY_MARGIN   = 0.10   # 安全邊距（加在 robot_radius 上）
+RVO2_CULLING_RADIUS  = 5.0    # 障礙物篩選半徑（超出不考慮）
+RVO2_NEIGHBOR_DIST   = 10.0   # ORCA neighbor 搜尋距離
+RVO2_MAX_NEIGHBORS   = 20     # ORCA 最大鄰居數
+RVO2_TACTICAL_RETREAT = True   # 側向威脅強制倒車（Zone B 戰術後退）
+RVO2_DISP_THRESHOLD  = 0.3    # displacement stuck 偵測閾值（m）
+RVO2_DISP_WINDOW     = 15     # displacement stuck 偵測視窗（步數）
 
 # --- LiDAR ---
 LIDAR_NO_NOISE   = False   # True=關閉 LiDAR 雜訊
 LIDAR_VIS        = True    # True=顯示 LiDAR 射線
+LIDAR_R_MIN      = 0.1     # LiDAR 最小量測距離 m（盲區）
+COLLISION_DIST   = 0.45    # 碰撞判定距離 m（= body_radius 0.35 + buffer 0.10）
 
 # --- 診斷工具 ---
 AUX_DEBUG        = True   # True=印出 RNN aux 7D 預測 vs 真實值
@@ -106,7 +125,7 @@ DIAGNOSTIC       = False   # True=LiDAR 可觀察性診斷
 # --- BEV 俯視圖 ---
 BEV_VIS          = True    # True=開啟 BEV 俯視圖視窗
 BEV_FRAME        = "world"  # "body"=車體座標（前方為上）/ "world"=世界座標
-BEV_UPDATE_INTERVAL = 2    # 每 N 步更新一次 BEV
+BEV_UPDATE_INTERVAL = 5    # 每 N 步更新一次 BEV（matplotlib 是純 CPU，太頻繁會拖慢 GPU）
 BEV_MAX_RANGE    = 20.0    # BEV 最大顯示範圍 m
 
 
@@ -135,6 +154,8 @@ parser.add_argument("--camera", type=str, default=CAMERA, choices=["top", "follo
                     help="攝影機視角：top=俯視 / follow=跟隨 / side=側視")
 parser.add_argument("--deterministic", action="store_true", default=DETERMINISTIC,
                     help="動作選擇用 argmax（確定性）而非 sampling（探索）")
+parser.add_argument("--seed", type=int, default=None,
+                    help="環境隨機種子（控制 obstacle/goal 生成順序，None=使用 env config 預設 42）")
 parser.add_argument("--real_time", action="store_true", default=REAL_TIME,
                     help="以真實時間步進（插入 sleep 模擬 dt）")
 
@@ -213,6 +234,11 @@ parser.add_argument("--b_risk", type=float, default=None)
 parser.add_argument("--ss_lower_mode", type=str, default=None, choices=["aggressive", "moderate"])
 parser.add_argument("--ss_raise_mode", action="store_true", default=False)
 
+# --- LiDAR Distance Bias ---
+parser.add_argument("--lidar_dist_bias", type=float, default=LIDAR_DIST_BIAS,
+                    help="LiDAR 距離偏移 (m)：加到 LiDAR 觀測值上，讓 agent 覺得障礙物更遠。"
+                         "例如 0.2 → 實際碰撞邊界 0.25m 的位置 agent 感知為 0.45m。0=關閉")
+
 # --- Safety Shield ---
 parser.add_argument("--use_safety_shield", action="store_true", default=USE_SAFETY_SHIELD,
                     help="啟用距離安全護盾（action 後處理）")
@@ -235,9 +261,29 @@ parser.add_argument("--vo_evade_gain", type=float, default=1.0,
 parser.add_argument("--use_rvo2_filter", action="store_true", default=USE_RVO2_FILTER,
                     help="啟用 RVO2 ORCA 多障礙物安全過濾（需要 pyrvo2）")
 parser.add_argument("--rvo2_time_horizon", type=float, default=RVO2_TIME_HORIZON,
-                    help="ORCA 預測時域（秒）：越長越保守")
+                    help="ORCA 動態障礙物預測時域（秒）：越長越保守")
+parser.add_argument("--rvo2_time_horizon_static", type=float, default=RVO2_TIME_HORIZON_STATIC,
+                    help="ORCA 靜態障礙物預測時域（秒）")
 parser.add_argument("--rvo2_angle_threshold", type=float, default=RVO2_ANGLE_THRESHOLD,
                     help="非全向 fallback 角度閾值（度）：v_safe 方向偏離 heading 超過此值時減速轉向")
+parser.add_argument("--rvo2_safety_margin", type=float, default=RVO2_SAFETY_MARGIN,
+                    help="ORCA 安全邊距（m），加在 robot_radius(0.35) 上")
+parser.add_argument("--rvo2_culling_radius", type=float, default=RVO2_CULLING_RADIUS,
+                    help="ORCA 障礙物篩選半徑（m），超出此距離的障礙物不送入 solver")
+parser.add_argument("--rvo2_neighbor_dist", type=float, default=RVO2_NEIGHBOR_DIST,
+                    help="ORCA neighbor 搜尋距離（m）")
+parser.add_argument("--rvo2_max_neighbors", type=int, default=RVO2_MAX_NEIGHBORS,
+                    help="ORCA 最大鄰居數")
+parser.add_argument("--rvo2_obs_inflation", type=float, default=1.8,
+                    help="非合作障礙物半徑膨脹倍率（動態障礙物不參與 ORCA 50/50 避讓，需膨脹補償）")
+parser.add_argument("--rvo2_tactical_retreat", action="store_true", default=RVO2_TACTICAL_RETREAT,
+                    help="側向威脅戰術後退：60~120 度時強制倒車避讓（關閉則慢速前進+轉向）")
+parser.add_argument("--no_rvo2_tactical_retreat", dest="rvo2_tactical_retreat", action="store_false",
+                    help="關閉側向威脅戰術後退")
+parser.add_argument("--rvo2_disp_threshold", type=float, default=RVO2_DISP_THRESHOLD,
+                    help="displacement stuck 偵測閾值（m），若在 disp_window 步內移動小於此值判定 stuck")
+parser.add_argument("--rvo2_disp_window", type=int, default=RVO2_DISP_WINDOW,
+                    help="displacement stuck 偵測視窗（步數）")
 
 # --- 障礙物運動控制 ---
 parser.add_argument("--scripted_obstacles", action="store_true", default=SCRIPTED_OBSTACLES,
@@ -246,6 +292,11 @@ parser.add_argument("--scripted_obstacles", action="store_true", default=SCRIPTE
                          "注意：未來將被 BehaviorScheduler 取代")
 parser.add_argument("--no_walls", action="store_true", default=NO_WALLS,
                     help="移除所有內部牆壁")
+parser.add_argument("--usd_scene", type=str, default=USD_SCENE,
+                    help="使用 Isaac Sim USD 場景取代程式化迷宮。"
+                         "Nucleus: warehouse, hospital, grid, simple_room, rough_plane | "
+                         "本機: 3floor, 3floor_v1, 3floor_v2 | 或自訂 USD 絕對路徑。"
+                         "啟用後自動停用程式化牆壁並擴展 LiDAR 偵測範圍")
 
 # --- 目標附近障礙物 ---
 parser.add_argument("--obs_near_goal_count", type=int, default=OBS_NEAR_GOAL_COUNT,
@@ -256,6 +307,12 @@ parser.add_argument("--obs_near_goal_radius", type=float, default=OBS_NEAR_GOAL_
 # --- LiDAR 設定 ---
 parser.add_argument("--lidar_no_noise", action="store_true", default=LIDAR_NO_NOISE,
                     help="關閉 LiDAR 雜訊（distractor + Unoise）")
+parser.add_argument("--lidar_r_min", type=float, default=LIDAR_R_MIN,
+                    help="LiDAR 最小量測距離（盲區）m。實機 VLP16 ≈ 0.9")
+parser.add_argument("--collision_dist", type=float, default=COLLISION_DIST,
+                    help="碰撞判定距離 m（= body_radius + buffer）。預設 0.45")
+parser.add_argument("--no_goal_movement", action="store_true", default=False,
+                    help="強制關閉 goal movement（即使 stage config 有設定）")
 parser.add_argument("--lidar_vis", action="store_true", default=LIDAR_VIS,
                     help="啟用 LiDAR 光線視覺化（預設開啟）")
 parser.add_argument("--no_lidar_vis", action="store_true", default=False,
@@ -284,6 +341,28 @@ parser.add_argument("--bev_max_range", type=float, default=BEV_MAX_RANGE,
                     help="BEV 最大顯示範圍 (m)")
 parser.add_argument("--bev_frame", type=str, default=BEV_FRAME, choices=["body", "world"],
                     help="BEV 座標系：body=車體座標（前方為上）/ world=世界座標")
+parser.add_argument("--bev_trail_length", type=int, default=500,
+                    help="BEV 歷史軌跡最大點數（0=關閉）")
+
+# --- RSGS-Lite (Recovery-only Safer-Gap Goal Selector) ---
+parser.add_argument("--use_rsgs", action="store_true", default=False,
+                    help="啟用 RSGS-Lite 卡住恢復模組（play-only，預設 OFF）")
+parser.add_argument("--rsgs_stuck_window", type=int, default=15,
+                    help="RSGS stuck 偵測視窗步數（15 = 3s @5Hz）")
+parser.add_argument("--rsgs_stuck_threshold", type=float, default=0.3,
+                    help="RSGS stuck 位移門檻 (m)：視窗內移動 < 此值判定卡住")
+parser.add_argument("--rsgs_gap_min_width", type=int, default=3,
+                    help="RSGS 最小 gap 寬度 (LiDAR bins)")
+parser.add_argument("--rsgs_gap_clear_threshold", type=float, default=0.10,
+                    help="RSGS LiDAR clear 門檻（normalized，0.10 ≈ 2.35m）")
+parser.add_argument("--rsgs_recovery_distance", type=float, default=2.0,
+                    help="RSGS 恢復目標距離 (m)")
+parser.add_argument("--rsgs_max_recovery_steps", type=int, default=50,
+                    help="RSGS 恢復最長步數（50 = 10s）")
+parser.add_argument("--rsgs_exit_displacement", type=float, default=1.0,
+                    help="RSGS 脫困成功位移門檻 (m)")
+parser.add_argument("--rsgs_goal_bias", type=float, default=0.3,
+                    help="RSGS gap 選擇時偏向 final goal 的權重 [0,1]")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -414,17 +493,30 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
 
     # 障礙物數量與比例（套用到 randomize_obstacles 事件）
     total_obs = final["num_static"] + final["num_dynamic"]
-    if cli_args.stage_parameter and stage_cfg is not None:
-        # 嚴格對齊訓練 stage：直接用 stage 的原始 ratios
+    # Play 模式 (num_envs=1): 永遠從用戶設定的數量計算 ratio，
+    # 避免 stage 的 empty_ratio 導致唯一的 env 被擲骰為 empty。
+    # 訓練時的 ratio 是給 512 envs 做混合分佈用的，1 env 不適用。
+    is_single_env = getattr(env_cfg.scene, "num_envs", 1) <= 1
+    if cli_args.stage_parameter and stage_cfg is not None and not is_single_env:
+        # 多環境訓練：嚴格對齊訓練 stage 的 ratios
         empty_ratio = stage_cfg["empty_ratio"]
         static_ratio = stage_cfg["static_ratio"]
         dynamic_ratio = stage_cfg["dynamic_ratio"]
     else:
-        # 手動模式：從 counts 重算 ratios
+        # Play / 手動模式：從 counts 確定性推導 ratios
+        # mixed_ratio 不需要顯式傳入，它是 1 - (empty + static + dynamic) 的餘量
         if total_obs > 0:
             empty_ratio = 0.0
-            static_ratio = round(final["num_static"] / total_obs, 2)
-            dynamic_ratio = round(1.0 - static_ratio, 2)
+            if final["num_dynamic"] > 0 and final["num_static"] > 0:
+                # 兩者都有 → mixed (remainder=1.0: 同場景靜態+動態)
+                static_ratio = 0.0
+                dynamic_ratio = 0.0
+            elif final["num_dynamic"] > 0:
+                static_ratio = 0.0
+                dynamic_ratio = 1.0
+            else:
+                static_ratio = 1.0
+                dynamic_ratio = 0.0
         else:
             empty_ratio = 1.0
             static_ratio = dynamic_ratio = 0.0
@@ -508,6 +600,108 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
     return final
 
 
+# ============================================================================
+# USD 場景切換
+# ============================================================================
+
+# 預設場景別名 → Nucleus 路徑
+_USD_SCENE_ALIASES: dict[str, str] = {
+    "warehouse": "Environments/Simple_Warehouse/warehouse.usd",
+    "warehouse_full": "Environments/Simple_Warehouse/full_warehouse.usd",
+    "hospital": "Environments/Hospital/hospital.usd",
+    "simple_room": "Environments/Simple_Room/simple_room.usd",
+    "grid": "Environments/Grid/default_environment.usd",
+    "grid_black": "Environments/Grid/gridroom_black.usd",
+    "rough_plane": "Environments/Terrains/rough_plane.usd",
+}
+
+# 本機自訂 USD 場景（不透過 Nucleus，直接使用絕對路徑）
+_USD_LOCAL_ALIASES: dict[str, str] = {
+    "3floor": "/home/aa/usd/charge/3floor_ver_1.usd",
+    "3floor_v1": "/home/aa/usd/charge/3floor_ver_1.usd",
+    "3floor_v2": "/home/aa/usd/charge/3floor_ver_2 .usd",
+}
+
+
+def apply_usd_scene(env_cfg, usd_scene: str) -> str:
+    """將 env_cfg 的 terrain 替換為 USD 場景，停用程式化牆壁，擴展 LiDAR 偵測。
+
+    Args:
+        env_cfg: 環境配置物件
+        usd_scene: 場景名稱 (warehouse/hospital/grid) 或自訂 USD 路徑
+
+    Returns:
+        最終使用的 USD 路徑字串
+    """
+    from isaaclab.terrains import TerrainImporterCfg
+    import isaaclab.sim as sim_utils
+    from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+
+    # 解析場景路徑：本機 alias → Nucleus alias → 自訂絕對路徑
+    if usd_scene in _USD_LOCAL_ALIASES:
+        usd_path = _USD_LOCAL_ALIASES[usd_scene]
+    elif usd_scene in _USD_SCENE_ALIASES:
+        usd_path = f"{ISAAC_NUCLEUS_DIR}/{_USD_SCENE_ALIASES[usd_scene]}"
+    else:
+        usd_path = usd_scene  # 使用者提供的絕對路徑
+
+    # 1. 替換 terrain: plane → usd
+    env_cfg.scene.terrain = TerrainImporterCfg(
+        prim_path="/World/ground",
+        terrain_type="usd",
+        usd_path=usd_path,
+        collision_group=-1,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+        ),
+    )
+
+    # 2. 停用程式化牆壁（外牆 + 內牆）
+    wall_attrs = []
+    for attr in list(vars(env_cfg.scene)):
+        if attr.startswith("wall_"):
+            delattr(env_cfg.scene, attr)
+            wall_attrs.append(attr)
+
+    # 停用牆壁隨機化事件
+    wall_evt = getattr(env_cfg.events, "randomize_wall_positions", None)
+    if wall_evt is not None:
+        wall_evt.params["min_walls"] = 0
+        wall_evt.params["max_walls"] = 0
+
+    # 3. 擴展 LiDAR raycast targets — 加入 USD 場景內所有 mesh
+    #    保留原有的 Obstacle_* target（程式化障礙物仍可用）
+    if hasattr(env_cfg.scene, "lidar"):
+        from isaaclab.sensors.ray_caster import MultiMeshRayCasterCfg
+        # 新的 mesh_prim_paths：
+        #   - /World/ground/.* → 涵蓋 USD 場景內的所有 geometry（牆壁/貨架/地面等）
+        #   - {ENV_REGEX_NS}/Obstacle_.* → 保留程式化障礙物偵測
+        env_cfg.scene.lidar.mesh_prim_paths = [
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/ground",
+                track_mesh_transforms=False,
+            ),
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="/World/ground/.*",
+                track_mesh_transforms=False,
+            ),
+            MultiMeshRayCasterCfg.RaycastTargetCfg(
+                prim_expr="{ENV_REGEX_NS}/Obstacle_.*",
+                track_mesh_transforms=True,
+            ),
+        ]
+
+    print(f"[PLAY] USD 場景: {usd_scene} → {usd_path}")
+    if wall_attrs:
+        print(f"[PLAY]   停用程式化牆壁: {len(wall_attrs)} 個 ({', '.join(wall_attrs[:6])}{'...' if len(wall_attrs) > 6 else ''})")
+    print(f"[PLAY]   LiDAR raycast 擴展至 /World/ground/.* (涵蓋 USD 場景所有 mesh)")
+
+    return usd_path
+
+
 def sample_action(logits: torch.Tensor, deterministic: bool) -> torch.Tensor:
     """從 policy logits 取樣動作。MultiDiscrete([19, 19]) = 線性加速 × 角速度。
 
@@ -569,6 +763,16 @@ def resolve_env_cfg(task: str):
             ChargeNavigationEnvCfgVLP16CurriculumWD,
         )
         return ChargeNavigationEnvCfgVLP16CurriculumWD()
+    if task == "Isaac-Navigation-Charge-VLP16-Curriculum-WD-TCorridor":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_wd_sparse import (
+            ChargeNavigationEnvCfgVLP16CurriculumWD_TCorridor,
+        )
+        return ChargeNavigationEnvCfgVLP16CurriculumWD_TCorridor()
+    if task == "Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-TCorridor":
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
+            ChargeNavigationEnvCfgVLP16CurriculumNavRL_TCorridor,
+        )
+        return ChargeNavigationEnvCfgVLP16CurriculumNavRL_TCorridor()
     if task == "Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play":
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.cfg.charge_env_cfg_vlp16_curriculum import (
             ChargeNavigationEnvCfgVLP16CurriculumNavRL_PLAY,
@@ -878,7 +1082,7 @@ def run_lidar_sanity_test(env, raw_env):
     sweep_rmin = wd_like_sweep_72(
         raw_env, sensor_cfg,
         num_bins=72, r_max=20.0, r_robot=0.3,
-        r_min=0.5, z_filter=0.5,
+        r_min=0.1, z_filter=0.5,
     )
     real_dist_rmin = sweep_rmin[0] * 20.0
     diff = (real_dist_rmin - real_dist).abs()
@@ -1014,7 +1218,7 @@ def print_aux_debug(raw_env, step: int, obs_tensor: torch.Tensor, aux_pred: torc
     sensor_cfg.resolve(raw_env.scene)
     sweep = wd_like_sweep_72(
         raw_env, sensor_cfg,
-        num_bins=72, r_max=20.0, r_robot=0.3, r_min=0.5, z_filter=0.5,
+        num_bins=72, r_max=20.0, r_robot=0.3, r_min=0.1, z_filter=0.5,
     )
     lidar_m = sweep[0] * 20.0  # 反正規化
     near_bin = int(lidar_m.argmin().item())
@@ -1056,9 +1260,11 @@ class LiveBEVVisualizer:
       body = 車體座標（前方為上），world = 世界座標（北為上）
     """
 
-    def __init__(self, raw_env, max_range: float = 20.0, frame: str = "body"):
+    def __init__(self, raw_env, max_range: float = 20.0, frame: str = "body",
+                 lidar_r_min: float = 0.1, trail_length: int = 500):
         import matplotlib
         import numpy as np
+        from collections import deque
         from isaaclab.managers import SceneEntityCfg
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.observations.obs_functions import (
             wd_like_sweep_72,
@@ -1074,6 +1280,7 @@ class LiveBEVVisualizer:
         self.raw_env = raw_env
         self.max_range = float(max_range)
         self.frame = frame
+        self.lidar_r_min = float(lidar_r_min)
         self.wd_like_sweep_72 = wd_like_sweep_72
 
         # LiDAR 感測器配置（與訓練相同的 sweep 參數）
@@ -1091,11 +1298,15 @@ class LiveBEVVisualizer:
         # 建立 matplotlib 互動視窗。
         # 版面原則：上方 text_ax 是純文字資料層；下方 ax 是完全不遮擋的 BEV 視覺層。
         self.plt.ion()
-        self.fig = self.plt.figure(figsize=(10.5, 10.0), constrained_layout=True)
-        gs = self.fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.25, 5.6], hspace=0.03)
+        self.fig = self.plt.figure(figsize=(7.5, 7.2), constrained_layout=True)
+        gs = self.fig.add_gridspec(nrows=2, ncols=1, height_ratios=[1.8, 5.2], hspace=0.03)
         self.text_ax = self.fig.add_subplot(gs[0])
         self.ax = self.fig.add_subplot(gs[1])
         self.fig.patch.set_facecolor("#141414")
+        # 歷史軌跡 buffer：儲存世界座標 (x, y)，每幀轉換為相對座標繪製
+        self._trail_enabled = trail_length > 0
+        self._trail: deque[tuple[float, float]] = deque(maxlen=max(trail_length, 1))
+
         try:
             self.fig.canvas.manager.set_window_title("Charge RL BEV — 72-bin LiDAR")
         except Exception:
@@ -1139,7 +1350,7 @@ class LiveBEVVisualizer:
         # --- 重算 72-bin sweep（與訓練觀測完全相同的處理流程）---
         sweep = self.wd_like_sweep_72(
             self.raw_env, self.sensor_cfg,
-            num_bins=72, r_max=self.max_range, r_robot=0.3, r_min=0.5, z_filter=0.5,
+            num_bins=72, r_max=self.max_range, r_robot=0.3, r_min=self.lidar_r_min, z_filter=0.5,
         )
         real_dist = (sweep[0] * self.max_range).detach().cpu().numpy()  # 反正規化為公尺
 
@@ -1211,6 +1422,36 @@ class LiveBEVVisualizer:
         ax.arrow(0, 0, head_x, head_y, color="white", width=0.04, head_width=0.35, length_includes_head=True, zorder=5)
         ax.scatter([0], [0], c="white", s=28, marker="o", edgecolors="black", linewidths=0.6, zorder=7)
 
+        # --- 歷史軌跡 ---
+        if self._trail_enabled:
+            robot_w = self.raw_env.scene["robot"].data.root_pos_w[0, :2].detach().cpu().numpy()
+            # Reset 偵測：位置跳躍 > 2m → 清空軌跡（episode 結束時 robot 瞬移到新 spawn 點）
+            if len(self._trail) > 0:
+                last = self._trail[-1]
+                dx = float(robot_w[0]) - last[0]
+                dy = float(robot_w[1]) - last[1]
+                if dx * dx + dy * dy > 4.0:  # > 2m
+                    self._trail.clear()
+            self._trail.append((float(robot_w[0]), float(robot_w[1])))
+            if len(self._trail) >= 2:
+                trail_arr = np.array(self._trail)  # (N, 2)
+                rel_trail = trail_arr - robot_w[None, :]  # 相對當前位置
+                tx, ty = self._world_rel_to_plot(rel_trail, yaw)
+                n = len(tx)
+                # 漸變色：舊=暗橙, 新=亮青，alpha 從 0.15 到 0.9
+                from matplotlib.collections import LineCollection
+                segments = np.column_stack([tx[:-1], ty[:-1], tx[1:], ty[1:]]).reshape(-1, 2, 2)
+                alphas = np.linspace(0.15, 0.9, n - 1)
+                # 使用 RGBA：從暗色 (0.6,0.3,0.1) 到亮色 (0.3,0.9,1.0)
+                colors = np.zeros((n - 1, 4))
+                t = np.linspace(0, 1, n - 1)
+                colors[:, 0] = 0.6 * (1 - t) + 0.3 * t   # R
+                colors[:, 1] = 0.3 * (1 - t) + 0.9 * t   # G
+                colors[:, 2] = 0.1 * (1 - t) + 1.0 * t   # B
+                colors[:, 3] = alphas                       # A
+                lc = LineCollection(segments, colors=colors, linewidths=1.5, zorder=2)
+                ax.add_collection(lc)
+
         # 繪製所有目標點（cyan X）+ 終止判定目標（洋紅 P）
         self._draw_goals(ax, yaw)
         goal_info = self._draw_termination_goal(ax, yaw)
@@ -1265,7 +1506,7 @@ class LiveBEVVisualizer:
             "mid2_5": f"{int(((real_dist >= 2.0) & (real_dist < 5.0)).sum())}/72",
             "ground_echo": f"{echo_bins}/72",
             "max_range": f"{int((real_dist >= self.max_range - 0.5).sum())}/72",
-            "legend": "White=robot  Yellow=nav goal  Magenta=term. goal",
+            "legend": "White=robot  Yellow=nav goal  Magenta=term. goal  Gradient=trail",
         }
 
         # RVO2 向量疊加（藍=v_pref, 綠=v_safe, 紅虛線=偏差）。文字狀態改由上方面板顯示。
@@ -1333,15 +1574,21 @@ class LiveBEVVisualizer:
                 "v_safe": "N/A",
                 "rate": "N/A",
                 "mean_distance": "N/A",
+                "is_intervening": False,
             }
 
-        v_pref = float(np.linalg.norm(getattr(rvo2_filter, "v_pref_world", np.zeros(2))))
-        v_safe = float(np.linalg.norm(getattr(rvo2_filter, "v_safe_world", np.zeros(2))))
+        v_pref_vec = getattr(rvo2_filter, "v_pref_world", np.zeros(2))
+        v_safe_vec = getattr(rvo2_filter, "v_safe_world", np.zeros(2))
+        v_pref = float(np.linalg.norm(v_pref_vec))
+        v_safe = float(np.linalg.norm(v_safe_vec))
+        v_diff = float(np.linalg.norm(v_safe_vec - v_pref_vec))
         total_steps = max(1, int(getattr(rvo2_filter, "total_steps", 0)))
         intervention_steps = int(getattr(rvo2_filter, "intervention_steps", 0))
         rate = intervention_steps / total_steps
         active = bool(getattr(rvo2_filter, "orca_active", False))
-        status = "RVO active" if active else "RL pass-through"
+        fallback = bool(getattr(rvo2_filter, "fallback_active", False))
+        is_intervening = active or fallback or v_diff > 0.01
+        status = "ORCA fallback" if fallback else ("RVO active" if is_intervening else "RL pass-through")
 
         vo_cones = getattr(rvo2_filter, "_vo_cone_data", [])
         if vo_cones:
@@ -1356,10 +1603,15 @@ class LiveBEVVisualizer:
             "v_safe": f"{v_safe:.2f}",
             "rate": f"{rate:.1%}",
             "mean_distance": mean_distance,
+            "is_intervening": is_intervening,
         }
 
     def _draw_top_panel(self, rl_info: dict, orca_info: dict) -> None:
-        """上方固定資料面板：左側 RL/LiDAR，右側 ORCA，避免遮擋 BEV 視覺資料。"""
+        """上方固定資料面板：三欄 grid layout + 動態 ORCA/RL 狀態指示燈。
+
+        重要設計：這個 axes 只負責文字資料層。所有文字使用固定欄位 x 座標與
+        分層 y 座標，避免在小視窗中把 Step / Action / ORCA 指標擠成同一行。
+        """
         ax = self.text_ax
         ax.cla()
         ax.set_facecolor("#101214")
@@ -1367,62 +1619,81 @@ class LiveBEVVisualizer:
         ax.set_ylim(0, 1)
         ax.axis("off")
 
-        # 面板底線，清楚分隔資料層與 BEV 視覺層。
+        # 分隔線與欄位底色：讓上方資料層和下方 BEV 視覺層清楚分開。
         ax.axhline(0.02, color="#3c3f44", linewidth=1.0)
+        for x in (0.33, 0.66):
+            ax.axvline(x, ymin=0.08, ymax=0.82, color="#272b30", linewidth=0.8)
 
+        # ── 動態狀態指示燈（右上角）──
+        is_orca_intervening = bool(orca_info.get("is_intervening", False))
+        if is_orca_intervening:
+            badge_text = " [ ORCA Intervening ] "
+            badge_color = "#b3261e"
+        else:
+            badge_text = " [ RL Control ] "
+            badge_color = "#1f8f3a"
         ax.text(
-            0.015, 0.90, rl_info["title"],
-            color="white", fontsize=11.5, fontweight="bold", ha="left", va="center",
+            0.985, 0.91, badge_text,
+            transform=ax.transAxes, ha="right", va="center",
+            color="white", fontsize=10.5, fontweight="bold",
+            bbox={"facecolor": badge_color, "edgecolor": "none", "alpha": 0.88,
+                  "boxstyle": "round,pad=0.45"},
         )
 
+        # 固定三欄 grid。每欄只放短行，避免文字水平重疊。
+        x_left, x_mid, x_right = 0.02, 0.36, 0.69
+        y_header = 0.78
+        y_rows = [0.64, 0.53, 0.42, 0.31, 0.20, 0.09]
+        mono = "DejaVu Sans Mono"
+
+        ax.text(0.02, 0.91, rl_info["title"], transform=ax.transAxes,
+                color="white", fontsize=10.3, fontweight="bold", ha="left", va="center")
+
+        # Column 1: agent/action command
         cmd = rl_info["cmd"]
-        ax.text(
-            0.015, 0.70,
-            f"AGENT OUTPUT  v={cmd['v']}    ω={cmd['omega']}  ({cmd['omega_deg']})",
-            color="#fff4a8", fontsize=13.5, fontweight="bold", ha="left", va="center",
-            bbox={"facecolor": "#3a3100", "edgecolor": "#ffd040", "alpha": 0.95, "boxstyle": "round,pad=0.28"},
-        )
-        ax.text(
-            0.015, 0.51,
-            f"linear accel={cmd['accel']}    raw action idx={cmd['raw_idx']}",
-            color="#ffe9a8", fontsize=8.8, ha="left", va="center",
-        )
-        ax.text(
-            0.015, 0.36,
-            f"Step: {rl_info['step']}    Action: {rl_info['action']}\n"
-            f"Frame: {rl_info['frame']}    Yaw: {rl_info['yaw']}",
-            color="#d8e6ff", fontsize=8.8, ha="left", va="top",
-        )
-        ax.text(
-            0.34, 0.36,
-            f"Term: {rl_info['term']}    idx: {rl_info['term_idx']}\n"
-            f"Center: {rl_info['center']}    Edge: {rl_info['edge']}    dist<th: {rl_info['threshold']}",
-            color="#ffe6c0", fontsize=9, ha="left", va="top",
-        )
-        ax.text(
-            0.015, 0.19,
-            f"Nearest: {rl_info['nearest']}    LiDAR mean: {rl_info['lidar_mean']}    "
-            f"<2m: {rl_info['lt2']}    2~5m: {rl_info['mid2_5']}",
-            color="#c9f7c9", fontsize=8.5, ha="left", va="center",
-        )
-        ax.text(
-            0.015, 0.06,
-            f"Ground echo 5.6m: {rl_info['ground_echo']}    max-range: {rl_info['max_range']}    {rl_info['legend']}",
-            color="#aaaaaa", fontsize=8.2, ha="left", va="center",
-        )
+        ax.text(x_left, y_header, "AGENT / ACTION", transform=ax.transAxes,
+                color="#fff4a8", fontsize=9.2, fontweight="bold", ha="left", va="center")
+        left_lines = [
+            f"Step   : {rl_info['step']}",
+            f"Raw idx: {cmd['raw_idx']}",
+            f"v      : {cmd['v']}",
+            f"omega  : {cmd['omega']}",
+            f"omega° : {cmd['omega_deg']}",
+            f"accel  : {cmd['accel']}",
+        ]
+        for y, line in zip(y_rows, left_lines):
+            ax.text(x_left, y, line, transform=ax.transAxes,
+                    color="#ffe9a8", fontsize=7.6, fontfamily=mono, ha="left", va="center")
 
-        ax.text(0.72, 0.82, "ORCA / RVO2", color="#88ccff", fontsize=11, fontweight="bold", ha="left", va="center")
-        ax.text(
-            0.72, 0.54,
-            f"Status: {orca_info['status']}\n"
-            f"|v_pref|: {orca_info['v_pref']}    |v_safe|: {orca_info['v_safe']}",
-            color="#d8e6ff", fontsize=9, ha="left", va="top",
-        )
-        ax.text(
-            0.72, 0.19,
-            f"Rate: {orca_info['rate']}    Mean distance: {orca_info['mean_distance']}",
-            color="#c9f7c9", fontsize=8.8, ha="left", va="center",
-        )
+        # Column 2: LiDAR / goal termination
+        ax.text(x_mid, y_header, "LIDAR / GOAL", transform=ax.transAxes,
+                color="#c9f7c9", fontsize=9.2, fontweight="bold", ha="left", va="center")
+        mid_lines = [
+            f"Nearest: {rl_info['nearest']}",
+            f"Mean   : {rl_info['lidar_mean']}",
+            f"<2m/2~5: {rl_info['lt2']} / {rl_info['mid2_5']}",
+            f"Center : {rl_info['center']}",
+            f"Edge   : {rl_info['edge']}",
+            f"Term   : {rl_info['term']}",
+        ]
+        for y, line in zip(y_rows, mid_lines):
+            ax.text(x_mid, y, line, transform=ax.transAxes,
+                    color="#d8f7d8", fontsize=7.4, fontfamily=mono, ha="left", va="center")
+
+        # Column 3: ORCA/RVO2 metrics
+        ax.text(x_right, y_header, "ORCA / RVO2", transform=ax.transAxes,
+                color="#88ccff", fontsize=9.2, fontweight="bold", ha="left", va="center")
+        right_lines = [
+            f"Status : {orca_info['status']}",
+            f"|v_pref|: {orca_info['v_pref']}",
+            f"|v_safe|: {orca_info['v_safe']}",
+            f"Rate   : {orca_info['rate']}",
+            f"Mean d : {orca_info['mean_distance']}",
+            f"Frame  : {rl_info['frame']} {rl_info['yaw']}",
+        ]
+        for y, line in zip(y_rows, right_lines):
+            ax.text(x_right, y, line, transform=ax.transAxes,
+                    color="#d8e6ff", fontsize=7.6, fontfamily=mono, ha="left", va="center")
 
     def close(self):
         """關閉 BEV 視窗。"""
@@ -1566,6 +1837,10 @@ def main():
     # 套用場景參數：stage_parameter=True 時保留 stage 預設，只有明確 CLI 才覆寫；False 時用手動設定區/CLI。
     scene_final = configure_play_scene(env_cfg, stage_cfg, args_cli)
 
+    # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
+    if args_cli.usd_scene:
+        apply_usd_scene(env_cfg, args_cli.usd_scene)
+
     # 套用攝影機視角
     configure_camera(env_cfg, args_cli.camera)
 
@@ -1577,6 +1852,35 @@ def main():
     # 非 headless 模式降低渲染頻率（每 4 步渲染一次）
     if not args_cli.headless:
         env_cfg.sim.render_interval = 4
+
+    # USD 場景效能覆寫（必須在 lidar_vis / render_interval 之後，避免被蓋回去）
+    if args_cli.usd_scene:
+        # 複雜 USD 場景 + 5760 rays debug_vis → 卡頓，強制關閉
+        if hasattr(env_cfg.scene, "lidar"):
+            env_cfg.scene.lidar.debug_vis = False
+        # render_interval=4 (每 0.04s) 在 USD 場景太頻繁，改為每 env step 一次
+        env_cfg.sim.render_interval = env_cfg.decimation
+        # BEV matplotlib 在 USD 場景更慢（CPU 要處理更多 render data），自動降頻
+        if args_cli.bev_update_interval <= 5:
+            args_cli.bev_update_interval = 10
+        print(f"[PLAY] USD 效能優化: LiDAR debug_vis=OFF, "
+              f"render_interval={env_cfg.sim.render_interval}, "
+              f"bev_update_interval={args_cli.bev_update_interval}")
+
+    # CLI 碰撞距離覆寫 — 修改所有 termination term 的碰撞距離參數
+    if args_cli.collision_dist != COLLISION_DIST:
+        try:
+            terms = env_cfg.terminations.__dict__
+            for tname, tterm in terms.items():
+                params = getattr(tterm, 'params', {}) or {}
+                if 'threshold' in params:
+                    tterm.params["threshold"] = args_cli.collision_dist
+                    print(f"[PLAY] 覆寫 termination '{tname}' threshold → {args_cli.collision_dist}m")
+                if 'collision_distance' in params:
+                    tterm.params["collision_distance"] = args_cli.collision_dist
+                    print(f"[PLAY] 覆寫 termination '{tname}' collision_distance → {args_cli.collision_dist}m")
+        except Exception as e:
+            print(f"[PLAY] 無法覆寫 collision_dist: {e}")
 
     # 印出配置摘要
     print(f"[PLAY] checkpoint: {ckpt_path}")
@@ -1592,6 +1896,14 @@ def main():
     # ================================================================
     # 4. 建立環境 + 初始化
     # ================================================================
+    # Override env seed — default to random if not specified
+    import random as _random
+    if args_cli.seed is not None:
+        env_cfg.seed = args_cli.seed
+    else:
+        env_cfg.seed = _random.randint(0, 99999)
+    print(f"[PLAY] 環境 seed = {env_cfg.seed}")
+
     env = gym.make(args_cli.task, cfg=env_cfg)
     raw_env = env.unwrapped
     obs, _ = env.reset()
@@ -1691,35 +2003,65 @@ def main():
     # 建立 BehaviorScheduler（與訓練一致）
     # 訓練時由 curriculum 建立，play 時手動建立
     _play_behavior_scheduler = None
-    if args_cli.obstacle_behavior and args_cli.obstacle_behavior != "static":
+    _n_static_play = scene_final["num_static"]
+    _n_dynamic_play = scene_final["num_dynamic"]
+    # num_dynamic=0 → 全部強制靜態，跳過 BehaviorScheduler
+    _effective_behavior = args_cli.obstacle_behavior
+    if _n_dynamic_play == 0 and _effective_behavior and _effective_behavior != "static":
+        print(f"[PLAY] num_dynamic_obs=0 → obstacle_behavior 強制改為 'static'（原設定: '{_effective_behavior}'）")
+        _effective_behavior = "static"
+    if _effective_behavior and _effective_behavior != "static":
         try:
             from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.behavior_scheduler import BehaviorScheduler
-            _play_stage_config = {
-                "behavior_mix": {
-                    "patrol": 0.45,
-                    "random_walk": 0.30,
-                    "static": 0.25,
-                },
-                "obs_near_goal_count": args_cli.obs_near_goal_count,
-                "obs_near_goal_radius": args_cli.obs_near_goal_radius,
-            }
-            _n_obs = scene_final["num_static"] + scene_final["num_dynamic"]
+            # behavior_mix: 根據用戶選擇的 obstacle_behavior + static/dynamic 數量
+            _n_obs = _n_static_play + _n_dynamic_play
+            # 動態 slot 使用用戶選擇的行為（而非硬編碼 patrol/random_walk）
+            _dynamic_behavior = _effective_behavior  # e.g., "path_crossing", "patrol", etc.
+            if _n_obs > 0 and _n_static_play > 0:
+                _static_frac = _n_static_play / _n_obs
+                _dynamic_frac = 1.0 - _static_frac
+                _play_stage_config = {
+                    "behavior_mix": {
+                        "static": _static_frac,
+                        _dynamic_behavior: _dynamic_frac,
+                    },
+                    "obs_near_goal_count": args_cli.obs_near_goal_count,
+                    "obs_near_goal_radius": args_cli.obs_near_goal_radius,
+                }
+            else:
+                # num_static=0 → 全部使用用戶選擇的動態行為
+                _play_stage_config = {
+                    "behavior_mix": {
+                        _dynamic_behavior: 1.0,
+                    },
+                    "obs_near_goal_count": args_cli.obs_near_goal_count,
+                    "obs_near_goal_radius": args_cli.obs_near_goal_radius,
+                }
+            # 從 event params 讀取 boundary 和 spawn_zones（T 走廊等非矩形場景）
+            _obs_evt = getattr(env_cfg.events, "randomize_obstacles", None)
+            _spawn_zones = None
             _bnd = getattr(raw_env, '_room_boundary', 7.0)
-            # BehaviorScheduler 只支援 scalar boundary — 非對稱場景取最小軸
-            if isinstance(_bnd, (list, tuple)):
-                _bnd = min(_bnd)
+            if _obs_evt is not None:
+                _spawn_zones = _obs_evt.params.get("spawn_zones", None)
+                _evt_bnd = _obs_evt.params.get("boundary", None)
+                if _evt_bnd is not None:
+                    _bnd = _evt_bnd  # 可以是 tuple (28.0, 9.0)
             _play_behavior_scheduler = BehaviorScheduler(
                 stage_config=_play_stage_config,
                 num_envs=raw_env.num_envs,
                 max_obstacles=_n_obs,
                 device=str(device),
                 boundary=_bnd,
+                spawn_zones=_spawn_zones,
             )
+            # Play loop 直接呼叫 step()，不需 interval event 重複呼叫
+            raw_env._obstacle_policy_active = True  # 讓 interval event skip
             raw_env._behavior_scheduler = _play_behavior_scheduler
             # 初始 reset
             _all_ids = torch.arange(raw_env.num_envs, device=device)
             _play_behavior_scheduler.reset(_all_ids, raw_env)
-            print(f"[PLAY] BehaviorScheduler 啟用: {_n_obs} slots, mix={_play_stage_config['behavior_mix']}")
+            print(f"[PLAY] BehaviorScheduler 啟用: {_n_obs} slots (static={_n_static_play}, dynamic={_n_dynamic_play}), "
+                  f"mix={_play_stage_config['behavior_mix']}")
         except Exception as e:
             print(f"[PLAY] BehaviorScheduler 建立失敗: {e}")
             _play_behavior_scheduler = None
@@ -1728,14 +2070,14 @@ def main():
 
     print(
         "[PLAY] 障礙物運動: "
-        + ("scripted interval events 啟用" if args_cli.scripted_obstacles else
-           "BehaviorScheduler 控制" if _play_behavior_scheduler else
+        + ("BehaviorScheduler 控制 (play loop)" if _play_behavior_scheduler else
+           "scripted interval events 啟用" if args_cli.scripted_obstacles else
            "全部靜止")
     )
 
-    # Goal movement（與訓練一致）
+    # Goal movement（與訓練一致，--no_goal_movement 可強制關閉）
     _play_goal_mover = None
-    if hasattr(args_cli, 'stage') and args_cli.stage is not None:
+    if hasattr(args_cli, 'stage') and args_cli.stage is not None and not args_cli.no_goal_movement:
         try:
             from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.goal_movement import move_goal_positions
             from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases.wd_single_agent_v1 import STAGES, _flatten_phase
@@ -1791,6 +2133,10 @@ def main():
     stats_total = 0      # 總回合數
     stats_steps_list = []  # 每回合步數（用於計算平均）
 
+    # --- Per-episode step-by-step velocity/position log (env 0) ---
+    _ep_step_log: list[dict] = []    # current episode buffer
+    _all_ep_logs: list[dict] = []    # finished episodes: {episode, cause, steps, log:[...]}
+
     # --- play_diag 累積診斷變數 ---
     diag_heading_sum = 0.0              # 累積航向誤差（度）
     diag_velocity_to_goal_sum = 0.0     # 累積朝目標速度
@@ -1809,7 +2155,16 @@ def main():
                 raw_env,
                 num_envs=raw_env.num_envs,
                 time_horizon=args_cli.rvo2_time_horizon,
+                time_horizon_obst=args_cli.rvo2_time_horizon_static,
                 angle_threshold_deg=args_cli.rvo2_angle_threshold,
+                safety_margin=args_cli.rvo2_safety_margin,
+                culling_radius=args_cli.rvo2_culling_radius,
+                neighbor_dist=args_cli.rvo2_neighbor_dist,
+                max_neighbors=args_cli.rvo2_max_neighbors,
+                obs_inflation=args_cli.rvo2_obs_inflation,
+                tactical_retreat=args_cli.rvo2_tactical_retreat,
+                disp_threshold=args_cli.rvo2_disp_threshold,
+                disp_window=args_cli.rvo2_disp_window,
             )
             rvo2_filter.install(action_term)
         except ImportError:
@@ -1817,14 +2172,38 @@ def main():
         except Exception as e:
             print(f"[RVO2] 初始化失敗: {e}")
 
+    # --- RSGS-Lite 初始化 ---
+    rsgs_filter = None
+    if args_cli.use_rsgs:
+        from rsgs_lite import RSGSConfig, RSGSLite
+        rsgs_cfg = RSGSConfig(
+            stuck_window=args_cli.rsgs_stuck_window,
+            stuck_threshold=args_cli.rsgs_stuck_threshold,
+            gap_min_width=args_cli.rsgs_gap_min_width,
+            gap_clear_threshold=args_cli.rsgs_gap_clear_threshold,
+            recovery_distance=args_cli.rsgs_recovery_distance,
+            max_recovery_steps=args_cli.rsgs_max_recovery_steps,
+            exit_displacement=args_cli.rsgs_exit_displacement,
+            goal_bias_weight=args_cli.rsgs_goal_bias,
+        )
+        rsgs_filter = RSGSLite(raw_env, raw_env.num_envs, device, cfg=rsgs_cfg)
+        print(f"[RSGS] RSGS-Lite 已啟用 "
+              f"(window={rsgs_cfg.stuck_window}, threshold={rsgs_cfg.stuck_threshold}m, "
+              f"recovery_dist={rsgs_cfg.recovery_distance}m, "
+              f"max_steps={rsgs_cfg.max_recovery_steps})")
+
     # --- BEV 俯視圖初始化 ---
     bev_visualizer = None
     if args_cli.bev_vis:
         if args_cli.num_envs != 1:
             print("[PLAY] --bev_vis 只顯示 env 0；num_envs > 1 可用但可讀性較低")
         try:
-            bev_visualizer = LiveBEVVisualizer(raw_env, max_range=args_cli.bev_max_range, frame=args_cli.bev_frame)
-            print(f"[PLAY] BEV 視窗已啟用（座標系={args_cli.bev_frame}）。關閉視窗即停止 play。")
+            bev_visualizer = LiveBEVVisualizer(
+                raw_env, max_range=args_cli.bev_max_range, frame=args_cli.bev_frame,
+                lidar_r_min=args_cli.lidar_r_min,
+                trail_length=args_cli.bev_trail_length,
+            )
+            print(f"[PLAY] BEV 視窗已啟用（座標系={args_cli.bev_frame}，軌跡={args_cli.bev_trail_length}點）。關閉視窗即停止 play。")
         except Exception as exc:
             print(f"[PLAY] 警告: BEV 初始化失敗: {exc}")
             bev_visualizer = None
@@ -1972,6 +2351,31 @@ def main():
     # ================================================================
     # 10. 主 Play 迴圈
     # ================================================================
+    # LiDAR distance bias — 轉換到 z-score 空間（normalize 後加）
+    # 用 BIAS_SCALE (2.0m) 而非 max_range (20.0m) 作為基準，
+    # 否則 0.2m / 20.0 = 0.01 → /std ≈ 0.067 std，policy 完全感知不到。
+    # 用 2.0m 基準：0.2m / 2.0 = 0.1 → /std ≈ 0.67 std，policy 可明確感知。
+    _LIDAR_BIAS_SCALE = 2.0  # 有效避障範圍 (m)，決定 bias 對 policy 的感知強度
+    _lidar_bias_zscore = None
+    if args_cli.lidar_dist_bias > 0:
+        lidar_var = var[6:78]
+        var_from_ckpt = "obs_normalizer" in ckpt
+        lidar_std = lidar_var.sqrt() + 1e-8  # [72] per-bin std
+        _lidar_bias_zscore = (args_cli.lidar_dist_bias / _LIDAR_BIAS_SCALE) / lidar_std  # [72]
+        avg_effect = _lidar_bias_zscore.mean().item()
+        print(f"[PLAY] LiDAR distance bias: +{args_cli.lidar_dist_bias:.2f}m "
+              f"(scale={_LIDAR_BIAS_SCALE}m, z-score shift: avg {avg_effect:.2f} std, "
+              f"range {_lidar_bias_zscore.min().item():.2f}~{_lidar_bias_zscore.max().item():.2f})")
+        if not var_from_ckpt:
+            print(f"[PLAY] ⚠ obs_normalizer 不在 checkpoint 中，var=1.0 fallback → "
+                  f"bias 效果可能偏弱 (avg {avg_effect:.2f} std)")
+        print(f"[PLAY]   lidar_std 範圍: {lidar_std.min().item():.4f} ~ {lidar_std.max().item():.4f}")
+
+    # --- Per-step 效能分析器 ---
+    _perf_accum = {"inference": 0.0, "env_step": 0.0, "orca": 0.0, "bev": 0.0, "other": 0.0, "total": 0.0}
+    _perf_count = 0
+    _PERF_INTERVAL = 100  # 每 N 步印一次效能摘要
+
     step = 0
     while simulation_app.is_running() and step < args_cli.steps:
         start = time.time()
@@ -1980,6 +2384,16 @@ def main():
             # --- 觀測處理 → 模型推論 → 動作選擇 ---
             obs_tensor = policy_obs(obs)
             obs_normed = normalize(obs_tensor)               # 正規化觀測
+            # LiDAR distance bias: 在 z-score 空間加偏移，讓 agent 覺得障礙物更遠
+            if _lidar_bias_zscore is not None:
+                if step % 500 == 0:
+                    _before_min = obs_normed[0, 6:78].min().item()
+                obs_normed[:, 6:78] = obs_normed[:, 6:78] + _lidar_bias_zscore
+                if step % 500 == 0:
+                    _after_min = obs_normed[0, 6:78].min().item()
+                    print(f"[BIAS] step {step}: env0 lidar_min z-score "
+                          f"before={_before_min:.3f} after={_after_min:.3f} "
+                          f"delta={_after_min - _before_min:.3f}")
             p_obs = charge_obs_for_rl(obs_normed)             # 取出 policy 觀測切片
             features = charge_features_for_rnn(obs_normed, p_obs)  # RNN 輸入特徵
             hidden = rnn_state.get()                          # 取得目前 RNN 隱藏狀態
@@ -2026,25 +2440,88 @@ def main():
             if args_cli.aux_debug and aux_pred is not None and step % max(1, args_cli.aux_debug_interval) == 0:
                 print_aux_debug(raw_env, step, obs_tensor, aux_pred, max_active_obstacles)
 
+        _t_inference = time.time() - start
+
         # inference_mode 產生的 tensor 不允許 in-place 修改，
         # 但 per-env hidden reset 需要寫入，所以要 clone
         new_hidden = new_hidden.clone()
 
         # --- 環境步進 ---
+        _t0_env = time.time()
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
-        # BehaviorScheduler 每步移動障礙物（與訓練一致）
+        # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
         if _play_behavior_scheduler is not None:
-            _play_behavior_scheduler.step(raw_env, dt=step_dt)
+            if int(episode_step[0].item()) > 3:
+                _play_behavior_scheduler.step(raw_env, dt=step_dt)
         # Goal movement 每步移動 goal（與訓練一致）
         if _play_goal_mover is not None:
             _play_goal_mover(raw_env)
+        # RSGS-Lite: stuck detection + recovery goal injection
+        if rsgs_filter is not None:
+            rsgs_filter.step(obs_tensor)
         # 合併 terminated + truncated 為 done 旗標
         done = (terminated.squeeze(-1) | truncated.squeeze(-1)) if terminated.ndim > 1 else (terminated | truncated)
+        _t_env = time.time() - _t0_env
 
         # 累積回合獎勵與步數
         episode_reward += reward.squeeze(-1) if reward.ndim > 1 else reward
         episode_step += 1
         rnn_state.update(new_hidden)  # 更新 RNN 隱藏狀態
+
+        # --- Per-step velocity/position log (env 0) for stuck diagnosis ---
+        _t0_orca = time.time()
+        if rvo2_filter is not None:
+            _robot = raw_env.scene["robot"]
+            _r_pos = _robot.data.root_pos_w[0, :2].detach().cpu().tolist()
+            _r_vel = _robot.data.root_lin_vel_w[0, :2].detach().cpu().tolist()
+            _r_speed = ((_r_vel[0]**2 + _r_vel[1]**2)**0.5)
+            # goal in body frame from obs
+            _obs_flat = obs_tensor.reshape(raw_env.num_envs, -1)
+            _goal_body = _obs_flat[0, 4:6].detach().cpu().tolist()
+            # nearest obstacle distance
+            _nearest_obs_dist = 999.0
+            if _play_behavior_scheduler is not None:
+                _rp = _robot.data.root_pos_w[0:1, :2]
+                _eo = raw_env.scene.env_origins[0:1, :2]
+                _rl = _rp - _eo
+                _op = _play_behavior_scheduler.positions[0:1, :, :2]
+                _dd = (_op - _rl.unsqueeze(1)).norm(dim=2)
+                _act = _play_behavior_scheduler.behavior_type[0:1] != 0
+                _dd[~_act] = 999.0
+                _nearest_obs_dist = float(_dd.min().item())
+            _step_rec = {
+                "step": int(episode_step[0].item()),
+                "agent_pos": _r_pos,
+                "agent_vel": _r_vel,
+                "speed": round(_r_speed, 4),
+                "v_pref": rvo2_filter.v_pref_world.tolist(),
+                "v_safe": rvo2_filter.v_safe_world.tolist(),
+                "v_body_pref": round(rvo2_filter.last_agent_linear, 4),
+                "orca_active": rvo2_filter.orca_active,
+                "recovery": rvo2_filter.recovery_active,
+                "goal_body": _goal_body,
+                "nearest_obs": round(_nearest_obs_dist, 3),
+            }
+            _ep_step_log.append(_step_rec)
+
+            # Live stuck detection: if speed < 0.1 for 5+ consecutive steps, print each step
+            _consec_low = 0
+            for _s in reversed(_ep_step_log):
+                if _s["speed"] < 0.1:
+                    _consec_low += 1
+                else:
+                    break
+            if _consec_low >= 5:
+                s = _step_rec
+                print(
+                    f"[STUCK LIVE] ep_step={s['step']:3d} speed={s['speed']:.3f} "
+                    f"v_body={s['v_body_pref']:+.3f} orca={'Y' if s['orca_active'] else 'N'} "
+                    f"near_obs={s['nearest_obs']:.2f}m "
+                    f"pos=({s['agent_pos'][0]:+.2f},{s['agent_pos'][1]:+.2f}) "
+                    f"goal=({s['goal_body'][0]:+.2f},{s['goal_body'][1]:+.2f}) "
+                    f"vpref=({s['v_pref'][0]:+.3f},{s['v_pref'][1]:+.3f}) "
+                    f"vsafe=({s['v_safe'][0]:+.3f},{s['v_safe'][1]:+.3f})"
+                )
 
         # --- Per-step 行為診斷 logging ---
         if hasattr(args_cli, 'play_diag') and args_cli.play_diag and step < args_cli.steps:
@@ -2073,6 +2550,8 @@ def main():
             main._diag_data['speed'].append(_speed.cpu().numpy())
             main._diag_data['omega'].append(_omega.cpu().numpy())
             main._diag_data['obs_dist'].append(_obs_min_dist.cpu().numpy())
+
+        _t_orca = time.time() - _t0_orca
 
         # --- 回合結束處理 ---
         if done.any():
@@ -2104,15 +2583,39 @@ def main():
                     f"步數={ep_steps:4d} 獎勵={ep_rew:.1f}"
                 )
 
+                # Save per-step log for env 0
+                if env_id == 0 and rvo2_filter is not None and _ep_step_log:
+                    speeds = [s["speed"] for s in _ep_step_log]
+                    avg_speed = sum(speeds) / max(len(speeds), 1)
+                    low_speed_steps = sum(1 for s in speeds if s < 0.1)
+                    _all_ep_logs.append({
+                        "episode": stats_total,
+                        "cause": cause_name,
+                        "steps": ep_steps,
+                        "reward": ep_rew,
+                        "avg_speed": round(avg_speed, 4),
+                        "low_speed_steps": low_speed_steps,
+                        "low_speed_ratio": round(low_speed_steps / max(len(speeds), 1), 3),
+                        "log": list(_ep_step_log),
+                    })
+                    # Per-episode velocity summary
+                    print(
+                        f"  └─ 速度: avg={avg_speed:.3f} low(<0.1)={low_speed_steps}/{len(speeds)} "
+                        f"({low_speed_steps/max(len(speeds),1):.0%})"
+                    )
+                    _ep_step_log.clear()
+
             # 重置結束 env 的 RNN 狀態和累積器
             rnn_state.reset(done_ids)
             episode_reward[done_ids] = 0.0
             episode_step[done_ids] = 0
+            if rsgs_filter is not None:
+                rsgs_filter.reset(done_ids)
 
-            # 新 episode 開始 → BehaviorScheduler reset + near-goal placement
-            if _play_behavior_scheduler is not None:
-                _play_behavior_scheduler.reset(done_ids, raw_env)
-            else:
+            # 新 episode 開始:
+            # BehaviorScheduler.reset() 已由 env 內部事件系統觸發（randomize_obstacles event）
+            # 不可再次呼叫，否則會在 robot 已 spawn 後覆寫 obstacle 位置導致重疊
+            if _play_behavior_scheduler is None:
                 place_obstacles_near_goal(done_ids)
 
         # --- 每 200 步印出進度摘要 ---
@@ -2132,13 +2635,39 @@ def main():
             print_lidar_diagnostic(raw_env, step)
 
         # --- BEV 視窗更新 ---
+        _t0_bev = time.time()
         if bev_visualizer is not None and step % max(1, args_cli.bev_update_interval) == 0:
             if not bev_visualizer.update(step, obs_tensor, actions, rvo2_filter=rvo2_filter):
                 print("[PLAY] BEV 視窗已關閉，停止 play。")
                 break
+        _t_bev = time.time() - _t0_bev
 
         obs = next_obs  # 推進觀測
         step += 1
+
+        # --- 效能摘要累積 & 定期印出 ---
+        _t_total = time.time() - start
+        _t_other = max(0.0, _t_total - _t_inference - _t_env - _t_orca - _t_bev)
+        _perf_accum["inference"] += _t_inference
+        _perf_accum["env_step"] += _t_env
+        _perf_accum["orca"] += _t_orca
+        _perf_accum["bev"] += _t_bev
+        _perf_accum["other"] += _t_other
+        _perf_accum["total"] += _t_total
+        _perf_count += 1
+        if _perf_count % _PERF_INTERVAL == 0:
+            n = _PERF_INTERVAL
+            print(
+                f"[PERF] avg over {n} steps: "
+                f"inference={_perf_accum['inference']/n*1000:.1f}ms "
+                f"env_step={_perf_accum['env_step']/n*1000:.1f}ms "
+                f"orca={_perf_accum['orca']/n*1000:.1f}ms "
+                f"bev={_perf_accum['bev']/n*1000:.1f}ms "
+                f"other={_perf_accum['other']/n*1000:.1f}ms "
+                f"total={_perf_accum['total']/n*1000:.1f}ms "
+                f"({n/_perf_accum['total']:.1f} fps)"
+            )
+            _perf_accum = {k: 0.0 for k in _perf_accum}
 
         # 真實時間模式：插入 sleep 以模擬 dt
         if args_cli.real_time:
@@ -2177,6 +2706,59 @@ def main():
     # --- RVO2 Safety Filter 統計 ---
     if rvo2_filter is not None:
         rvo2_filter.print_stats()
+    # --- RSGS-Lite 統計 ---
+    if rsgs_filter is not None:
+        rsgs_filter.print_stats()
+
+    # --- Stuck episode analysis ---
+    if _all_ep_logs:
+        print("\n" + "=" * 60)
+        print("[VELOCITY LOG] 各回合速度摘要:")
+        print("=" * 60)
+        for ep in _all_ep_logs:
+            flag = " ◀◀ STUCK" if ep["low_speed_ratio"] > 0.5 else ""
+            print(
+                f"  回合{ep['episode']:3d} [{ep['cause']:7s}] "
+                f"步數={ep['steps']:3d} avg_speed={ep['avg_speed']:.3f} "
+                f"low_ratio={ep['low_speed_ratio']:.0%}{flag}"
+            )
+
+        # Find worst stuck episode
+        stuck_eps = [ep for ep in _all_ep_logs if ep["low_speed_ratio"] > 0.3 and ep["steps"] > 3]
+        if stuck_eps:
+            worst = max(stuck_eps, key=lambda e: e["low_speed_ratio"])
+            print(f"\n{'='*60}")
+            print(f"[STUCK DETAIL] 回合 {worst['episode']} — {worst['cause']}, "
+                  f"{worst['steps']} 步, low_ratio={worst['low_speed_ratio']:.0%}")
+            print(f"{'='*60}")
+            print(f"{'step':>4s} {'speed':>6s} {'v_body':>6s} {'orca':>4s} {'rec':>3s} "
+                  f"{'near_obs':>8s} {'agent_x':>8s} {'agent_y':>8s} "
+                  f"{'goal_bx':>7s} {'goal_by':>7s} "
+                  f"{'vpref_x':>7s} {'vpref_y':>7s} {'vsafe_x':>7s} {'vsafe_y':>7s}")
+            for s in worst["log"]:
+                print(
+                    f"{s['step']:4d} {s['speed']:6.3f} {s['v_body_pref']:+6.3f} "
+                    f"{'Y' if s['orca_active'] else 'N':>4s} "
+                    f"{'Y' if s['recovery'] else 'N':>3s} "
+                    f"{s['nearest_obs']:8.3f} "
+                    f"{s['agent_pos'][0]:8.3f} {s['agent_pos'][1]:8.3f} "
+                    f"{s['goal_body'][0]:7.3f} {s['goal_body'][1]:7.3f} "
+                    f"{s['v_pref'][0]:+7.3f} {s['v_pref'][1]:+7.3f} "
+                    f"{s['v_safe'][0]:+7.3f} {s['v_safe'][1]:+7.3f}"
+                )
+
+            # Also dump ALL stuck episodes if more than one
+            other_stuck = [ep for ep in stuck_eps if ep["episode"] != worst["episode"]]
+            for ep in other_stuck[:2]:
+                print(f"\n--- 回合 {ep['episode']} ({ep['cause']}, {ep['steps']} 步, low={ep['low_speed_ratio']:.0%}) ---")
+                for s in ep["log"]:
+                    print(
+                        f"{s['step']:4d} {s['speed']:6.3f} {s['v_body_pref']:+6.3f} "
+                        f"{'Y' if s['orca_active'] else 'N':>4s} "
+                        f"{s['nearest_obs']:8.3f} "
+                        f"{s['agent_pos'][0]:8.3f} {s['agent_pos'][1]:8.3f} "
+                        f"{s['goal_body'][0]:7.3f} {s['goal_body'][1]:7.3f}"
+                    )
 
     print("=" * 60)
 
