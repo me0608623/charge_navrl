@@ -119,6 +119,40 @@ class ExperimentConfig:
     log_interval: int = 10
     save_interval: int = 100
 
+    # ── Sim-to-Real Domain Randomization (TLNI + Physics + Disturbance) ──
+
+    # LiDAR Layer 1: Per-Ray noise (before min-pool)
+    lidar_displacement_std: float = 0.002        # Gaussian σ (m), VLP-16 calibrated
+    lidar_hole_rate: float = 0.20                # ray dropout rate, VLP-16 measured ~21%
+    lidar_distractor_rate: float = 0.002         # ghost/mixed-pixel rate
+    lidar_distance_bias: bool = False            # distance-dependent bias k=0.021, b=-0.030
+    lidar_per_ring_bias: bool = False            # 16ch per-ring calibration offset
+
+    # LiDAR Layer 2: Per-Bin noise (after min-pool)
+    lidar_obs_noise_std: float = 0.005           # ObsTerm Gaussian noise σ (replaces Unoise)
+    lidar_block_dropout_prob: float = 0.0        # block dropout probability per step
+    lidar_block_dropout_width: tuple[int, int] = (3, 8)  # contiguous bin width range
+
+    # LiDAR Layer 3: Per-Episode DR ranges (reset-time sampling)
+    lidar_displacement_std_dr: tuple[float, float] | None = None  # e.g. (0.0005, 0.005)
+    lidar_hole_rate_dr: tuple[float, float] | None = None         # e.g. (0.15, 0.30)
+
+    # Physics DR
+    physics_mass_dr: tuple[float, float] = (0.85, 1.15)     # mass scale range
+    physics_friction_dr: tuple[float, float] = (0.7, 1.3)   # friction scale range
+    physics_com_offset: float = 0.05                          # CoM offset ±(m)
+
+    # External disturbance DR
+    disturbance_wind_force: tuple[float, float] = (0.0, 3.0)    # continuous wind (N)
+    disturbance_push_force: tuple[float, float] = (5.0, 20.0)   # random push (N)
+    disturbance_push_ratio: float = 0.10                          # push env fraction
+
+    # Actuator DR (experimental, default off)
+    enable_actuator_dr: bool = False
+    actuator_delay_range: tuple[int, int] = (0, 2)       # action delay (steps)
+    actuator_velocity_scale: tuple[float, float] = (0.9, 1.1)  # velocity scaling
+    actuator_motor_lag: float = 0.3                        # first-order lag α
+
     # checkpoint / resume
     checkpoint: str | None = None
     no_resume_optimizer: bool = True
@@ -155,6 +189,9 @@ _FIELD_TO_FLAGS: dict[str, list[str]] = {
     "zero_preprocess_feature_for_rl": ["--zero_preprocess_feature_for_rl"],
     "no_domain_randomization": ["--no_domain_randomization"],
     "reward_speed_v05": ["--reward_speed_v05"],
+    "lidar_distance_bias": ["--lidar_distance_bias"],
+    "lidar_per_ring_bias": ["--lidar_per_ring_bias"],
+    "enable_actuator_dr": ["--enable_actuator_dr"],
 }
 
 # Fields that are metadata-only (not applied to args_cli)
@@ -262,9 +299,14 @@ def load_experiment_config_from_yaml(path: str) -> ExperimentConfig:
     if not isinstance(data, dict):
         raise ValueError(f"YAML config {path} must be a mapping, got {type(data).__name__}")
 
-    # Convert tags list to tuple
-    if "tags" in data and isinstance(data["tags"], list):
-        data["tags"] = tuple(data["tags"])
+    # Convert YAML lists to tuples for all tuple-typed fields
+    _tuple_fields = {
+        f.name for f in fields(ExperimentConfig)
+        if "tuple" in str(f.type)
+    }
+    for key in _tuple_fields:
+        if key in data and isinstance(data[key], list):
+            data[key] = tuple(data[key])
 
     # Remove fields not in ExperimentConfig (comments become None, etc.)
     valid_fields = {f.name for f in fields(ExperimentConfig)}

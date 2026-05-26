@@ -96,14 +96,43 @@ aux_seq_batch_size: 256                                       # 每次 aux updat
 aux_grad_clip: 0.5                                            # aux/RNN 專用 grad clip；抑制 RNN feature drift
 zero_preprocess_feature_for_rl: false                         # true=RL head 看不到 12D RNN feature；只用於消融
 
-# --- Runtime / safety / logging（執行、安全與日誌） ---
-lidar_no_noise: true                                          # 關閉 LiDAR noise/distractor；正式 run 必須開
-no_domain_randomization: false                                # true=關閉 domain randomization；固定 phase 通常保留 false
-reward_speed_v05: false                                       # legacy reward speed ablation；false=不啟用
-reward_mode: current                                          # legacy reward mode；主要 reward dispatch 由 reward_profile 控制
-action_table_sample_size: 0                                   # action table artifact 抽樣；長訓練建議 0
-log_interval: 10                                              # console/WandB log 間隔，單位 iteration
-save_interval: 100                                            # checkpoint 儲存間隔，單位 iteration
+# --- Sim-to-Real Domain Randomization（域隨機化 — SA8: 完整 TLNI + Actuator DR） ---
+# SA8 策略：最終 stage，啟用全部域隨機化，包含 actuator DR。趨近 real-world 部署條件。
+lidar_no_noise: false
+# LiDAR L1: Per-Ray
+lidar_displacement_std: 0.002
+lidar_hole_rate: 0.20
+lidar_distractor_rate: 0.002
+lidar_distance_bias: true
+lidar_per_ring_bias: true
+# LiDAR L2: Per-Bin
+lidar_obs_noise_std: 0.005
+lidar_block_dropout_prob: 0.15                                # SA8: 高 block dropout（15%）
+lidar_block_dropout_width: [3, 8]
+# LiDAR L3: Per-Episode DR
+lidar_displacement_std_dr: [0.0005, 0.005]
+lidar_hole_rate_dr: [0.15, 0.30]
+# Physics DR
+physics_mass_dr: [0.80, 1.20]                                # SA8: 加寬質量範圍 ±20%
+physics_friction_dr: [0.6, 1.4]                               # SA8: 加寬摩擦範圍 ±40%
+physics_com_offset: 0.08                                      # SA8: CoM 偏移加大 → 8cm
+# Disturbance DR（最強擾動）
+disturbance_wind_force: [0.0, 6.0]                            # SA8: 風力 → 6N
+disturbance_push_force: [8.0, 30.0]                           # SA8: 推力 → 8-30N
+disturbance_push_ratio: 0.12                                  # SA8: 推力觸發率 → 12%
+# Actuator DR（SA8: 啟用！模擬真實致動器延遲與非線性）
+enable_actuator_dr: true                                      # SA8: 首次啟用 actuator DR
+actuator_delay_range: [0, 3]                                  # SA8: 延遲 → 0-3 步
+actuator_velocity_scale: [0.85, 1.15]                         # SA8: 速度縮放範圍加寬
+actuator_motor_lag: 0.35                                      # SA8: 馬達慣性 lag
+
+# --- Runtime / logging ---
+no_domain_randomization: false
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
 
 # --- Checkpoint / resume（續訓設定） ---
 checkpoint: null                                              # checkpoint path；建議啟動時用 CLI --checkpoint 覆蓋

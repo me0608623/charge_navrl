@@ -56,8 +56,8 @@ clip_eps: 0.2                                                 # PPO ratio clip �
 
 # --- Entropy（探索熵係數） ---
 ent_coeff: 0.0                                                # legacy 單一 entropy 係數；0=不覆蓋 per-head 設定
-ent_coeff_linear: 0.0                                        # linear head entropy；0 表示由 curriculum runtime 同步 phase 值
-ent_coeff_angular: 0.0                                       # angular head entropy；0 表示由 curriculum runtime 同步 phase 值
+ent_coeff_linear: 0.01                                        # linear head entropy；0 表示由 curriculum runtime 同步 phase 值
+ent_coeff_angular: 0.02                                       # angular head entropy；0 表示由 curriculum runtime 同步 phase 值
 
 # --- WD-style gradient caps / loss guards（WD 分離裁剪與 loss 保護） ---
 wd_update_clip: true                                          # 啟用 actor/critic 分離 grad cap；避免 critic spike 壓制 actor
@@ -96,8 +96,37 @@ aux_seq_batch_size: 256                                       # 每次 aux updat
 aux_grad_clip: 0.5                                            # aux/RNN 專用 grad clip；抑制 RNN feature drift
 zero_preprocess_feature_for_rl: false                         # true=RL head 看不到 12D RNN feature；只用於消融
 
-# --- Runtime / safety / logging（執行、安全與日誌） ---
-lidar_no_noise: true                                          # 關閉 LiDAR noise/distractor；正式 run 必須開
+# --- Sim-to-Real Domain Randomization（域隨機化 — SA1: 關閉 LiDAR 噪聲，專注導航學習） ---
+# SA1 策略：agent 先學純導航，LiDAR 保持乾淨。Physics/Wind DR 保持開啟提供基礎魯棒性。
+lidar_no_noise: true                                          # SA1: 關閉 LiDAR noise，讓 agent 先學會信任感測器
+# LiDAR L1: Per-Ray（lidar_no_noise=true 時以下值不生效，但保留供 override）
+lidar_displacement_std: 0.002                                 # Gaussian σ (m)；VLP-16 校準值
+lidar_hole_rate: 0.20                                         # ray dropout rate；VLP-16 實測 ~21%
+lidar_distractor_rate: 0.002                                  # ghost point rate；VLP-16 實測
+lidar_distance_bias: false                                    # 距離相關偏差 (k=0.021, b=-0.030)
+lidar_per_ring_bias: false                                    # 16ch per-ring calibration offset
+# LiDAR L2: Per-Bin
+lidar_obs_noise_std: 0.005                                    # ObsTerm Gaussian noise σ（取代 Unoise）
+lidar_block_dropout_prob: 0.0                                 # block dropout 機率；SA1 關閉
+lidar_block_dropout_width: [3, 8]                             # block dropout bin 寬度範圍
+# LiDAR L3: Per-Episode DR（null=不啟用 per-episode 隨機化）
+lidar_displacement_std_dr: null                               # SA1: 不做 per-episode σ DR
+lidar_hole_rate_dr: null                                      # SA1: 不做 per-episode hole DR
+# Physics DR
+physics_mass_dr: [0.85, 1.15]                                 # 質量縮放 ±15%
+physics_friction_dr: [0.7, 1.3]                               # 摩擦力縮放 ±30%
+physics_com_offset: 0.05                                      # 質心偏移 ±5cm
+# Disturbance DR
+disturbance_wind_force: [0.0, 3.0]                            # 持續風力 0~3N
+disturbance_push_force: [5.0, 20.0]                           # 隨機推力 5~20N
+disturbance_push_ratio: 0.10                                  # 推力環境比例 10%
+# Actuator DR（SA1: 關閉）
+enable_actuator_dr: false                                     # 致動器 DR；SA1 不啟用
+actuator_delay_range: [0, 2]                                  # 動作延遲 0~2 steps
+actuator_velocity_scale: [0.9, 1.1]                           # 速度縮放 ±10%
+actuator_motor_lag: 0.3                                       # 馬達回應滯後 α
+
+# --- Runtime / logging（執行與日誌） ---
 no_domain_randomization: false                                # true=關閉 domain randomization；固定 phase 通常保留 false
 reward_speed_v05: false                                       # legacy reward speed ablation；false=不啟用
 reward_mode: current                                          # legacy reward mode；主要 reward dispatch 由 reward_profile 控制

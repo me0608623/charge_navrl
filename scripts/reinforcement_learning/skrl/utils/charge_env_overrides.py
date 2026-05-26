@@ -491,41 +491,17 @@ def apply_charge_env_overrides(env_cfg, args_cli):
             print("[M1.4_DS] M1.4 ds rebalance applied. 預期 ds effective weight ↑ 4-10x")
             changed = True
 
-    # --- lidar_no_noise ---
-    if getattr(args_cli, "lidar_no_noise", False):
-        obs_root = getattr(env_cfg, "observations", None)
-        if obs_root is not None:
-            cleared_terms = []
-            for group_name in dir(obs_root):
-                if group_name.startswith("_"):
-                    continue
-                group = getattr(obs_root, group_name, None)
-                if group is None or not hasattr(group, "__dict__"):
-                    continue
-                for term_name in dir(group):
-                    if term_name.startswith("_"):
-                        continue
-                    term = getattr(group, term_name, None)
-                    if term is None or not hasattr(term, "params"):
-                        continue
-                    if "lidar" not in term_name.lower():
-                        continue
-                    params = term.params
-                    if "displacement_std" in params:
-                        params["displacement_std"] = 0.0
-                    if "hole_rate" in params:
-                        params["hole_rate"] = 0.0
-                    if "distractor_rate" in params:
-                        params["distractor_rate"] = 0.0
-                    if hasattr(term, "noise"):
-                        term.noise = None
-                    cleared_terms.append(f"{group_name}.{term_name}")
-            print(f"[NO_LIDAR_NOISE] LiDAR observation noise disabled: {cleared_terms}")
-            print(
-                "[NO_LIDAR_NOISE] displacement_std=0, hole_rate=0, "
-                "distractor_rate=0, Unoise=None"
-            )
+    # --- Sim-to-Real LiDAR noise configuration ---
+    # lidar_no_noise=True → all zeros (legacy shortcut)
+    # lidar_no_noise=False → apply per-param values from YAML
+    _apply_lidar_noise_config(env_cfg, args_cli)
+    # Always count as changed if any lidar param was set
+    if getattr(args_cli, "lidar_no_noise", False) or not getattr(args_cli, "lidar_no_noise", True):
         changed = True
+
+    # --- Physics / Disturbance / Actuator DR param overrides ---
+    _apply_dr_param_overrides(env_cfg, args_cli)
+    changed = True
 
     # --- Ablation 5: safety weights ---
     ss_lower = getattr(args_cli, "ss_lower_mode", None)
@@ -542,3 +518,189 @@ def apply_charge_env_overrides(env_cfg, args_cli):
 
     if not changed:
         print("[ABLATION] baseline (no overrides)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Sim-to-Real DR helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _find_lidar_obs_terms(env_cfg):
+    """Yield (group_name, term_name, term) for all LiDAR ObsTerms."""
+    obs_root = getattr(env_cfg, "observations", None)
+    if obs_root is None:
+        return
+    for group_name in dir(obs_root):
+        if group_name.startswith("_"):
+            continue
+        group = getattr(obs_root, group_name, None)
+        if group is None or not hasattr(group, "__dict__"):
+            continue
+        for term_name in dir(group):
+            if term_name.startswith("_"):
+                continue
+            term = getattr(group, term_name, None)
+            if term is None or not hasattr(term, "params"):
+                continue
+            if "lidar" not in term_name.lower():
+                continue
+            yield group_name, term_name, term
+
+
+def _apply_lidar_noise_config(env_cfg, args_cli):
+    """Apply LiDAR noise params from YAML/CLI to env_cfg ObsTerms.
+
+    When lidar_no_noise=True, all noise is zeroed (legacy behavior).
+    When lidar_no_noise=False, individual params are applied from YAML.
+    """
+    if getattr(args_cli, "lidar_no_noise", False):
+        # Legacy path: disable all noise
+        for gn, tn, term in _find_lidar_obs_terms(env_cfg):
+            params = term.params
+            if "displacement_std" in params:
+                params["displacement_std"] = 0.0
+            if "hole_rate" in params:
+                params["hole_rate"] = 0.0
+            if "distractor_rate" in params:
+                params["distractor_rate"] = 0.0
+            if hasattr(term, "noise"):
+                term.noise = None
+        print("[SIM2REAL] lidar_no_noise=True → all LiDAR noise disabled")
+        return
+
+    # Fine-grained per-param configuration
+    disp_std = getattr(args_cli, "lidar_displacement_std", None)
+    hole_rate = getattr(args_cli, "lidar_hole_rate", None)
+    distractor_rate = getattr(args_cli, "lidar_distractor_rate", None)
+    obs_noise_std = getattr(args_cli, "lidar_obs_noise_std", None)
+    distance_bias = getattr(args_cli, "lidar_distance_bias", False)
+    per_ring_bias = getattr(args_cli, "lidar_per_ring_bias", False)
+    block_dropout_prob = getattr(args_cli, "lidar_block_dropout_prob", 0.0)
+    block_dropout_width = getattr(args_cli, "lidar_block_dropout_width", (3, 8))
+    disp_std_dr = getattr(args_cli, "lidar_displacement_std_dr", None)
+    hole_rate_dr = getattr(args_cli, "lidar_hole_rate_dr", None)
+
+    any_set = False
+    for gn, tn, term in _find_lidar_obs_terms(env_cfg):
+        params = term.params
+
+        # Layer 1: Per-Ray params
+        if disp_std is not None and "displacement_std" in params:
+            params["displacement_std"] = disp_std
+            any_set = True
+        if hole_rate is not None and "hole_rate" in params:
+            params["hole_rate"] = hole_rate
+            any_set = True
+        if distractor_rate is not None and "distractor_rate" in params:
+            params["distractor_rate"] = distractor_rate
+            any_set = True
+
+        # Layer 1 NEW: distance-dependent bias & per-ring bias
+        if distance_bias:
+            params["distance_bias_k"] = 0.021
+            params["distance_bias_b"] = -0.030
+            any_set = True
+        if per_ring_bias:
+            params["per_ring_bias"] = True
+            any_set = True
+
+        # Layer 2: Block dropout
+        if block_dropout_prob > 0:
+            params["block_dropout_prob"] = block_dropout_prob
+            params["block_dropout_width_min"] = block_dropout_width[0]
+            params["block_dropout_width_max"] = block_dropout_width[1]
+            any_set = True
+
+        # Layer 2: ObsTerm Gaussian noise (replace Unoise with Gnoise)
+        if obs_noise_std is not None and obs_noise_std > 0:
+            from isaaclab.utils.noise import GaussianNoiseCfg
+            term.noise = GaussianNoiseCfg(std=obs_noise_std)
+            any_set = True
+        elif obs_noise_std == 0.0:
+            term.noise = None
+            any_set = True
+
+        # Layer 3: Per-episode DR ranges
+        if disp_std_dr is not None:
+            params["displacement_std_dr_min"] = disp_std_dr[0]
+            params["displacement_std_dr_max"] = disp_std_dr[1]
+            any_set = True
+        if hole_rate_dr is not None:
+            params["hole_rate_dr_min"] = hole_rate_dr[0]
+            params["hole_rate_dr_max"] = hole_rate_dr[1]
+            any_set = True
+
+    if any_set:
+        print(
+            f"[SIM2REAL] LiDAR noise config: "
+            f"disp_σ={disp_std} hole={hole_rate} ghost={distractor_rate} "
+            f"obs_noise_σ={obs_noise_std} "
+            f"dist_bias={'ON' if distance_bias else 'OFF'} "
+            f"ring_bias={'ON' if per_ring_bias else 'OFF'} "
+            f"block_drop={block_dropout_prob}"
+        )
+        if disp_std_dr:
+            print(f"[SIM2REAL]   L3 DR: disp_σ∈{disp_std_dr} hole∈{hole_rate_dr}")
+
+
+def _apply_dr_param_overrides(env_cfg, args_cli):
+    """Apply physics/disturbance/actuator DR params from YAML to env_cfg EventTerms."""
+    if getattr(args_cli, "no_domain_randomization", False):
+        return  # DR disabled globally, handled elsewhere
+
+    events = getattr(env_cfg, "events", None)
+    if events is None:
+        return
+
+    dr_term = getattr(events, "domain_randomization", None)
+    if dr_term is None:
+        return
+
+    params = dr_term.params
+    any_set = False
+
+    # Physics DR ranges
+    mass_dr = getattr(args_cli, "physics_mass_dr", None)
+    if mass_dr is not None:
+        params["mass_scale"] = tuple(mass_dr)
+        any_set = True
+
+    friction_dr = getattr(args_cli, "physics_friction_dr", None)
+    if friction_dr is not None:
+        params["friction_scale"] = tuple(friction_dr)
+        any_set = True
+
+    com_offset = getattr(args_cli, "physics_com_offset", None)
+    if com_offset is not None:
+        params["com_offset"] = com_offset
+        any_set = True
+
+    # Disturbance DR
+    wind_force = getattr(args_cli, "disturbance_wind_force", None)
+    if wind_force is not None:
+        params["wind_force_range"] = tuple(wind_force)
+        any_set = True
+
+    push_force = getattr(args_cli, "disturbance_push_force", None)
+    if push_force is not None:
+        params["push_force_range"] = tuple(push_force)
+        any_set = True
+
+    push_ratio = getattr(args_cli, "disturbance_push_ratio", None)
+    if push_ratio is not None:
+        params["push_env_ratio"] = push_ratio
+        any_set = True
+
+    # Actuator DR
+    enable_act = getattr(args_cli, "enable_actuator_dr", False)
+    params["enable_actuator_dr"] = enable_act
+
+    if any_set or enable_act:
+        print(
+            f"[SIM2REAL] DR overrides: "
+            f"mass={params.get('mass_scale')} "
+            f"friction={params.get('friction_scale')} "
+            f"com={params.get('com_offset')} "
+            f"wind={params.get('wind_force_range')} "
+            f"push={params.get('push_force_range')}@{params.get('push_env_ratio')} "
+            f"actuator={'ON' if enable_act else 'OFF'}"
+        )

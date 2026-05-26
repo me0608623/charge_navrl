@@ -1188,6 +1188,7 @@ def compute_wd_charge_reward(
     penalty_hit: float,
     reward_get_goal: float,
     cost_operate: float,
+    penalty_timeout: float = 0.0,
     rl_fps: float = 5.0,
     cost_turn_rate: float = 0.5,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -1297,10 +1298,18 @@ def compute_wd_charge_reward(
         action_reward = action_reward * alive.float()
         reward += action_reward
 
+    # --- Timeout penalty (truncated but not terminated = episode 時間到但未碰撞/未到達目標) ---
+    timeout_reward = torch.zeros(N, device=device)
+    if penalty_timeout != 0.0:
+        is_timeout = truncated_flat & ~terminated_flat
+        timeout_reward[is_timeout] = penalty_timeout
+        reward += timeout_reward
+
     breakdown = {
         "goal_reward": goal_reward,              # WD: car goal reward
         "wall_hit_reward": wall_hit_reward,      # WD: car static obstacle reward
         "obs_hit_reward": obs_hit_reward,        # WD: car dynamic obstacle reward
+        "timeout_reward": timeout_reward,        # timeout penalty
         "floor_reward": torch.zeros(N, device=device),  # WD: car floor reward (0 for flat)
         "action_reward": action_reward,          # WD: car dynamic reward (action cost)
         "goal_reached": goal_reached,
@@ -2160,28 +2169,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO] room_size={_rs} → scene {_rs*2}×{_rs*2}m, "
               f"boundary_walls at ±{_rs}, scene_bound_base={args_cli.scene_bound_base}")
 
-    if args_cli.lidar_no_noise:
-        # --lidar_no_noise: 關閉 LiDAR 三種噪聲（displacement_std / hole_rate / distractor_rate）。
-        # 背景：v18b 發現 distractor_rate=0.002 + Uniform noise 使 lidar.min 永遠 ≈ 0，
-        # 讓 policy 學到不信任 LiDAR（Bug B）。
-        # 關閉後 sim-to-real gap 增大，但 policy 訓練訊號更乾淨。
-        try:
-            disabled_groups = []
-            for group_name in ("policy", "critic"):
-                obs_group = getattr(env_cfg.observations, group_name, None)
-                lidar_cfg = getattr(obs_group, "lidar_static", None)
-                if lidar_cfg is None:
-                    continue
-                lidar_cfg.params["displacement_std"] = 0.0     # 測距誤差 → 0
-                lidar_cfg.params["hole_rate"] = 0.0             # 隨機遮擋率 → 0
-                lidar_cfg.params["distractor_rate"] = 0.0       # 干擾點率 → 0
-                lidar_cfg.noise = None                           # 移除 IsaacLab ObsTerm 噪聲
-                disabled_groups.append(group_name)
-            if not disabled_groups:
-                raise AttributeError("no lidar_static ObsTerm found in policy/critic observation groups")
-            print(f"[INFO] LiDAR noise disabled for groups: {', '.join(disabled_groups)}")
-        except Exception as e:
-            print(f"[WARN] Failed to disable LiDAR noise: {e}")
+    # --- Sim-to-Real DR：LiDAR 噪聲 + Physics/Disturbance/Actuator 域隨機化 ---
+    # 統一由 charge_env_overrides 處理，YAML 設定經 ExperimentConfig → args_cli 傳入。
+    # lidar_no_noise=True → 全部歸零（legacy）；False → 使用 YAML 中的 per-param 值。
+    from charge_env_overrides import (
+        _apply_lidar_noise_config,
+        _apply_dr_param_overrides,
+    )
+    _apply_lidar_noise_config(env_cfg, args_cli)
+    _apply_dr_param_overrides(env_cfg, args_cli)
 
     # --- Curriculum version：設定 goal_obstacle_curriculum 的版本與起始階段 ---
     # curriculum_version 決定用哪組 phase config（warp_drive_single_agent_v1 等）
@@ -2761,6 +2757,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _spot_penalty_hit = -5.0
     _spot_reward_get_goal = 40.0
     _spot_cost_operate = 0.03  # Phase 1 default (will update from curriculum)
+    _spot_penalty_timeout = 0.0  # timeout penalty (0 = no penalty, SA6+)
     _reward_module.update_params({
         "spot_penalty_hit": _spot_penalty_hit,
         "spot_reward_get_goal": _spot_reward_get_goal,
@@ -2854,6 +2851,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _spot_penalty_hit = metrics._curriculum_info.get("spot_penalty_hit", -5.0)
         _spot_reward_get_goal = metrics._curriculum_info.get("spot_reward_get_goal", 40.0)
         _spot_cost_operate = metrics._curriculum_info.get("spot_cost_operate", 0.0)
+        _spot_penalty_timeout = metrics._curriculum_info.get("spot_penalty_timeout", 0.0)
         _reward_module.update_params(metrics._curriculum_info)
 
         # Sync WD entropy params from curriculum (per-phase, A2CK per-head)
@@ -3840,6 +3838,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # Reward / scene / obstacle effective phase params
                 "phase_parameter/reward_get_goal": float(_spot_reward_get_goal),
                 "phase_parameter/penalty_hit": float(_spot_penalty_hit),
+                "phase_parameter/penalty_timeout": float(_spot_penalty_timeout),
                 "phase_parameter/cost_operate": float(_spot_cost_operate),
                 "phase_parameter/obstacle_speed_rate": float(_obs_speed_limit),
                 "phase_parameter/obs_size_rand": float(_obs_size_rand),

@@ -363,8 +363,8 @@ class GoalCommand(CommandTerm):
                 min_clearance = dists.min(dim=1).values  # [N]
             else:
                 min_clearance = torch.full((num_envs,), 999.0, device=self.device)
-            # 在邊界內 & 離機器人夠遠的候選才有資格當 best
-            eligible = within_walls & clear_of_robot
+            # 在邊界內 & 離機器人夠遠 & 不在牆壁內的候選才有資格當 best
+            eligible = within_walls & clear_of_robot & clear_of_walls
             improved = eligible & (min_clearance > best_min_clearance)
             best_goals_local[improved] = candidate_goals_local[improved]
             best_min_clearance[improved] = min_clearance[improved]
@@ -378,7 +378,7 @@ class GoalCommand(CommandTerm):
         if needs_resample.any():
             n_failed = needs_resample.sum().item()
             failed_envs = needs_resample
-            # 使用歷史最佳候選（離障礙物最遠的位置）而非最後一次隨機位置
+            # 使用歷史最佳候選（離障礙物最遠且不在牆壁內的位置）
             has_best = failed_envs & (best_min_clearance >= 0)
             best_clr = best_min_clearance[has_best].min().item() if has_best.any() else -1
             print(f"[WARN] Goal resample fallback: {n_failed}/{num_envs} envs "
@@ -387,6 +387,10 @@ class GoalCommand(CommandTerm):
                   f"safe_dist={obstacle_safe_distance:.2f}m)")
             if has_best.any():
                 candidate_goals_local[has_best] = best_goals_local[has_best]
+            else:
+                # 所有嘗試都落在牆壁內（T 走廊等窄場景常見）→ 放在機器人附近
+                candidate_goals_local[failed_envs] = robot_pos_local[failed_envs] + 1.0
+                print(f"[WARN] No valid best candidate found, placing goal near robot")
             # 兜底: clamp 到邊界內
             candidate_goals_local[failed_envs, 0] = torch.clamp(
                 candidate_goals_local[failed_envs, 0],
@@ -396,6 +400,15 @@ class GoalCommand(CommandTerm):
                 candidate_goals_local[failed_envs, 1],
                 -valid_boundary_y, valid_boundary_y
             )
+            # 最後安全檢查：fallback 候選仍在牆壁內 → 強制放回機器人前方 1m
+            still_in_wall = check_wall_proximity_perenv(
+                candidate_goals_local, wall_c, wall_s, wall_m, wall_safe_margin
+            )
+            if (failed_envs & still_in_wall).any():
+                stuck = failed_envs & still_in_wall
+                candidate_goals_local[stuck] = robot_pos_local[stuck] + 1.0
+                print(f"[WARN] {stuck.sum().item()} envs fallback still in wall, "
+                      f"placing goal 1m from robot")
         
         # ------------------------------------------------------------------------
         # 轉換為世界座標系並更新目標位置
@@ -478,6 +491,14 @@ class GoalCommand(CommandTerm):
         # 會更新 self.goal_pos_w[env_ids]
 
         # ------------------------------------------------------------------------
+        # 步驟 3.5：重新放置 near-goal 障礙物
+        # ------------------------------------------------------------------------
+        # _reset_idx 中 event_manager.apply("reset") 在 command_manager.reset()
+        # 之前執行，導致 BehaviorScheduler._place_near_goal() 讀到的是上一局
+        # 的 goal 位置。在此處 goal 已更新後，重新觸發放置。
+        self._relocate_near_goal_obstacles(env_ids)
+
+        # ------------------------------------------------------------------------
         # 步驟 4：更新可視化標記
         # ------------------------------------------------------------------------
         if self.cfg.debug_vis:
@@ -485,6 +506,23 @@ class GoalCommand(CommandTerm):
             # 如果啟用可視化，更新綠色箭頭的位置
 
         return {}  # 返回空字典（父類接口要求）
+
+    def _relocate_near_goal_obstacles(self, env_ids) -> None:
+        """Goal 位置更新後，重新放置 near-goal 障礙物。
+
+        解決 _reset_idx 中 event_manager 先於 command_manager 的時序問題。
+        """
+        sched = getattr(self._env, '_behavior_scheduler', None)
+        if sched is None or sched.obs_near_goal_count <= 0:
+            return
+
+        import torch
+        if not isinstance(env_ids, torch.Tensor):
+            env_ids = torch.tensor(env_ids, device=self.device, dtype=torch.long)
+
+        sched._place_near_goal(env_ids, self._env)
+        sched._enforce_spawn_constraints(env_ids, self._env)
+        sched._write_positions_to_sim(self._env)
 
     # ------------------------------------------------------------------------
     # 可視化方法
@@ -636,7 +674,7 @@ class GoalCommandCfg(CommandTermCfg):
     # 障礙物安全距離（米）
     # 目標與任何障礙物中心的最小距離
 
-    max_resample_attempts: int = 30
+    max_resample_attempts: int = 50
     # 最大重試次數
     # 密集障礙物場景需要更多嘗試；fallback 使用歷史最佳候選（離障礙最遠的位置）
 
