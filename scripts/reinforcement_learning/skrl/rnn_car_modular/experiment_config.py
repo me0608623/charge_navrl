@@ -89,6 +89,8 @@ class ExperimentConfig:
     fc_dim: int = 48
     wd_middle_dim: int = 32
     rnn_type: str = "RNN"
+    predict_dim: int = 7                  # aux target dims (7=WD original, 13=+velocity)
+    aux_velocity_topk: int = 0            # 0=no velocity target; 3=nearest 3 obstacles
 
     # obstacle / scene controls
     obs_lr: float = 3e-4

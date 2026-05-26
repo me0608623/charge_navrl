@@ -295,6 +295,12 @@ parser.add_argument("--wd_middle_dim", type=int, default=32,
 # - 更改影響：GRU 通常更穩/記長期，但參數更多；切換後 checkpoint 不相容。wd_exact_rnn 強制 RNN。
 parser.add_argument("--rnn_type", type=str, default="RNN", choices=["RNN", "GRU"],
                     help="RNN type. wd_exact_rnn forces vanilla RNN to match WD.")
+# --predict_dim
+parser.add_argument("--predict_dim", type=int, default=7,
+                    help="Aux predict head output dim. 7=WD original, 13=+velocity (top-3 body-frame vx/vy).")
+# --aux_velocity_topk
+parser.add_argument("--aux_velocity_topk", type=int, default=0,
+                    help="Append body-frame velocity of nearest K dynamic obstacles to aux target. 0=off, 3=13D total.")
 
 # --- Obstacle Policy ---
 # --obs_lr
@@ -583,9 +589,10 @@ from modular_rnn_models import (
     LIDAR_END,
     NUM_BINS,
 )
-from wd_aux_targets import build_wd_preprocess_targets, compute_wd_module_loss
-# build_wd_preprocess_targets: 每步計算「最近 2 個障礙物」的 7D 特權幾何資訊 (aux loss target)
-# compute_wd_module_loss: Warp Drive module loss = log(clamp(L1, 0.01)) per-dim weighted
+from wd_aux_targets import (
+    build_wd_preprocess_targets, compute_wd_module_loss,
+    WD_DEFAULT_WEIGHT, WD_DEFAULT_WEIGHT_13D,
+)
 from privileged_obs import extract_privileged_obs, PRIVILEGED_OBS_DIM
 
 from rnn_car_modular.profiles import resolve_profiles, validate_profiles, profiles_to_dict
@@ -646,12 +653,19 @@ print("[INFO] Multi-Agent Modular RNN Training v5 — WD-Principle (A2CK + vanil
 # WD module loss dim → human-readable name mapping
 # wd_aux_targets.py 輸出 7D loss，前 6 維對應最近兩個障礙物的 body-frame 相對座標
 _AUX_DIM_NAMES = {
-    "module_feture_0_loss": "aux/near1_x_loss",   # 最近障礙物 1 的 x 方向 loss
-    "module_feture_1_loss": "aux/near1_y_loss",   # 最近障礙物 1 的 y 方向 loss
-    "module_feture_2_loss": "aux/near1_d_loss",   # 最近障礙物 1 的距離 loss
-    "module_feture_3_loss": "aux/near2_x_loss",   # 最近障礙物 2 的 x 方向 loss
-    "module_feture_4_loss": "aux/near2_y_loss",   # 最近障礙物 2 的 y 方向 loss
-    "module_feture_5_loss": "aux/near2_d_loss",   # 最近障礙物 2 的距離 loss
+    "module_feture_0_loss": "aux/t0_bx_loss",
+    "module_feture_1_loss": "aux/t0_by_loss",
+    "module_feture_2_loss": "aux/next_bx_loss",
+    "module_feture_3_loss": "aux/next_by_loss",
+    "module_feture_4_loss": "aux/hist_bx_loss",
+    "module_feture_5_loss": "aux/hist_by_loss",
+    "module_feture_6_loss": "aux/hist_dis_loss",
+    "module_feture_7_loss": "aux/obs1_vbx_loss",
+    "module_feture_8_loss": "aux/obs1_vby_loss",
+    "module_feture_9_loss": "aux/obs2_vbx_loss",
+    "module_feture_10_loss": "aux/obs2_vby_loss",
+    "module_feture_11_loss": "aux/obs3_vbx_loss",
+    "module_feture_12_loss": "aux/obs3_vby_loss",
 }
 
 
@@ -756,7 +770,7 @@ class RunningNormalizer:
 
 class ChargeRolloutBuffer:
     def __init__(self, num_steps, num_envs, rl_input_dim, obs_dim, hidden_dim, device,
-                 privileged_dim: int = 0):
+                 privileged_dim: int = 0, predict_dim: int = 7):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.device = device
@@ -770,9 +784,7 @@ class ChargeRolloutBuffer:
         # Aux/RNN 訓練所需欄位
         self.raw_obs = torch.zeros(num_steps, num_envs, obs_dim, device=device)       # [T,E,139] 原始觀測
         self.hiddens = torch.zeros(num_steps, num_envs, hidden_dim, device=device)    # [T,E,H] RNN hidden
-        # WD-style 7D privileged geometry target for module loss
-        # 7D = near1(x,y,d) + near2(x,y,d) + timestep
-        self.aux_targets = torch.zeros(num_steps, num_envs, 7, device=device)
+        self.aux_targets = torch.zeros(num_steps, num_envs, predict_dim, device=device)
         # Asymmetric critic privileged obs
         self._privileged_dim = privileged_dim
         if privileged_dim > 0:
@@ -2439,12 +2451,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         extractor = None
         rnn_input_dim = policy_obs_dim  # 79D（raw_fc_rnn）或 113D（wd_exact_rnn）
+    _predict_dim = args_cli.predict_dim
+    _aux_vel_topk = args_cli.aux_velocity_topk
+    if _aux_vel_topk > 0 and _predict_dim == 7:
+        _predict_dim = 7 + _aux_vel_topk * 2
+        print(f"[INFO] aux_velocity_topk={_aux_vel_topk} → predict_dim auto-set to {_predict_dim}")
+    _aux_weight = WD_DEFAULT_WEIGHT_13D[:_predict_dim] if _predict_dim > 7 else None
+    _middle_dim = args_cli.wd_middle_dim if (wd_exact_mode or args_cli.wd_middle_dim > 0) else None
     preprocess_rnn = PreprocessRNN(
         input_dim=rnn_input_dim, fc_dim=args_cli.fc_dim,
         hidden_dim=args_cli.hidden_dim, preprocess_dim=args_cli.preprocess_dim,
-        predict_dim=7,  # WD-style: 7D 特權幾何資訊（aux loss target）
+        predict_dim=_predict_dim,
         rnn_type=args_cli.rnn_type,
-        middle_dim=args_cli.wd_middle_dim if wd_exact_mode else None,
+        middle_dim=_middle_dim,
     ).to(device)
     rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # WD principle: concat(obs, preprocess_feat)
     policy_head = PolicyHead(input_dim=rl_input_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
@@ -2547,6 +2566,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"  extractor:    lr={_lr_extractor}  {'(frozen)' if _lr_extractor == 0 else ''}")
     else:
         print(f"  extractor:    N/A (raw_fc_rnn mode, no extractor)")
+    if _predict_dim > 7:
+        print(f"[INFO] Velocity aux: predict_dim={_predict_dim}, topk={_aux_vel_topk}, weight={list(_aux_weight)}")
 
     # --- Build Obstacle models (skip if rule_based or scripted) ---
     total_obs_params = 0
@@ -2660,7 +2681,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # --- Buffers ---
     charge_buf = ChargeRolloutBuffer(RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device,
-                                      privileged_dim=_priv_dim)
+                                      privileged_dim=_priv_dim, predict_dim=_predict_dim)
     obs_buf = ObstacleRolloutBuffer(RL, num_envs, N_obs, OBS_POLICY_OBS_DIM, 2, device) if _obstacle_mode == "learned" else None
 
     # --- Metrics ---
@@ -2705,6 +2726,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "rnn_type": args_cli.rnn_type,
                     "hidden_dim": args_cli.hidden_dim,
                     "preprocess_dim": args_cli.preprocess_dim,
+                    "predict_dim": _predict_dim,
+                    "aux_velocity_topk": _aux_vel_topk,
                     "obs_lr": args_cli.obs_lr, "obs_ent_coeff": args_cli.obs_ent_coeff,
                     "obs_speed_limit": args_cli.obs_speed_limit,
                     "train_goal_rate": args_cli.train_goal_rate,
@@ -3057,10 +3080,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs_done = done.unsqueeze(-1).expand(-1, N_obs).reshape(-1)
 
             # --- 4. Store transitions（儲存本步資料到 rollout buffer）---
-            # WD-style 7D privileged geometry target（訓練專用，推論時不需要）
             with torch.no_grad():
                 wd_aux_tgt = build_wd_preprocess_targets(
-                    env.unwrapped, N_obs, device)  # [E, 7]：最近 2 障礙物的 body-frame 幾何資訊
+                    env.unwrapped, N_obs, device,
+                    top_k_velocity=_aux_vel_topk)  # [E, predict_dim]
             charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
                            aux_target=wd_aux_tgt, privileged=_priv_obs)
             if obs_buf is not None:
@@ -3178,7 +3201,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     total_loss = torch.tensor(0.0, device=device)
                     last_display_pre = {}
                     for t_idx in range(effective_len):
-                        l_t, last_display_pre = compute_wd_module_loss(pred_eff[t_idx], tgt_eff[t_idx])
+                        l_t, last_display_pre = compute_wd_module_loss(pred_eff[t_idx], tgt_eff[t_idx], weight=_aux_weight)
                         total_loss = total_loss + l_t
                     total_loss = total_loss / max(effective_len, 1)
                     charge_opt_aux.zero_grad()
@@ -3674,7 +3697,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     last_display = {}
                     for t_idx in range(effective_len):
                         l_t, disp_t = compute_wd_module_loss(
-                            pred_eff[t_idx], tgt_eff[t_idx])
+                            pred_eff[t_idx], tgt_eff[t_idx], weight=_aux_weight)
                         total_loss = total_loss + l_t
                         n_loss_steps += 1
                         last_display = disp_t

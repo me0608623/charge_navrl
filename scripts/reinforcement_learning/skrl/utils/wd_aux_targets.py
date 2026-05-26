@@ -49,6 +49,19 @@ import torch.nn as nn
 # dim 6: total_dis — 預設不參與訓練（weight=0）
 WD_DEFAULT_WEIGHT = [1.0, 1.0, 1.0, 0.7, 0.7, 0.7, 0.0]
 
+# 13D weight: 7D original + 6D velocity (top-3 obstacles body-frame vx/vy)
+WD_DEFAULT_WEIGHT_13D = [
+    1.0, 1.0,    # dim 0-1: t0 (now)
+    1.0, 1.0,    # dim 2-3: next (future)
+    0.7, 0.7,    # dim 4-5: hist (past)
+    0.0,         # dim 6: total_dis (disabled)
+    0.8, 0.8,    # dim 7-8: obs1 velocity (nearest)
+    0.5, 0.5,    # dim 9-10: obs2 velocity
+    0.3, 0.3,    # dim 11-12: obs3 velocity
+]
+
+_VELOCITY_SCALE = 1.0 / 2.0  # max obstacle speed ~2 m/s
+
 # 當沒有合適的動態障礙物時，用 FAR_DEFAULT 填充
 _FAR_DEFAULT = 10.0
 
@@ -179,20 +192,81 @@ def _update_history_cache(
         new_mask, current_pos, current_pos)  # t1 always ← current
 
 
+def _build_velocity_targets(
+    env_unwrapped,
+    top_k: int,
+    cos_yaw: torch.Tensor,
+    sin_yaw: torch.Tensor,
+    robot_pos_w: torch.Tensor,
+    max_obstacles: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Build body-frame velocity targets for the nearest K dynamic obstacles.
+
+    Returns:
+        [num_envs, top_k * 2] — (vbx, vby) per obstacle, scaled by _VELOCITY_SCALE.
+        Slots without active dynamic obstacles are zero-filled.
+    """
+    num_envs = robot_pos_w.shape[0]
+    result = torch.zeros(num_envs, top_k, 2, device=device)
+
+    all_pos = torch.zeros(num_envs, max_obstacles, 2, device=device)
+    all_vel = torch.zeros(num_envs, max_obstacles, 2, device=device)
+    all_active = torch.zeros(num_envs, max_obstacles, dtype=torch.bool, device=device)
+
+    for i, obstacle in enumerate(env_unwrapped._obs_policy_cache):
+        if obstacle is None or i >= max_obstacles:
+            break
+        pos_w = obstacle.data.root_pos_w
+        active = pos_w[:, 2] > 0.0
+        all_active[:, i] = active
+        all_pos[:, i, 0] = pos_w[:, 0]
+        all_pos[:, i, 1] = pos_w[:, 1]
+
+    if hasattr(env_unwrapped, "_obstacle_velocities"):
+        n_vel = min(env_unwrapped._obstacle_velocities.shape[1], max_obstacles)
+        all_vel[:, :n_vel, :] = env_unwrapped._obstacle_velocities[:, :n_vel, :]
+
+    all_speed = torch.linalg.norm(all_vel, dim=-1)
+    is_dynamic = all_active & (all_speed > _DYNAMIC_SPEED_THRESHOLD)
+
+    dx = all_pos[:, :, 0] - robot_pos_w[:, 0:1]
+    dy = all_pos[:, :, 1] - robot_pos_w[:, 1:2]
+    dist = torch.sqrt(dx ** 2 + dy ** 2)
+    dist_for_sort = torch.where(is_dynamic, dist,
+                                torch.full_like(dist, _FAR_DEFAULT * 10))
+    _, sorted_idx = torch.sort(dist_for_sort, dim=1)  # [E, N]
+    batch_idx = torch.arange(num_envs, device=device)
+
+    for k in range(top_k):
+        idx = sorted_idx[:, k]  # [E]
+        vx_w = all_vel[batch_idx, idx, 0]
+        vy_w = all_vel[batch_idx, idx, 1]
+        valid = is_dynamic[batch_idx, idx]
+        vbx = cos_yaw * vx_w + sin_yaw * vy_w
+        vby = -sin_yaw * vx_w + cos_yaw * vy_w
+        result[:, k, 0] = torch.where(valid, vbx * _VELOCITY_SCALE, torch.zeros_like(vbx))
+        result[:, k, 1] = torch.where(valid, vby * _VELOCITY_SCALE, torch.zeros_like(vby))
+
+    return result.reshape(num_envs, top_k * 2)
+
+
 def build_wd_preprocess_targets(
     env_unwrapped,
     max_obstacles: int,
     device: torch.device,
     robot_radius: float = 0.33,
     prediction_horizon_s: float = 0.2,
+    top_k_velocity: int = 0,
 ) -> torch.Tensor:
-    """建立 WD-original dynamic 7D temporal aux target。
+    """建立 WD-original dynamic 7D temporal aux target，可選擴充 velocity targets。
 
     流程：
     1. 更新 3-step 歷史 cache
     2. 識別最近的 active dynamic obstacle
     3. 對 t0 (now), next (future), hist (t-3) 分別計算 body-frame surface vector
     4. 組成 7D target
+    5. (可選) 附加 top-K 障礙物的 body-frame velocity (top_k_velocity × 2D)
 
     Args:
         env_unwrapped: IsaacLab unwrapped env
@@ -200,9 +274,11 @@ def build_wd_preprocess_targets(
         device: CUDA device
         robot_radius: 機器人半徑（用於 collision shrinking）
         prediction_horizon_s: 外推時間（秒），用於 next position
+        top_k_velocity: 附加最近 K 個動態障礙物的 body-frame velocity。
+            0 = 不附加（回傳 7D），3 = 回傳 13D。
 
     Returns:
-        target: [num_envs, 7] — WD-original 7D temporal target
+        target: [num_envs, 7 + top_k_velocity*2] — temporal target
     """
     num_envs = env_unwrapped.num_envs
 
@@ -340,6 +416,17 @@ def build_wd_preprocess_targets(
         hist_by,         # [5] obstacle PAST (t-3) body-frame surface y
         hist_total_dis,  # [6] obstacle PAST center distance
     ], dim=-1)
+
+    # ------------------------------------------------------------------
+    # 10. (可選) 附加 top-K 障礙物 body-frame velocity
+    # ------------------------------------------------------------------
+    if top_k_velocity > 0:
+        vel_targets = _build_velocity_targets(
+            env_unwrapped, top_k_velocity,
+            cos_yaw, sin_yaw, robot_pos_w,
+            max_obstacles, device,
+        )  # [E, top_k_velocity * 2]
+        target = torch.cat([target, vel_targets], dim=-1)
 
     return target
 
