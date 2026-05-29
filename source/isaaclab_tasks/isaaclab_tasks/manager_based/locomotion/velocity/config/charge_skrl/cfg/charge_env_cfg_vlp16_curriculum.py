@@ -945,7 +945,7 @@ class ActionsCfgVLP16Shielded:
         num_bins=19,
         max_linear_velocity=1.0,
         max_linear_accel=0.5,
-        max_angular_vel=0.25 * math.pi,
+        max_angular_vel=2.0,    # 2026-05-28: 0.25π (≈0.785) → 2.0 rad/s，提高轉向能力對抗倒車鎖死
         shield_mode="soft",
         shield_d_danger=0.55,
         shield_d_safe=1.2,

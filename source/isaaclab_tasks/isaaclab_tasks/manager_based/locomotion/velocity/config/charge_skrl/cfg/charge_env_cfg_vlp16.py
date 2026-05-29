@@ -327,7 +327,7 @@ class ActionsCfgVLP16:
         num_bins=19,
         max_linear_velocity=1.0,
         max_linear_accel=0.5,
-        max_angular_vel=0.25 * math.pi,
+        max_angular_vel=2.0,    # 2026-05-28: 0.25π → 2.0 rad/s（與 _curriculum.py 同步）
     )
 
 
@@ -364,9 +364,10 @@ class ObservationsCfgVLP16:
 
     @configclass
     class PolicyCfg(ObsGroup):
-        """Policy 觀測組 (139D)
+        """Policy 觀測組 (79D) — 部署可用，移除 60D 障礙物 ground-truth
 
-        ego (4D) + goal (2D) + static (72D) + obs (60D) + time (1D) = 139D
+        ego (4D) + goal (2D) + static/LiDAR (72D) + time (1D) = 79D
+        (60D TopK 障礙物已移除：actor 不該吃特權 ground-truth；privileged 資訊只給 asymmetric critic)
         """
         # --- ego state (4D) ---
         # ā_t: 歸一化前進加速度 — 1D
@@ -400,6 +401,7 @@ class ObservationsCfgVLP16:
 
         # --- static state (72D) ---
         # VLP-16 LiDAR 72 bins (單幀，不做 history stacking)
+        # 預設 clean（SA1）；實際訓練噪聲由 _apply_lidar_noise_config 覆蓋
         lidar_static = ObsTerm(
             func=wd_like_sweep_72,
             params={
@@ -407,30 +409,16 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.1,         # ★ LiDAR 最小偵測距離（play 測試用 0.1m，原 0.5）
-                "z_filter": 0.5,      # ★ 過濾 z 異常命中（隱藏障礙物 z=-10 鬼影）
-                "displacement_std": 0.02,
-                "hole_rate": 0.005,
+                "r_min": 0.9,         # ★ VLP-16 硬體盲區（實測 0.9m）
+                "z_filter": 0.5,      # ★ 過濾地板/天花板/z=-10 鬼影
+                "displacement_std_per_meter": 0.0,   # σ(r)=k·r；SA2+ 由 YAML 覆蓋
+                "displacement_std": 0.0,             # legacy fixed-σ，不啟用
+                "hole_rate": 0.0,
                 "distractor_rate": 0.002,
                 "distractor_range": (0.2, 2.0),
             },
-            noise=Unoise(n_min=-0.02, n_max=0.02),
+            noise=None,   # SA2+ 由 _apply_lidar_noise_config 加 GaussianNoise
             clip=(0.0, 1.0),
-        )
-
-        # --- obs state (60D) ---
-        # Top-10 obstacles × 6D = 60D (body-frame, LOS 遮擋)
-        obstacle_obs = ObsTerm(
-            func=topk_obstacles_6d,
-            params={
-                "robot_cfg": SceneEntityCfg("robot"),
-                "top_k": 10,
-                "max_obstacles": MAX_OBSTACLES,
-                "max_distance": 8.0,
-                "v_max": 1.5,
-                "wall_occlusion": True,
-                "speed_threshold": 0.01,
-            },
         )
 
         # --- time state (1D) ---
@@ -443,9 +431,12 @@ class ObservationsCfgVLP16:
 
     @configclass
     class CriticCfg(ObsGroup):
-        """Critic 觀測組 — 與 Policy 相同 (139D)
+        """Critic 觀測組 — 與 Policy 相同 (79D)
 
-        暫不加入特權資訊。保持對稱 Critic，先建立 baseline。
+        移除 60D 障礙物 obs（與 PolicyCfg 一致，省 compute）。
+        注意：WD pipeline (train_rnn_car_wdclip.py) 不使用此 group —
+        asymmetric critic 的特權 obs 由 extract_privileged_obs 從 scene 直接抽 96D。
+        此 group 維持 79D 對稱僅供非 WD pipeline（如 SKRL 內建）使用。
         """
         # --- ego state (4D) ---
         linear_acceleration = ObsTerm(
@@ -480,30 +471,16 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.1,         # ★ LiDAR 最小偵測距離（play 測試用 0.1m，原 0.5）
-                "z_filter": 0.5,      # ★ 過濾 z 異常命中（隱藏障礙物 z=-10 鬼影）
-                "displacement_std": 0.02,
-                "hole_rate": 0.005,
+                "r_min": 0.9,
+                "z_filter": 0.5,
+                "displacement_std_per_meter": 0.0,
+                "displacement_std": 0.0,
+                "hole_rate": 0.0,
                 "distractor_rate": 0.002,
                 "distractor_range": (0.2, 2.0),
             },
-            noise=Unoise(n_min=-0.02, n_max=0.02),
+            noise=None,
             clip=(0.0, 1.0),
-        )
-
-        # --- obs state (60D) ---
-        # Top-10 obstacles × 6D = 60D (body-frame, LOS 遮擋)
-        obstacle_obs = ObsTerm(
-            func=topk_obstacles_6d,
-            params={
-                "robot_cfg": SceneEntityCfg("robot"),
-                "top_k": 10,
-                "max_obstacles": MAX_OBSTACLES,
-                "max_distance": 8.0,
-                "v_max": 1.5,
-                "wall_occlusion": True,
-                "speed_threshold": 0.01,
-            },
         )
 
         # --- time state (1D) ---

@@ -1923,6 +1923,17 @@ def main():
 
     obs_tensor = policy_obs(obs)
 
+    # === Auto-adapt POLICY_OBS_INDICES（v2: env 改成 79D 後不再有 index 138）===
+    # baseline: 139D obs，policy 用 [0:78] + [138]
+    # v2:        79D obs（PolicyCfg 已移除 60D 障礙），policy 用全部
+    global POLICY_OBS_INDICES
+    _obs_dim_runtime = obs_tensor.shape[-1]
+    if _obs_dim_runtime < 139:
+        POLICY_OBS_INDICES = list(range(0, _obs_dim_runtime))
+        print(f"[PLAY] obs_dim={_obs_dim_runtime} (<139) → POLICY_OBS_INDICES=0..{_obs_dim_runtime-1} (全用)")
+    else:
+        print(f"[PLAY] obs_dim={_obs_dim_runtime} (>=139) → POLICY_OBS_INDICES=0..77 + [138]")
+
     # ================================================================
     # 5. 載入模型權重
     # ================================================================
@@ -1930,9 +1941,10 @@ def main():
     ckpt_args = ckpt.get("args", {})
 
     # 從 checkpoint 讀取網路結構超參數
-    hidden_dim = int(ckpt_args.get("hidden_dim", 30))           # RNN 隱藏層維度
+    hidden_dim = int(ckpt_args.get("hidden_dim", 30))           # RNN 隱藏層維度（baseline 30, v2=64）
     preprocess_dim = int(ckpt_args.get("preprocess_dim", 12))   # RNN 輸出特徵維度
-    fc_dim = int(ckpt_args.get("fc_dim", 48))                   # RNN 前全連接層維度
+    fc_dim = int(ckpt_args.get("fc_dim", 48))                   # RNN 前全連接層維度（baseline 48, v2=64）
+    predict_dim = int(ckpt_args.get("predict_dim", 7))          # Aux 預測維度（baseline 7, v2=13）
     rnn_type = ckpt_args.get("rnn_type", "RNN")                 # RNN 類型（RNN/GRU/LSTM）
     encoder_mode = ckpt_args.get("charge_encoder_mode", "extractor_rnn")  # 編碼器模式
     zero_preprocess = ckpt_args.get("zero_preprocess_feature_for_rl", False)  # RNN 特徵是否歸零
@@ -1946,7 +1958,11 @@ def main():
     wd_exact_mode = (encoder_mode == "wd_exact_rnn")
     use_extractor = (encoder_mode == "extractor_rnn")
     policy_obs_dim = 113 if wd_exact_mode else len(POLICY_OBS_INDICES)
-    middle_dim = int(ckpt_args.get("wd_middle_dim", 32)) if wd_exact_mode else None
+    # wd_middle_dim: 控制 fc_middle 是 2 層（None/0）還是 3 層（>0，含中間 layer）
+    # baseline: extractor_rnn 模式 = None → 2 層直接 input→preprocess_dim
+    # v2: 即使 extractor_rnn 也用 wd_middle_dim=48 → 3 層 input→48→preprocess_dim
+    _wd_middle_raw = ckpt_args.get("wd_middle_dim", 32 if wd_exact_mode else 0)
+    middle_dim = int(_wd_middle_raw) if _wd_middle_raw and int(_wd_middle_raw) > 0 else None
 
     if use_extractor:
         extractor = LidarStateExtractor().to(device)
@@ -1961,11 +1977,18 @@ def main():
         hidden_dim=hidden_dim,
         preprocess_dim=preprocess_dim,
         fc_dim=fc_dim,
+        predict_dim=predict_dim,
         rnn_type=rnn_type,
         middle_dim=middle_dim,
     ).to(device)
+    print(f"[PLAY] PreprocessRNN: input={rnn_input_dim} fc={fc_dim} hidden={hidden_dim} middle={middle_dim} preprocess={preprocess_dim} predict={predict_dim} rnn={rnn_type}")
     policy_head = PolicyHead(input_dim=policy_obs_dim + preprocess_dim).to(device)
-    value_head = ValueHead(input_dim=policy_obs_dim + preprocess_dim).to(device)
+    # Asymmetric critic（v2）：ValueHead 多一條 50D privileged 通道
+    # 雖然 play 不會真的呼叫 value forward，但 load_state_dict 必須 shape 對齊
+    critic_profile = ckpt_args.get("critic_profile", "symmetric")
+    privileged_dim = 50 if critic_profile == "asymmetric" else 0
+    value_head = ValueHead(input_dim=policy_obs_dim + preprocess_dim, privileged_dim=privileged_dim).to(device)
+    print(f"[PLAY] ValueHead: input={policy_obs_dim + preprocess_dim} privileged={privileged_dim} (profile={critic_profile})")
 
     # 載入訓練權重
     if use_extractor:
@@ -2436,8 +2459,12 @@ def main():
                 diag_action_angular_sum += float(actions[:, 1].float().mean().item())
                 diag_samples += 1
 
-            # --- aux_debug: 定期印出 RNN 7D 預測 vs 真實 ---
-            if args_cli.aux_debug and aux_pred is not None and step % max(1, args_cli.aux_debug_interval) == 0:
+            # --- aux_debug: 定期印出 RNN 預測 vs 真實 ---
+            # v2 用 predict_dim=13（含 top-3 障礙 body-frame velocity），
+            # 但 print_aux_debug 還寫死 7D target → 暫只支援 predict_dim==7
+            if (args_cli.aux_debug and aux_pred is not None
+                    and predict_dim == 7
+                    and step % max(1, args_cli.aux_debug_interval) == 0):
                 print_aux_debug(raw_env, step, obs_tensor, aux_pred, max_active_obstacles)
 
         _t_inference = time.time() - start

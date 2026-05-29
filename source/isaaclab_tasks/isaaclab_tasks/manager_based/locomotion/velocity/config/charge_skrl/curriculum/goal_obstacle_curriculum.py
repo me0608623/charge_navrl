@@ -1353,8 +1353,10 @@ def goal_obstacle_curriculum(
     current_stage = state["stage"]
     stage_cfg = STAGES[current_stage]
 
-    # DEBUG: 每 50000 episodes 輸出完整狀態
-    if state["total_episodes"] % 50000 < env.num_envs:
+    # DEBUG: 每跨越 50000 episodes 邊界輸出一次（修法 ①：避免 num_envs 寬窗導致 ~1024 行 spam）
+    _milestone = state["total_episodes"] // 50000
+    if _milestone > state.get("_debug_last_milestone", -1):
+        state["_debug_last_milestone"] = _milestone
         print(
             f"\n[DEBUG Curriculum State] "
             f"episodes={state['total_episodes']} stage={current_stage} "

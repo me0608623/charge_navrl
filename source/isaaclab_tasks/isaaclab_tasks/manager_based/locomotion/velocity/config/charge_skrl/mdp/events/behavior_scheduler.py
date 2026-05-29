@@ -108,6 +108,19 @@ class BehaviorScheduler:
         self.obs_near_goal_count = int(stage_config.get("obs_near_goal_count", 0))
         self.obs_near_goal_radius = float(stage_config.get("obs_near_goal_radius", 2.0))
 
+        # Narrow-gap pairs: 機率性生成窄通道 pair（中心距 D ∈ [D_lo, D_hi]）
+        # 訓 policy 偶爾遇到「兩障礙物形成的窄通道」，學會穿越避免保守行為
+        # narrow_gap_prob: 每對 pair 對每個 env 獨立 roll 的命中機率
+        # narrow_gap_max_pairs: 最多嘗試生成幾對（每對都獨立 roll prob）
+        # 舊欄位 narrow_gap_pairs 維持向後相容（=N 時視為 prob=1.0, max_pairs=N）
+        _legacy_pairs = int(stage_config.get("narrow_gap_pairs", 0))
+        self.narrow_gap_prob = float(stage_config.get("narrow_gap_prob", 1.0 if _legacy_pairs > 0 else 0.0))
+        self.narrow_gap_max_pairs = int(stage_config.get("narrow_gap_max_pairs", _legacy_pairs))
+        _nd_range = stage_config.get("narrow_gap_center_dist_range", (1.8, 2.4))
+        self.narrow_gap_dist_min = float(_nd_range[0])
+        self.narrow_gap_dist_max = float(_nd_range[1])
+        self.narrow_gap_align_to_goal = bool(stage_config.get("narrow_gap_align_to_goal", True))
+
         # 建立 config + apply overrides
         self.cfg = BehaviorConfig()
         all_overrides = {**speed_overrides, **safety_overrides}
@@ -237,6 +250,10 @@ class BehaviorScheduler:
         # Near-goal placement: 覆寫前 N 個 active slot 位置到 goal 附近
         if self.obs_near_goal_count > 0:
             self._place_near_goal(env_ids, env)
+
+        # Narrow-gap pairs: 強制窄通道（覆寫尾端 slots）
+        if self.narrow_gap_max_pairs > 0 and self.narrow_gap_prob > 0.0:
+            self._place_narrow_gap_pairs(env_ids, env)
 
         # Rejection sampling: 確保 safety constraints
         self._enforce_spawn_constraints(env_ids, env)
@@ -542,6 +559,131 @@ class BehaviorScheduler:
             self.positions[env_ids[active], slot_idx, 0] = new_x[active]
             self.positions[env_ids[active], slot_idx, 1] = new_y[active]
             placed += 1
+
+    def _place_narrow_gap_pairs(self, env_ids: Tensor, env: ManagerBasedRLEnv) -> None:
+        """機率性生成窄通道 pair：goal 出現在兩障礙物形成的窄通道後方。
+
+        每對 pair_idx 對所有 reset env 獨立 roll 機率 (narrow_gap_prob)，命中才生成。
+        命中後：
+          - 採樣中心距 D ~ U(narrow_gap_dist_min, narrow_gap_dist_max)
+          - pair 中心放在 robot→goal 線段 30%~70% 處（goal 在 pair 後方）
+          - pair 軸：align_to_goal=True 時垂直於 robot→goal（強迫穿越）
+          - 用尾端 active slots（避免覆蓋 near_goal 的前幾個 slot）
+          - 通道兩端 obstacles 都設為 BEHAVIOR_STATIC
+
+        通行條件（與 collision threshold 對齊）：
+          - LiDAR threshold = 0.45 m，obstacle radius ≈ 0.3 m
+          - LiDAR-passable: D ≥ 2*(0.45+0.3) = 1.5 m
+          - Geometric-passable: D ≥ 2*0.9 = 1.8 m
+          - 推薦範圍：D ∈ [1.8, 2.4] m
+        """
+        K = len(env_ids)
+        device = self.device
+
+        # 取得 robot + goal 位置（用於對齊與中心採樣）
+        try:
+            robot = env.scene["robot"]
+            robot_pos_w = robot.data.root_pos_w[env_ids, :2]
+            env_origins_xy = env.scene.env_origins[env_ids, :2]
+            robot_local = robot_pos_w - env_origins_xy
+        except Exception:
+            return
+
+        try:
+            goal_cmd = env.command_manager.get_command("goal_command")
+            goal_world = goal_cmd[env_ids, :2]
+            goal_local = goal_world - env_origins_xy
+        except Exception:
+            return
+
+        # robot→goal 向量 + 垂直向量
+        rg_vec = goal_local - robot_local  # [K, 2]
+        rg_norm = torch.norm(rg_vec, dim=1, keepdim=True).clamp(min=1e-3)
+        rg_dir = rg_vec / rg_norm  # [K, 2]
+        # 垂直向量：(x, y) → (-y, x) 即 rotate +90°
+        rg_perp = torch.stack([-rg_dir[:, 1], rg_dir[:, 0]], dim=1)  # [K, 2]
+
+        bx = self.boundary_x
+        by = self.boundary_y
+
+        for pair_idx in range(self.narrow_gap_max_pairs):
+            # 兩個 slot 編號（從尾端取）
+            slot_a = self.max_obstacles - 1 - 2 * pair_idx
+            slot_b = self.max_obstacles - 2 - 2 * pair_idx
+            if slot_a < 0 or slot_b < 0:
+                break  # slot 不夠
+
+            # 機率 roll：每個 env 獨立決定本對是否生成
+            roll = torch.rand(K, device=device) < self.narrow_gap_prob  # [K]
+            hit_idx = roll.nonzero(as_tuple=True)[0]  # [K_hit]
+            if hit_idx.numel() == 0:
+                continue
+
+            K_hit = hit_idx.numel()
+            env_ids_hit = env_ids[hit_idx]
+            robot_local_hit = robot_local[hit_idx]
+            rg_vec_hit = rg_vec[hit_idx]
+            rg_perp_hit = rg_perp[hit_idx]
+
+            # 採樣中心距 D ~ U[D_lo, D_hi]（僅命中 env）
+            D = torch.empty(K_hit, device=device).uniform_(
+                self.narrow_gap_dist_min, self.narrow_gap_dist_max
+            )
+
+            # 採樣 pair 中心 t ~ U[0.3, 0.7]，沿 robot→goal 線段
+            # → t<0.5 偏 robot 側，goal 仍在 pair 後方；t>0.5 pair 已接近 goal
+            t = torch.empty(K_hit, device=device).uniform_(0.3, 0.7).unsqueeze(1)
+            pair_center = robot_local_hit + t * rg_vec_hit  # [K_hit, 2]
+
+            # pair 軸方向：垂直於 robot→goal，強迫穿越
+            if self.narrow_gap_align_to_goal:
+                axis = rg_perp_hit
+            else:
+                ang = torch.empty(K_hit, device=device).uniform_(0, 2.0 * math.pi)
+                axis = torch.stack([torch.cos(ang), torch.sin(ang)], dim=1)
+
+            # 先 clamp pair_center 留出 D/2 + 0.5m margin，避免 a/b 出 boundary
+            # 若獨立 clamp a 和 b 會在角落把兩者擠到一起，D 從 2.3 變 0.18（已發現的 bug）
+            margin = (D / 2.0) + 0.5  # [K_hit]
+            pair_center[:, 0] = torch.clamp(pair_center[:, 0], -bx + margin, bx - margin)
+            pair_center[:, 1] = torch.clamp(pair_center[:, 1], -by + margin, by - margin)
+
+            # 兩個 obstacle 位置 = 中心 ± (D/2) * axis
+            offset = (D / 2.0).unsqueeze(1) * axis
+            pos_a = pair_center + offset
+            pos_b = pair_center - offset
+
+            # 寫入位置
+            self.positions[env_ids_hit, slot_a] = pos_a
+            self.positions[env_ids_hit, slot_b] = pos_b
+
+            # 確保 slot active；若原本 inactive，設為 STATIC
+            cur_a = self.behavior_type[env_ids_hit, slot_a]
+            cur_b = self.behavior_type[env_ids_hit, slot_b]
+            self.behavior_type[env_ids_hit, slot_a] = torch.where(
+                cur_a == BEHAVIOR_INACTIVE,
+                torch.full_like(cur_a, BEHAVIOR_STATIC),
+                cur_a,
+            )
+            self.behavior_type[env_ids_hit, slot_b] = torch.where(
+                cur_b == BEHAVIOR_INACTIVE,
+                torch.full_like(cur_b, BEHAVIOR_STATIC),
+                cur_b,
+            )
+
+            # 診斷 print（只在 play / smoke test 模式下印）
+            if K <= 4:
+                for k in range(K_hit):
+                    actual_D = float(torch.norm(pos_a[k] - pos_b[k]).item())
+                    print(
+                        f"[NarrowGap] env={int(env_ids_hit[k].item())} pair={pair_idx} "
+                        f"slots=({slot_a},{slot_b}) D={actual_D:.2f}m "
+                        f"prob={self.narrow_gap_prob:.2f} "
+                        f"center=({pair_center[k,0].item():.2f},{pair_center[k,1].item():.2f}) "
+                        f"a=({pos_a[k,0].item():.2f},{pos_a[k,1].item():.2f}) "
+                        f"b=({pos_b[k,0].item():.2f},{pos_b[k,1].item():.2f})",
+                        flush=True,
+                    )
 
     def _enforce_spawn_constraints(self, env_ids: Tensor, env: ManagerBasedRLEnv) -> None:
         """Spawn 後 rejection sampling，確保 obstacle 不與 robot / goal / 其他 obstacle 重疊。

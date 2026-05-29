@@ -244,6 +244,35 @@ def lidar_vlp16_to_2d_bins(
     return x   # [N, num_bins]
 
 
+def _get_episode_noise_scale(
+    env: ManagerBasedRLEnv,
+    key: str,
+    lo: float,
+    hi: float,
+) -> torch.Tensor:
+    """Return per-env noise scale, resampling only for newly-reset envs.
+
+    Stores state in env._lidar_ep_noise_cache to avoid extra env fields.
+    Resample condition: episode_length_buf == 0 (first step of each episode).
+    """
+    cache_attr = "_lidar_ep_noise_cache"
+    if not hasattr(env, cache_attr):
+        setattr(env, cache_attr, {})
+    cache: dict = getattr(env, cache_attr)
+
+    device = env.device
+    if key not in cache:
+        mid = (lo + hi) * 0.5
+        cache[key] = torch.full((env.num_envs,), mid, device=device, dtype=torch.float32)
+
+    reset_ids = (env.episode_length_buf == 0).nonzero(as_tuple=False).squeeze(-1)
+    if len(reset_ids) > 0:
+        new_vals = torch.rand(len(reset_ids), device=device) * (hi - lo) + lo
+        cache[key][reset_ids] = new_vals
+
+    return cache[key]  # [N]
+
+
 def wd_like_sweep_72(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
@@ -252,10 +281,47 @@ def wd_like_sweep_72(
     r_robot: float = 0.3,
     r_min: float = 0.0,
     z_filter: float = 0.0,
+    # --- L1 noise: fixed-σ (legacy) ---
     displacement_std: float = 0.0,
     hole_rate: float = 0.0,
     distractor_rate: float = 0.0,
     distractor_range: tuple[float, float] = (0.2, 2.0),
+    # --- L1 noise: distance-dependent σ(r) = std_per_meter × r ---
+    displacement_std_per_meter: float = 0.0,
+    # --- L1 noise: fixed-σ soft target (human/clothing), independent of distance ---
+    displacement_std_soft: float = 0.0,
+    # --- L3 per-episode DR: displacement (per-meter scale) ---
+    displacement_std_per_meter_dr_min: float = 0.0,
+    displacement_std_per_meter_dr_max: float = 0.0,
+    # --- L3 per-episode DR: soft-target fixed σ ---
+    displacement_std_soft_dr_min: float = 0.0,
+    displacement_std_soft_dr_max: float = 0.0,
+    # --- L3 per-episode DR: hole_rate ---
+    hole_rate_dr_min: float = 0.0,
+    hole_rate_dr_max: float = 0.0,
+    # --- L1 systematic range bias: bias(d) = k·d + b ---
+    # Scalar values (fixed across envs/episodes). Use DR ranges below for per-episode sampling.
+    distance_bias_k: float = 0.0,
+    distance_bias_b: float = 0.0,
+    # --- L1 distance bias DR (per-episode sampling, range covers measured ±36mm) ---
+    # k 範圍涵蓋 ±10mm/m slope；b 範圍涵蓋 ±40mm offset
+    # 每 episode 採樣一組 (k, b)，不假設特定模型形狀（避免 R²=0.58 線性假設誤導 policy）
+    distance_bias_k_dr_min: float = 0.0,
+    distance_bias_k_dr_max: float = 0.0,
+    distance_bias_b_dr_min: float = 0.0,
+    distance_bias_b_dr_max: float = 0.0,
+    # --- L1 per-ring bias (VLP-16, 16ch ±22.7mm fixed offsets) ---
+    per_ring_bias: bool = False,
+    per_ring_bias_scale: float = 1.0,
+    per_ring_bias_scale_dr_min: float = 0.0,
+    per_ring_bias_scale_dr_max: float = 0.0,
+    # --- legacy L3 params (absorbed, now no-op to prevent TypeError) ---
+    displacement_std_dr_min: float = 0.0,
+    displacement_std_dr_max: float = 0.0,
+    # --- L2 Per-Bin block dropout (absorbed for forward-compat) ---
+    block_dropout_prob: float = 0.0,
+    block_dropout_width_min: int = 3,
+    block_dropout_width_max: int = 8,
 ) -> torch.Tensor:
     """Build a WD-style 72-bin sweep from raw ray hits in the robot yaw frame.
 
@@ -315,12 +381,140 @@ def wd_like_sweep_72(
     )
     distances_2d = torch.clamp(distances_2d, min=0.0, max=r_max)
 
-    if displacement_std > 0:
+    # --- L3 per-episode DR: resample noise scales at episode reset ---
+    if displacement_std_per_meter_dr_min > 0 and displacement_std_per_meter_dr_max > displacement_std_per_meter_dr_min:
+        ep_std_scale = _get_episode_noise_scale(
+            env, "disp_per_meter",
+            displacement_std_per_meter_dr_min,
+            displacement_std_per_meter_dr_max,
+        )  # [N]
+        active_std_per_meter = ep_std_scale
+    else:
+        active_std_per_meter = displacement_std_per_meter
+
+    if hole_rate_dr_min > 0 and hole_rate_dr_max > hole_rate_dr_min:
+        ep_hole = _get_episode_noise_scale(
+            env, "hole_rate",
+            hole_rate_dr_min,
+            hole_rate_dr_max,
+        )  # [N]
+        active_hole_rate = ep_hole  # [N]
+    else:
+        active_hole_rate = hole_rate  # scalar
+
+    # --- L3 per-episode DR: soft-target fixed σ ---
+    if displacement_std_soft_dr_min > 0 and displacement_std_soft_dr_max > displacement_std_soft_dr_min:
+        ep_soft = _get_episode_noise_scale(
+            env, "disp_soft",
+            displacement_std_soft_dr_min,
+            displacement_std_soft_dr_max,
+        )  # [N]
+        active_std_soft = ep_soft  # [N]
+    else:
+        active_std_soft = displacement_std_soft  # scalar
+
+    # --- L1 systematic range bias: bias(d) = k·d + b ---
+    # Physical model: ToF clock offset (linear with distance) + constant offset
+    # Applied BEFORE displacement noise (bias acts on true distance)
+    # L3 DR: per-episode 採樣 k, b（涵蓋實測 ±36mm；不假設模型形狀）
+    has_k_dr = distance_bias_k_dr_min != 0.0 or distance_bias_k_dr_max != 0.0
+    has_b_dr = distance_bias_b_dr_min != 0.0 or distance_bias_b_dr_max != 0.0
+    has_scalar_bias = distance_bias_k != 0.0 or distance_bias_b != 0.0
+
+    if has_k_dr or has_b_dr or has_scalar_bias:
+        # 每 episode 採樣 k_eff, b_eff per env
+        if has_k_dr:
+            k_eff = _get_episode_noise_scale(
+                env, "distance_bias_k",
+                distance_bias_k_dr_min, distance_bias_k_dr_max,
+            )  # [N]
+        else:
+            k_eff = torch.full(
+                (env.num_envs,), distance_bias_k,
+                device=device, dtype=dtype,
+            )
+        if has_b_dr:
+            b_eff = _get_episode_noise_scale(
+                env, "distance_bias_b",
+                distance_bias_b_dr_min, distance_bias_b_dr_max,
+            )  # [N]
+        else:
+            b_eff = torch.full(
+                (env.num_envs,), distance_bias_b,
+                device=device, dtype=dtype,
+            )
+        # [N, 1] × [N, R] + [N, 1] broadcast
+        bias = k_eff.unsqueeze(1) * distances_2d + b_eff.unsqueeze(1)
+        distances_2d = torch.clamp(distances_2d + bias, min=0.0, max=r_max)
+
+    # --- L1 per-ring bias: VLP-16 16-channel calibration offsets (±22.7mm) ---
+    if per_ring_bias:
+        cache_attr = "_lidar_per_ring_bias_cache"
+        if not hasattr(env, cache_attr):
+            # VLP-16 measured per-ring biases (m), from white-wall calibration
+            _PER_RING_BIAS_M = torch.tensor([
+                -0.0041, +0.0019, -0.0031, -0.0093, -0.0071, +0.0083, +0.0140, +0.0027,
+                +0.0157, +0.0167, +0.0123, +0.0068, -0.0113, -0.0227, -0.0137, -0.0196,
+            ], device=device, dtype=dtype)
+            # Broadcast to [R]: assume ray_idx % 16 → ring_id (VLP-16 convention)
+            ring_ids = torch.arange(num_rays, device=device) % 16
+            ring_offsets = _PER_RING_BIAS_M[ring_ids]  # [R]
+            setattr(env, cache_attr, ring_offsets)
+        ring_offsets = getattr(env, cache_attr)  # [R]
+
+        # L3 per-episode scale (e.g. U(0.5, 1.5))
+        if per_ring_bias_scale_dr_min > 0 and per_ring_bias_scale_dr_max > per_ring_bias_scale_dr_min:
+            ep_ring_scale = _get_episode_noise_scale(
+                env, "ring_bias_scale",
+                per_ring_bias_scale_dr_min,
+                per_ring_bias_scale_dr_max,
+            )  # [N]
+            # [N, 1] × [1, R] = [N, R]
+            distances_2d = distances_2d + ep_ring_scale.unsqueeze(1) * ring_offsets.unsqueeze(0)
+        else:
+            # scalar scale broadcast
+            distances_2d = distances_2d + per_ring_bias_scale * ring_offsets.unsqueeze(0)
+        distances_2d = torch.clamp(distances_2d, min=0.0, max=r_max)
+
+    # --- L1 displacement noise (hard + soft combined via RSS) ---
+    has_per_meter = displacement_std_per_meter > 0 or displacement_std_per_meter_dr_min > 0
+    has_soft = displacement_std_soft > 0 or displacement_std_soft_dr_min > 0
+    has_legacy = displacement_std > 0
+
+    if has_per_meter or has_soft:
+        # σ_total = sqrt(σ_per_meter(r)² + σ_soft²)
+        if has_per_meter:
+            if isinstance(active_std_per_meter, torch.Tensor):
+                sigma_hard = active_std_per_meter.unsqueeze(1) * distances_2d  # [N, R]
+            else:
+                sigma_hard = active_std_per_meter * distances_2d
+        else:
+            sigma_hard = torch.zeros_like(distances_2d)
+
+        if has_soft:
+            if isinstance(active_std_soft, torch.Tensor):
+                sigma_soft_val = active_std_soft.unsqueeze(1).expand_as(distances_2d)
+            else:
+                sigma_soft_val = torch.full_like(distances_2d, active_std_soft)
+        else:
+            sigma_soft_val = torch.zeros_like(distances_2d)
+
+        sigma = torch.sqrt(sigma_hard ** 2 + sigma_soft_val ** 2)
+        noise = torch.randn_like(distances_2d) * sigma
+        distances_2d = torch.clamp(distances_2d + noise, min=0.0, max=r_max)
+    elif has_legacy:
+        # legacy fixed-σ fallback
         noise = torch.randn_like(distances_2d) * displacement_std
         distances_2d = torch.clamp(distances_2d + noise, min=0.0, max=r_max)
 
-    if hole_rate > 0:
-        hole_mask = torch.rand_like(distances_2d) < hole_rate
+    if isinstance(active_hole_rate, torch.Tensor):
+        hole_mask = torch.rand_like(distances_2d) < active_hole_rate.unsqueeze(1)
+    elif active_hole_rate > 0:
+        hole_mask = torch.rand_like(distances_2d) < active_hole_rate
+    else:
+        hole_mask = None
+
+    if hole_mask is not None:
         distances_2d = torch.where(hole_mask, r_max, distances_2d)
 
     if distractor_rate > 0:
@@ -336,6 +530,25 @@ def wd_like_sweep_72(
 
     sweep = torch.full((num_envs, num_bins), r_max, device=device, dtype=dtype)
     sweep.scatter_reduce_(1, bin_indices, distances_2d, reduce="amin", include_self=True)
+
+    # --- L2 Per-Bin block dropout: contiguous sector occlusion ---
+    # Models large obstacle (pillar, leg) blocking a 15°-40° sector
+    if block_dropout_prob > 0:
+        trigger = torch.rand(num_envs, device=device) < block_dropout_prob
+        if trigger.any():
+            n_trig = int(trigger.sum().item())
+            w = torch.randint(
+                block_dropout_width_min, block_dropout_width_max + 1,
+                (n_trig,), device=device,
+            )
+            start = torch.randint(0, num_bins, (n_trig,), device=device)
+            trig_envs = trigger.nonzero(as_tuple=False).squeeze(-1)
+            # Build a [n_trig, num_bins] mask via cumulative comparison
+            bin_range = torch.arange(num_bins, device=device).unsqueeze(0)  # [1, B]
+            # bin in [start, start+w) mod num_bins
+            offs = (bin_range - start.unsqueeze(1)) % num_bins  # [n_trig, B]
+            mask = offs < w.unsqueeze(1)  # [n_trig, B]
+            sweep[trig_envs] = torch.where(mask, torch.full_like(sweep[trig_envs], r_max), sweep[trig_envs])
 
     sweep = torch.clamp(sweep - r_robot, min=0.0, max=r_max)
     sweep = sweep / r_max

@@ -124,11 +124,14 @@ class ExperimentConfig:
     # ── Sim-to-Real Domain Randomization (TLNI + Physics + Disturbance) ──
 
     # LiDAR Layer 1: Per-Ray noise (before min-pool)
-    lidar_displacement_std: float = 0.002        # Gaussian σ (m), VLP-16 calibrated
-    lidar_hole_rate: float = 0.20                # ray dropout rate, VLP-16 measured ~21%
-    lidar_distractor_rate: float = 0.002         # ghost/mixed-pixel rate
-    lidar_distance_bias: bool = False            # distance-dependent bias k=0.021, b=-0.030
-    lidar_per_ring_bias: bool = False            # 16ch per-ring calibration offset
+    # distance-dependent σ(r) = lidar_displacement_std_per_meter × r  [preferred]
+    lidar_displacement_std_per_meter: float = 0.00036  # fitted from VLP-16 measurement: σ(r)≈0.00036·r
+    lidar_displacement_std_soft: float = 0.0          # fixed-σ for soft targets (human/clothing); RSS-combined with per_meter
+    lidar_displacement_std: float = 0.0               # legacy fixed-σ; use per_meter instead
+    lidar_hole_rate: float = 0.20                     # ray dropout rate, VLP-16 measured ~21%
+    lidar_distractor_rate: float = 0.002              # ghost/mixed-pixel rate
+    lidar_distance_bias: bool = False                 # distance-dependent bias k=0.021, b=-0.030
+    lidar_per_ring_bias: bool = False                 # 16ch per-ring calibration offset
 
     # LiDAR Layer 2: Per-Bin noise (after min-pool)
     lidar_obs_noise_std: float = 0.005           # ObsTerm Gaussian noise σ (replaces Unoise)
@@ -136,8 +139,14 @@ class ExperimentConfig:
     lidar_block_dropout_width: tuple[int, int] = (3, 8)  # contiguous bin width range
 
     # LiDAR Layer 3: Per-Episode DR ranges (reset-time sampling)
-    lidar_displacement_std_dr: tuple[float, float] | None = None  # e.g. (0.0005, 0.005)
+    # per-meter scale: covers between-robot calibration variation
+    lidar_displacement_std_per_meter_dr: tuple[float, float] | None = None  # e.g. (0.00020, 0.00060)
+    lidar_displacement_std_soft_dr: tuple[float, float] | None = None       # e.g. (0.002, 0.020) for human targets
+    lidar_displacement_std_dr: tuple[float, float] | None = None  # legacy, use per_meter_dr
     lidar_hole_rate_dr: tuple[float, float] | None = None         # e.g. (0.15, 0.30)
+    # distance bias DR: per-episode sample (k, b), covers measured ±36mm without assuming model shape
+    lidar_distance_bias_k_dr: tuple[float, float] | None = None   # e.g. (-0.010, +0.010) slope range
+    lidar_distance_bias_b_dr: tuple[float, float] | None = None   # e.g. (-0.040, +0.040) offset range
 
     # Physics DR
     physics_mass_dr: tuple[float, float] = (0.85, 1.15)     # mass scale range

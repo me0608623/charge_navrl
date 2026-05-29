@@ -353,7 +353,7 @@ class ValueHead(nn.Module):
     WD 對齊: spot_critic = [256, 256, 256, 512, 512] (5 hidden layers)
     input = cat(obs_79D, preprocess_12D) = 91D
 
-    Asymmetric critic: input_dim = 91 + privileged_dim (96D) = 187D.
+    Asymmetric critic: input_dim = 91 + privileged_dim (50D) = 141D.
     When privileged_dim > 0, a separate projection merges the privileged
     features before the shared MLP, allowing checkpoint migration from
     symmetric → asymmetric (the rl_proj weights carry over).

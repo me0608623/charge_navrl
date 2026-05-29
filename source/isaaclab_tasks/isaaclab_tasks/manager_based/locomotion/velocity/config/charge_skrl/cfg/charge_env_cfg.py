@@ -242,7 +242,7 @@ class ActionsCfg:
         num_bins=19,
         max_linear_velocity=1.0,
         max_linear_accel=0.5,
-        max_angular_vel=0.25 * math.pi,
+        max_angular_vel=2.0,    # 2026-05-28: 0.25π → 2.0 rad/s（與 vlp16_curriculum.py 同步）
         debug_vis=True,
     )
 

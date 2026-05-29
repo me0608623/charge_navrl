@@ -198,23 +198,21 @@ STAGES = [
         "name": "SA2_nav_static",
 
         "scene": {
-            "goals": 8,
-            "goal_distance": (5.0, 9.0),
-            "static_obstacles": 3,              # ↑ from 2，提高密度
-            "dynamic_obstacles": 3,             # ↑ from 2
-            "dynamic_obstacles_min": 2,         # ↑ from 1
+            "goals": 10,                        # 【Test G】SA1 clone：8→10
+            "goal_distance": (2.0, 6.0),        # 【Test G】SA1 clone
+            "static_obstacles": 1,
+            "dynamic_obstacles": 2,
+            "dynamic_obstacles_min": 1,
             "walls_min": 0,
             "walls_max": 1,
             "wall_length": 3.0,
-            "boundary": 7.0,                    # ↓ from 8.5，縮小活動範圍提高障礙密度
-            # 目標附近障礙物
-            "obs_near_goal_count": 2,             # ↑ from 1，goal 附近放 2 個障礙
-            "obs_near_goal_radius": 2.5,        # ↑ from 2.0，稍擴大環形範圍
-            # goal 隨機移動（SA2: 關閉，專注靜態辨識）
-            "goal_move_speed": 0.3,             # 線速度 (m/s)，robot 30% v_max
-            "goal_move_max_radius": 2.0,        # 最大漫遊半徑 (m)
-            "goal_move_behavior": "random_walk", # random_walk / drift / patrol
-            "goal_move_angular_speed": 0.5,     # 方向變換角速度 (rad/s)
+            "boundary": 8.5,                    # 【Test G】SA1 clone：7.0→8.5
+            "obs_near_goal_count": 0,
+            "obs_near_goal_radius": 2.0,        # 【Test G】SA1 clone
+            "goal_move_speed": 0.0,
+            "goal_move_max_radius": 0.0,        # 【Test G】SA1 clone
+            "goal_move_behavior": "random_walk",
+            "goal_move_angular_speed": 0.0,     # 【Test G】SA1 clone
             "episode_s": 60,
             "gamma": 0.984,
         },
@@ -233,14 +231,13 @@ STAGES = [
 
         "behavior": {
             "obstacle_speed": 0.80,
-            "behavior_mix": {
-                "patrol": 0.45,
-                "random_walk": 0.30,
-                "static": 0.25,                 # 新增，讓 RNN 學靜態 vs 動態
+            "behavior_mix": {                   # 【Test G】SA1 clone：移除 static
+                "patrol": 0.60,
+                "random_walk": 0.40,
             },
             "speed_overrides": {
-                "patrol": {"speed_range": (0.20, 0.40)},
-                "random_walk": {"speed_range": (0.15, 0.40)},
+                "patrol": {"speed_range": (0.15, 0.35)},     # 【Test G】SA1 clone
+                "random_walk": {"speed_range": (0.10, 0.30)},
             },
         },
 
@@ -371,6 +368,12 @@ STAGES = [
             # 目標附近障礙物
             "obs_near_goal_count": 2,           # 同 SA3
             "obs_near_goal_radius": 2.5,        # 同 SA3
+            # narrow-gap pairs: SA4 intro 寬通道（D 2.2-2.4m → LiDAR 通道 0.8-1.0m）
+            # 偶爾生成（20% env），goal 在 pair 後方逼穿越
+            "narrow_gap_prob": 0.20,
+            "narrow_gap_max_pairs": 1,
+            "narrow_gap_center_dist_range": (2.2, 2.4),
+            "narrow_gap_align_to_goal": True,
             # goal 隨機移動（SA4: 首次真正啟用！per-goal random [0.3,0.6] m/s）
             "goal_move_speed": 0.1,             # > 0 即啟用 per-goal movement
             "goal_move_max_radius": 3.0,        # 最大漫遊半徑
@@ -455,6 +458,11 @@ STAGES = [
             # 目標附近障礙物
             "obs_near_goal_count": 1,           # goal 附近強制生成的障礙物數量（0=關閉）
             "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # narrow-gap pairs: SA5 加 1 對中通道（D 2.0-2.3m → LiDAR 通道 0.7-0.95m）
+            "narrow_gap_prob": 0.30,
+            "narrow_gap_max_pairs": 1,
+            "narrow_gap_center_dist_range": (2.0, 2.3),
+            "narrow_gap_align_to_goal": True,
             # goal 隨機移動（SA5: 中速 random_walk）
             "goal_move_speed": 0.15,            # 線速度 (m/s)，↑ from 0.10
             "goal_move_max_radius": 2.0,        # 最大漫遊半徑 (m)，↑ from 1.5
@@ -540,6 +548,11 @@ STAGES = [
             # 目標附近障礙物
             "obs_near_goal_count": 2,           # goal 附近強制生成的障礙物數量（0=關閉）
             "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # narrow-gap pairs: SA6 機率提升 + max 2 對（D 1.9-2.2m → LiDAR 通道 0.65-0.9m）
+            "narrow_gap_prob": 0.40,
+            "narrow_gap_max_pairs": 2,
+            "narrow_gap_center_dist_range": (1.9, 2.2),
+            "narrow_gap_align_to_goal": True,
             # goal 隨機移動（SA6: 中快速 random_walk）
             "goal_move_speed": 0.20,            # 線速度 (m/s)，↑ from 0.15
             "goal_move_max_radius": 2.5,        # 最大漫遊半徑 (m)，↑ from 2.0
@@ -628,6 +641,11 @@ STAGES = [
             # 目標附近障礙物
             "obs_near_goal_count": 2,           # goal 附近強制生成的障礙物數量（0=關閉）
             "obs_near_goal_radius": 2.0,        # goal 附近多少米範圍內生成障礙物
+            # narrow-gap pairs: SA7 最高機率 + max 2 對（D 1.8-2.1m → LiDAR 通道 0.6-0.8m）
+            "narrow_gap_prob": 0.50,
+            "narrow_gap_max_pairs": 2,
+            "narrow_gap_center_dist_range": (1.8, 2.1),
+            "narrow_gap_align_to_goal": True,
             # goal 隨機移動（SA7: 快速 patrol）
             "goal_move_speed": 0.25,            # 線速度 (m/s)，↑ from 0.20
             "goal_move_max_radius": 3.0,        # 最大漫遊半徑 (m)，↑ from 2.5
@@ -895,6 +913,17 @@ def _flatten_phase(phase: dict) -> dict:
         # goal 附近障礙物
         "obs_near_goal_count": float(scene.get("obs_near_goal_count", 0)),
         "obs_near_goal_radius": float(scene.get("obs_near_goal_radius", 2.0)),
+
+        # narrow-gap pairs: 機率性窄通道（policy 偶爾遇到通道，學穿越）
+        # narrow_gap_prob: 每對 pair 對每個 env 獨立 roll 的命中機率
+        # narrow_gap_max_pairs: 每次 reset 最多嘗試生成幾對
+        # 舊欄位 narrow_gap_pairs 維持向後相容（=N 時 → prob=1.0, max_pairs=N）
+        "narrow_gap_prob": float(scene.get("narrow_gap_prob",
+                                           1.0 if int(scene.get("narrow_gap_pairs", 0)) > 0 else 0.0)),
+        "narrow_gap_max_pairs": int(scene.get("narrow_gap_max_pairs",
+                                              int(scene.get("narrow_gap_pairs", 0)))),
+        "narrow_gap_center_dist_range": tuple(scene.get("narrow_gap_center_dist_range", (1.8, 2.4))),
+        "narrow_gap_align_to_goal": bool(scene.get("narrow_gap_align_to_goal", True)),
 
         # goal 隨機移動
         "goal_move_speed": float(scene.get("goal_move_speed", 0.0)),

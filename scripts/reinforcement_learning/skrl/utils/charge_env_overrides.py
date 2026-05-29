@@ -499,6 +499,9 @@ def apply_charge_env_overrides(env_cfg, args_cli):
     if getattr(args_cli, "lidar_no_noise", False) or not getattr(args_cli, "lidar_no_noise", True):
         changed = True
 
+    # --- Actuator DR (action delay, velocity scaling, motor lag) ---
+    _apply_actuator_dr_config(env_cfg, args_cli)
+
     # --- Physics / Disturbance / Actuator DR param overrides ---
     _apply_dr_param_overrides(env_cfg, args_cli)
     changed = True
@@ -553,22 +556,49 @@ def _apply_lidar_noise_config(env_cfg, args_cli):
     When lidar_no_noise=False, individual params are applied from YAML.
     """
     if getattr(args_cli, "lidar_no_noise", False):
-        # Legacy path: disable all noise
+        # Noise-only path: 歸零隨機 noise（每 step 變化），但保留 bias（硬體屬性）
+        # bias 是「這台機器人的固定特性」，連 SA1 bootstrap 也該訓 policy 適應
+        # 只關掉真正的「random noise」: displacement / hole / distractor / obs term noise
         for gn, tn, term in _find_lidar_obs_terms(env_cfg):
             params = term.params
             if "displacement_std" in params:
                 params["displacement_std"] = 0.0
+            if "displacement_std_per_meter" in params:
+                params["displacement_std_per_meter"] = 0.0
+            if "displacement_std_soft" in params:
+                params["displacement_std_soft"] = 0.0
             if "hole_rate" in params:
                 params["hole_rate"] = 0.0
             if "distractor_rate" in params:
                 params["distractor_rate"] = 0.0
             if hasattr(term, "noise"):
                 term.noise = None
-        print("[SIM2REAL] lidar_no_noise=True → all LiDAR noise disabled")
+            # 仍處理 bias（如果 yaml 啟用）— 不視為 "noise"
+            if getattr(args_cli, "lidar_distance_bias", False):
+                dr_k = getattr(args_cli, "lidar_distance_bias_k_dr", None)
+                dr_b = getattr(args_cli, "lidar_distance_bias_b_dr", None)
+                if dr_k and dr_b:
+                    params["distance_bias_k_dr_min"] = dr_k[0]
+                    params["distance_bias_k_dr_max"] = dr_k[1]
+                    params["distance_bias_b_dr_min"] = dr_b[0]
+                    params["distance_bias_b_dr_max"] = dr_b[1]
+                else:
+                    params["distance_bias_k"] = 0.021
+                    params["distance_bias_b"] = -0.030
+            if getattr(args_cli, "lidar_per_ring_bias", False):
+                params["per_ring_bias"] = True
+        _dist_on = getattr(args_cli, "lidar_distance_bias", False)
+        _ring_on = getattr(args_cli, "lidar_per_ring_bias", False)
+        print(
+            f"[SIM2REAL] lidar_no_noise=True → random noise off, "
+            f"bias kept: dist_bias={'ON' if _dist_on else 'OFF'} "
+            f"ring_bias={'ON' if _ring_on else 'OFF'}"
+        )
         return
 
     # Fine-grained per-param configuration
     disp_std = getattr(args_cli, "lidar_displacement_std", None)
+    disp_std_per_meter = getattr(args_cli, "lidar_displacement_std_per_meter", None)
     hole_rate = getattr(args_cli, "lidar_hole_rate", None)
     distractor_rate = getattr(args_cli, "lidar_distractor_rate", None)
     obs_noise_std = getattr(args_cli, "lidar_obs_noise_std", None)
@@ -577,6 +607,9 @@ def _apply_lidar_noise_config(env_cfg, args_cli):
     block_dropout_prob = getattr(args_cli, "lidar_block_dropout_prob", 0.0)
     block_dropout_width = getattr(args_cli, "lidar_block_dropout_width", (3, 8))
     disp_std_dr = getattr(args_cli, "lidar_displacement_std_dr", None)
+    disp_std_per_meter_dr = getattr(args_cli, "lidar_displacement_std_per_meter_dr", None)
+    disp_std_soft = getattr(args_cli, "lidar_displacement_std_soft", None)
+    disp_std_soft_dr = getattr(args_cli, "lidar_displacement_std_soft_dr", None)
     hole_rate_dr = getattr(args_cli, "lidar_hole_rate_dr", None)
 
     any_set = False
@@ -584,8 +617,15 @@ def _apply_lidar_noise_config(env_cfg, args_cli):
         params = term.params
 
         # Layer 1: Per-Ray params
-        if disp_std is not None and "displacement_std" in params:
+        if disp_std_per_meter is not None:
+            params["displacement_std_per_meter"] = disp_std_per_meter
+            params["displacement_std"] = 0.0  # disable legacy fixed-σ
+            any_set = True
+        elif disp_std is not None and "displacement_std" in params:
             params["displacement_std"] = disp_std
+            any_set = True
+        if disp_std_soft is not None:
+            params["displacement_std_soft"] = disp_std_soft
             any_set = True
         if hole_rate is not None and "hole_rate" in params:
             params["hole_rate"] = hole_rate
@@ -595,9 +635,22 @@ def _apply_lidar_noise_config(env_cfg, args_cli):
             any_set = True
 
         # Layer 1 NEW: distance-dependent bias & per-ring bias
+        # distance_bias 兩種模式：
+        #   (a) DR 範圍：per-episode 採樣 k,b（不假設模型形狀，推薦）
+        #   (b) 固定 k,b：legacy linear fit（R²=0.58，已知殘差有結構）
         if distance_bias:
-            params["distance_bias_k"] = 0.021
-            params["distance_bias_b"] = -0.030
+            dr_k = getattr(args_cli, "lidar_distance_bias_k_dr", None)
+            dr_b = getattr(args_cli, "lidar_distance_bias_b_dr", None)
+            if dr_k and dr_b:
+                # DR mode: per-episode sampling
+                params["distance_bias_k_dr_min"] = dr_k[0]
+                params["distance_bias_k_dr_max"] = dr_k[1]
+                params["distance_bias_b_dr_min"] = dr_b[0]
+                params["distance_bias_b_dr_max"] = dr_b[1]
+            else:
+                # Legacy fixed mode
+                params["distance_bias_k"] = 0.021
+                params["distance_bias_b"] = -0.030
             any_set = True
         if per_ring_bias:
             params["per_ring_bias"] = True
@@ -619,10 +672,19 @@ def _apply_lidar_noise_config(env_cfg, args_cli):
             term.noise = None
             any_set = True
 
-        # Layer 3: Per-episode DR ranges
-        if disp_std_dr is not None:
+        # Layer 3: Per-episode DR ranges (distance-dependent, preferred)
+        if disp_std_per_meter_dr is not None:
+            params["displacement_std_per_meter_dr_min"] = disp_std_per_meter_dr[0]
+            params["displacement_std_per_meter_dr_max"] = disp_std_per_meter_dr[1]
+            any_set = True
+        elif disp_std_dr is not None:
+            # legacy fixed-σ DR (kept for backward compat, absorbed by function)
             params["displacement_std_dr_min"] = disp_std_dr[0]
             params["displacement_std_dr_max"] = disp_std_dr[1]
+            any_set = True
+        if disp_std_soft_dr is not None:
+            params["displacement_std_soft_dr_min"] = disp_std_soft_dr[0]
+            params["displacement_std_soft_dr_max"] = disp_std_soft_dr[1]
             any_set = True
         if hole_rate_dr is not None:
             params["hole_rate_dr_min"] = hole_rate_dr[0]
@@ -640,6 +702,44 @@ def _apply_lidar_noise_config(env_cfg, args_cli):
         )
         if disp_std_dr:
             print(f"[SIM2REAL]   L3 DR: disp_σ∈{disp_std_dr} hole∈{hole_rate_dr}")
+        if disp_std_soft_dr:
+            print(f"[SIM2REAL]   L3 DR: soft_σ∈{disp_std_soft_dr} (human target noise)")
+
+
+def _apply_actuator_dr_config(env_cfg, args_cli):
+    """Wire actuator DR (action delay, velocity scaling, motor lag) into ActionsCfg.
+
+    Reads enable_actuator_dr / actuator_delay_range / actuator_velocity_scale /
+    actuator_motor_lag from args_cli and sets them on env_cfg.actions.diff_drive.
+    Safe no-op if action term does not expose these fields (legacy configs).
+    """
+    if not getattr(args_cli, "enable_actuator_dr", False):
+        return
+
+    actions = getattr(env_cfg, "actions", None)
+    if actions is None:
+        return
+    diff = getattr(actions, "diff_drive", None)
+    if diff is None or not hasattr(diff, "enable_actuator_dr"):
+        return  # action term doesn't support actuator DR (e.g. legacy continuous drive)
+
+    diff.enable_actuator_dr = True
+    delay_range = getattr(args_cli, "actuator_delay_range", None)
+    if delay_range is not None:
+        diff.actuator_delay_range = tuple(delay_range)
+    vel_scale = getattr(args_cli, "actuator_velocity_scale", None)
+    if vel_scale is not None:
+        diff.actuator_velocity_scale = tuple(vel_scale)
+    motor_lag = getattr(args_cli, "actuator_motor_lag", None)
+    if motor_lag is not None:
+        diff.actuator_motor_lag = float(motor_lag)
+
+    print(
+        f"[SIM2REAL] Actuator DR: "
+        f"delay={diff.actuator_delay_range} steps, "
+        f"vel_scale={diff.actuator_velocity_scale}, "
+        f"motor_lag α={diff.actuator_motor_lag}"
+    )
 
 
 def _apply_dr_param_overrides(env_cfg, args_cli):

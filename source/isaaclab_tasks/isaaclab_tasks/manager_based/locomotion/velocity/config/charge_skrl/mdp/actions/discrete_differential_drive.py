@@ -124,6 +124,13 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         Args:
             actions: [num_envs, 2] float — NN 輸出的 [accel_idx, omega_idx]
         """
+        # --- Actuator DR Step 1: action delay (before decoding) ---
+        if self.cfg.enable_actuator_dr:
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.domain_randomization.actuator_dr import (
+                apply_action_delay,
+            )
+            actions = apply_action_delay(self._env, actions, self.cfg.actuator_delay_range)
+
         self._raw_actions[:] = actions
 
         # ── 第一步：直接取兩個獨立索引 ──
@@ -178,6 +185,22 @@ class DiscreteDifferentialDriveAction(ActionTerm):
 
         # ── 第六步：速度積分 ──
         next_velocity = (v + actual_linear_accel * dt).clamp(-v_max, +v_max)
+
+        # --- Actuator DR Step 2 & 3: velocity scaling + motor lag ---
+        # Applied to target velocity (next_velocity, actual_angular_vel) before being written to sim
+        if self.cfg.enable_actuator_dr:
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.domain_randomization.actuator_dr import (
+                apply_velocity_scaling,
+                apply_motor_response_lag,
+            )
+            # Stack [N, 2] = (v, ω)
+            target_vel = torch.stack([next_velocity, actual_angular_vel], dim=1)
+            target_vel = apply_velocity_scaling(self._env, target_vel, self.cfg.actuator_velocity_scale)
+            target_vel = apply_motor_response_lag(self._env, target_vel, self.cfg.actuator_motor_lag)
+            next_velocity = target_vel[:, 0].clamp(-v_max, +v_max)
+            actual_angular_vel = target_vel[:, 1].clamp(
+                -self.cfg.max_angular_vel, self.cfg.max_angular_vel
+            )
 
         # ── 第七步：正規化 → ā_t, ω̄_t ──
         self._a_bar[:] = actual_linear_accel / a_max
@@ -316,3 +339,9 @@ class DiscreteDifferentialDriveActionCfg(ActionTermCfg):
     max_angular_vel: float = 0.25 * math.pi          # rad/s ≈ 0.7854
 
     debug_vis: bool = True
+
+    # --- Actuator domain randomization (off by default) ---
+    enable_actuator_dr: bool = False
+    actuator_delay_range: tuple[int, int] = (0, 2)         # [lo, hi] action delay steps (per-env, per-episode)
+    actuator_velocity_scale: tuple[float, float] = (0.9, 1.1)  # per-episode velocity scale per (v, ω)
+    actuator_motor_lag: float = 0.3                         # 1st-order low-pass α (0=no response, 1=instant)

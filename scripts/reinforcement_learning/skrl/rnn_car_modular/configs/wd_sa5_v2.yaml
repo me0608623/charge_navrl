@@ -104,7 +104,9 @@ zero_preprocess_feature_for_rl: false
 
 # --- LiDAR (SA5: full TLNI + per-ring bias + per-episode DR) ---
 lidar_no_noise: false
-lidar_displacement_std: 0.002
+lidar_displacement_std_per_meter: 0.00036
+lidar_displacement_std_soft: 0.0
+lidar_displacement_std: 0.0
 lidar_hole_rate: 0.20
 lidar_distractor_rate: 0.002
 lidar_distance_bias: true
@@ -112,8 +114,13 @@ lidar_per_ring_bias: true
 lidar_obs_noise_std: 0.005
 lidar_block_dropout_prob: 0.10
 lidar_block_dropout_width: [3, 8]
-lidar_displacement_std_dr: [0.0005, 0.005]
+lidar_displacement_std_per_meter_dr: [0.00020, 0.00060]
+lidar_displacement_std_soft_dr: [0.002, 0.020]
+lidar_displacement_std_dr: null
 lidar_hole_rate_dr: [0.15, 0.30]
+# distance_bias DR: per-episode 採樣，涵蓋實測 ±36mm（不假設線性模型形狀）
+lidar_distance_bias_k_dr: [-0.012, 0.012]   # SA5: 涵蓋多數 sensor 個體（5m 處 ±60mm）
+lidar_distance_bias_b_dr: [-0.030, 0.030]   # ±30mm offset
 
 # --- Sim-to-Real DR ---
 no_domain_randomization: false
@@ -123,7 +130,10 @@ physics_com_offset: 0.05
 disturbance_wind_force: [0.0, 3.0]
 disturbance_push_force: [5.0, 20.0]
 disturbance_push_ratio: 0.10
-enable_actuator_dr: false
+enable_actuator_dr: true              # 與 SA4 progressive：略升
+actuator_delay_range: [0, 2]          # 0–400ms delay
+actuator_velocity_scale: [0.94, 1.06] # ±6% motor efficiency variation
+actuator_motor_lag: 0.42              # rise time ~0.55s
 
 # Observation latency DR (SA5: 50% chance 1-step delay)
 obs_delay_steps: [0, 1]

@@ -2319,18 +2319,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO] obs_dim={obs_dim}, max_active_obstacles={N_obs}")
 
     # --- Charge policy / WD-like obs path ---
-    # IsaacLab 完整觀測是 139D：
+    # IsaacLab 觀測（2026-05-27 起移除 60D 障礙物，env 觀測 = 79D）：
     #   [0:4]   ego state: accel, vel, omega, radius
     #   [4:6]   goal (x, y)
     #   [6:78]  72-bin LiDAR（5° 解析度）
-    #   [78:138] TopK obstacles 60D（10個 × 6D：body-frame x,y,vx,vy,r,mask）
-    #   [138]   time (episode timestep / episode_length)
+    #   [78]    time (episode timestep / episode_length)
+    #   （舊 139D 佈局的 [78:138] 60D TopK obstacles 已從 PolicyCfg/CriticCfg 移除）
     #
     # 三種 obs 路徑（由 --charge_encoder_mode 選擇）：
-    #   extractor_rnn: 完整 139D → Conv1d LiDAR extractor(96D) → FC → RNN → 12D → RL
-    #   raw_fc_rnn:    legacy 79D ([0:78]+[138]) → FC → RNN → 12D → RL（更簡單）
-    #   wd_exact_rnn:  重組為 WD 的 113D 格式（17D base + 60D obs + 36D LiDAR pair-pooled）
-    POLICY_OBS_INDICES = list(range(0, 78)) + [138]   # legacy 79D 的索引
+    #   extractor_rnn: 79D → Conv1d LiDAR extractor → FC → RNN → 12D → RL（SA1_v2 用此）
+    #   raw_fc_rnn:    79D → FC → RNN → 12D → RL（更簡單）
+    #   wd_exact_rnn:  ⚠️ 需要 60D 障礙物重組 113D，已不相容 79D env（v2 不使用）
+    # obs_dim 由 env.observation_space 動態取得（79D）；POLICY_OBS_INDICES 選全部 79D。
+    OBS_DIM_RUNTIME = env.observation_space.shape[-1]   # 79D（移除 60D 後）
+    if OBS_DIM_RUNTIME >= 139:
+        POLICY_OBS_INDICES = list(range(0, 78)) + [138]   # 舊 139D 佈局相容（fallback）
+    else:
+        POLICY_OBS_INDICES = list(range(0, OBS_DIM_RUNTIME))   # 79D：全選（time 在 78）
     _policy_obs_idx = torch.tensor(POLICY_OBS_INDICES, dtype=torch.long, device=device)
     wd_exact_mode = (args_cli.charge_encoder_mode == "wd_exact_rnn")   # 是否使用 WD 精確模式
     use_extractor = (args_cli.charge_encoder_mode == "extractor_rnn")  # 是否使用 Conv1d extractor

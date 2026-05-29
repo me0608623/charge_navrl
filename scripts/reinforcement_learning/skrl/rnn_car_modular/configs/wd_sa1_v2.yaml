@@ -100,18 +100,25 @@ aux_seq_batch_size: 256
 aux_grad_clip: 0.5
 zero_preprocess_feature_for_rl: false
 
-# --- LiDAR (SA1: clean, no noise) ---
-lidar_no_noise: true
+# --- LiDAR (SA1: clean noise OFF, but bias + per_ring ON 從一開始適應硬體特性) ---
+lidar_no_noise: true   # 不加 random noise（保留 clean bootstrap）
+lidar_distance_bias: true               # 但啟用 bias（硬體屬性）
+lidar_distance_bias_k_dr: [-0.005, 0.005]   # SA1: 5m 處最壞 ±37mm（小範圍 intro）
+lidar_distance_bias_b_dr: [-0.012, 0.012]   # ±12mm offset
+lidar_per_ring_bias: true               # 啟用 16 通道偏差
 no_domain_randomization: false
 
-# --- Sim-to-Real DR (SA1: physics + disturbance only, no LiDAR noise) ---
+# --- Sim-to-Real DR (SA1: physics + disturbance + light actuator) ---
 physics_mass_dr: [0.85, 1.15]
 physics_friction_dr: [0.7, 1.3]
 physics_com_offset: 0.05
 disturbance_wind_force: [0.0, 3.0]
 disturbance_push_force: [5.0, 20.0]
 disturbance_push_ratio: 0.10
-enable_actuator_dr: false
+enable_actuator_dr: true                    # SA1+: 從零開始適應馬達特性
+actuator_delay_range: [0, 1]               # 0–200ms delay（輕度）
+actuator_velocity_scale: [0.97, 1.03]      # ±3% motor variation（輕度）
+actuator_motor_lag: 0.5                     # rise time ~0.4s
 
 # Observation latency DR (SA1: off)
 obs_delay_steps: [0, 0]
