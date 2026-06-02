@@ -81,18 +81,21 @@ class LidarStateExtractor(nn.Module):
       （等同 WD per-index Linear 精神，前面多了卷積特徵抽取）。
       ⚠️ lidar_proj 形狀由 (64→64) 變為 (1152→64)，與舊 checkpoint 不相容，
          該層需重新初始化；其餘層（conv / state / 下游 RNN+head）形狀不變可遷移。
-      未來可選：Conv1d padding_mode='circular' 修正 360°↔0° 環狀邊界。
+      Conv1d padding_mode='circular'：LiDAR 角度環狀，零填充會割斷 355°↔0° 連續性
+      （影響正前方那段角度的卷積特徵），改環狀填充修正；不改 tensor 形狀、不影響相容性。
     """
 
     def __init__(self):
         super().__init__()
         # Branch 1: LiDAR Conv1d
+        # padding_mode='circular'：LiDAR 角度為環狀（bin71 355° ↔ bin0 0° 是鄰居），
+        # 零填充會在邊界假裝外面是空的，割斷正前方那段角度的卷積連續性 → 用環狀填充修正。
         self.lidar_conv = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=5, padding=2),
+            nn.Conv1d(1, 32, kernel_size=5, padding=2, padding_mode="circular"),
             nn.ReLU(),
-            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),
+            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, padding_mode="circular"),
             nn.ReLU(),
-            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1, padding_mode="circular"),
             nn.ReLU(),
         )
         # flatten 角度軸 → Linear，保留每個角度位置的身份（取代 AdaptiveMaxPool1d）
