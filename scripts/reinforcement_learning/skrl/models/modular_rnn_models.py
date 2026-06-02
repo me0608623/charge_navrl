@@ -55,6 +55,8 @@ TIME_START, TIME_END = 78, 79    # remaining ratio (was 138:139 when obs=139D)
 
 STATE_DIM = 7     # ego(4) + goal(2) + time(1)
 LIDAR_DIM = 72
+LIDAR_CONV_CH = 64           # Conv1d 最終 channel 數
+LIDAR_CONV_LEN = LIDAR_DIM // 4  # 72 → 18，經兩次 stride=2 卷積後的角度軸長度
 USED_OBS_DIM = 79  # 4 + 2 + 72 + 1
 RAW_OBS_DIM = 79   # env output dim (no TopK)
 NUM_BINS = 19
@@ -69,6 +71,17 @@ class LidarStateExtractor(nn.Module):
     """2-branch extractor: LiDAR Conv1d (64D) + StateMLP (32D) = 96D.
 
     從 79D env obs 中取 LiDAR(72D) 和 state(7D) 部分。保留 WD modular principle，無 TopK obs。
+
+    角度語意 (2026-06-02 變更):
+      原本 Conv1d → AdaptiveMaxPool1d(1) 在角度軸做 global max pooling，
+      把 18 個 spatial tokens 壓成 channel-wise scalar → translation-invariant，
+      丟失「障礙在哪個方位角」的定位資訊（policy 無法定位 static walls）。
+      改為 Conv1d → flatten → Linear：flatten 保留 18 個角度位置為獨立 input index，
+      Linear 對每個位置有獨立權重 → translation-equivariant，角度身份保留
+      （等同 WD per-index Linear 精神，前面多了卷積特徵抽取）。
+      ⚠️ lidar_proj 形狀由 (64→64) 變為 (1152→64)，與舊 checkpoint 不相容，
+         該層需重新初始化；其餘層（conv / state / 下游 RNN+head）形狀不變可遷移。
+      未來可選：Conv1d padding_mode='circular' 修正 360°↔0° 環狀邊界。
     """
 
     def __init__(self):
@@ -82,8 +95,8 @@ class LidarStateExtractor(nn.Module):
             nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
         )
-        self.lidar_pool = nn.AdaptiveMaxPool1d(1)
-        self.lidar_proj = nn.Linear(64, 64)
+        # flatten 角度軸 → Linear，保留每個角度位置的身份（取代 AdaptiveMaxPool1d）
+        self.lidar_proj = nn.Linear(LIDAR_CONV_CH * LIDAR_CONV_LEN, 64)  # 1152 → 64
         self.lidar_ln = nn.LayerNorm(64)
 
         # Branch 2: State MLP (ego + goal + time = 7D)
@@ -108,7 +121,7 @@ class LidarStateExtractor(nn.Module):
         """
         lidar = obs[:, LIDAR_START:LIDAR_END].unsqueeze(1)   # [B, 1, 72]
         lidar = self.lidar_conv(lidar)                        # [B, 64, 18]
-        lidar = self.lidar_pool(lidar).squeeze(-1)            # [B, 64]
+        lidar = lidar.flatten(1)                              # [B, 64*18=1152]  保留角度位置
         lidar = self.lidar_ln(self.lidar_proj(lidar))         # [B, 64]
 
         ego = obs[:, EGO_START:EGO_END]                       # [B, 4]
