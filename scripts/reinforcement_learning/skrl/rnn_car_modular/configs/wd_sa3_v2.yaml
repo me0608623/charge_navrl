@@ -3,8 +3,11 @@
 # 用法：
 #   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
 #     --experiment_config wd_sa3_v2 --headless \
-#     --checkpoint logs/rnn_car/<sa2_v2_run>/checkpoint_XXXXXX.pt \
+#     --checkpoint logs/rnn_car/sa2_v2_lidar2_ne1024_s42/checkpoint_390000.pt \
 #     --run_name sa3_v2_ne1024_s42
+#
+# 起點 ckpt：sa2_v2_lidar2 全程 vexp 峰值（0.8199 / SR 98.94% / obsCR 0.91%）
+# 已修：4 個 LiDAR 噪聲指標（hole-masked min, see train_rnn_car_wdclip.py:1764+）
 
 name: wd_sa3_v2
 description: "SA3 v2: Wall crossing, full LiDAR noise + block dropout 5%, asymmetric critic, RNN64, vel aux 13D."
@@ -143,7 +146,7 @@ log_interval: 10
 save_interval: 100
 
 # --- Checkpoint / resume ---
-checkpoint: null
+checkpoint: logs/rnn_car/sa2_v2_lidar2_ne1024_s42/checkpoint_390000.pt    # SA2_v2_lidar2 全程 vexp 峰值 (0.8199 / SR 98.94% / obsCR 0.91%)
 no_resume_optimizer: true
 
 # --- Metadata ---

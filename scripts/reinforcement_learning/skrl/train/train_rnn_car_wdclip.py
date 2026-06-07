@@ -1578,6 +1578,16 @@ class MetricsCollector:
         self._action_omega: list[float] = []
         self._action_speed_accel_rows: list[list[float]] = []
 
+        # --- LiDAR-noise impact diagnostics (post-noise, normalized to [0, 1]) ---
+        # step-mean of per-env min(lidar) → 0 means right at obstacle, 1 = clear
+        self._lidar_min_step: list[float] = []
+        # step-mean number of near-zero rays per env (proxy for hole_rate effect)
+        self._lidar_zero_count_step: list[float] = []
+        # step-mean speed_x conditioned on min(lidar) < LIDAR_NEAR_THRESH
+        # (only logged when at least one env is near an obstacle)
+        self._action_speed_x_near_obs: list[float] = []
+        self._lidar_near_obs_env_count: list[float] = []
+
         # --- Termination counters ---
         self._goal_reached = 0
         self._collision = 0           # total: wall + obstacle + geometric
@@ -1750,6 +1760,44 @@ class MetricsCollector:
             self._action_speed_x.append(v_x.float().mean().item())
             self._action_accel_x.append(a_x.float().mean().item())
             self._action_omega.append(omega.float().mean().item())
+
+        # --- LiDAR-noise impact diagnostics ---
+        # obs is 139D: [ego(4) + goal(2) + lidar(72) + obstacles(60) + time(1)]
+        # lidar slice [6:78] is normalized to [0, 1] where 0=at-obstacle, 1=at-max-range.
+        # See observations/functions.py:75 — normalized = distances / max_range.
+        #
+        # FIX (2026-06-06): raw min(lidar) is dominated by hole_rate/distractor noise
+        # (post-noise rays ≈ 0 are not real obstacles). Mask holes first, then min.
+        # See feedback_lidar_min_metric_fix.md.
+        HOLE_MASK_THRESH = 0.02          # normalized ≈ 2% of max_range → treat as hole/distractor
+        LIDAR_NEAR_THRESH = 0.15         # normalized ≈ 15% of max_range → robust slowdown region
+        if obs is not None and obs.dim() >= 2 and obs.shape[-1] >= 78:
+            lidar = obs[..., 6:78].detach()                                          # [E, 72]
+            # Hole counter (cheap, pre-mask) — proxy for hole_rate visible to policy
+            zero_count_per_env = (lidar < HOLE_MASK_THRESH).float().sum(dim=-1)      # [E]
+            self._lidar_zero_count_step.append(zero_count_per_env.mean().item())
+            # Hole-masked min: replace hole/distractor rays with +inf so they lose the min vote
+            lidar_clean = torch.where(
+                lidar < HOLE_MASK_THRESH,
+                torch.full_like(lidar, float("inf")),
+                lidar,
+            )
+            lidar_min_clean = lidar_clean.min(dim=-1).values                         # [E]
+            # If ALL rays are holes (degenerate), fall back to 1.0 (max-range, "no info")
+            all_holes_mask = torch.isinf(lidar_min_clean)
+            lidar_min_per_env = torch.where(
+                all_holes_mask,
+                torch.ones_like(lidar_min_clean),
+                lidar_min_clean,
+            )
+            self._lidar_min_step.append(lidar_min_per_env.mean().item())
+            # Speed when close to obstacle (using masked min)
+            near_mask = lidar_min_per_env < LIDAR_NEAR_THRESH                        # [E] bool
+            n_near = int(near_mask.sum().item())
+            if n_near > 0 and charge_actions is not None:
+                v_near = v_x[near_mask].float().mean().item()
+                self._action_speed_x_near_obs.append(v_near)
+                self._lidar_near_obs_env_count.append(float(n_near))
 
             remaining = self.action_table_sample_size - len(self._action_speed_accel_rows)
             if remaining > 0:
@@ -1994,6 +2042,18 @@ class MetricsCollector:
             m["charge/accel_x_std_over_steps"] = np.std(self._action_accel_x)
             m["charge/omega_std_over_steps"] = np.std(self._action_omega)
 
+        # --- LiDAR-noise impact diagnostics ---
+        # lidar_min_step_mean : mean of per-env min(lidar) over the rollout (post-noise).
+        # lidar_zero_count_step_mean : avg # of near-zero rays per env per step (hole proxy).
+        # speed_x_near_obs_mean : speed_x conditioned on at-least-one-env close to obstacle.
+        # near_obs_env_count_mean : how many envs were "near obstacle" per step (denominator).
+        if self._lidar_min_step:
+            m["charge/lidar_min_step_mean"] = float(np.mean(self._lidar_min_step))
+            m["charge/lidar_zero_count_step_mean"] = float(np.mean(self._lidar_zero_count_step))
+        if self._action_speed_x_near_obs:
+            m["charge/speed_x_near_obs_mean"] = float(np.mean(self._action_speed_x_near_obs))
+            m["charge/near_obs_env_count_mean"] = float(np.mean(self._lidar_near_obs_env_count))
+
         # --- All Isaac Lab reward terms (raw) ---
         for k, vals in self._reward_terms.items():
             if vals:
@@ -2092,6 +2152,10 @@ class MetricsCollector:
         self._action_accel_x.clear()
         self._action_omega.clear()
         self._action_speed_accel_rows.clear()
+        self._lidar_min_step.clear()
+        self._lidar_zero_count_step.clear()
+        self._action_speed_x_near_obs.clear()
+        self._lidar_near_obs_env_count.clear()
         self._goal_reached = 0
         self._collision = 0
         self._wall_collision = 0
