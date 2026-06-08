@@ -224,6 +224,26 @@ PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_ch
 - 不要修改 `--task` 名稱，消融實驗全靠 CLI 參數切換
 - 所有新 CLI 參數預設值 = baseline 行為
 
+## v3 改動 (2026-06-08)
+
+從 `wd_sa1_v3` 起的新版本，與 v2 不相容（obs distribution + reward 都不同）：
+
+| 改動 | 數值 |
+|------|------|
+| LiDAR `r_min` | 0.9 → **0.25** (VLP-16 實測：表面→人物中心 0.2m + 物理半徑 0.0515m) |
+| Reward `penalty_smoothness` | 0 → **0.005** (全 stage，抗單幀抽動，作 inductive bias) |
+| Curriculum | 新建 `warp_drive_single_agent_v3` |
+| 新監控指標 | `jitter/per_env_omega_std_p95`、`jitter/per_env_ratio_flip_rate_p95` (抽 16 envs) |
+
+**啟動指令**:
+```bash
+PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+  --experiment_config wd_sa1_v3 --headless \
+  --run_name sa1_v3_ne1024_s42
+```
+
+⚠️ v3 不能 resume v1/v2 ckpt — 必須從頭訓練。
+
 ## MARL RNN 備忘
 
 - `scripts/reinforcement_learning/skrl/train_marl_rnn.py` 已支援 `--grad-clip-mode {merged,separate}`。

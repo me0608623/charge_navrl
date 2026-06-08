@@ -146,7 +146,7 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
     # VLP-16 LiDAR: 16 channels, 360 horizontal, 1.0 deg res, max 20m
     lidar = MultiMeshRayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/charger_rover_urdf5/base_link",
-        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 1.6)),
+        offset=MultiMeshRayCasterCfg.OffsetCfg(pos=(0.0, 0.0, 1.43)),
         ray_alignment="yaw",
         pattern_cfg=patterns.LidarPatternCfg(
             channels=16,
@@ -182,7 +182,7 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
 
         room_size = 8.0
         wall_thickness = 0.2
-        wall_height = 3.0   # ★ 真實牆 3m，高於 VLP16 (z=1.6m)，確保 LiDAR 可見
+        wall_height = 3.0   # ★ 真實牆 3m，高於 VLP16 (z=1.43m)，確保 LiDAR 可見
         wall_length = room_size * 2 + wall_thickness
         wall_color = (0.5, 0.5, 0.5)
 
@@ -244,7 +244,7 @@ class MySceneCfgVLP16(InteractiveSceneCfg):
         # 實際使用數量由 event params 的 num_obstacles_static/dynamic 控制
         # 觀測只取 Top-K=10 最近的（obs 維度不變 60D）
         HIDDEN_Z = -10.0
-        # ★ 行人高度 (1.6~1.8m)：確保 VLP16 LiDAR (z=1.6m, lowest beam -15°) 可觀測
+        # ★ 行人高度 (1.6~1.8m)：確保 VLP16 LiDAR (z=1.43m, lowest beam -15°) 可觀測
         _obstacle_templates = [
             {"type": "cuboid",   "size": (0.5, 0.5, 1.7),   "color": (0.8, 0.2, 0.2)},
             {"type": "cylinder", "radius": 0.3, "height": 1.6, "color": (0.8, 0.8, 0.2)},
@@ -327,7 +327,9 @@ class ActionsCfgVLP16:
         num_bins=19,
         max_linear_velocity=1.0,
         max_linear_accel=0.5,
-        max_angular_vel=2.0,    # 2026-05-28: 0.25π → 2.0 rad/s（與 _curriculum.py 同步）
+        max_angular_vel=1.2,    # 2026-06-02: 2.0 → 1.2 rad/s 對齊馬達 profile_omega_max
+        max_angular_accel=3.0,  # rad/s² 對齊 cmd filter slew，防止舞龍舞獅
+        reverse_velocity_scale=0.2,  # 反向上限 -0.2 m/s（前進偏好，防倒車鎖死）
     )
 
 
@@ -409,7 +411,7 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.9,         # ★ VLP-16 硬體盲區（實測 0.9m）
+                "r_min": 0.25,        # ★ VLP-16 實測：表面→人物中心 0.2m + LiDAR 半徑 0.0515m = 0.25m (v3)
                 "z_filter": 0.5,      # ★ 過濾地板/天花板/z=-10 鬼影
                 "displacement_std_per_meter": 0.0,   # σ(r)=k·r；SA2+ 由 YAML 覆蓋
                 "displacement_std": 0.0,             # legacy fixed-σ，不啟用
@@ -471,7 +473,7 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.9,
+                "r_min": 0.25,        # ★ VLP-16 實測：表面→人物中心 0.2m + LiDAR 半徑 0.0515m = 0.25m (v3)
                 "z_filter": 0.5,
                 "displacement_std_per_meter": 0.0,
                 "displacement_std": 0.0,

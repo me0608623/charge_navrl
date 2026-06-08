@@ -37,6 +37,7 @@ class WDSparseReward:
         penalty_timeout: float = 0.0,
         rl_fps: float = 5.0,
         cost_turn_rate: float = 0.5,
+        penalty_smoothness: float = 0.0,
     ) -> None:
         self.penalty_hit = penalty_hit
         self.reward_get_goal = reward_get_goal
@@ -44,13 +45,14 @@ class WDSparseReward:
         self.penalty_timeout = penalty_timeout
         self.rl_fps = rl_fps
         self.cost_turn_rate = cost_turn_rate
+        self.penalty_smoothness = penalty_smoothness
 
     def update_params(self, curriculum_info: dict) -> None:
         """Sync reward params from curriculum phase config.
 
         Expected keys (matching Phase Config flat schema):
             spot_penalty_hit, spot_reward_get_goal, spot_cost_operate,
-            spot_penalty_timeout
+            spot_penalty_timeout, spot_penalty_smoothness
         """
         if "spot_penalty_hit" in curriculum_info:
             self.penalty_hit = curriculum_info["spot_penalty_hit"]
@@ -60,6 +62,8 @@ class WDSparseReward:
             self.cost_operate = curriculum_info["spot_cost_operate"]
         if "spot_penalty_timeout" in curriculum_info:
             self.penalty_timeout = curriculum_info["spot_penalty_timeout"]
+        if "spot_penalty_smoothness" in curriculum_info:
+            self.penalty_smoothness = curriculum_info["spot_penalty_smoothness"]
 
     def compute(
         self,
@@ -69,7 +73,15 @@ class WDSparseReward:
         truncated: torch.Tensor,
         context: dict | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute WD sparse reward by delegating to canonical implementation."""
+        """Compute WD sparse reward by delegating to canonical implementation.
+
+        context (optional):
+            - prev_actions: torch.Tensor [N, 2] — previous step's actions, used for
+              frame-to-frame smoothness penalty (v3, anti-jitter)
+        """
+        prev_actions = None
+        if context is not None:
+            prev_actions = context.get("prev_actions")
         return compute_wd_charge_reward(
             env_unwrapped=env_unwrapped,
             actions=actions,
@@ -81,4 +93,6 @@ class WDSparseReward:
             penalty_timeout=self.penalty_timeout,
             rl_fps=self.rl_fps,
             cost_turn_rate=self.cost_turn_rate,
+            penalty_smoothness=self.penalty_smoothness,
+            prev_actions=prev_actions,
         )

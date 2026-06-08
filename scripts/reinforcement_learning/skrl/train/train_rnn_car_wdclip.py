@@ -1578,6 +1578,14 @@ class MetricsCollector:
         self._action_omega: list[float] = []
         self._action_speed_accel_rows: list[list[float]] = []
 
+        # --- v3: Per-env jitter sampling (16 random envs, per-env trajectories) ---
+        # 1024 envs 平均會掩蓋單 env 抽動 → 抽 16 個 env 個別記錄 omega + angular_idx 軌跡
+        # → flush 時計算每個 env 的 std / flip_rate，再取 p50 / p95 作為抽動真相指標
+        self._jitter_n_sample: int = 16
+        self._jitter_sample_ids: torch.Tensor | None = None  # set on first action; fixed across rollouts
+        self._jitter_omega_traj: list[list[float]] = []      # [n_sample][T] applied ω trajectory
+        self._jitter_ang_ratio_traj: list[list[float]] = []  # [n_sample][T] angular ratio trajectory
+
         # --- LiDAR-noise impact diagnostics (post-noise, normalized to [0, 1]) ---
         # step-mean of per-env min(lidar) → 0 means right at obstacle, 1 = clear
         self._lidar_min_step: list[float] = []
@@ -1760,6 +1768,26 @@ class MetricsCollector:
             self._action_speed_x.append(v_x.float().mean().item())
             self._action_accel_x.append(a_x.float().mean().item())
             self._action_omega.append(omega.float().mean().item())
+
+            # --- v3: Per-env jitter sampling ---
+            # 從 envs 隨機抽 jitter_n_sample 個 env（首次呼叫時固定 ids）
+            # 記錄個別 env 的 applied_omega 與 angular_ratio 軌跡，flush 時算 std / flip_rate
+            num_envs_total = omega.shape[0]
+            if self._jitter_sample_ids is None and num_envs_total > 0:
+                n_sample = min(self._jitter_n_sample, num_envs_total)
+                # deterministic by training seed: 用 torch.randperm 在 omega 的 device 上
+                self._jitter_sample_ids = torch.randperm(
+                    num_envs_total, device=omega.device
+                )[:n_sample]
+                self._jitter_omega_traj = [[] for _ in range(n_sample)]
+                self._jitter_ang_ratio_traj = [[] for _ in range(n_sample)]
+            if self._jitter_sample_ids is not None:
+                sampled_omega = omega[self._jitter_sample_ids].float().cpu().tolist()
+                # angular ratio: (ang_idx - 9) / 9 ∈ [-1, 1]
+                sampled_ratio = ((ang_idx[self._jitter_sample_ids].float() - 9.0) / 9.0).cpu().tolist()
+                for i, (o_val, r_val) in enumerate(zip(sampled_omega, sampled_ratio)):
+                    self._jitter_omega_traj[i].append(o_val)
+                    self._jitter_ang_ratio_traj[i].append(r_val)
 
         # --- LiDAR-noise impact diagnostics ---
         # obs is 139D: [ego(4) + goal(2) + lidar(72) + obstacles(60) + time(1)]
@@ -2042,6 +2070,27 @@ class MetricsCollector:
             m["charge/accel_x_std_over_steps"] = np.std(self._action_accel_x)
             m["charge/omega_std_over_steps"] = np.std(self._action_omega)
 
+        # --- v3: Per-env jitter p50/p95 (抽動真相) ---
+        # 注意：全 env 平均的 omega_std 會因為「不同 env 抽動相位不同」互相抵消
+        # 這裡用 sampled per-env trajectories 算 per-env std/flip-rate 再取 p50/p95
+        # → p95 才是抽動嚴重程度的真實指標
+        if self._jitter_omega_traj and len(self._jitter_omega_traj[0]) > 1:
+            FLIP_THRESH = 0.5  # |Δratio_ang| > 0.5 視為「抽動」(idx 9→13 以上)
+            per_env_omega_std = []
+            per_env_flip_rate = []
+            for omega_traj, ratio_traj in zip(self._jitter_omega_traj, self._jitter_ang_ratio_traj):
+                if len(omega_traj) > 1:
+                    per_env_omega_std.append(float(np.std(omega_traj)))
+                    ratio_arr = np.asarray(ratio_traj)
+                    delta = np.abs(np.diff(ratio_arr))
+                    per_env_flip_rate.append(float((delta > FLIP_THRESH).mean()))
+            if per_env_omega_std:
+                m["jitter/per_env_omega_std_p50"] = float(np.percentile(per_env_omega_std, 50))
+                m["jitter/per_env_omega_std_p95"] = float(np.percentile(per_env_omega_std, 95))
+                m["jitter/per_env_ratio_flip_rate_p50"] = float(np.percentile(per_env_flip_rate, 50))
+                m["jitter/per_env_ratio_flip_rate_p95"] = float(np.percentile(per_env_flip_rate, 95))
+                m["jitter/n_sample"] = float(len(per_env_omega_std))
+
         # --- LiDAR-noise impact diagnostics ---
         # lidar_min_step_mean : mean of per-env min(lidar) over the rollout (post-noise).
         # lidar_zero_count_step_mean : avg # of near-zero rays per env per step (hole proxy).
@@ -2152,6 +2201,12 @@ class MetricsCollector:
         self._action_accel_x.clear()
         self._action_omega.clear()
         self._action_speed_accel_rows.clear()
+        # v3: jitter sampling — keep _jitter_sample_ids (stable across rollouts)
+        # but clear trajectories so each rollout's p50/p95 is over fresh data
+        for traj in self._jitter_omega_traj:
+            traj.clear()
+        for traj in self._jitter_ang_ratio_traj:
+            traj.clear()
         self._lidar_min_step.clear()
         self._lidar_zero_count_step.clear()
         self._action_speed_x_near_obs.clear()
@@ -2868,11 +2923,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _spot_reward_get_goal = 40.0
     _spot_cost_operate = 0.03  # Phase 1 default (will update from curriculum)
     _spot_penalty_timeout = 0.0  # timeout penalty (0 = no penalty, SA6+)
+    _spot_penalty_smoothness = 0.0  # v3: anti-jitter Δratio penalty (will update from curriculum)
     _reward_module.update_params({
         "spot_penalty_hit": _spot_penalty_hit,
         "spot_reward_get_goal": _spot_reward_get_goal,
         "spot_cost_operate": _spot_cost_operate,
+        "spot_penalty_smoothness": _spot_penalty_smoothness,
     })
+
+    # --- v3: prev_actions buffer for smoothness penalty (anti-jitter) ---
+    # Initialize as None; populated after first action in rollout loop
+    _prev_actions = None  # type: torch.Tensor | None
 
     # --- WD entropy params (initial, safe defaults) ---
     # Conservative defaults (0.01/0.02) prevent entropy explosion on iter 0
@@ -3012,6 +3073,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _spot_reward_get_goal = metrics._curriculum_info.get("spot_reward_get_goal", 40.0)
         _spot_cost_operate = metrics._curriculum_info.get("spot_cost_operate", 0.0)
         _spot_penalty_timeout = metrics._curriculum_info.get("spot_penalty_timeout", 0.0)
+        _spot_penalty_smoothness = metrics._curriculum_info.get("spot_penalty_smoothness", 0.0)  # v3
         _reward_module.update_params(metrics._curriculum_info)
 
         # Sync WD entropy params from curriculum (per-phase, A2CK per-head)
@@ -3107,9 +3169,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             charge_action_diagnostics = compute_charge_action_diagnostics(env.unwrapped, actions)  # 物理動作診斷
 
             # Reward computation via modular dispatch (Phase 2)
+            # v3: pass prev_actions via context for frame-to-frame smoothness penalty
             reward_flat, reward_breakdown = _reward_module.compute(
                 env.unwrapped, actions, terminated, truncated,
+                context={"prev_actions": _prev_actions} if _prev_actions is not None else None,
             )
+            # Update prev_actions for next step (clone to detach from autograd graph)
+            _prev_actions = actions.detach().clone()
 
             # --- 2b. Heading stability：懲罰角速度符號翻轉（抗震盪）---
             # obs layout: [0]=accel [1]=speed [2]=omega ...
@@ -4066,6 +4132,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "phase_parameter/reward_get_goal": float(_spot_reward_get_goal),
                 "phase_parameter/penalty_hit": float(_spot_penalty_hit),
                 "phase_parameter/penalty_timeout": float(_spot_penalty_timeout),
+                "phase_parameter/penalty_smoothness": float(_spot_penalty_smoothness),  # v3
                 "phase_parameter/cost_operate": float(_spot_cost_operate),
                 "phase_parameter/obstacle_speed_rate": float(_obs_speed_limit),
                 "phase_parameter/obs_size_rand": float(_obs_size_rand),

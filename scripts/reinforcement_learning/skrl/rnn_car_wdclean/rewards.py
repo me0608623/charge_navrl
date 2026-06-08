@@ -45,6 +45,8 @@ def compute_wd_charge_reward(
     penalty_timeout: float = 0.0,
     rl_fps: float = 5.0,
     cost_turn_rate: float = 0.5,
+    penalty_smoothness: float = 0.0,
+    prev_actions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute Warp Drive style sparse reward for charge agent.
 
@@ -142,6 +144,20 @@ def compute_wd_charge_reward(
         action_reward = action_reward * alive.float()
         reward += action_reward
 
+    # --- Smoothness penalty (v3, 2026-06-08): 抑制單幀抽動 ---
+    # penalty_smoothness=0.005, |Δratio_ang|∈[0,2]
+    #   → 最壞每幀 -0.01，一 episode (300步) 最壞 -3.0 ≈ 20% collision penalty
+    #   → 實際平均 ~-0.3~-0.5/episode，僅作 inductive bias，不破壞主目標
+    smoothness_reward = torch.zeros(N, device=device)
+    if penalty_smoothness > 0 and actions is not None and prev_actions is not None:
+        ratio_ang_t = (actions[:, 1].float() - 9.0) / 9.0          # [-1, 1]
+        ratio_ang_prev = (prev_actions[:, 1].float() - 9.0) / 9.0  # [-1, 1]
+        delta_ang = (ratio_ang_t - ratio_ang_prev).abs()           # [0, 2]
+        smoothness_reward = -penalty_smoothness * delta_ang
+        alive = ~terminated_flat
+        smoothness_reward = smoothness_reward * alive.float()
+        reward += smoothness_reward
+
     # --- Timeout penalty (truncated but not terminated = episode 時間到但未碰撞/未到達目標) ---
     timeout_reward = torch.zeros(N, device=device)
     if penalty_timeout != 0.0:
@@ -153,6 +169,7 @@ def compute_wd_charge_reward(
         "goal_reward": goal_reward,              # WD: car goal reward
         "wall_hit_reward": wall_hit_reward,      # WD: car static obstacle reward
         "obs_hit_reward": obs_hit_reward,        # WD: car dynamic obstacle reward
+        "smoothness_reward": smoothness_reward,  # v3: anti-jitter penalty
         "timeout_reward": timeout_reward,        # timeout penalty
         "floor_reward": torch.zeros(N, device=device),  # WD: car floor reward (0 for flat)
         "action_reward": action_reward,          # WD: car dynamic reward (action cost)
