@@ -157,8 +157,11 @@ STAGES = [
         },
 
         "exploration": {
-            "entropy_linear": 0.01,
-            "entropy_angular": 0.02,
+            # v3b (2026-06-08): 加倍 ent_coeff，避免 SA1 過早收斂
+            # 前次 sa1_v3 iter 180 ent_ang 跌到 0.53（碰 YELLOW 線）+ p95_flip 反彈
+            # 配合 obs_delay [0,1] 一起測試
+            "entropy_linear": 0.02,
+            "entropy_angular": 0.04,
         },
 
         "behavior": {

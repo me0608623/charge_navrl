@@ -1,15 +1,20 @@
-# wd_sa1_v3 — SA1 v3: Bootstrap nav + r_min=0.25 + anti-jitter smoothness
+# wd_sa1_v3 — SA1 v3b: Bootstrap nav + r_min=0.25 + anti-jitter + obs_delay
 #
-# v3 與 v2 的差異 (2026-06-08):
-#   1. LiDAR r_min: 0.9 → 0.25 (VLP-16 實測：表面→人物中心 0.2m + 半徑 0.0515m)
-#   2. Reward 加 penalty_smoothness=0.005（curriculum v3 全 stage 套用）→ 抑制單幀抽動
-#   3. Curriculum 改用 warp_drive_single_agent_v3
-#   4. 從頭訓練，不能 resume v2 ckpt（obs distribution 與 reward 都不同）
+# v3b 與 v3 的差異 (2026-06-08，第二次嘗試):
+#   1. obs_delay_steps: [0,0] → [0,1] (0-200ms 觀測延遲，匹配真實 LiDAR 管線)
+#   2. ent_coeff_linear: 0.01 → 0.02 (避免 SA1 過早收斂)
+#   3. ent_coeff_angular: 0.02 → 0.04 (同上)
+#   4. SA1 curriculum entropy 同步加倍 (0.01/0.02 → 0.02/0.04)
 #
-# 用法：
+# v3 與 v2 的差異:
+#   1. LiDAR r_min: 0.9 → 0.25
+#   2. Reward 加 penalty_smoothness=0.005
+#   3. Curriculum: warp_drive_single_agent_v3
+#
+# 用法 (新 run_name 區分):
 #   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
 #     --experiment_config wd_sa1_v3 --headless \
-#     --run_name sa1_v3_ne1024_s42
+#     --run_name sa1_v3b_ne1024_s42
 
 name: wd_sa1_v3
 description: "SA1 v3: Bootstrap nav, r_min=0.25, anti-jitter smoothness=0.005, asymmetric critic, RNN64, vel aux 13D. Train from scratch."
@@ -58,10 +63,10 @@ ppo_epochs: 1
 mini_batches: 1
 clip_eps: 0.2
 
-# --- Entropy (SA1: active exploration, unchanged from v2) ---
+# --- Entropy (v3b: 加倍 to avoid premature convergence) ---
 ent_coeff: 0.0
-ent_coeff_linear: 0.01
-ent_coeff_angular: 0.02
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
 
 # --- WD-style gradient caps ---
 wd_update_clip: true
@@ -124,8 +129,9 @@ actuator_delay_range: [0, 1]
 actuator_velocity_scale: [0.97, 1.03]
 actuator_motor_lag: 0.5
 
-# Observation latency DR (SA1: off)
-obs_delay_steps: [0, 0]
+# Observation latency DR (v3b: 0-200ms 模擬實機 LiDAR→policy 管線延遲)
+# 部署測試假設：抽動部分原因是真實 obs 比 sim 慢 30ms，policy 對延遲 obs over-react
+obs_delay_steps: [0, 1]
 # Heading stability (SA1: off)
 heading_stability_weight: 0.0
 
