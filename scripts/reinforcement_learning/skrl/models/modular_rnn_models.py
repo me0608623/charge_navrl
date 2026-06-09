@@ -52,13 +52,15 @@ EGO_START, EGO_END = 0, 4        # accel + vel + omega + radius
 GOAL_START, GOAL_END = 4, 6      # waypoint (x, y)
 LIDAR_START, LIDAR_END = 6, 78   # 72 bins
 TIME_START, TIME_END = 78, 79    # remaining ratio (was 138:139 when obs=139D)
+ACT_HIST_START, ACT_HIST_END = 79, 83   # v3c: past 2 actions (a, ω) × 2 = 4D
 
-STATE_DIM = 7     # ego(4) + goal(2) + time(1)
+ACT_HIST_DIM = ACT_HIST_END - ACT_HIST_START  # 4
+STATE_DIM = 7 + ACT_HIST_DIM   # ego(4) + goal(2) + time(1) + act_hist(4) = 11
 LIDAR_DIM = 72
 LIDAR_CONV_CH = 64           # Conv1d 最終 channel 數
 LIDAR_CONV_LEN = LIDAR_DIM // 4  # 72 → 18，經兩次 stride=2 卷積後的角度軸長度
-USED_OBS_DIM = 79  # 4 + 2 + 72 + 1
-RAW_OBS_DIM = 79   # env output dim (no TopK)
+USED_OBS_DIM = 83  # 4 + 2 + 72 + 1 + 4 (v3c: +4 action history)
+RAW_OBS_DIM = 83   # env output dim (v3c: 79 + 4 action history)
 NUM_BINS = 19
 TOTAL_LOGITS = NUM_BINS * 2  # 38
 
@@ -85,24 +87,36 @@ class LidarStateExtractor(nn.Module):
       （影響正前方那段角度的卷積特徵），改環狀填充修正；不改 tensor 形狀、不影響相容性。
     """
 
-    def __init__(self):
+    def __init__(self, legacy: bool = False):
         super().__init__()
+        # legacy=True：還原 2026-06-02 之前的舊架構（Conv1d 零填充 + AdaptiveMaxPool1d(1)
+        #   + Linear(64,64)），用來載入舊 checkpoint（lidar_proj 形狀 64→64）。
+        #   僅供 play/eval 相容，不影響新訓練（預設 legacy=False = 新架構）。
+        self.legacy = legacy
         # Branch 1: LiDAR Conv1d
         # padding_mode='circular'：LiDAR 角度為環狀（bin71 355° ↔ bin0 0° 是鄰居），
         # 零填充會在邊界假裝外面是空的，割斷正前方那段角度的卷積連續性 → 用環狀填充修正。
+        # legacy 模式用零填充（'zeros'），對齊舊 checkpoint 訓練時的行為。
+        pad_mode = "zeros" if legacy else "circular"
         self.lidar_conv = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=5, padding=2, padding_mode="circular"),
+            nn.Conv1d(1, 32, kernel_size=5, padding=2, padding_mode=pad_mode),
             nn.ReLU(),
-            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, padding_mode="circular"),
+            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, padding_mode=pad_mode),
             nn.ReLU(),
-            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1, padding_mode="circular"),
+            nn.Conv1d(64, 64, kernel_size=3, stride=2, padding=1, padding_mode=pad_mode),
             nn.ReLU(),
         )
-        # flatten 角度軸 → Linear，保留每個角度位置的身份（取代 AdaptiveMaxPool1d）
-        self.lidar_proj = nn.Linear(LIDAR_CONV_CH * LIDAR_CONV_LEN, 64)  # 1152 → 64
+        if legacy:
+            # 舊架構：global max pooling 壓成 channel-wise scalar → Linear(64,64)
+            self.lidar_pool = nn.AdaptiveMaxPool1d(1)
+            self.lidar_proj = nn.Linear(LIDAR_CONV_CH, 64)  # 64 → 64
+        else:
+            # 新架構：flatten 角度軸 → Linear，保留每個角度位置的身份（取代 AdaptiveMaxPool1d）
+            self.lidar_proj = nn.Linear(LIDAR_CONV_CH * LIDAR_CONV_LEN, 64)  # 1152 → 64
         self.lidar_ln = nn.LayerNorm(64)
 
-        # Branch 2: State MLP (ego + goal + time = 7D)
+        # Branch 2: State MLP (ego + goal + time + act_hist = 11D in v3c, 7D legacy)
+        # v3c: STATE_DIM=11 包含 4D 動作歷史 (past 2 steps × (a_norm, ω_norm))
         self.state_mlp = nn.Sequential(
             nn.Linear(STATE_DIM, 32),
             nn.ReLU(),
@@ -124,14 +138,18 @@ class LidarStateExtractor(nn.Module):
         """
         lidar = obs[:, LIDAR_START:LIDAR_END].unsqueeze(1)   # [B, 1, 72]
         lidar = self.lidar_conv(lidar)                        # [B, 64, 18]
-        lidar = lidar.flatten(1)                              # [B, 64*18=1152]  保留角度位置
+        if self.legacy:
+            lidar = self.lidar_pool(lidar).squeeze(-1)        # [B, 64]  舊架構 global max pool
+        else:
+            lidar = lidar.flatten(1)                          # [B, 64*18=1152]  保留角度位置
         lidar = self.lidar_ln(self.lidar_proj(lidar))         # [B, 64]
 
         ego = obs[:, EGO_START:EGO_END]                       # [B, 4]
         goal = obs[:, GOAL_START:GOAL_END]                     # [B, 2]
         time_feat = obs[:, TIME_START:TIME_END]                # [B, 1]
-        state_7d = torch.cat([ego, goal, time_feat], dim=-1)  # [B, 7]
-        state = self.state_ln(self.state_mlp(state_7d))       # [B, 32]
+        act_hist = obs[:, ACT_HIST_START:ACT_HIST_END]         # [B, 4] v3c: 過去 2 步 action
+        state_in = torch.cat([ego, goal, time_feat, act_hist], dim=-1)  # [B, 11]
+        state = self.state_ln(self.state_mlp(state_in))       # [B, 32]
 
         return torch.cat([lidar, state], dim=-1)              # [B, 96]
 

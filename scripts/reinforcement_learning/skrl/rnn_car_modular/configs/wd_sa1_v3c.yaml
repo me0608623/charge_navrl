@@ -1,0 +1,153 @@
+# wd_sa1_v3c — SA1 v3c: v3b + 動作堆疊 (action stacking, +4D obs)
+#
+# v3c 與 v3b 的差異 (2026-06-09):
+#   1. Observation 加 4D action history (past 2 steps × (a_norm, ω_norm))
+#      → env obs: 79D → 83D
+#      → StateMLP input: 7D → 11D (ego4 + goal2 + time1 + act_hist4)
+#   2. 動機: vanilla RNN64 容量有限，難以同時 filter LiDAR 噪聲 + 精確記住前步動作
+#      → 顯式給 policy 「自己的指令歷史」，作為阻尼 (damping term) 抑制抽動
+#   3. 維度成本極低 (4D / 83D = 4.8%)
+#
+# v3b 特性繼承: obs_delay [0,1] + ent 加倍 (0.02/0.04) + smoothness=0.005 + r_min=0.25
+#
+# ⚠️ 不相容 v3/v3b ckpt (obs dim 79 → 83, StateMLP shape 7→32 → 11→32)
+# 純對照組性質，從頭訓練。SA1_v3b 完訓後啟動。
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa1_v3c --headless \
+#     --run_name sa1_v3c_ne1024_s42
+
+name: wd_sa1_v3c
+description: "SA1 v3c: v3b + action stacking 4D obs (83D total). RNN64 + action history damping for anti-jitter. Train from scratch."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3   # v3: r_min=0.25 + penalty_smoothness=0.005
+initial_stage: 1
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles (v3: same as v2) ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0002
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.5
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (v3b: 加倍 to avoid premature convergence) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (v3: RNN64, unchanged from v2) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA1: clean noise OFF, bias + per_ring ON) ---
+lidar_no_noise: true
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR (SA1: physics + disturbance + light actuator) ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (v3b: 0-200ms 模擬實機 LiDAR→policy 管線延遲)
+# 部署測試假設：抽動部分原因是真實 obs 比 sim 慢 30ms，policy 對延遲 obs over-react
+obs_delay_steps: [0, 1]
+# Heading stability (SA1: off)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (v3: from scratch) ---
+checkpoint: null
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa1, v3c, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, antijitter, action_stacking]
+notes: "SA1 v3c: v3b + action stacking (past 2 actions, 4D), obs 83D, StateMLP 11D. Explicit damping signal for anti-jitter. From scratch."

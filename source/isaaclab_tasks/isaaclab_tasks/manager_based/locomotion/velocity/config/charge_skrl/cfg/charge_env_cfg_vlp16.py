@@ -63,6 +63,7 @@ from ..mdp.observations import (
 from ..mdp.observations.obs_functions import (
     wd_like_sweep_72,
     topk_obstacles_6d,
+    discrete_applied_action_history,  # v3c: action stacking
 )
 
 # 獎勵函數
@@ -428,6 +429,13 @@ class ObservationsCfgVLP16:
             func=time_remaining_ratio,
         )
 
+        # --- action history (4D, v3c) ---
+        # 過去 2 步 applied actions (a_norm, ω_norm) × 2，提供「剎車訊號」抑制抽動
+        past_actions = ObsTerm(
+            func=discrete_applied_action_history,
+            params={"stack_size": 2},
+        )
+
         def __post_init__(self):
             self.concatenate_terms = True
 
@@ -488,6 +496,13 @@ class ObservationsCfgVLP16:
         # --- time state (1D) ---
         time_remaining = ObsTerm(
             func=time_remaining_ratio,
+        )
+
+        # --- action history (4D, v3c) ---
+        # 過去 2 步 applied actions (a_norm, ω_norm) × 2，提供「剎車訊號」抑制抽動
+        past_actions = ObsTerm(
+            func=discrete_applied_action_history,
+            params={"stack_size": 2},
         )
 
         def __post_init__(self):

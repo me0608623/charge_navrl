@@ -1593,6 +1593,87 @@ def discrete_applied_action(
     return torch.nan_to_num(result, nan=0.0).clamp(-2.0, 2.0)
 
 
+# ====================================================================
+# 觀測函數七.b：動作歷史堆疊 (v3c, 2026-06-09)
+# ====================================================================
+
+def discrete_applied_action_history(
+    env: ManagerBasedRLEnv,
+    stack_size: int = 2,
+    a_max: float = 0.2,
+    omega_max: float = math.pi / 15.0,
+) -> torch.Tensor:
+    """讀取最近 stack_size 步的 applied actions 並堆疊成時序矩陣。
+
+    動機 (v3c anti-jitter):
+        Vanilla RNN64 容量有限 (139D obs → 64D hidden) 難以同時過濾 LiDAR 噪聲
+        + 精確記住前 N 步動作意圖。把 a_{t-1}, a_{t-2} 顯式塞入 obs，給 policy
+        「剎車訊號」: 它能直接看見自己剛下達的指令，做出阻尼修正 (damping)。
+
+    布局：
+        返回 [N, stack_size * 2] = [N, 2*stack_size] 維度
+        每 2D 為 [a_norm_t-i, ω_norm_t-i]，最新→最舊排列
+        例如 stack_size=2: [a_t-1, ω_t-1, a_t-2, ω_t-2]
+
+    機制：
+        - 維護 env._action_history_buffer (deque maxlen=stack_size)
+        - 每次 step 結束後讀取 term.applied_accelerations 並 push
+        - episode reset 時對應 env 的歷史清零
+        - 首次 call 用 zeros 初始化（policy 看到 [0, 0, 0, 0] 沒問題）
+
+    Args:
+        env:        Isaac Lab 環境
+        stack_size: 堆疊步數，預設 2（共 4D）
+        a_max:      線加速度 normalize 上限
+        omega_max:  角速度 normalize 上限
+
+    Returns:
+        [num_envs, stack_size * 2] — 歸一化後的動作時序
+    """
+    term = list(env.action_manager._terms.values())[0]
+
+    # 讀當前 applied actions（與 discrete_applied_action 相同源）
+    if hasattr(term, "applied_accelerations"):
+        pa = term.applied_accelerations  # [N, 2] = [applied_a, ω]
+    else:
+        pa = term.processed_actions
+
+    N = pa.shape[0]
+    device = pa.device
+
+    # 歸一化（與 discrete_applied_action 一致）
+    current = torch.zeros_like(pa)
+    current[:, 0] = pa[:, 0] / a_max
+    current[:, 1] = pa[:, 1] / omega_max
+    current = torch.nan_to_num(current, nan=0.0).clamp(-2.0, 2.0)
+
+    # 初始化 buffer (首次 call)
+    if not hasattr(env, "_action_history_buffer") or env._action_history_buffer is None:
+        env._action_history_buffer = [
+            torch.zeros((N, 2), device=device) for _ in range(stack_size)
+        ]
+        env._action_history_buffer_size = stack_size
+
+    # episode reset 時對應 env 的歷史清零
+    just_reset = env.episode_length_buf == 0
+    if just_reset.any():
+        for buf in env._action_history_buffer:
+            buf[just_reset] = 0.0
+
+    # 取出歷史（最新 → 最舊）
+    # buffer[0] = t-1, buffer[1] = t-2, ...
+    stacked = torch.cat(env._action_history_buffer, dim=-1)  # [N, stack_size*2]
+
+    # 更新 buffer: 把當前 push 進 buffer[0]，舊資料往後推
+    # 注意：observation 函數在 step 結束後被叫，這時 current = a_t (剛 apply 的)
+    # 下次 obs 讀取時，這個 current 已經是 a_{t-1}
+    # 所以 push 順序：保留 stack_size 個最新的，丟最舊
+    new_buffer = [current.clone()] + env._action_history_buffer[:-1]
+    env._action_history_buffer = new_buffer
+
+    return stacked
+
+
 def topk_obstacles_goal_centric(
     env: ManagerBasedRLEnv,
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
