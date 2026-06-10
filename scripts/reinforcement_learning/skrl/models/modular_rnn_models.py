@@ -87,12 +87,16 @@ class LidarStateExtractor(nn.Module):
       （影響正前方那段角度的卷積特徵），改環狀填充修正；不改 tensor 形狀、不影響相容性。
     """
 
-    def __init__(self, legacy: bool = False):
+    def __init__(self, legacy: bool = False, include_act_hist: bool = True):
         super().__init__()
         # legacy=True：還原 2026-06-02 之前的舊架構（Conv1d 零填充 + AdaptiveMaxPool1d(1)
         #   + Linear(64,64)），用來載入舊 checkpoint（lidar_proj 形狀 64→64）。
         #   僅供 play/eval 相容，不影響新訓練（預設 legacy=False = 新架構）。
+        # include_act_hist=False：還原 v3b/v3 的 7D state（無 4D 動作歷史），
+        #   讓 play/eval 能載入 action-stacking 之前的 checkpoint（state_mlp 輸入 7D）。
+        #   forward 會自動略過 obs 尾端的 act_hist，不影響新訓練（預設 True = v3c 11D）。
         self.legacy = legacy
+        self.include_act_hist = include_act_hist
         # Branch 1: LiDAR Conv1d
         # padding_mode='circular'：LiDAR 角度為環狀（bin71 355° ↔ bin0 0° 是鄰居），
         # 零填充會在邊界假裝外面是空的，割斷正前方那段角度的卷積連續性 → 用環狀填充修正。
@@ -117,8 +121,10 @@ class LidarStateExtractor(nn.Module):
 
         # Branch 2: State MLP (ego + goal + time + act_hist = 11D in v3c, 7D legacy)
         # v3c: STATE_DIM=11 包含 4D 動作歷史 (past 2 steps × (a_norm, ω_norm))
+        # include_act_hist=False: 回到 7D（ego+goal+time），相容 v3b/v3 checkpoint
+        state_in_dim = STATE_DIM if include_act_hist else (STATE_DIM - ACT_HIST_DIM)
         self.state_mlp = nn.Sequential(
-            nn.Linear(STATE_DIM, 32),
+            nn.Linear(state_in_dim, 32),
             nn.ReLU(),
             nn.Linear(32, 32),
             nn.ReLU(),
@@ -147,8 +153,12 @@ class LidarStateExtractor(nn.Module):
         ego = obs[:, EGO_START:EGO_END]                       # [B, 4]
         goal = obs[:, GOAL_START:GOAL_END]                     # [B, 2]
         time_feat = obs[:, TIME_START:TIME_END]                # [B, 1]
-        act_hist = obs[:, ACT_HIST_START:ACT_HIST_END]         # [B, 4] v3c: 過去 2 步 action
-        state_in = torch.cat([ego, goal, time_feat, act_hist], dim=-1)  # [B, 11]
+        if self.include_act_hist:
+            act_hist = obs[:, ACT_HIST_START:ACT_HIST_END]     # [B, 4] v3c: 過去 2 步 action
+            state_in = torch.cat([ego, goal, time_feat, act_hist], dim=-1)  # [B, 11]
+        else:
+            # v3b/v3 相容：無 act_hist，state 只用 ego+goal+time = 7D
+            state_in = torch.cat([ego, goal, time_feat], dim=-1)  # [B, 7]
         state = self.state_ln(self.state_mlp(state_in))       # [B, 32]
 
         return torch.cat([lidar, state], dim=-1)              # [B, 96]

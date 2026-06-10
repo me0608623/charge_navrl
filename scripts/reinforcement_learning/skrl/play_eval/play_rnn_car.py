@@ -32,6 +32,7 @@ import glob
 import os
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -311,6 +312,10 @@ parser.add_argument("--lidar_r_min", type=float, default=LIDAR_R_MIN,
                     help="LiDAR 最小量測距離（盲區）m。實機 VLP16 ≈ 0.9")
 parser.add_argument("--collision_dist", type=float, default=COLLISION_DIST,
                     help="碰撞判定距離 m（= body_radius + buffer）。預設 0.45")
+parser.add_argument("--max_angular_vel", type=float, default=None,
+                    help="角速度上限 rad/s（預設沿用 env cfg，例如 1.2）")
+parser.add_argument("--max_angular_accel", type=float, default=None,
+                    help="角加速度上限 rad/s²（slew clamp 強度。預設沿用 env cfg，例如 3.0）")
 parser.add_argument("--no_goal_movement", action="store_true", default=False,
                     help="強制關閉 goal movement（即使 stage config 有設定）")
 parser.add_argument("--lidar_vis", action="store_true", default=LIDAR_VIS,
@@ -396,7 +401,7 @@ sys.path.insert(0, str(_skrl_root / "models"))         # skrl/models/（modular_
 sys.path.insert(0, str(_skrl_root / "utils"))          # skrl/utils/（charge_env_overrides.py, wd_aux_targets.py）
 
 from charge_env_overrides import apply_charge_env_overrides  # env_cfg 覆寫工具
-from modular_rnn_models import LidarStateExtractor, PolicyHead, PreprocessRNN, RNNStateManager, ValueHead  # 模型元件
+from modular_rnn_models import ACT_HIST_DIM, LIDAR_CONV_CH, STATE_DIM, LidarStateExtractor, PolicyHead, PreprocessRNN, RNNStateManager, ValueHead  # 模型元件
 from wd_aux_targets import build_wd_preprocess_targets  # RNN aux 7D target 計算
 
 # 139D 觀測中，policy 使用的 79 維索引：
@@ -1867,20 +1872,38 @@ def main():
               f"render_interval={env_cfg.sim.render_interval}, "
               f"bev_update_interval={args_cli.bev_update_interval}")
 
-    # CLI 碰撞距離覆寫 — 修改所有 termination term 的碰撞距離參數
+    # CLI 碰撞距離覆寫 — 只改「碰撞相關」termination term 的距離參數。
+    # ⚠️ 不要用「含 threshold 參數」當條件去掃全部 term，否則會誤改 goal_reached.threshold
+    #    （到達 goal 門檻）等非碰撞 term。只鎖定名稱含 'collision' 的 term。
+    # 註：obstacle_collision_geometric 的 collision_distance 是「中心到中心」距離，
+    #     不是 LiDAR 表面距離；要在表面接觸時觸發，需 ≳ robot_radius+obs_radius(≈0.65m)。
     if args_cli.collision_dist != COLLISION_DIST:
         try:
             terms = env_cfg.terminations.__dict__
             for tname, tterm in terms.items():
+                if "collision" not in tname:
+                    continue  # 跳過 goal_reached / time_out / tipped_over 等非碰撞 term
                 params = getattr(tterm, 'params', {}) or {}
                 if 'threshold' in params:
                     tterm.params["threshold"] = args_cli.collision_dist
                     print(f"[PLAY] 覆寫 termination '{tname}' threshold → {args_cli.collision_dist}m")
                 if 'collision_distance' in params:
                     tterm.params["collision_distance"] = args_cli.collision_dist
-                    print(f"[PLAY] 覆寫 termination '{tname}' collision_distance → {args_cli.collision_dist}m")
+                    print(f"[PLAY] 覆寫 termination '{tname}' collision_distance → {args_cli.collision_dist}m (中心到中心)")
         except Exception as e:
             print(f"[PLAY] 無法覆寫 collision_dist: {e}")
+
+    # CLI 角速度 / 角加速度覆寫 — patch env_cfg.actions.diff_drive
+    _diff_drive_cfg = getattr(env_cfg.actions, "diff_drive", None)
+    if _diff_drive_cfg is not None:
+        if args_cli.max_angular_vel is not None:
+            _old_w = getattr(_diff_drive_cfg, "max_angular_vel", "?")
+            _diff_drive_cfg.max_angular_vel = args_cli.max_angular_vel
+            print(f"[PLAY] 覆寫 max_angular_vel: {_old_w} → {args_cli.max_angular_vel} rad/s")
+        if args_cli.max_angular_accel is not None:
+            _old_a = getattr(_diff_drive_cfg, "max_angular_accel", "?")
+            _diff_drive_cfg.max_angular_accel = args_cli.max_angular_accel
+            print(f"[PLAY] 覆寫 max_angular_accel: {_old_a} → {args_cli.max_angular_accel} rad/s²")
 
     # 印出配置摘要
     print(f"[PLAY] checkpoint: {ckpt_path}")
@@ -1952,6 +1975,21 @@ def main():
     if zero_preprocess:
         print("[PLAY] --zero_preprocess_feature_for_rl 啟用: RL head 的 RNN 特徵被歸零")
 
+    # === v3b/v3 相容：偵測 checkpoint 是否含 action history ===
+    # v3c: extractor state_mlp 輸入 11D（含 4D act_hist），policy obs 用滿 83D
+    # v3b/v3: state_mlp 輸入 7D（無 act_hist），policy obs 用 79D（裁掉尾端 act_hist）
+    # extractor.forward 收完整 obs（用絕對 index），7D 模式會自動略過 act_hist，故只需裁 policy 切片。
+    _state_w = ckpt.get("extractor", {}).get("state_mlp.0.weight", None)
+    include_act_hist = not (
+        _state_w is not None and _state_w.shape[1] == STATE_DIM - ACT_HIST_DIM
+    )
+    if not include_act_hist and len(POLICY_OBS_INDICES) > STATE_DIM - ACT_HIST_DIM:
+        POLICY_OBS_INDICES = POLICY_OBS_INDICES[:-ACT_HIST_DIM]
+        print(
+            f"[PLAY] 偵測到 7D state checkpoint（無 act_hist，v3b/v3）"
+            f" → POLICY_OBS_INDICES 裁掉尾端 {ACT_HIST_DIM}D → {len(POLICY_OBS_INDICES)}D"
+        )
+
     # 依 encoder_mode 決定模型結構
     #   wd_exact_rnn: 139D IsaacLab obs → 113D WD car layout，RNN 直接吃 113D
     #   extractor_rnn: 用 LidarStateExtractor 提取 96D 特徵餵給 RNN
@@ -1965,7 +2003,24 @@ def main():
     middle_dim = int(_wd_middle_raw) if _wd_middle_raw and int(_wd_middle_raw) > 0 else None
 
     if use_extractor:
-        extractor = LidarStateExtractor().to(device)
+        # 自動偵測舊 checkpoint：舊架構 lidar_proj 為 Linear(64,64)（shape[1]==64），
+        # 新架構為 Linear(1152,64)（shape[1]==1152）。據此切換 legacy 模式以相容載入。
+        _lidar_proj_w = ckpt.get("extractor", {}).get("lidar_proj.weight", None)
+        legacy_extractor = (
+            _lidar_proj_w is not None and _lidar_proj_w.shape[1] == LIDAR_CONV_CH
+        )
+        if legacy_extractor:
+            print(
+                f"[PLAY] 偵測到舊 checkpoint（lidar_proj {tuple(_lidar_proj_w.shape)}）"
+                f" → LidarStateExtractor(legacy=True)：AdaptiveMaxPool + zero-pad Conv1d"
+            )
+        if not include_act_hist:
+            print(
+                "[PLAY] 偵測到 7D state checkpoint → LidarStateExtractor(include_act_hist=False)"
+            )
+        extractor = LidarStateExtractor(
+            legacy=legacy_extractor, include_act_hist=include_act_hist
+        ).to(device)
         rnn_input_dim = extractor.output_dim  # 96D
     else:
         extractor = None
@@ -2012,6 +2067,22 @@ def main():
     obs_norm = ckpt.get("obs_normalizer", {})
     mean = obs_norm.get("mean", torch.zeros(obs_tensor.shape[-1], device=device))
     var = obs_norm.get("var", torch.ones(obs_tensor.shape[-1], device=device))
+
+    # v2 相容性：env 已改為 79D，但舊 ckpt 的 obs_normalizer 仍是 139D
+    # 139D layout: [0:4]ego + [4:6]goal + [6:78]LiDAR + [78:138]obstacles + [138]time
+    # 79D layout : [0:4]ego + [4:6]goal + [6:78]LiDAR + [78]time
+    # 對映：mean_79 = cat(mean_139[:78], mean_139[138:139])
+    _runtime_dim = obs_tensor.shape[-1]
+    if mean.shape[-1] != _runtime_dim:
+        if mean.shape[-1] == 139 and _runtime_dim == 79:
+            mean = torch.cat([mean[:78], mean[138:139]], dim=-1).to(device)
+            var = torch.cat([var[:78], var[138:139]], dim=-1).to(device)
+            print(f"[PLAY] obs_normalizer 139D → 79D 切片 (移除 [78:138] 障礙物欄位)")
+        else:
+            print(f"[PLAY] ⚠ obs_normalizer dim {mean.shape[-1]} != runtime obs {_runtime_dim}，"
+                  f"改用 identity (mean=0, var=1)")
+            mean = torch.zeros(_runtime_dim, device=device)
+            var = torch.ones(_runtime_dim, device=device)
 
     # RNN 隱藏狀態管理器（每個 env 獨立 hidden state）
     rnn_state = RNNStateManager(raw_env.num_envs, hidden_dim, device)
@@ -2146,6 +2217,28 @@ def main():
     step_dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
     episode_reward = torch.zeros(raw_env.num_envs, device=device)     # 累積回合獎勵
     episode_step = torch.zeros(raw_env.num_envs, dtype=torch.long, device=device)  # 回合步數
+    episode_speed_sum = torch.zeros(raw_env.num_envs, device=device)   # 累積線速度 |v|（算平均）
+    episode_speed_max = torch.zeros(raw_env.num_envs, device=device)   # 回合內最高 |v|
+    # 車體座標前向速度 vx_body：>0 前進、<0 後退
+    episode_vfwd_sum = torch.zeros(raw_env.num_envs, device=device)    # 前進步累積（vx_body > 0）
+    episode_vfwd_cnt = torch.zeros(raw_env.num_envs, dtype=torch.long, device=device)
+    episode_vbwd_sum = torch.zeros(raw_env.num_envs, device=device)    # 後退步累積（|vx_body| > 0 且 vx_body < 0）
+    episode_vbwd_cnt = torch.zeros(raw_env.num_envs, dtype=torch.long, device=device)
+    # --- 角速度 / LiDAR / 障礙物距離 累積器（BEV 資訊）---
+    episode_omega_sum = torch.zeros(raw_env.num_envs, device=device)        # 累積 |ω_z|（rad/s）
+    episode_omega_max = torch.zeros(raw_env.num_envs, device=device)        # 回合最高 |ω_z|
+    episode_lidar_min_sum = torch.zeros(raw_env.num_envs, device=device)    # 累積 LiDAR 最近距離
+    episode_lidar_min_min = torch.full((raw_env.num_envs,), 999.0, device=device)   # 回合 LiDAR 最近
+    episode_obs_dist_min = torch.full((raw_env.num_envs,), 999.0, device=device)    # 回合最近障礙物距離
+    episode_goal_dist_sum = torch.zeros(raw_env.num_envs, device=device)    # 累積目標距離
+    # slew clamp 差異：|ω_target - ω_actual|
+    episode_omega_target_sum = torch.zeros(raw_env.num_envs, device=device) # 累積 |ω_target|
+    episode_omega_target_max = torch.zeros(raw_env.num_envs, device=device) # 回合最高 |ω_target|
+    episode_slew_sum = torch.zeros(raw_env.num_envs, device=device)         # 累積 |ω_target - ω_actual|
+    episode_slew_max = torch.zeros(raw_env.num_envs, device=device)         # 回合最高 slew 差
+    # 讀取動作項目參數（用於計算 ω_target）
+    _action_term_ref = list(raw_env.action_manager._terms.values())[0]
+    _max_ang_vel = float(_action_term_ref.cfg.max_angular_vel)
 
     # --- 回合統計計數器 ---
     stats_goal = 0       # 到達目標次數
@@ -2157,8 +2250,28 @@ def main():
     stats_steps_list = []  # 每回合步數（用於計算平均）
 
     # --- Per-episode step-by-step velocity/position log (env 0) ---
-    _ep_step_log: list[dict] = []    # current episode buffer
-    _all_ep_logs: list[dict] = []    # finished episodes: {episode, cause, steps, log:[...]}
+    # 用 deque(maxlen) 取代無界 list：避免長 episode/多 episode 時 CPU RAM 漏。
+    # _EP_LOG_MAXLEN 預估：episode_length_s=60s @ step_dt=0.2s → 300 步綽綽有餘。
+    # _ALL_EP_LOGS_MAXLEN：只保留最後 K 個 episode 的詳細 log，其餘只留摘要。
+    _EP_LOG_MAXLEN = 600
+    _ALL_EP_LOGS_DETAILED_MAXLEN = 50
+    _ep_step_log: deque = deque(maxlen=_EP_LOG_MAXLEN)  # current episode buffer
+    _all_ep_logs: deque = deque(maxlen=_ALL_EP_LOGS_DETAILED_MAXLEN)
+    # Stuck 偵測 counter：O(1) per step，取代每步 O(N) 的 reversed 掃描。
+    _stuck_consec_low = 0
+    # Episode-end speed 統計 running counters：每步 append 同時累加，
+    # episode 結束時直接讀，徹底消除 `for _s in _ep_step_log` 統計 loop。
+    _ep_speed_total = 0.0
+    _ep_low_speed_count = 0
+    _ep_logged_count = 0
+
+    # play_diag GPU ring buffer：取代原本無界 numpy list + 每步 .cpu()。
+    # 預先在 GPU 配置固定大小張量，每步 in-place 寫入，遊標循環。
+    # 結束時一次性 .cpu() 輸出，省下 ~steps 次 host-device 同步。
+    _DIAG_BUF_MAXLEN = 20000  # 步數上限；超過會循環覆寫最舊資料（保留最後 20k 步）
+    _diag_buf: dict | None = None
+    _diag_write_idx = 0
+    _diag_total_steps = 0
 
     # --- play_diag 累積診斷變數 ---
     diag_heading_sum = 0.0              # 累積航向誤差（度）
@@ -2339,30 +2452,32 @@ def main():
 
         min_dist = 0.8  # 不要太貼 goal 中心
 
-        for i in range(count):
-            obs_name = f"obstacle_{i}"
+        # ── 一次性向量化所有 count 個障礙物的位置 [count, N, 2] ──
+        # GPU 一次 random + cos/sin → 取代逐 i 的小張量算法
+        angles = torch.rand(count, N, device=device) * (2.0 * 3.14159265)
+        dists = torch.rand(count, N, device=device) * (radius - min_dist) + min_dist
+        offsets_x = dists * torch.cos(angles)                          # [count, N]
+        offsets_y = dists * torch.sin(angles)                          # [count, N]
+        all_pose = torch.zeros(count, N, 7, device=device)
+        all_pose[..., 0] = goal_xy[None, :, 0] + offsets_x
+        all_pose[..., 1] = goal_xy[None, :, 1] + offsets_y
+        all_pose[..., 2] = 0.9
+        all_pose[..., 3] = 1.0  # quat w
+        zero_vel = torch.zeros(N, 6, device=device)
+
+        # ── 用 map() 派發 per-entity API call（write_root_pose_to_sim 無批次版本）──
+        def _place_one(i):
             try:
-                obstacle = raw_env.scene[obs_name]
+                obstacle = raw_env.scene[f"obstacle_{i}"]
             except KeyError:
-                break
+                return False
+            obstacle.write_root_pose_to_sim(all_pose[i], env_ids=env_ids_to_place)
+            obstacle.write_root_velocity_to_sim(zero_vel, env_ids=env_ids_to_place)
+            return True
 
-            # 在 goal 附近 [min_dist, radius] 環形區域隨機生成
-            angle = torch.rand(N, device=device) * 2.0 * 3.14159265
-            dist = torch.rand(N, device=device) * (radius - min_dist) + min_dist
-            offset_x = dist * torch.cos(angle)
-            offset_y = dist * torch.sin(angle)
-
-            # pose [N, 7] = [x, y, z, qw, qx, qy, qz]
-            pose = torch.zeros(N, 7, device=device)
-            pose[:, 0] = goal_xy[:, 0] + offset_x
-            pose[:, 1] = goal_xy[:, 1] + offset_y
-            pose[:, 2] = 0.9  # 可見高度
-            pose[:, 3] = 1.0  # quat w
-
-            obstacle.write_root_pose_to_sim(pose, env_ids=env_ids_to_place)
-            # 歸零速度
-            vel = torch.zeros(N, 6, device=device)
-            obstacle.write_root_velocity_to_sim(vel, env_ids=env_ids_to_place)
+        # functional map：iterator 消耗即執行；any() 早退（遇到 False 即停）
+        # 等價於原本 for-loop + break 但無 for-statement
+        list(map(_place_one, range(count)))
 
         if not hasattr(place_obstacles_near_goal, "_printed"):
             place_obstacles_near_goal._printed = True
@@ -2495,6 +2610,57 @@ def main():
         episode_step += 1
         rnn_state.update(new_hidden)  # 更新 RNN 隱藏狀態
 
+        # --- 累積線速度（所有 env，用於每回合 avg/max 輸出）---
+        _robot_data = raw_env.scene["robot"].data
+        _vel_w_all = _robot_data.root_lin_vel_w[:, :2]
+        _speed_all = _vel_w_all.norm(dim=1)
+        episode_speed_sum += _speed_all
+        episode_speed_max = torch.maximum(episode_speed_max, _speed_all)
+
+        # --- 車體座標 vx_body：世界速度旋回車體 frame ---
+        _q = _robot_data.root_quat_w
+        _qw, _qx, _qy, _qz = _q[:, 0], _q[:, 1], _q[:, 2], _q[:, 3]
+        _yaw = torch.atan2(2.0 * (_qw * _qz + _qx * _qy),
+                           1.0 - 2.0 * (_qy * _qy + _qz * _qz))
+        _cos_y, _sin_y = torch.cos(_yaw), torch.sin(_yaw)
+        _vx_body = _cos_y * _vel_w_all[:, 0] + _sin_y * _vel_w_all[:, 1]
+        _fwd_mask = _vx_body > 0
+        _bwd_mask = _vx_body < 0
+        episode_vfwd_sum += torch.where(_fwd_mask, _vx_body, torch.zeros_like(_vx_body))
+        episode_vbwd_sum += torch.where(_bwd_mask, -_vx_body, torch.zeros_like(_vx_body))  # 存正值
+        episode_vfwd_cnt += _fwd_mask.long()
+        episode_vbwd_cnt += _bwd_mask.long()
+
+        # --- 角速度 / LiDAR / 障礙物距離 累積（回合 BEV 資訊）---
+        _omega_z = _robot_data.root_ang_vel_w[:, 2].abs()  # |ω_z| (rad/s)
+        episode_omega_sum += _omega_z
+        episode_omega_max = torch.maximum(episode_omega_max, _omega_z)
+        _obs_flat_ep = obs_tensor.reshape(raw_env.num_envs, -1)
+        _lidar_ep = _obs_flat_ep[:, 6:78]                      # 72 bins, normalized [0,1]
+        _LIDAR_DENORM = 18.0                                   # matching play_diag denormalization
+        _lidar_min_ep = _lidar_ep.min(dim=1).values * _LIDAR_DENORM
+        episode_lidar_min_sum += _lidar_min_ep
+        episode_lidar_min_min = torch.minimum(episode_lidar_min_min, _lidar_min_ep)
+        episode_goal_dist_sum += torch.norm(_obs_flat_ep[:, 4:6], dim=1)
+        if _play_behavior_scheduler is not None:
+            _rp_ep = _robot_data.root_pos_w[:, :2]
+            _eo_ep = raw_env.scene.env_origins[:, :2]
+            _rl_ep = _rp_ep - _eo_ep
+            _op_ep = _play_behavior_scheduler.positions[:, :, :2]
+            _dd_ep = (_op_ep - _rl_ep.unsqueeze(1)).norm(dim=2)
+            _act_ep = _play_behavior_scheduler.behavior_type != 0
+            _dd_ep_masked = torch.where(_act_ep, _dd_ep, torch.full_like(_dd_ep, 999.0))
+            episode_obs_dist_min = torch.minimum(episode_obs_dist_min, _dd_ep_masked.min(dim=1).values)
+        # ω_target vs ω_actual（slew clamp 差異）
+        _omega_idx = actions[:, 1].float()                          # policy 角速度 index [0,18]
+        _omega_target = ((_omega_idx - 9.0) / 9.0) * _max_ang_vel  # ω_target = ratio × ω_max
+        _omega_actual_cmd = _action_term_ref._current_omega         # post-clamp ω_actual
+        _slew_delta = (_omega_target - _omega_actual_cmd).abs()
+        episode_omega_target_sum += _omega_target.abs()
+        episode_omega_target_max = torch.maximum(episode_omega_target_max, _omega_target.abs())
+        episode_slew_sum += _slew_delta
+        episode_slew_max = torch.maximum(episode_slew_max, _slew_delta)
+
         # --- Per-step velocity/position log (env 0) for stuck diagnosis ---
         _t0_orca = time.time()
         if rvo2_filter is not None:
@@ -2530,15 +2696,19 @@ def main():
                 "nearest_obs": round(_nearest_obs_dist, 3),
             }
             _ep_step_log.append(_step_rec)
+            # Running counters：同步累加，episode 結束時 O(1) 讀取，免 loop
+            _ep_speed_total += _r_speed
+            _ep_logged_count += 1
+            if _r_speed < 0.1:
+                _ep_low_speed_count += 1
 
-            # Live stuck detection: if speed < 0.1 for 5+ consecutive steps, print each step
-            _consec_low = 0
-            for _s in reversed(_ep_step_log):
-                if _s["speed"] < 0.1:
-                    _consec_low += 1
-                else:
-                    break
-            if _consec_low >= 5:
+            # Live stuck detection — O(1) counter（取代每步 O(N) reversed 掃描）。
+            # 連續 speed<0.1 → 計數+1；一旦超標就歸零。Episode reset 時也歸零。
+            if _r_speed < 0.1:
+                _stuck_consec_low += 1
+            else:
+                _stuck_consec_low = 0
+            if _stuck_consec_low >= 5:
                 s = _step_rec
                 print(
                     f"[STUCK LIVE] ep_step={s['step']:3d} speed={s['speed']:.3f} "
@@ -2570,13 +2740,22 @@ def main():
                 _obs_min_dist = _dists.min(dim=1).values
             else:
                 _obs_min_dist = torch.full((raw_env.num_envs,), 999.0, device=device)
-            # 寫入全局 list（在結束時輸出統計）
-            if not hasattr(main, '_diag_data'):
-                main._diag_data = {'lidar_min': [], 'speed': [], 'omega': [], 'obs_dist': []}
-            main._diag_data['lidar_min'].append(_lidar_min.cpu().numpy())
-            main._diag_data['speed'].append(_speed.cpu().numpy())
-            main._diag_data['omega'].append(_omega.cpu().numpy())
-            main._diag_data['obs_dist'].append(_obs_min_dist.cpu().numpy())
+            # GPU ring buffer：純張量 in-place 寫入，無 .cpu()、無 list append。
+            # Lazy init：第一次知道 num_envs 後配置；之後固定大小循環使用。
+            if _diag_buf is None:
+                _N = raw_env.num_envs
+                _diag_buf = {
+                    'lidar_min': torch.zeros(_DIAG_BUF_MAXLEN, _N, device=device),
+                    'speed':     torch.zeros(_DIAG_BUF_MAXLEN, _N, device=device),
+                    'omega':     torch.zeros(_DIAG_BUF_MAXLEN, _N, device=device),
+                    'obs_dist':  torch.zeros(_DIAG_BUF_MAXLEN, _N, device=device),
+                }
+            _diag_buf['lidar_min'][_diag_write_idx] = _lidar_min
+            _diag_buf['speed'][_diag_write_idx]     = _speed
+            _diag_buf['omega'][_diag_write_idx]     = _omega
+            _diag_buf['obs_dist'][_diag_write_idx]  = _obs_min_dist
+            _diag_write_idx = (_diag_write_idx + 1) % _DIAG_BUF_MAXLEN
+            _diag_total_steps += 1
 
         _t_orca = time.time() - _t0_orca
 
@@ -2587,12 +2766,47 @@ def main():
             truncated_flat = truncated.squeeze(-1) if truncated.ndim > 1 else truncated
             cause = detect_termination_cause(raw_env, terminated_flat, truncated_flat)
 
-            # 逐 env 印出回合結果 + 更新統計
-            for env_id in done_ids.tolist():
-                c = cause[env_id].item()
+            # 批次 GPU→CPU sync：把所有 done env 需要的 scalar 一次性 stack 後
+            # .tolist()，取代原本每 env 12+ 次 .item() 個別 sync（12N 次 → 1 次）。
+            _done_stack = torch.stack([
+                cause[done_ids].to(torch.float32),                # [0]  cause
+                episode_step[done_ids].to(torch.float32),         # [1]  steps
+                episode_reward[done_ids],                         # [2]  reward
+                episode_speed_sum[done_ids],                      # [3]  speed_sum
+                episode_speed_max[done_ids],                      # [4]  speed_max
+                episode_vfwd_sum[done_ids],                       # [5]  vfwd_sum
+                episode_vbwd_sum[done_ids],                       # [6]  vbwd_sum
+                episode_vfwd_cnt[done_ids].to(torch.float32),     # [7]  vfwd_cnt
+                episode_vbwd_cnt[done_ids].to(torch.float32),     # [8]  vbwd_cnt
+                episode_omega_sum[done_ids],                      # [9]  omega_sum
+                episode_omega_max[done_ids],                      # [10] omega_max
+                episode_lidar_min_sum[done_ids],                  # [11] lidar_min_sum
+                episode_lidar_min_min[done_ids],                  # [12] lidar_min_min
+                episode_obs_dist_min[done_ids],                   # [13] obs_dist_min
+                episode_goal_dist_sum[done_ids],                  # [14] goal_dist_sum
+                episode_omega_target_sum[done_ids],               # [15] omega_target_sum
+                episode_omega_target_max[done_ids],               # [16] omega_target_max
+                episode_slew_sum[done_ids],                       # [17] slew_sum
+                episode_slew_max[done_ids],                       # [18] slew_max
+            ], dim=0).cpu().tolist()  # [19, D]
+            _done_env_ids = done_ids.cpu().tolist()
+            # 逐 env 列印（純 Python，無 GPU sync）；done env 數量恆受 N 上限
+            for _i, env_id in enumerate(_done_env_ids):
+                c = int(_done_stack[0][_i])
                 cause_name = CAUSE_NAMES.get(c, "?")
-                ep_steps = episode_step[env_id].item()
-                ep_rew = episode_reward[env_id].item()
+                ep_steps = int(_done_stack[1][_i])
+                ep_rew = _done_stack[2][_i]
+                _ssum = _done_stack[3][_i]
+                ep_speed_max = _done_stack[4][_i]
+                _vfsum = _done_stack[5][_i]
+                _vbsum = _done_stack[6][_i]
+                _fc = int(_done_stack[7][_i])
+                _bc = int(_done_stack[8][_i])
+                ep_speed_avg = _ssum / max(ep_steps, 1)
+                ep_vfwd_avg = (_vfsum / _fc) if _fc > 0 else 0.0
+                ep_vbwd_avg = (_vbsum / _bc) if _bc > 0 else 0.0
+                ep_fwd_ratio = _fc / max(ep_steps, 1)
+                ep_bwd_ratio = _bc / max(ep_steps, 1)
                 stats_total += 1
                 stats_steps_list.append(ep_steps)
                 if c == 1:
@@ -2607,14 +2821,39 @@ def main():
                     stats_other += 1
                 print(
                     f"[回合 {stats_total:3d}] 環境={env_id} 原因={cause_name:7s} "
-                    f"步數={ep_steps:4d} 獎勵={ep_rew:.1f}"
+                    f"步數={ep_steps:4d} 獎勵={ep_rew:.1f} "
+                    f"|v|avg={ep_speed_avg:.3f} max={ep_speed_max:.3f} "
+                    f"| fwd={ep_vfwd_avg:.2f}@{ep_fwd_ratio*100:.0f}% "
+                    f"bwd={ep_vbwd_avg:.2f}@{ep_bwd_ratio*100:.0f}% m/s"
+                )
+                # BEV 資訊行：角速度 / slew / LiDAR / 障礙物 / 目標距離
+                _ep_omega_avg = _done_stack[9][_i] / max(ep_steps, 1)
+                _ep_omega_max = _done_stack[10][_i]
+                _ep_lidar_avg = _done_stack[11][_i] / max(ep_steps, 1)
+                _ep_lidar_min = _done_stack[12][_i]
+                _ep_obs_min = _done_stack[13][_i]
+                _ep_goal_avg = _done_stack[14][_i] / max(ep_steps, 1)
+                _ep_omega_tgt_avg = _done_stack[15][_i] / max(ep_steps, 1)
+                _ep_omega_tgt_max = _done_stack[16][_i]
+                _ep_slew_avg = _done_stack[17][_i] / max(ep_steps, 1)
+                _ep_slew_max = _done_stack[18][_i]
+                _d_obs_str = f"{_ep_obs_min:.2f}m" if _ep_obs_min < 990.0 else "無"
+                print(
+                    f"  └─ 角速度={_ep_omega_avg:.2f}~{_ep_omega_max:.2f}"
+                    f"(目標{_ep_omega_tgt_avg:.2f}~{_ep_omega_tgt_max:.2f}"
+                    f",差{_ep_slew_avg:.3f}~{_ep_slew_max:.3f}) rad/s  "
+                    f"雷射最近={_ep_lidar_min:.2f}m(均{_ep_lidar_avg:.2f})  "
+                    f"障礙最近={_d_obs_str}  "
+                    f"目標距={_ep_goal_avg:.2f}m"
                 )
 
-                # Save per-step log for env 0
+                # Save per-step log for env 0 — _all_ep_logs 是 deque(maxlen=K)，
+                # 自動丟掉超過 K 個 episode 之前的詳細 log，避免無界累積。
+                # 統計用 running counter（每步同步累加），O(1) 讀取，無迴圈。
                 if env_id == 0 and rvo2_filter is not None and _ep_step_log:
-                    speeds = [s["speed"] for s in _ep_step_log]
-                    avg_speed = sum(speeds) / max(len(speeds), 1)
-                    low_speed_steps = sum(1 for s in speeds if s < 0.1)
+                    n_steps_logged = _ep_logged_count
+                    avg_speed = _ep_speed_total / max(n_steps_logged, 1)
+                    low_speed_steps = _ep_low_speed_count
                     _all_ep_logs.append({
                         "episode": stats_total,
                         "cause": cause_name,
@@ -2622,8 +2861,8 @@ def main():
                         "reward": ep_rew,
                         "avg_speed": round(avg_speed, 4),
                         "low_speed_steps": low_speed_steps,
-                        "low_speed_ratio": round(low_speed_steps / max(len(speeds), 1), 3),
-                        "log": list(_ep_step_log),
+                        "low_speed_ratio": round(low_speed_steps / max(n_steps_logged, 1), 3),
+                        "log": list(_ep_step_log),  # deque(maxlen=600) → bounded
                     })
                     # Per-episode velocity summary
                     print(
@@ -2631,11 +2870,31 @@ def main():
                         f"({low_speed_steps/max(len(speeds),1):.0%})"
                     )
                     _ep_step_log.clear()
+                    _stuck_consec_low = 0  # 新 episode 重置 stuck counter
+                    _ep_speed_total = 0.0
+                    _ep_low_speed_count = 0
+                    _ep_logged_count = 0
 
             # 重置結束 env 的 RNN 狀態和累積器
             rnn_state.reset(done_ids)
             episode_reward[done_ids] = 0.0
             episode_step[done_ids] = 0
+            episode_speed_sum[done_ids] = 0.0
+            episode_speed_max[done_ids] = 0.0
+            episode_vfwd_sum[done_ids] = 0.0
+            episode_vbwd_sum[done_ids] = 0.0
+            episode_vfwd_cnt[done_ids] = 0
+            episode_vbwd_cnt[done_ids] = 0
+            episode_omega_sum[done_ids] = 0.0
+            episode_omega_max[done_ids] = 0.0
+            episode_lidar_min_sum[done_ids] = 0.0
+            episode_lidar_min_min[done_ids] = 999.0
+            episode_obs_dist_min[done_ids] = 999.0
+            episode_goal_dist_sum[done_ids] = 0.0
+            episode_omega_target_sum[done_ids] = 0.0
+            episode_omega_target_max[done_ids] = 0.0
+            episode_slew_sum[done_ids] = 0.0
+            episode_slew_max[done_ids] = 0.0
             if rsgs_filter is not None:
                 rsgs_filter.reset(done_ids)
 
@@ -2789,16 +3048,26 @@ def main():
 
     print("=" * 60)
 
-    # --- Per-step 行為診斷統計輸出 ---
-    if hasattr(main, '_diag_data') and main._diag_data['lidar_min']:
+    # --- Per-step 行為診斷統計輸出 (從 GPU ring buffer 一次性 .cpu()) ---
+    if _diag_buf is not None and _diag_total_steps > 0:
         import numpy as np
-        lidar_arr = np.concatenate(main._diag_data['lidar_min'])
-        speed_arr = np.concatenate(main._diag_data['speed'])
-        omega_arr = np.concatenate(main._diag_data['omega'])
-        obs_dist_arr = np.concatenate(main._diag_data['obs_dist'])
+        # 從 ring buffer 還原時間順序：若超過 maxlen，正確順序是 [write_idx:] + [:write_idx]
+        valid_len = min(_diag_total_steps, _DIAG_BUF_MAXLEN)
+        if _diag_total_steps <= _DIAG_BUF_MAXLEN:
+            # 未繞圈：[0 : valid_len] 即時序
+            _idx = torch.arange(valid_len, device=device)
+        else:
+            # 繞圈：從 write_idx 開始才是最舊
+            _idx = (torch.arange(valid_len, device=device) + _diag_write_idx) % _DIAG_BUF_MAXLEN
+        # 一次性 GPU → CPU，省下原本每步一次的 host-device sync
+        lidar_arr = _diag_buf['lidar_min'][_idx].reshape(-1).cpu().numpy()
+        speed_arr = _diag_buf['speed'][_idx].reshape(-1).cpu().numpy()
+        omega_arr = _diag_buf['omega'][_idx].reshape(-1).cpu().numpy()
+        obs_dist_arr = _diag_buf['obs_dist'][_idx].reshape(-1).cpu().numpy()
 
         print("\n" + "=" * 60)
-        print(f"[DIAG] Per-step 行為分析 ({len(lidar_arr)} samples)")
+        _truncated_note = f" (環形緩衝丟棄前 {_diag_total_steps - _DIAG_BUF_MAXLEN} 步)" if _diag_total_steps > _DIAG_BUF_MAXLEN else ""
+        print(f"[DIAG] Per-step 行為分析 ({len(lidar_arr)} samples{_truncated_note})")
         print("=" * 60)
 
         # 反 normalize: speed_arr 是 normalized (÷v_max=1.0)，lidar 是 normalized (÷max_range≈18m)
