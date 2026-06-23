@@ -64,6 +64,15 @@ _build
 # Teleop Recorded Dataset
 /datasets/
 
+# 文獻 PDF / 論文草稿（~500MB，勿入 git，僅本機保留）
+/paper/
+# 車端部署 repo（獨立 git repo，勿巢狀 commit）
+/rover_rl/
+# 本機暫存 / 個人設定
+/scripts/reinforcement_learning/skrl/tmp/
+.play_launcher_settings.json
+.hermes/
+
 # Tests
 tests/
 
