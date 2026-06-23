@@ -1,0 +1,157 @@
+# wd_sa1_v3e — SA1 v3e: 移除 penalty_smoothness（sin 波元兇）
+#
+# ★ 根因更正 (2026-06-15)：sin 波不是「缺抗抽動」，是 penalty_smoothness 本身造成的。
+#   決定性對照 sa3_v2（smoothness=0）視覺乾淨但 flip p95=0.362（高）；v3d（smoothness=0.015）
+#   sin 波但 flip p95=0.127（低）→ flip rate 是反指標：高 flip=快抖抵銷成直線（乾淨）、
+#   低 flip=持住同方向→slew 累積成大 weave（sin 波）。penalty_smoothness 罰 |Δratio_ang|
+#   = 罰 flip → 逼低 flip → 造成 sin 波。當初「抗單幀抽動」的懲罰反成元兇。
+#
+# v3e（方案 A：最小隔離 penalty_smoothness 單一變因）vs v3d：
+#   - curriculum v3e: penalty_smoothness 0.015 → 0.0（移除元兇）。
+#   - 其餘維持 v3d：ent_ang floor 0.02（防 angular collapse，與 sin 波無關）、
+#     act_hist action_error 編碼保留（obs 仍 83D）、dropout 0.2 保留。
+#   - 待確認 smoothness 單獨是否為主因後，再決定 act_hist 去留（→ 可能 v3f）。
+#
+# ⚠️ 從頭訓練。reward shaping 變，不可 resume v3d ckpt。
+# ⚠️ train/play 必須設 CHARGE_ACT_HIST_MODE=action_error（act_hist 保留）。
+#
+# 用法 (用 launcher 設好 env var):
+#   PYTHONUNBUFFERED=1 CHARGE_ACT_HIST_MODE=action_error \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa1_v3e --headless --run_name sa1_v3e_ne1024_s42
+
+name: wd_sa1_v3e
+description: "SA1 v3e: 移除 penalty_smoothness (sin 波元兇). curriculum v3e (smoothness=0, ent_ang floor 0.02). act_hist action_error 保留. From scratch. Requires CHARGE_ACT_HIST_MODE=action_error."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3e   # v3e: penalty_smoothness=0 + ent_ang floor=0.02
+initial_stage: 1
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles (same as v3d) ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0002
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.5
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (同 v3d；floor 由 curriculum v3e 強制 0.02) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
+
+# --- act_hist dropout (train-only mask on 4D action history，保留) ---
+act_hist_dropout: 0.2
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64, unchanged) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA1: clean noise OFF, bias + per_ring ON) ---
+lidar_no_noise: true
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR (SA1: physics + disturbance + light actuator) ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (v3b: 模擬實機 LiDAR→policy 管線延遲)
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
+# Heading stability (SA1: off)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (v3e: from scratch) ---
+checkpoint: null
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa1, v3e, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, smoothness0, no_smoothness_penalty, act_hist_action_error, act_hist_dropout]
+notes: "SA1 v3e: 移除 penalty_smoothness (sin 波元兇，curriculum v3e=0). 保留 act_hist action_error + ent_ang floor 0.02. From scratch. 驗收: 同場景 play 比 sa3_v2 乾淨度（注意 flip rate 是反指標）。"

@@ -1,0 +1,117 @@
+# wd_sa7_a2c_aux_tc — T Corridor SA7 high pressure: goals=1, penalty=-50, timeout=-25, occlusion 20%
+#
+# 用法：
+#   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa7_a2c_aux_tc --headless \
+#     --checkpoint logs/rnn_car/<sa6_tc_run>/checkpoint_XXXXXX.pt \
+#     --run_name sa7_tc_dense_ne1024_s42
+#
+# 從 SA6 TC checkpoint 續訓。TC3_sa7_high_pressure stage。
+# batch_size = 1024 × 300 = 307200
+# update 數 = timesteps / rollout_length = 600000 / 300 = 2000
+
+name: wd_sa7_a2c_aux_tc
+description: "T Corridor SA7 high pressure: goals=1, penalty=-50, timeout=-25, occlusion 20%, dynamic=8. From SA6 TC checkpoint."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD-TCorridor
+curriculum_version: wd_tcorridor_v1
+initial_stage: 3
+fixed_stage: true
+scene_profile: wd_tcorridor_v1
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: symmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 600000
+seed: 42
+
+# --- RL optimizer / return (SA7 trainer will sync from phase) ---
+lr: 0.0005
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.997
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: partial
+value_init_bias: 0.0
+max_grad_norm: 1.0
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.0
+ent_coeff_angular: 0.0
+
+# --- WD-style gradient caps / loss guards ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (match SA6 TC extractor_rnn architecture) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 30
+preprocess_dim: 12
+fc_dim: 48
+wd_middle_dim: 0
+rnn_type: RNN
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.65
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- Runtime / safety / logging ---
+lidar_no_noise: true
+no_domain_randomization: false
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume ---
+checkpoint: null
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, tcorridor, sa7, a2c, aux, extractor_rnn, partial_norm, g1, p50, timeout, occlusion]
+notes: "T Corridor SA7 high pressure: goals=1, penalty=-50, timeout=-25, occlusion 20%, dynamic=8, obs_speed=1.0, episode=120s. From SA6 TC checkpoint."

@@ -1,0 +1,173 @@
+# wd_sa2_v3c — SA2 v3c: 動態場景驗證 action stacking 價值
+#
+# 起點 (2026-06-10):
+#   ckpt = sa1_v3c_ne1024_s42/checkpoint_90000.pt (iter 300)
+#   SR 96.4% / CR 3.9% / p95_flip 36.8% / 視覺確認無舞龍舞獅
+#
+# SA2 改動（vs SA1_v3c）:
+#   - initial_stage: 1 → 2 (SA2_nav_static)
+#   - LiDAR noise OFF → ON (50% calibrated noise，匹配 wd_sa2_v2)
+#   - timesteps 270k → 420k (~1400 iter)
+#   - lr 2e-4 → 5e-4（SA2 stage curriculum 帶起，YAML 與之一致）
+#   - max_grad_norm 0.5 → 1.0（SA2 stage curriculum 帶起，YAML 與之一致）
+#   - ent_coeff 0.02/0.04 → 0.03/0.05（SA2 stage curriculum 帶起）
+#
+# 繼承 v3c 特性:
+#   - action stacking (past 2 actions, 4D obs)
+#   - obs_delay [0,1] (LiDAR→policy 管線延遲模擬)
+#   - smoothness 0.005 (curriculum 同步)
+#   - r_min 0.25 (curriculum 同步)
+#   - obs 83D / StateMLP 11D
+#
+# ⚠️ 不相容 v2/v3/v3b ckpt（obs 79 → 83，StateMLP 7→11）
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa2_v3c --headless \
+#     --checkpoint logs/rnn_car/sa1_v3c_ne1024_s42/checkpoint_90000.pt \
+#     --run_name sa2_v3c_ne1024_s42
+
+name: wd_sa2_v3c
+description: "SA2 v3c: 動態場景 + action stacking. From SA1_v3c iter 300 (SR 96.4%, p95_flip 36.8%)."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3
+initial_stage: 2
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 420000
+seed: 42
+
+# --- RL optimizer (與 SA2 stage 一致) ---
+lr: 0.0005
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 1.0
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (SA2 stage: 0.03/0.05) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.03
+ent_coeff_angular: 0.05
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64, 維持 SA1_v3c) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA2: 全噪聲 ON，50% 校準) ---
+lidar_no_noise: false
+lidar_displacement_std_per_meter: 0.00020
+lidar_displacement_std_soft: 0.001
+lidar_displacement_std: 0.0
+lidar_hole_rate: 0.10
+lidar_distractor_rate: 0.001
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+lidar_obs_noise_std: 0.003
+lidar_block_dropout_prob: 0.03
+lidar_block_dropout_width: [3, 8]
+lidar_displacement_std_per_meter_dr: [0.00015, 0.00030]
+lidar_displacement_std_soft_dr: [0.001, 0.010]
+lidar_displacement_std_dr: null
+lidar_hole_rate_dr: [0.05, 0.15]
+
+# --- Sim-to-Real DR (與 SA1_v3c 一致) ---
+no_domain_randomization: false
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (繼承 v3c)
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
+# Heading stability (SA2: off — 用 smoothness penalty 代替)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume ---
+checkpoint: logs/rnn_car/sa1_v3c_ne1024_s42/checkpoint_90000.pt
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa2, v3c, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, antijitter, action_stacking, dynamic]
+notes: "SA2 v3c: 動態場景驗證 action stacking. From SA1_v3c iter 300 (visual confirmed clean). LiDAR noise ON 50%."

@@ -1,0 +1,171 @@
+# wd_sa2_v3f — SA2 v3f: 動態場景 — 移除 act_hist 後的動態驗證（sin 波決勝局）
+#
+# 起點 (2026-06-19):
+#   ckpt = sa1_v3f_ne1024_s42/checkpoint_210000.pt (SA1_v3f 完訓平台 SR 96.4%)
+#   in-distribution 無障礙隔離 eval 三軸全過：|ω| 地板 0.05-0.33、slew 差 75% 鎖一步 0.6、fwd 96-100% = 乾淨。
+#
+# 為什麼 SA2 是關鍵：act_hist/action_error 是「動態才現形」的 sin 波元兇（SA2_v3e 動態爆 sin 波，
+#   但 SA1 靜態看不出來）。v3f 在 SA1 靜態已乾淨，SA2 動態才是真正考驗延遲 DR 是否獨立致 sin 波。
+#
+# v3f 與 v3e 的唯一差別：
+#   - obs 79D（act_hist 整個移除，含 action_error 速度落差）← env var CHARGE_USE_ACT_HIST=0（必須設！）
+#   - act_hist_dropout 0.0（無 act_hist，dropout 無意義）
+#   - 其餘（curriculum v3e penalty_smoothness=0、延遲 DR、LiDAR noise、stage 2 動態）全同 v3e。
+#
+# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0（不是 ACT_HIST_MODE）。obs 79D。
+# ⚠️ 不相容 v2/v3/v3b/v3c/v3d/v3e ckpt（那些是 83D 含 act_hist）。
+#
+# 用法 (用 launcher 設好 env var):
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa2_v3f --headless \
+#     --checkpoint logs/rnn_car/sa1_v3f_ne1024_s42/checkpoint_210000.pt \
+#     --run_name sa2_v3f_ne1024_s42
+
+name: wd_sa3_v3g
+description: "SA3 v3g: penalty_smoothness 0->0.003 抗 bang-bang 塌縮 (v3e/v3f penalty=0 致 degenerate sin波). From sa2_v3f checkpoint_210000 (iter700 乾淨). obs 79D, ent_ang 0.02. Requires CHARGE_USE_ACT_HIST=0."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3g   # v3e: penalty_smoothness=0 (sin 波元兇移除) + ent_ang floor=0.02
+initial_stage: 3
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 420000
+seed: 42
+
+# --- RL optimizer (與 SA2 stage 一致) ---
+lr: 0.0005
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.990
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 1.0
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (SA2 stage: 0.03/0.05) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.005
+ent_coeff_angular: 0.02
+
+# --- v3f: 無 act_hist → dropout 無意義 ---
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64, 維持 SA1_v3f) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.85
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA2: 全噪聲 ON，50% 校準) ---
+lidar_no_noise: false
+lidar_displacement_std_per_meter: 0.00020
+lidar_displacement_std_soft: 0.001
+lidar_displacement_std: 0.0
+lidar_hole_rate: 0.10
+lidar_distractor_rate: 0.001
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+lidar_obs_noise_std: 0.003
+lidar_block_dropout_prob: 0.03
+lidar_block_dropout_width: [3, 8]
+lidar_displacement_std_per_meter_dr: [0.00015, 0.00030]
+lidar_displacement_std_soft_dr: [0.001, 0.010]
+lidar_displacement_std_dr: null
+lidar_hole_rate_dr: [0.05, 0.15]
+
+# --- Sim-to-Real DR (與 SA1_v3f 一致：延遲 DR 保留) ---
+no_domain_randomization: false
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (繼承 v3e)
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
+# Heading stability (SA2: off)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume ---
+checkpoint: logs/rnn_car/sa2_v3f_ne1024_s42/checkpoint_210000.pt
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa2, v3f, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, no_act_hist, obs79d, smoothness0, dynamic]
+notes: "SA2 v3f: 動態場景, act_hist 移除後驗證 (sin 波決勝局). From SA1_v3f 完訓 (in-dist eval 三軸乾淨). obs 79D, curriculum v3e (penalty_smoothness=0). LiDAR noise ON 50%, 延遲 DR 保留."

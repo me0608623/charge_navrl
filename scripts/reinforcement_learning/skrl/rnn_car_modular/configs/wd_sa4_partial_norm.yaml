@@ -1,0 +1,119 @@
+# wd_sa4_partial_norm — SA4 variant: partial advantage normalization (A/sqrt(std))
+#
+# 用法：
+#   PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa4_partial_norm --headless --run_name <run_name>
+#
+# 核心改動（vs SA4 wd_sa4_a2c_aux baseline）：
+#   adv_norm_mode: partial  ← baseline 用 mean_only (A - mean)，此版用 A / sqrt(std)
+#   目的：降低 actor gradient 量級，改善 Module Entropy（ME≈0 目標）
+#   預期效果：ME 從 ~0.95 降到 ~0.5，entropy 下降速度放緩，延長探索期
+#
+# batch_size = num_envs × rollout_length = 1024 × 300 = 307200
+# update 數 = timesteps / rollout_length = 420000 / 300 = 1400
+
+name: wd_sa4_partial_norm
+description: "SA4 partial adv normalization: A/sqrt(std) for gradient balance. From SA3 checkpoint."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v1
+initial_stage: 4
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v1
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: symmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 420000                                                 # 1400 iter（與 SA4 baseline 900 iter 比較 + 500 延長）
+seed: 42
+
+# --- RL optimizer / return ---
+lr: 0.0005
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.994
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: partial                                            # ★ 核心改動：A / sqrt(std)
+value_init_bias: 0.0
+max_grad_norm: 1.0
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.0
+ent_coeff_angular: 0.0
+
+# --- WD-style gradient caps / loss guards ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 30
+preprocess_dim: 12
+fc_dim: 48
+wd_middle_dim: 0
+rnn_type: RNN
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- Runtime / safety / logging ---
+lidar_no_noise: true
+no_domain_randomization: false
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume ---
+checkpoint: null
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa4, a2c, aux, extractor_rnn, partial_norm, gradient_balance]
+notes: "SA4 partial adv norm: A/sqrt(std) to fix ME≈0.95 → target ME≈0.5. From SA3 checkpoint_270000."

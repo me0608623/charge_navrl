@@ -1,0 +1,163 @@
+# wd_sa1_v3d — SA1 v3d: v3c + 抗 sin 波抽動三件套
+#
+# v3d 與 v3c 的差異 (2026-06-12):
+#   根因診斷: v3c SA2/SA3 出現「目標在正前方仍走 sin 波」抽動，p95_flip 卡 50-56%。
+#   三個共謀因子: (a) act_hist raw 編碼 → policy 學成 copy 上一步 action；
+#                 (b) SA3 ent_ang sync 到 0.01 → angular 分布過尖鎖死 limit cycle；
+#                 (c) penalty_smoothness=0.005 太弱擋不住 dense reward。
+#
+#   三件套修法:
+#   1. act_hist action_error 編碼 (env: CHARGE_ACT_HIST_MODE=action_error)
+#      尾 2 通道 raw a_{t-2}/ω_{t-2} → [err_lin, err_ang] = actuator tracking error
+#      (意圖 pre-DR − 實際 post-DR)。穩定時 err≈0 → copy 失效；err≠0 = 馬達沒跟上
+#      → 顯式致動延遲簽名。a_{t-1}/ω_{t-1} 保留補償感測延遲 (obs_delay)。
+#   2. act_hist dropout 0.2 (train-only mask)
+#      逼 policy 不可 100% 依賴歷史動作，斷 copy shortcut 的保險絲
+#   3. curriculum v3d: penalty_smoothness 0.015 + entropy_angular floor 0.02 (全 stage)
+#
+#   ⚠️ ego[1:3] 已含實際車速/角速度 (odom 等價)，act_hist 不重複放 odom；
+#      唯一新增的是 action_error，這是訓練端建模致動延遲 (論文 §34)。
+#
+# ⚠️ 從頭訓練。obs 仍 83D 但 act_hist 語義變 (action_error) + reward shaping 變，
+#    不可 resume v3/v3c ckpt。play/eval 必須同樣設 CHARGE_ACT_HIST_MODE=action_error。
+#
+# 用法 (用 launcher 設好 env var):
+#   PYTHONUNBUFFERED=1 CHARGE_ACT_HIST_MODE=action_error \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa1_v3d --headless --run_name sa1_v3d_ne1024_s42
+
+name: wd_sa1_v3d
+description: "SA1 v3d: v3c + anti-sin-wave 三件套 (act_hist action_error + dropout 0.2 + smoothness 0.015 + ent_ang floor 0.02). Train from scratch. Requires CHARGE_ACT_HIST_MODE=action_error."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3d   # v3d: smoothness=0.015 + ent_ang floor=0.02
+initial_stage: 1
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles (same as v3c) ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0002
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.5
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (v3d: SA1 起點同 v3c；floor 由 curriculum v3d 強制) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
+
+# --- v3d: act_hist dropout (train-only mask on 4D action history) ---
+act_hist_dropout: 0.2
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64, unchanged from v3c) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA1: clean noise OFF, bias + per_ring ON) ---
+lidar_no_noise: true
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR (SA1: physics + disturbance + light actuator) ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (v3b: 模擬實機 LiDAR→policy 管線延遲)
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
+# Heading stability (SA1: off)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (v3d: from scratch) ---
+checkpoint: null
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa1, v3d, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, antijitter, action_stacking, act_hist_action_error, act_hist_dropout, smoothness015]
+notes: "SA1 v3d: anti-sin-wave 三件套. act_hist action_error encoding (CHARGE_ACT_HIST_MODE=action_error) + dropout 0.2 + curriculum v3d (smoothness 0.015, ent_ang floor 0.02). From scratch."
