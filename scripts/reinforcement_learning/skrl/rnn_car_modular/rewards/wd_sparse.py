@@ -38,6 +38,9 @@ class WDSparseReward:
         rl_fps: float = 5.0,
         cost_turn_rate: float = 0.5,
         penalty_smoothness: float = 0.0,
+        penalty_speed_near_obs: float = 0.0,
+        near_obs_d_react: float = 1.2,
+        near_obs_d_stop: float = 0.45,
     ) -> None:
         self.penalty_hit = penalty_hit
         self.reward_get_goal = reward_get_goal
@@ -46,6 +49,10 @@ class WDSparseReward:
         self.rl_fps = rl_fps
         self.cost_turn_rate = cost_turn_rate
         self.penalty_smoothness = penalty_smoothness
+        # v3f-react: clearance-gated 減速懲罰（抗動態障礙晚反應碰撞）
+        self.penalty_speed_near_obs = penalty_speed_near_obs
+        self.near_obs_d_react = near_obs_d_react
+        self.near_obs_d_stop = near_obs_d_stop
 
     def update_params(self, curriculum_info: dict) -> None:
         """Sync reward params from curriculum phase config.
@@ -64,6 +71,8 @@ class WDSparseReward:
             self.penalty_timeout = curriculum_info["spot_penalty_timeout"]
         if "spot_penalty_smoothness" in curriculum_info:
             self.penalty_smoothness = curriculum_info["spot_penalty_smoothness"]
+        if "spot_penalty_speed_near_obs" in curriculum_info:
+            self.penalty_speed_near_obs = curriculum_info["spot_penalty_speed_near_obs"]
 
     def compute(
         self,
@@ -80,8 +89,12 @@ class WDSparseReward:
               frame-to-frame smoothness penalty (v3, anti-jitter)
         """
         prev_actions = None
+        near_obs_dist_m = None
+        v_forward_m = None
         if context is not None:
             prev_actions = context.get("prev_actions")
+            near_obs_dist_m = context.get("near_obs_dist_m")
+            v_forward_m = context.get("v_forward_m")
         return compute_wd_charge_reward(
             env_unwrapped=env_unwrapped,
             actions=actions,
@@ -95,4 +108,9 @@ class WDSparseReward:
             cost_turn_rate=self.cost_turn_rate,
             penalty_smoothness=self.penalty_smoothness,
             prev_actions=prev_actions,
+            penalty_speed_near_obs=self.penalty_speed_near_obs,
+            near_obs_dist_m=near_obs_dist_m,
+            v_forward_m=v_forward_m,
+            near_obs_d_react=self.near_obs_d_react,
+            near_obs_d_stop=self.near_obs_d_stop,
         )

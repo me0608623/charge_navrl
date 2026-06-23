@@ -62,9 +62,15 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         self._processed_actions = torch.zeros(N, 2, device=self.device)
         # applied_accelerations: [actual_accel, actual_omega] — 供觀測函數讀取
         self._applied_accelerations = torch.zeros(N, 2, device=self.device)
+        # v3d: actuator tracking error [err_v_norm, err_w_norm] — 指令(pre-DR) − 實際(post-DR)
+        #   = 致動延遲/馬達響應的「沒跟上」量。actuator DR 關閉或 delay=0 時恆為 0。
+        #   供 obs action_error 模式讀取（顯式延遲簽名，訓練端建模延遲，論文 §34）。
+        self._actuator_tracking_error = torch.zeros(N, 2, device=self.device)
 
         # 速度狀態
         self._current_velocity = torch.zeros(N, device=self.device)
+        # 角速度狀態（用於 α slew clamp）
+        self._current_omega = torch.zeros(N, device=self.device)
 
         # 正規化狀態輸出（供 s_t^ego 的 ā_t, ω̄_t）
         self._a_bar = torch.zeros(N, device=self.device)
@@ -77,8 +83,11 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         if not hasattr(DiscreteDifferentialDriveAction, '_config_printed'):
             DiscreteDifferentialDriveAction._config_printed = True
             print(f"[ACTION] DiscreteDifferentialDrive: MultiDiscrete([{cfg.num_bins}, {cfg.num_bins}])")
-            print(f"  v_max={cfg.max_linear_velocity} m/s, a_max={cfg.max_linear_accel} m/s², "
-                  f"ω_max={cfg.max_angular_vel:.4f} rad/s, dt={self._dt:.3f}s")
+            print(f"  v_max=+{cfg.max_linear_velocity:.2f}/-{cfg.max_linear_velocity*cfg.reverse_velocity_scale:.2f} m/s "
+                  f"(rev_scale={cfg.reverse_velocity_scale:.2f}), "
+                  f"a_max={cfg.max_linear_accel} m/s², "
+                  f"ω_max={cfg.max_angular_vel:.4f} rad/s, α_max={cfg.max_angular_accel:.2f} rad/s², "
+                  f"dt={self._dt:.3f}s")
 
     # ------------------------------------------------------------------
     # Properties
@@ -104,6 +113,15 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         供觀測函數讀取裁切後的物理指令。
         """
         return self._applied_accelerations
+
+    @property
+    def actuator_tracking_error(self) -> torch.Tensor:
+        """[num_envs, 2]: [err_v_norm, err_w_norm] — 致動延遲 tracking error。
+
+        = (actuator DR 前的意圖速度指令) − (DR 後實際寫入 sim 的速度)，正規化到 ~[-1,1]。
+        actuator DR 關閉或 delay=0 時恆為 0。供 obs action_error 模式作為顯式延遲簽名。
+        """
+        return self._actuator_tracking_error
 
     @property
     def a_bar(self) -> torch.Tensor:
@@ -151,17 +169,18 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         v = self._current_velocity
         dt = self._dt
         a_max = self.cfg.max_linear_accel
-        v_max = self.cfg.max_linear_velocity
+        v_max_pos = self.cfg.max_linear_velocity                            # 正向上限
+        v_max_neg = self.cfg.max_linear_velocity * self.cfg.reverse_velocity_scale  # 反向上限（可縮放）
 
         allowable_accel_max = torch.min(
             torch.full_like(v, +a_max),
-            (+v_max - v) / dt,
+            (+v_max_pos - v) / dt,
         )  # [N] 正向加速上界
 
         allowable_accel_min = torch.max(
             torch.full_like(v, -a_max),
-            (-v_max - v) / dt,
-        )  # [N] 反向制動下界（負值）
+            (-v_max_neg - v) / dt,
+        )  # [N] 反向制動下界（負值，受 reverse_velocity_scale 限制）
 
         # ── 第四步：ratio × 動態邊界 → 實際線加速度 ──
         #   ratio ≥ 0：accel = ratio × allowable_max（正向加速）
@@ -179,12 +198,27 @@ class DiscreteDifferentialDriveAction(ActionTerm):
             max=allowable_accel_max,
         )
 
-        # ── 第五步：角速度直接映射 ──
-        #   actual_ω = ratio × ω_max
-        actual_angular_vel = ratio_angular * self.cfg.max_angular_vel  # [N] rad/s
+        # ── 第五步：角速度映射 + α slew clamp ──
+        #   target_ω = ratio × ω_max
+        #   actual_ω = clamp(target_ω - ω_prev, ±α_max·dt) + ω_prev
+        # 防止 policy 瞬間翻轉 ±ω_max 造成舞龍舞獅
+        target_angular_vel = ratio_angular * self.cfg.max_angular_vel  # [N] rad/s
+        max_dw = self.cfg.max_angular_accel * dt                       # 每步最大 Δω
+        actual_angular_vel = self._current_omega + torch.clamp(
+            target_angular_vel - self._current_omega,
+            -max_dw, max_dw,
+        )
+        actual_angular_vel = actual_angular_vel.clamp(
+            -self.cfg.max_angular_vel, self.cfg.max_angular_vel,
+        )
 
-        # ── 第六步：速度積分 ──
-        next_velocity = (v + actual_linear_accel * dt).clamp(-v_max, +v_max)
+        # ── 第六步：速度積分（正反向上限非對稱）──
+        next_velocity = (v + actual_linear_accel * dt).clamp(-v_max_neg, +v_max_pos)
+
+        # v3d: 擷取 actuator DR 之前的「意圖速度指令」(policy 想要的)，
+        #      之後與 DR 後實際寫入 sim 的速度相減 → actuator tracking error。
+        _v_intended = next_velocity.clone()
+        _w_intended = actual_angular_vel.clone()
 
         # --- Actuator DR Step 2 & 3: velocity scaling + motor lag ---
         # Applied to target velocity (next_velocity, actual_angular_vel) before being written to sim
@@ -197,7 +231,7 @@ class DiscreteDifferentialDriveAction(ActionTerm):
             target_vel = torch.stack([next_velocity, actual_angular_vel], dim=1)
             target_vel = apply_velocity_scaling(self._env, target_vel, self.cfg.actuator_velocity_scale)
             target_vel = apply_motor_response_lag(self._env, target_vel, self.cfg.actuator_motor_lag)
-            next_velocity = target_vel[:, 0].clamp(-v_max, +v_max)
+            next_velocity = target_vel[:, 0].clamp(-v_max_neg, +v_max_pos)
             actual_angular_vel = target_vel[:, 1].clamp(
                 -self.cfg.max_angular_vel, self.cfg.max_angular_vel
             )
@@ -206,12 +240,22 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         self._a_bar[:] = actual_linear_accel / a_max
         self._omega_bar[:] = ratio_angular  # 本身就是 [-1, 1]
 
+        # v3d: actuator tracking error = (意圖 pre-DR) − (實際 post-DR)，正規化到 ~[-1,1]
+        #   actuator DR 關閉時 next_velocity / actual_angular_vel 未被改 → err = 0。
+        self._actuator_tracking_error[:, 0] = (
+            (_v_intended - next_velocity) / self.cfg.max_linear_velocity
+        ).clamp(-1.0, 1.0)
+        self._actuator_tracking_error[:, 1] = (
+            (_w_intended - actual_angular_vel) / self.cfg.max_angular_vel
+        ).clamp(-1.0, 1.0)
+
         # ── 儲存 ──
         self._applied_accelerations[:, 0] = actual_linear_accel
         self._applied_accelerations[:, 1] = actual_angular_vel
         self._processed_actions[:, 0] = next_velocity
         self._processed_actions[:, 1] = actual_angular_vel
         self._current_velocity[:] = next_velocity
+        self._current_omega[:] = actual_angular_vel
 
     def reset(self, env_ids: Sequence[int] | None = None):
         """重置速度狀態。"""
@@ -225,8 +269,10 @@ class DiscreteDifferentialDriveAction(ActionTerm):
             ids = torch.tensor(env_ids, device=self.device, dtype=torch.long)
 
         self._current_velocity[ids] = 0.0
+        self._current_omega[ids] = 0.0
         self._processed_actions[ids] = 0.0
         self._applied_accelerations[ids] = 0.0
+        self._actuator_tracking_error[ids] = 0.0
         self._a_bar[ids] = 0.0
         self._omega_bar[ids] = 0.0
 
@@ -329,6 +375,8 @@ class DiscreteDifferentialDriveActionCfg(ActionTermCfg):
         max_linear_velocity:  線速度極限 (m/s)
         max_linear_accel:     線加速度極限 (m/s²)
         max_angular_vel:      角速度極限 (rad/s)
+        max_angular_accel:    角加速度極限 (rad/s²) — 對應 cmd filter slew，防止舞龍舞獅
+        reverse_velocity_scale: 反向速度上限縮放 (1.0=對稱，0.2=反向上限為 max×0.2)
     """
     class_type: type = DiscreteDifferentialDriveAction
     asset_name: str = "robot"
@@ -337,6 +385,8 @@ class DiscreteDifferentialDriveActionCfg(ActionTermCfg):
     max_linear_velocity: float = 1.0                 # m/s
     max_linear_accel: float = 0.5                    # m/s²
     max_angular_vel: float = 0.25 * math.pi          # rad/s ≈ 0.7854
+    max_angular_accel: float = 3.0                   # rad/s² — 對應 cmd_max_accel_angular
+    reverse_velocity_scale: float = 1.0              # 反向速度縮放，1.0=對稱，0.2=強制前進偏好
 
     debug_vis: bool = True
 

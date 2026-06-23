@@ -918,6 +918,7 @@ def _flatten_phase(phase: dict) -> dict:
         "spot_cost_operate": float(reward.get("cost_operate", 0.0)),
         "spot_penalty_timeout": float(reward.get("penalty_timeout", 0.0)),
         "spot_penalty_smoothness": float(reward.get("penalty_smoothness", 0.0)),  # v3
+        "spot_penalty_speed_near_obs": float(reward.get("penalty_speed_near_obs", 0.0)),  # v3f-react
 
         # exploration -> entropy fields
         "ent_coeff_linear": float(exploration.get("entropy_linear", 0.01)),

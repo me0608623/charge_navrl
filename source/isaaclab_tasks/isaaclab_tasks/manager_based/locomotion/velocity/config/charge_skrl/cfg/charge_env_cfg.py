@@ -242,7 +242,9 @@ class ActionsCfg:
         num_bins=19,
         max_linear_velocity=1.0,
         max_linear_accel=0.5,
-        max_angular_vel=2.0,    # 2026-05-28: 0.25π → 2.0 rad/s（與 vlp16_curriculum.py 同步）
+        max_angular_vel=1.2,    # 2026-06-02: 2.0 → 1.2 rad/s 對齊馬達 profile_omega_max
+        max_angular_accel=3.0,  # rad/s² 對齊 cmd filter slew，防止舞龍舞獅
+        reverse_velocity_scale=0.2,  # 反向上限 -0.2 m/s（前進偏好，防倒車鎖死）
         debug_vis=True,
     )
 

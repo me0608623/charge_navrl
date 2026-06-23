@@ -47,6 +47,11 @@ def compute_wd_charge_reward(
     cost_turn_rate: float = 0.5,
     penalty_smoothness: float = 0.0,
     prev_actions: torch.Tensor | None = None,
+    penalty_speed_near_obs: float = 0.0,
+    near_obs_dist_m: torch.Tensor | None = None,
+    v_forward_m: torch.Tensor | None = None,
+    near_obs_d_react: float = 1.2,
+    near_obs_d_stop: float = 0.45,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute Warp Drive style sparse reward for charge agent.
 
@@ -158,6 +163,31 @@ def compute_wd_charge_reward(
         smoothness_reward = smoothness_reward * alive.float()
         reward += smoothness_reward
 
+    # --- Clearance-gated speed penalty (v3f-react, 2026-06-22): 抗「動態障礙晚反應碰撞」---
+    # 根因診斷：SA4_v3f 89% 碰撞為全速行進撞動態障礙、97% 在 ≤0.5m 才偵測。
+    #   sparse reward 對障礙的唯一訊號是接觸瞬間 penalty_hit，接觸前無任何梯度叫 policy 放慢。
+    # 設計：障礙進入反應區 [d_stop, d_react] 時，懲罰「快速」(而非懲罰「接近」)：
+    #   接近因子 p = clip((d_react - d)/(d_react - d_stop), 0, 1)   # 遠=0, 碰撞邊界=1
+    #   逐步懲罰 = -(w/fps) * p^2 * max(v_forward, 0)
+    #   → p^2 只在內側真正危險區咬(反應區邊緣寬鬆,避免空曠過度煞車)
+    #   → 慢下來(v→0)即免罰(就算貼障礙),鼓勵「減速通過」而非凍結
+    #   → dense(每步在區內都給)→ 直接塑造中段全速行為,換反應時間
+    # 預設 w=0 → 不影響其他 stage(單變因,向後相容)。
+    speed_near_obs_reward = torch.zeros(N, device=device)
+    if (
+        penalty_speed_near_obs > 0
+        and near_obs_dist_m is not None
+        and v_forward_m is not None
+    ):
+        d = near_obs_dist_m.to(device).float()
+        v_fwd = v_forward_m.to(device).float().clamp(min=0.0)
+        denom = max(near_obs_d_react - near_obs_d_stop, 1e-3)
+        p = ((near_obs_d_react - d) / denom).clamp(0.0, 1.0)
+        speed_near_obs_reward = -(penalty_speed_near_obs / rl_fps) * p.pow(2) * v_fwd
+        alive = ~terminated_flat
+        speed_near_obs_reward = speed_near_obs_reward * alive.float()
+        reward += speed_near_obs_reward
+
     # --- Timeout penalty (truncated but not terminated = episode 時間到但未碰撞/未到達目標) ---
     timeout_reward = torch.zeros(N, device=device)
     if penalty_timeout != 0.0:
@@ -170,6 +200,7 @@ def compute_wd_charge_reward(
         "wall_hit_reward": wall_hit_reward,      # WD: car static obstacle reward
         "obs_hit_reward": obs_hit_reward,        # WD: car dynamic obstacle reward
         "smoothness_reward": smoothness_reward,  # v3: anti-jitter penalty
+        "speed_near_obs_reward": speed_near_obs_reward,  # v3f-react: clearance-gated 減速
         "timeout_reward": timeout_reward,        # timeout penalty
         "floor_reward": torch.zeros(N, device=device),  # WD: car floor reward (0 for flat)
         "action_reward": action_reward,          # WD: car dynamic reward (action cost)

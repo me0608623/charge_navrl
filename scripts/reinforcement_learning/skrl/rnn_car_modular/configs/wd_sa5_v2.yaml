@@ -136,7 +136,7 @@ actuator_velocity_scale: [0.94, 1.06] # ±6% motor efficiency variation
 actuator_motor_lag: 0.42              # rise time ~0.55s
 
 # Observation latency DR (SA5: 50% chance 1-step delay)
-obs_delay_steps: [0, 1]
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
 # Heading stability (SA5: light penalty)
 heading_stability_weight: -0.05
 

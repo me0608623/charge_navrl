@@ -2570,7 +2570,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     #                                                 → preprocess_feat(12D)
     #   RL head: concat(policy_obs, preprocess_feat) → PolicyHead / ValueHead
     if use_extractor:
-        extractor = LidarStateExtractor().to(device)   # Conv1d LiDAR + MLP obs 特徵抽取器
+        # v3d: act_hist_dropout > 0 時，訓練端對 4D 動作歷史隨機 mask（斷 copy shortcut）
+        _act_hist_dropout = float(getattr(args_cli, "act_hist_dropout", 0.0))
+        # v3f: CHARGE_USE_ACT_HIST=0 → 移除 act_hist（含 action_error），obs 79D、state 7D。
+        #      必須與 env cfg 同一 env var 一致（env 端也用 CHARGE_USE_ACT_HIST 控制 obs 維度）。
+        _use_act_hist = os.environ.get("CHARGE_USE_ACT_HIST", "1") != "0"
+        extractor = LidarStateExtractor(
+            include_act_hist=_use_act_hist,
+            act_hist_dropout=(_act_hist_dropout if _use_act_hist else 0.0),
+        ).to(device)   # Conv1d LiDAR + MLP obs 特徵抽取器
+        if not _use_act_hist:
+            print("[v3f] CHARGE_USE_ACT_HIST=0 → act_hist 移除，obs 79D / state 7D（含 action_error 速度落差移除）")
+        elif _act_hist_dropout > 0.0:
+            print(f"[v3d] act_hist_dropout={_act_hist_dropout} (train-only mask on 4D action history)")
         rnn_input_dim = extractor.output_dim  # 96D（extractor 輸出維度）
     else:
         extractor = None
@@ -2924,11 +2936,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _spot_cost_operate = 0.03  # Phase 1 default (will update from curriculum)
     _spot_penalty_timeout = 0.0  # timeout penalty (0 = no penalty, SA6+)
     _spot_penalty_smoothness = 0.0  # v3: anti-jitter Δratio penalty (will update from curriculum)
+    _spot_penalty_speed_near_obs = 0.0  # v3f-react: clearance-gated 減速 (will update from curriculum)
+    # LiDAR max range (m) for normalizing obs[6:78] back to meters in clearance-gated penalty.
+    # Matches curriculum env config (charge_env_cfg_vlp16_curriculum.py: max_distance=8.0).
+    _LIDAR_MAX_DISTANCE_M = 8.0
     _reward_module.update_params({
         "spot_penalty_hit": _spot_penalty_hit,
         "spot_reward_get_goal": _spot_reward_get_goal,
         "spot_cost_operate": _spot_cost_operate,
         "spot_penalty_smoothness": _spot_penalty_smoothness,
+        "spot_penalty_speed_near_obs": _spot_penalty_speed_near_obs,
     })
 
     # --- v3: prev_actions buffer for smoothness penalty (anti-jitter) ---
@@ -3074,6 +3091,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _spot_cost_operate = metrics._curriculum_info.get("spot_cost_operate", 0.0)
         _spot_penalty_timeout = metrics._curriculum_info.get("spot_penalty_timeout", 0.0)
         _spot_penalty_smoothness = metrics._curriculum_info.get("spot_penalty_smoothness", 0.0)  # v3
+        _spot_penalty_speed_near_obs = metrics._curriculum_info.get(
+            "spot_penalty_speed_near_obs", 0.0)  # v3f-react
         _reward_module.update_params(metrics._curriculum_info)
 
         # Sync WD entropy params from curriculum (per-phase, A2CK per-head)
@@ -3170,9 +3189,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # Reward computation via modular dispatch (Phase 2)
             # v3: pass prev_actions via context for frame-to-frame smoothness penalty
+            # v3f-react: pass per-env nearest-obstacle distance (m) + forward speed (m/s)
+            #   for clearance-gated speed penalty. obs layout: [1]=v_x norm(/v_max=1.0 → m/s),
+            #   [6:78]=lidar norm[0,1] (×max_distance=8.0 → m). Hole-mask <0.02 like metrics.
+            _reward_ctx = {"prev_actions": _prev_actions}
+            with torch.no_grad():
+                _lidar_norm = obs[:, 6:78]                                       # [E,72] norm[0,1]
+                _lidar_clean = torch.where(
+                    _lidar_norm < 0.02, torch.full_like(_lidar_norm, float("inf")), _lidar_norm
+                )
+                _dmin_norm = _lidar_clean.min(dim=-1).values                     # [E]
+                _dmin_norm = torch.where(
+                    torch.isinf(_dmin_norm), torch.ones_like(_dmin_norm), _dmin_norm
+                )
+                _reward_ctx["near_obs_dist_m"] = _dmin_norm * _LIDAR_MAX_DISTANCE_M  # [E] meters
+                _reward_ctx["v_forward_m"] = obs[:, 1]                           # [E] m/s (v_max=1.0)
             reward_flat, reward_breakdown = _reward_module.compute(
                 env.unwrapped, actions, terminated, truncated,
-                context={"prev_actions": _prev_actions} if _prev_actions is not None else None,
+                context=_reward_ctx,
             )
             # Update prev_actions for next step (clone to detach from autograd graph)
             _prev_actions = actions.detach().clone()
@@ -4133,6 +4167,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "phase_parameter/penalty_hit": float(_spot_penalty_hit),
                 "phase_parameter/penalty_timeout": float(_spot_penalty_timeout),
                 "phase_parameter/penalty_smoothness": float(_spot_penalty_smoothness),  # v3
+                "phase_parameter/penalty_speed_near_obs": float(_spot_penalty_speed_near_obs),  # v3f-react
                 "phase_parameter/cost_operate": float(_spot_cost_operate),
                 "phase_parameter/obstacle_speed_rate": float(_obs_speed_limit),
                 "phase_parameter/obs_size_rand": float(_obs_size_rand),

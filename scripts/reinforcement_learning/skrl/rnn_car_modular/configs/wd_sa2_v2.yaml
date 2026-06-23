@@ -14,7 +14,7 @@ description: "SA2 v2: Static env, low LiDAR noise (50% cal), asymmetric critic, 
 # --- Environment / curriculum ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
 curriculum_version: warp_drive_single_agent_v1
-initial_stage: 1    # 【Test I】2→1，測 stage 編號是否為真兇
+initial_stage: 2    # SA2_nav_static
 fixed_stage: true
 scene_profile: warp_drive_single_agent_v1
 obstacle_mode: rule_based
@@ -101,23 +101,24 @@ aux_seq_batch_size: 256
 aux_grad_clip: 0.5
 zero_preprocess_feature_for_rl: false
 
-# --- LiDAR (SA2: low-intensity noise, 50% calibration) ---
-lidar_no_noise: false   # 【Profile】開啟 noise 量 host overhead
-lidar_displacement_std_per_meter: 0.00020
-lidar_displacement_std_soft: 0.0
-lidar_displacement_std: 0.0
-lidar_hole_rate: 0.10
-lidar_distractor_rate: 0.001
+# --- LiDAR (SA2: 全噪聲 ON，SA3 的 50%) ---
+lidar_no_noise: false                       # 全噪聲開
+lidar_displacement_std_per_meter: 0.00020   # 距離正比位移（5m 處 ±1mm）
+lidar_displacement_std_soft: 0.001          # 軟性位移（SA3 量級 50%）
+lidar_displacement_std: 0.0                 # 固定位移（仍 0，per_meter 涵蓋）
+lidar_hole_rate: 0.10                       # 漏點 10%
+lidar_distractor_rate: 0.001                # 偽距 0.1%
 lidar_distance_bias: true                   # 一致性：bias 全程 ON
 lidar_distance_bias_k_dr: [-0.005, 0.005]   # SA2: 同 SA1 等級
 lidar_distance_bias_b_dr: [-0.012, 0.012]
 lidar_per_ring_bias: true                   # 16 通道偏差 全程 ON
-lidar_obs_noise_std: 0.003
-lidar_block_dropout_prob: 0.0
+lidar_obs_noise_std: 0.003                  # 觀測高斯
+lidar_block_dropout_prob: 0.03              # 連續區塊遮蔽 3%（SA3 0.05 的 50% upper）
 lidar_block_dropout_width: [3, 8]
-lidar_displacement_std_per_meter_dr: null
-lidar_displacement_std_dr: null
-lidar_hole_rate_dr: null
+lidar_displacement_std_per_meter_dr: [0.00015, 0.00030]  # per-env DR（SA5 [0.00020,0.00060] 的 50%）
+lidar_displacement_std_soft_dr: [0.001, 0.010]           # soft displacement DR（SA5 [0.002,0.020] 的 50%）
+lidar_displacement_std_dr: null             # 固定位移 DR 不啟（per_meter_dr 已涵蓋）
+lidar_hole_rate_dr: [0.05, 0.15]            # hole rate DR（SA5 [0.15,0.30] 的 50%~中心）
 
 # --- Sim-to-Real DR ---
 no_domain_randomization: false
@@ -146,7 +147,7 @@ log_interval: 10
 save_interval: 100
 
 # --- Checkpoint / resume ---
-checkpoint: null    # 【Test H】from scratch — 排除 ckpt resume 拖累 fps 的假設
+checkpoint: logs/rnn_car/sa1_v2_lidar2_ne1024_s42/checkpoint_210000.pt   # SA1_v2_lidar2 iter 700 ckpt (SR 98.6%, flatten+circular encoder)
 no_resume_optimizer: true                                          # 新階段 optimizer momentum 清零
 
 # --- Metadata ---

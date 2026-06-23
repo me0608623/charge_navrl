@@ -25,6 +25,11 @@ v3 變更：
 """
 
 import math
+import os
+
+# v3f: CHARGE_USE_ACT_HIST=0 → 移除 act_hist 4D obs term（含 action_error 速度落差），obs 79D。
+#      預設 "1"（保留 act_hist，相容 v3c/v3d/v3e）。延遲仍由 actuator DR 建模，policy 從 ego 實際車速隱式學補償。
+_USE_ACT_HIST = os.environ.get("CHARGE_USE_ACT_HIST", "1") != "0"
 
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -438,6 +443,8 @@ class ObservationsCfgVLP16:
 
         def __post_init__(self):
             self.concatenate_terms = True
+            if not _USE_ACT_HIST:  # v3f: 移除 act_hist → 79D
+                self.past_actions = None
 
     @configclass
     class CriticCfg(ObsGroup):
@@ -507,6 +514,8 @@ class ObservationsCfgVLP16:
 
         def __post_init__(self):
             self.concatenate_terms = True
+            if not _USE_ACT_HIST:  # v3f: 移除 act_hist → 79D
+                self.past_actions = None
 
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()

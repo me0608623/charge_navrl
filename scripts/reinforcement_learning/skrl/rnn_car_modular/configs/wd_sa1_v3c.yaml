@@ -133,7 +133,7 @@ actuator_motor_lag: 0.5
 
 # Observation latency DR (v3b: 0-200ms 模擬實機 LiDAR→policy 管線延遲)
 # 部署測試假設：抽動部分原因是真實 obs 比 sim 慢 30ms，policy 對延遲 obs over-react
-obs_delay_steps: [0, 1]
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
 # Heading stability (SA1: off)
 heading_stability_weight: 0.0
 

@@ -130,7 +130,7 @@ actuator_velocity_scale: [0.9, 1.1]
 actuator_motor_lag: 0.3
 
 # Observation latency DR
-obs_delay_steps: [0, 1]                                       # SA6: 50% 機率 1 步延遲
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
 # Heading stability reward
 heading_stability_weight: -0.05                                # SA6: 輕微懲罰角速度震盪
 

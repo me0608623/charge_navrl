@@ -87,7 +87,7 @@ class LidarStateExtractor(nn.Module):
       （影響正前方那段角度的卷積特徵），改環狀填充修正；不改 tensor 形狀、不影響相容性。
     """
 
-    def __init__(self, legacy: bool = False, include_act_hist: bool = True):
+    def __init__(self, legacy: bool = False, include_act_hist: bool = True, act_hist_dropout: float = 0.0):
         super().__init__()
         # legacy=True：還原 2026-06-02 之前的舊架構（Conv1d 零填充 + AdaptiveMaxPool1d(1)
         #   + Linear(64,64)），用來載入舊 checkpoint（lidar_proj 形狀 64→64）。
@@ -97,6 +97,11 @@ class LidarStateExtractor(nn.Module):
         #   forward 會自動略過 obs 尾端的 act_hist，不影響新訓練（預設 True = v3c 11D）。
         self.legacy = legacy
         self.include_act_hist = include_act_hist
+        # v3d (2026-06-12): 訓練時對 act_hist 做 dropout，當「保險絲」逼 policy 不可
+        #   100% 依賴歷史動作（即使被 mask 也要靠 RNN hidden + ego 推斷）→ 弱化
+        #   "copy 上一步 action" 的 shortcut。eval/play 時 self.training=False 自動關閉。
+        #   0.0 = 不啟用（v3c 及之前的行為完全不變）。
+        self.act_hist_dropout = float(act_hist_dropout)
         # Branch 1: LiDAR Conv1d
         # padding_mode='circular'：LiDAR 角度為環狀（bin71 355° ↔ bin0 0° 是鄰居），
         # 零填充會在邊界假裝外面是空的，割斷正前方那段角度的卷積連續性 → 用環狀填充修正。
@@ -155,6 +160,11 @@ class LidarStateExtractor(nn.Module):
         time_feat = obs[:, TIME_START:TIME_END]                # [B, 1]
         if self.include_act_hist:
             act_hist = obs[:, ACT_HIST_START:ACT_HIST_END]     # [B, 4] v3c: 過去 2 步 action
+            if self.act_hist_dropout > 0.0:
+                # v3d: 訓練時隨機 mask act_hist（eval 時 training=False → 直接 passthrough）
+                act_hist = nn.functional.dropout(
+                    act_hist, p=self.act_hist_dropout, training=self.training
+                )
             state_in = torch.cat([ego, goal, time_feat, act_hist], dim=-1)  # [B, 11]
         else:
             # v3b/v3 相容：無 act_hist，state 只用 ego+goal+time = 7D
@@ -246,11 +256,13 @@ class PreprocessRNN(nn.Module):
                 nn.ReLU(),
             )
 
-        # Predict head — WD-style: Linear(12→7)+ReLU (preprocess_info_back)
-        # Training only — predicts 7D privileged geometry target for module loss
+        # Predict head — predicts privileged geometry+velocity target for aux module loss.
+        # ⚠️ 2026-06-23 修 dead-head bug：原本末端有 nn.ReLU()，但 target 含「有正負」的
+        #   body-frame 位置/速度（vbx/vby 可負）→ ReLU 強制 ≥0 + dead-ReLU 死亡螺旋 →
+        #   predict_head 輸出恆 0、零梯度、RNN 從未被監督學會預測障礙運動。移除末端 ReLU。
+        #   保留 nn.Sequential 結構使 state_dict key 仍為 predict_head.0.* (相容舊 checkpoint)。
         self.predict_head = nn.Sequential(
             nn.Linear(preprocess_dim, predict_dim),
-            nn.ReLU(),
         )
 
         self.preprocess_dim = preprocess_dim

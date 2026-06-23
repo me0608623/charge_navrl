@@ -1743,6 +1743,7 @@ def goal_obstacle_curriculum(
         "spot_cost_operate": float(stage_cfg.get("spot_cost_operate", 0.0)),
         "spot_penalty_timeout": float(stage_cfg.get("spot_penalty_timeout", 0.0)),
         "spot_penalty_smoothness": float(stage_cfg.get("spot_penalty_smoothness", 0.0)),  # v3 anti-jitter
+        "spot_penalty_speed_near_obs": float(stage_cfg.get("spot_penalty_speed_near_obs", 0.0)),  # v3f-react clearance-gated 減速
         "ent_coeff_linear": float(stage_cfg.get("ent_coeff_linear", 0.30)),
         "ent_coeff_angular": float(stage_cfg.get("ent_coeff_angular", 0.375)),
         "obstacle_speed_rate": float(stage_cfg.get("obstacle_speed_rate", 0.8)),

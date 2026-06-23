@@ -105,6 +105,10 @@ class ExperimentConfig:
     scene_bound_base: float = 7.0
     room_size: float | None = None
 
+    # v3d: act_hist dropout（訓練時隨機 mask 4D 動作歷史，弱化 "copy 上一步" shortcut）
+    # 0.0 = 不啟用（v3c 行為）。配合 CHARGE_ACT_HIST_MODE=delta 一起斷 sin 波抽動。
+    act_hist_dropout: float = 0.0
+
     # aux
     aux_seq_len: int = 15
     aux_burn_in: int = 0

@@ -14,7 +14,7 @@
        → 注意: train_rnn_car_wdclip.py 不使用 scripted 障礙物移動
        → 障礙物由 learned obstacle policy (ObstaclePolicyFC) 控制
        → max_active_obstacles=10，實際數量由 curriculum phase 決定
-     - LiDAR: VLP16, z=1.6m, 72 bins, raycast Wall_.* + Obstacle_.*
+     - LiDAR: VLP16, z=1.43m, 72 bins, raycast Wall_.* + Obstacle_.*
 
   2. 命令初始值 (CommandsCfgVLP16Curriculum):
      - Phase 1 預設: 8 goals, 距離 2-13m
@@ -122,7 +122,7 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
 
         room_size = 10.0  # ±10m = 20×20m
         wall_thickness = 1.0  # 1.0m 厚度（原 0.2m）
-        wall_height = 3.0   # ★ 真實牆 3m，高於 VLP16 (z=1.6m)，確保 LiDAR 可見
+        wall_height = 3.0   # ★ 真實牆 3m，高於 VLP16 (z=1.43m)，確保 LiDAR 可見
         wall_length = room_size * 2 + wall_thickness
         wall_color = (0.5, 0.5, 0.5)
 
@@ -199,7 +199,7 @@ class MySceneCfgVLP16_20x20(MySceneCfgVLP16):
 
         # 100 個障礙物（循環外觀模板，初始隱藏在 Z = -10.0）
         # play --no_curriculum 可自由設定 --num_static/--num_dynamic
-        # ★ 行人高度 (1.6~1.8m)：確保 VLP16 LiDAR (z=1.6m, lowest beam -15°) 可觀測
+        # ★ 行人高度 (1.6~1.8m)：確保 VLP16 LiDAR (z=1.43m, lowest beam -15°) 可觀測
         MAX_OBS = 100
         HIDDEN_Z = -10.0
         _static_tpl = [
@@ -945,7 +945,9 @@ class ActionsCfgVLP16Shielded:
         num_bins=19,
         max_linear_velocity=1.0,
         max_linear_accel=0.5,
-        max_angular_vel=2.0,    # 2026-05-28: 0.25π (≈0.785) → 2.0 rad/s，提高轉向能力對抗倒車鎖死
+        max_angular_vel=1.2,    # 2026-06-02: 2.0 → 1.2 rad/s 對齊馬達 profile_omega_max
+        max_angular_accel=3.0,  # rad/s² 對齊 cmd filter slew，防止舞龍舞獅
+        reverse_velocity_scale=0.2,  # 反向上限 -0.2 m/s（前進偏好，防倒車鎖死）
         shield_mode="soft",
         shield_d_danger=0.55,
         shield_d_safe=1.2,

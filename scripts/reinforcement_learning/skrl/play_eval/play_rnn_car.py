@@ -155,6 +155,9 @@ parser.add_argument("--camera", type=str, default=CAMERA, choices=["top", "follo
                     help="攝影機視角：top=俯視 / follow=跟隨 / side=側視")
 parser.add_argument("--deterministic", action="store_true", default=DETERMINISTIC,
                     help="動作選擇用 argmax（確定性）而非 sampling（探索）")
+parser.add_argument("--jitter_eval", action="store_true", default=False,
+                    help="量測 deterministic policy 的角度 ratio 正負號翻轉率 (per-env p95) + |ω| std，"
+                         "用來去掉訓練探索噪聲後判斷 sin 波抽動是否真的存在")
 parser.add_argument("--seed", type=int, default=None,
                     help="環境隨機種子（控制 obstacle/goal 生成順序，None=使用 env config 預設 42）")
 parser.add_argument("--real_time", action="store_true", default=REAL_TIME,
@@ -183,6 +186,10 @@ parser.add_argument("--obstacle_speed", type=float, default=OBSTACLE_SPEED,
                     help="覆寫障礙物速度倍率 (0.0=靜止, 1.0=全速)")
 parser.add_argument("--obstacle_boundary", type=float, default=None,
                     help="覆寫障礙物生成邊界 (m)。例如 5.0 表示障礙物只在機器人 ±5m 內生成")
+parser.add_argument("--arena_size", type=float, default=None,
+                    help="程式化場景邊長 (m)，等比例縮放整個 20×20m 場景。"
+                         "例如 10.0 → 10×10m（外牆/障礙/目標/機器人生成同步縮小，障礙物不會超出邊界）。"
+                         "與 --usd_scene 互斥。")
 parser.add_argument("--obstacle_behavior", type=str, default=OBSTACLE_BEHAVIOR,
                     choices=["static", "patrol", "random_walk", "horizontal_crossing",
                              "path_crossing", "near_miss", "corridor_crossing", "occlusion",
@@ -336,6 +343,18 @@ parser.add_argument("--aux_debug_interval", type=int, default=AUX_DEBUG_INTERVAL
                     help="每 N 步印一次 aux debug")
 parser.add_argument("--no_domain_randomization", action="store_true", default=False,
                     help="關閉 domain randomization")
+
+# --- Actuator DR (致動延遲 / 馬達 lag)：play 端對齊訓練 + 真車 200ms 延遲 ---
+# 訓練有 enable_actuator_dr=true（YAML），但 play 預設關閉 → train/play 不一致會讓 RNN
+# 的延遲預補償變過補償 → sin 波。開此 flag 讓 play 對齊訓練/真車底盤延遲。
+parser.add_argument("--enable_actuator_dr", action="store_true", default=False,
+                    help="play 端開啟 actuator DR（action delay + motor lag + vel scale），對齊訓練/真車")
+parser.add_argument("--actuator_delay_range", type=int, nargs=2, default=None,
+                    metavar=("LO", "HI"), help="action delay 步數範圍 [lo,hi]（dt=0.2s → 1 步≈200ms）")
+parser.add_argument("--actuator_velocity_scale", type=float, nargs=2, default=None,
+                    metavar=("LO", "HI"), help="per-episode 速度縮放範圍 [lo,hi]")
+parser.add_argument("--actuator_motor_lag", type=float, default=None,
+                    help="一階低通 α（0=無響應, 1=瞬間），訓練值 0.5")
 
 # --- BEV 俯視圖 ---
 parser.add_argument("--bev_vis", action="store_true", default=BEV_VIS,
@@ -603,6 +622,127 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
         print(f"  目標附近障礙: {cli_args.obs_near_goal_count} 個在 goal ≤{cli_args.obs_near_goal_radius:.1f}m 內")
 
     return final
+
+
+# ============================================================================
+# Arena 尺寸縮放（程式化場景等比例縮放：20×20m → 任意正方形）
+# ============================================================================
+
+ARENA_REF_SIZE = 20.0  # 訓練基準場景邊長 (m)，對應 MySceneCfgVLP16_20x20 room_size=10.0
+
+
+def apply_arena_size(env_cfg, arena_size: float) -> None:
+    """把程式化 20×20m 場景等比例縮放成 arena_size × arena_size。
+
+    以 ratio r = arena_size / 20.0 同步縮放：外牆、內牆 mesh、障礙物生成邊界、
+    機器人生成範圍、動態障礙物活動邊界、目標距離 / 目標移動半徑、per-env 邊界牆
+    與 room_boundary。目的是「跟原本 20×20 一樣、只是縮小」，且保證障礙物 / 目標 /
+    機器人都不會生成或移動到新邊界之外。
+
+    僅適用於程式化場景；使用 --usd_scene 時不應呼叫（USD 自帶幾何）。
+
+    Args:
+        env_cfg: 環境配置物件
+        arena_size: 新場景邊長 (m)，例如 10.0 → 10×10m
+    """
+    r = float(arena_size) / ARENA_REF_SIZE
+    if r <= 0:
+        print(f"[PLAY] arena_size={arena_size} 無效，略過縮放")
+        return
+
+    new_half = 10.0 * r           # 新外牆半邊長（場景中心 → 牆中心）
+    thickness = 1.0               # 牆厚維持 1.0m（不縮放，保持實心）
+    L = new_half * 2 + thickness  # 外牆長度
+
+    # 1. 物理外牆（wall_north/south/east/west）— 移到 ±new_half 並重設長度
+    def _wall_height(w):
+        try:
+            return float(w.spawn.size[2])
+        except Exception:
+            return 3.0
+
+    for name, axis in (("wall_north", "y+"), ("wall_south", "y-"),
+                       ("wall_east", "x+"), ("wall_west", "x-")):
+        w = getattr(env_cfg.scene, name, None)
+        if w is None:
+            continue
+        h = _wall_height(w)
+        sign = 1.0 if axis.endswith("+") else -1.0
+        if axis.startswith("y"):
+            w.spawn.size = (L, thickness, h)
+            w.init_state.pos = (0.0, sign * new_half, h / 2.0)
+        else:
+            w.spawn.size = (thickness, L, h)
+            w.init_state.pos = (sign * new_half, 0.0, h / 2.0)
+
+    # 2. 內牆 slot mesh（wall_internal_*）— 平面尺寸等比例縮小
+    i = 0
+    while True:
+        w = getattr(env_cfg.scene, f"wall_internal_{i}", None)
+        if w is None:
+            break
+        try:
+            sx, sy, sz = w.spawn.size
+            w.spawn.size = (sx * r, sy * r, sz)
+        except Exception:
+            pass
+        i += 1
+
+    # 3. 事件邊界縮放（障礙物生成 / 牆壁生成 / 機器人生成 / 動態活動範圍 / 目標移動半徑）
+    for evt_attr in ("randomize_obstacles", "randomize_obstacles_startup"):
+        evt = getattr(env_cfg.events, evt_attr, None)
+        if evt is not None and "boundary" in evt.params:
+            evt.params["boundary"] = 9.5 * r
+
+    wall_evt = getattr(env_cfg.events, "randomize_wall_positions", None)
+    if wall_evt is not None and "boundary" in wall_evt.params:
+        wall_evt.params["boundary"] = 8.5 * r
+
+    reset_evt = getattr(env_cfg.events, "reset_base", None)
+    if reset_evt is not None and "pose_range" in reset_evt.params:
+        lim = 7.0 * r
+        reset_evt.params["pose_range"]["x"] = (-lim, lim)
+        reset_evt.params["pose_range"]["y"] = (-lim, lim)
+
+    move_evt = getattr(env_cfg.events, "move_dynamic_obstacles", None)
+    if move_evt is not None:
+        if "area_limit" in move_evt.params:
+            move_evt.params["area_limit"] = 8.0 * r
+        if "bound_limit" in move_evt.params:
+            move_evt.params["bound_limit"] = 9.0 * r
+
+    goal_move_evt = getattr(env_cfg.events, "move_goal", None)
+    if goal_move_evt is not None and "goal_move_max_radius" in goal_move_evt.params:
+        goal_move_evt.params["goal_move_max_radius"] *= r
+
+    # 4. per-env 邊界牆 spec + room_boundary（init_perenv_walls startup 事件）
+    #    與物理外牆對齊，供 LOS / proximity / goal 邊界檢查使用
+    init_evt = getattr(env_cfg.events, "init_walls", None)
+    if init_evt is not None:
+        init_evt.params["boundary_walls_spec"] = [
+            (0.0,  new_half, L, thickness),   # North
+            (0.0, -new_half, L, thickness),   # South
+            ( new_half, 0.0, thickness, L),   # East
+            (-new_half, 0.0, thickness, L),   # West
+        ]
+        init_evt.params["room_boundary"] = new_half
+
+    # 5. 目標命令：距離與牆界等比例縮放，並夾在可達上限內
+    gc = env_cfg.commands.goal_command
+    dmin, dmax = gc.ranges.distance
+    reach_max = max(1.0, new_half * 2 - 1.5)
+    gc.ranges.distance = (min(dmin * r, reach_max), min(dmax * r, reach_max))
+    gc.wall_boundary = 9.5 * r
+
+    print(
+        f"[PLAY] Arena 縮放: {ARENA_REF_SIZE:.0f}×{ARENA_REF_SIZE:.0f}m → "
+        f"{arena_size:.0f}×{arena_size:.0f}m (ratio={r:.2f})"
+    )
+    print(
+        f"        外牆 ±{new_half:.1f}m | 障礙物邊界 ±{9.5 * r:.2f}m | "
+        f"機器人生成 ±{7.0 * r:.2f}m | "
+        f"目標距離 {gc.ranges.distance[0]:.1f}~{gc.ranges.distance[1]:.1f}m"
+    )
 
 
 # ============================================================================
@@ -1190,6 +1330,11 @@ def print_lidar_diagnostic(raw_env, step: int):
           f"max={int((real_dist >= 19.5).sum())}")
 
 
+# v2 速度預測解碼累計器（跨步累計 RNN 速度預測誤差，判斷 aux 表徵準度）
+_AUX_VEL_ERR: list[float] = []
+_AUX_VEL_TRUE: list[float] = []
+
+
 def print_aux_debug(raw_env, step: int, obs_tensor: torch.Tensor, aux_pred: torch.Tensor, max_obstacles: int):
     """印出 RNN aux 7D 預測 vs simulator ground truth（env 0）。
 
@@ -1210,9 +1355,9 @@ def print_aux_debug(raw_env, step: int, obs_tensor: torch.Tensor, aux_pred: torc
         device=aux_pred.device,
     )
 
-    pred0 = aux_pred[0].detach()   # RNN 預測值
-    tgt0 = target[0].detach()      # simulator 真實值
-    err0 = pred0 - tgt0            # 預測誤差
+    pred0 = aux_pred[0].detach()   # RNN 預測值 (可能 13D)
+    tgt0 = target[0].detach()      # simulator 真實值 (7D geometry)
+    err0 = pred0[:tgt0.shape[0]] - tgt0   # 預測誤差 (只比 7D geometry 部分)
 
     def _fmt_triplet(v):
         """格式化 [x, y, d] 三元組"""
@@ -1248,6 +1393,28 @@ def print_aux_debug(raw_env, step: int, obs_tensor: torch.Tensor, aux_pred: torc
           f"@local_bin={obs_near_bin} global_bin={obs_near_bin + 6} ({obs_near_angle:+.0f}°)")
     print(f"  重算 LiDAR:             最近={lidar_m[near_bin].item():.2f}m "
           f"@bin={near_bin} ({near_angle:+.0f}°)\n")
+
+    # === v2 速度預測解碼 (dims 7-12 = top-3 動態障礙 body-frame velocity) ===
+    # 反 scale ÷ _VELOCITY_SCALE 還原 m/s；只統計「真實有動態障礙」的 slot。
+    if aux_pred.shape[-1] >= 13:
+        import numpy as _np
+        from wd_aux_targets import _VELOCITY_SCALE as _VS
+        tgt13 = build_wd_preprocess_targets(
+            raw_env, max_obstacles=max_obstacles, device=aux_pred.device, top_k_velocity=3,
+        )
+        pv = (aux_pred[:, 7:13].detach() / _VS).reshape(-1, 3, 2)   # [E,3,2] m/s
+        tv = (tgt13[:, 7:13].detach() / _VS).reshape(-1, 3, 2)
+        tv_spd = tv.norm(dim=-1)                                     # [E,3] 真實速度大小
+        valid = tv_spd > 1e-3                                        # 有真動態障礙的 slot
+        err = (pv - tv).norm(dim=-1)                                 # [E,3] 預測誤差 m/s
+        v = valid.reshape(-1)
+        if v.any():
+            e = err.reshape(-1)[v]; s = tv_spd.reshape(-1)[v]
+            _AUX_VEL_ERR.extend(e.tolist()); _AUX_VEL_TRUE.extend(s.tolist())
+            _rel = _np.mean(_AUX_VEL_ERR) / max(_np.mean(_AUX_VEL_TRUE), 1e-6)
+            print(f"  [速度預測解碼] 本步有效slot={int(v.sum())} 誤差MAE={float(e.mean()):.3f}m/s "
+                  f"真實速度均={float(s.mean()):.3f}m/s | 累計: MAE={_np.mean(_AUX_VEL_ERR):.3f}m/s "
+                  f"真實均={_np.mean(_AUX_VEL_TRUE):.3f}m/s 相對誤差={_rel*100:.0f}% (n={len(_AUX_VEL_ERR)})\n")
 
 
 class LiveBEVVisualizer:
@@ -1842,6 +2009,13 @@ def main():
     # 套用場景參數：stage_parameter=True 時保留 stage 預設，只有明確 CLI 才覆寫；False 時用手動設定區/CLI。
     scene_final = configure_play_scene(env_cfg, stage_cfg, args_cli)
 
+    # Arena 等比例縮放（程式化場景；與 USD 互斥）
+    if getattr(args_cli, "arena_size", None) is not None:
+        if args_cli.usd_scene:
+            print("[PLAY] ⚠️ --arena_size 與 --usd_scene 互斥，已略過 arena 縮放（USD 自帶幾何）")
+        else:
+            apply_arena_size(env_cfg, args_cli.arena_size)
+
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
     if args_cli.usd_scene:
         apply_usd_scene(env_cfg, args_cli.usd_scene)
@@ -1983,11 +2157,20 @@ def main():
     include_act_hist = not (
         _state_w is not None and _state_w.shape[1] == STATE_DIM - ACT_HIST_DIM
     )
-    if not include_act_hist and len(POLICY_OBS_INDICES) > STATE_DIM - ACT_HIST_DIM:
+    # v3f：env 端用 CHARGE_USE_ACT_HIST=0 直接移除 act_hist（obs 本來就 79D，past_actions=None）。
+    # 此時 env obs 尾端沒有 act_hist，POLICY_OBS_INDICES 已是 79D，不可再裁（否則 79→75=雙重移除）。
+    # v3b/v3：env 仍 83D（act_hist 在尾端），需裁掉 4D → 79D。差別就在 env 有沒有放 act_hist。
+    _env_act_hist_removed = os.environ.get("CHARGE_USE_ACT_HIST", "1") == "0"
+    if not include_act_hist and not _env_act_hist_removed and len(POLICY_OBS_INDICES) > STATE_DIM - ACT_HIST_DIM:
         POLICY_OBS_INDICES = POLICY_OBS_INDICES[:-ACT_HIST_DIM]
         print(
             f"[PLAY] 偵測到 7D state checkpoint（無 act_hist，v3b/v3）"
             f" → POLICY_OBS_INDICES 裁掉尾端 {ACT_HIST_DIM}D → {len(POLICY_OBS_INDICES)}D"
+        )
+    elif not include_act_hist and _env_act_hist_removed:
+        print(
+            f"[PLAY] v3f：env 已移除 act_hist（CHARGE_USE_ACT_HIST=0，obs={len(POLICY_OBS_INDICES)}D）"
+            f" → POLICY_OBS_INDICES 不裁切，policy_head 維持 {len(POLICY_OBS_INDICES)}D+RNN"
         )
 
     # 依 encoder_mode 決定模型結構
@@ -2078,6 +2261,13 @@ def main():
             mean = torch.cat([mean[:78], mean[138:139]], dim=-1).to(device)
             var = torch.cat([var[:78], var[138:139]], dim=-1).to(device)
             print(f"[PLAY] obs_normalizer 139D → 79D 切片 (移除 [78:138] 障礙物欄位)")
+        elif mean.shape[-1] == 79 and _runtime_dim == 83:
+            # v2 ckpt (79D normalizer) on v3 env (83D，尾端多 act_hist 4D)。
+            # act_hist 在 dims [79:83]，v2 model 端會裁掉 → pad identity，前 79D 套 v2 真正統計量。
+            _pad = _runtime_dim - 79
+            mean = torch.cat([mean.to(device), torch.zeros(_pad, device=device)], dim=-1)
+            var = torch.cat([var.to(device), torch.ones(_pad, device=device)], dim=-1)
+            print(f"[PLAY] obs_normalizer 79D → {_runtime_dim}D pad (act_hist {_pad}D identity, model 端裁掉)")
         else:
             print(f"[PLAY] ⚠ obs_normalizer dim {mean.shape[-1]} != runtime obs {_runtime_dim}，"
                   f"改用 identity (mean=0, var=1)")
@@ -2514,6 +2704,12 @@ def main():
     _perf_count = 0
     _PERF_INTERVAL = 100  # 每 N 步印一次效能摘要
 
+    # --- jitter_eval 累積器（per-env 角度 ratio sign-flip 率 + |ω| std）---
+    _jit_prev_sign = None
+    _jit_flips = torch.zeros(raw_env.num_envs, device=raw_env.device)
+    _jit_steps = torch.zeros(raw_env.num_envs, device=raw_env.device)
+    _jit_omega_list = []  # 每步 |ω_actual| [N]
+
     step = 0
     while simulation_app.is_running() and step < args_cli.steps:
         start = time.time()
@@ -2578,7 +2774,7 @@ def main():
             # v2 用 predict_dim=13（含 top-3 障礙 body-frame velocity），
             # 但 print_aux_debug 還寫死 7D target → 暫只支援 predict_dim==7
             if (args_cli.aux_debug and aux_pred is not None
-                    and predict_dim == 7
+                    and predict_dim >= 7
                     and step % max(1, args_cli.aux_debug_interval) == 0):
                 print_aux_debug(raw_env, step, obs_tensor, aux_pred, max_active_obstacles)
 
@@ -2655,6 +2851,16 @@ def main():
         _omega_idx = actions[:, 1].float()                          # policy 角速度 index [0,18]
         _omega_target = ((_omega_idx - 9.0) / 9.0) * _max_ang_vel  # ω_target = ratio × ω_max
         _omega_actual_cmd = _action_term_ref._current_omega         # post-clamp ω_actual
+        # --- jitter_eval: 角度 ratio 正負號翻轉率（episode 內，done 時歸零）---
+        if args_cli.jitter_eval:
+            _ratio_ang = (_omega_idx - 9.0) / 9.0                    # [-1,1]，0 = 直行
+            _sign = torch.sign(_ratio_ang)
+            if _jit_prev_sign is not None:
+                _flip = ((_sign != _jit_prev_sign) & (_sign != 0) & (_jit_prev_sign != 0)).float()
+                _jit_flips += _flip
+                _jit_steps += 1.0
+            _jit_prev_sign = torch.where(done, torch.zeros_like(_sign), _sign)  # done 後不跨回合計 flip
+            _jit_omega_list.append(_omega_actual_cmd.abs().detach().cpu())
         _slew_delta = (_omega_target - _omega_actual_cmd).abs()
         episode_omega_target_sum += _omega_target.abs()
         episode_omega_target_max = torch.maximum(episode_omega_target_max, _omega_target.abs())
@@ -2989,6 +3195,21 @@ def main():
         print(f"    目標距離均值:         {diag_goal_distance_sum/diag_samples:.4f}")
         print(f"    線性動作 idx 均值:    {diag_action_linear_sum/diag_samples:.4f}")
         print(f"    角度動作 idx 均值:    {diag_action_angular_sum/diag_samples:.4f}")
+    # --- jitter_eval 摘要（deterministic 真實抽動，去掉訓練探索噪聲）---
+    if args_cli.jitter_eval and _jit_steps.max().item() > 0:
+        import numpy as _np
+        _rate = (_jit_flips / _jit_steps.clamp(min=1)).detach().cpu().numpy()
+        _omega = torch.stack(_jit_omega_list)           # [T, N]
+        _omega_std = _omega.std(dim=0).numpy()          # per-env |ω| std
+        print("\n" + "=" * 60)
+        print(f"JITTER-EVAL（deterministic={args_cli.deterministic}）")
+        print("=" * 60)
+        print(f"  rollout steps={int(_jit_steps.max().item())}  num_envs={len(_rate)}")
+        print(f"  ratio_flip_rate  : mean={_rate.mean():.3f}  p50={_np.percentile(_rate,50):.3f}  "
+              f"p95={_np.percentile(_rate,95):.3f}  max={_rate.max():.3f}")
+        print(f"  |omega|_std (rad/s): mean={_omega_std.mean():.3f}  p95={_np.percentile(_omega_std,95):.3f}")
+        print(f"  解讀: p95_flip < 0.15 ≈ 視覺直行乾淨 / 0.15-0.30 輕微擺動 / >0.30 仍 sin 波")
+
     # --- RVO2 Safety Filter 統計 ---
     if rvo2_filter is not None:
         rvo2_filter.print_stats()

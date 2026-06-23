@@ -33,6 +33,7 @@ topk_obstacles_body_frame 詳細說明:
 from __future__ import annotations
 
 import math
+import os
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
@@ -1662,7 +1663,40 @@ def discrete_applied_action_history(
 
     # 取出歷史（最新 → 最舊）
     # buffer[0] = t-1, buffer[1] = t-2, ...
-    stacked = torch.cat(env._action_history_buffer, dim=-1)  # [N, stack_size*2]
+    #
+    # v3d (2026-06-12): action history 編碼模式，由環境變數 CHARGE_ACT_HIST_MODE 控制
+    #   "raw"          : [a_{t-1}, ω_{t-1}, a_{t-2}, ω_{t-2}]（v3c 預設，向後相容舊 ckpt）
+    #   "delta"        : [a_{t-1}, ω_{t-1}, a_{t-1}-a_{t-2}, ω_{t-1}-ω_{t-2}]（動作變化量）
+    #   "action_error" : [a_{t-1}, ω_{t-1}, err_lin, err_ang]
+    #                    err = actuator tracking error（指令 pre-DR − 實際 post-DR）。
+    #                    - a_{t-1}, ω_{t-1}: 上一步指令 → 補償「感測延遲」(obs_delay)
+    #                    - err: 馬達沒跟上的量 → 補償「致動延遲」，且穩定時 ≈0 斷 copy shortcut
+    #                    這是訓練端顯式延遲建模（論文 §34），v3d 預設。
+    #   ⚠️ train 與 play 必須設成相同 mode，否則 obs 分布不符。
+    if not hasattr(env, "_act_hist_mode"):
+        env._act_hist_mode = os.environ.get("CHARGE_ACT_HIST_MODE", "raw").strip().lower()
+
+    if env._act_hist_mode == "action_error" and len(env._action_history_buffer) >= 1:
+        # a_{t-1}, ω_{t-1} 來自 buffer[0]（上一步 applied 指令，1 步前）
+        a_tm1 = env._action_history_buffer[0]   # [N, 2]
+        # actuator tracking error（從 action term 讀新鮮值），用 buffer 延後 1 步與 a_{t-1} 對齊
+        if hasattr(term, "actuator_tracking_error"):
+            err_now = torch.nan_to_num(term.actuator_tracking_error, nan=0.0).clamp(-2.0, 2.0)
+        else:
+            err_now = torch.zeros_like(a_tm1)
+        if (not hasattr(env, "_act_err_prev")) or env._act_err_prev is None \
+                or env._act_err_prev.shape != err_now.shape:
+            env._act_err_prev = torch.zeros_like(err_now)
+        if just_reset.any():
+            env._act_err_prev[just_reset] = 0.0
+        stacked = torch.cat([a_tm1, env._act_err_prev], dim=-1)  # [N, 4]
+        env._act_err_prev = err_now.clone()
+    elif env._act_hist_mode == "delta" and len(env._action_history_buffer) >= 2:
+        a_tm1 = env._action_history_buffer[0]   # [N, 2] = (a_{t-1}, ω_{t-1})
+        a_tm2 = env._action_history_buffer[1]   # [N, 2] = (a_{t-2}, ω_{t-2})
+        stacked = torch.cat([a_tm1, a_tm1 - a_tm2], dim=-1)  # [N, 4]
+    else:
+        stacked = torch.cat(env._action_history_buffer, dim=-1)  # [N, stack_size*2]
 
     # 更新 buffer: 把當前 push 進 buffer[0]，舊資料往後推
     # 注意：observation 函數在 step 結束後被叫，這時 current = a_t (剛 apply 的)
