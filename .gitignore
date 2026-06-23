@@ -73,6 +73,12 @@ _build
 .play_launcher_settings.json
 .hermes/
 
+# Director-mode / Claude Code 工具 runtime 產物（非專案內容）
+**/.director-mode/
+.claude/scheduled_tasks.lock
+.claude/commands/
+.claude/plans/
+
 # Tests
 tests/
 
