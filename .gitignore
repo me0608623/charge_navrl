@@ -75,9 +75,11 @@ _build
 
 # Director-mode / Claude Code 工具 runtime 產物（非專案內容）
 **/.director-mode/
-.claude/scheduled_tasks.lock
+**/scheduled_tasks.lock
 .claude/commands/
 .claude/plans/
+# Agent 狀態快照（誤入庫，僅本機）
+other/local_agent_state/
 
 # Tests
 tests/
