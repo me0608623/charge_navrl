@@ -1,28 +1,29 @@
-# wd_sa5_v3f — SA5 v3f-react: 耐久導航 (stage 5) + 反應訓練 — 接 SA4_v3f 乾淨 baseline
+# wd_sa5_v3f_vaux — SA5 v3f-react + velocity-aux 修復配方 (耐久導航 stage 5 + 反應訓練)
 #
-# 起點 (2026-06-22):
-#   ckpt = sa4_v3f_ne1024_s42/checkpoint_420000.pt
-#   (SA4_v3f 完訓：deterministic SR 88.5% / CR 11.5%，無 sin 波。
-#    診斷定案 CR 死因 = 動態障礙晚反應碰撞，詳見記憶 project_sa4_v3f_completion_diagnosis)
+# ★ velocity-aux 修復配方 (同 vaux lineage)：
+#   reshape bug 修復 (程式碼) + GRU + feat_norm + aux_epochs 8 + 可訓 readout
+#   + huber + aux_target_pos_scale 0.33 + predict_dim 7。
 #
-# v3f-react 改善兩軸（只作用在 SA5）：
+# SA5 v3f-react 改善兩軸 (curriculum v3f_react，只作用在 SA5)：
 #   軸一 Reward：clearance-gated 減速懲罰 penalty_speed_near_obs=0.8
 #     → 障礙進反應區 [0.45,1.2]m 時罰「快速」(p^2·v_forward)，補 sparse「接觸前無梯度」根因。
-#   軸二 場景：動態速度壓回可反應範圍 (patrol 0.25-0.50 等) + corridor_crossing 0.25→0.15
-#     + obs_near_goal_radius 2.0→2.5（障礙別生在反應區內）。
-#   → curriculum_version = warp_drive_single_agent_v3f_react（其餘 stage 同 v3e）。
+#   軸二 場景：動態速度壓回可反應範圍 + corridor_crossing 0.25→0.15 + obs_near_goal_radius 2.0→2.5。
 #
-# ⚠️ obs 79D 不變，可 resume SA4_v3f ckpt。train/play 必須 CHARGE_USE_ACT_HIST=0。
+# ⚠️ 相容性：resume【vaux lineage】SA4 完訓 checkpoint，不是舊 v3f 的。
+#   起點 ckpt 路徑見下方 checkpoint 欄位 — 請依 SA4_v3f_vaux 實際完訓 step 調整。
 #
-# 用法 (用 launcher 設好 env var):
+# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 (obs 79D)。
+#
+# 用法:
 #   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
 #   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
-#     --experiment_config wd_sa5_v3f --headless \
-#     --checkpoint logs/rnn_car/sa4_v3f_ne1024_s42/checkpoint_420000.pt \
-#     --run_name sa5_v3f_react_ne1024_s42
+#     --experiment_config wd_sa5_v3f_vaux --headless \
+#     --feat_norm --aux_epochs 8 \
+#     --checkpoint logs/rnn_car/sa4_v3f_vaux_ne1024_s42/checkpoint_420000.pt \
+#     --run_name sa5_v3f_vaux_react_ne1024_s42
 
-name: wd_sa5_v3f
-description: "SA5 v3f-react: 耐久導航 (stage 5) + 反應訓練 (clearance-gated 減速 + 壓低動態速度). From SA4_v3f checkpoint_420000 (SR 88.5%, 無 sin 波). obs 79D, curriculum v3f_react. Requires CHARGE_USE_ACT_HIST=0."
+name: wd_sa5_v3f_vaux
+description: "SA5 v3f-react_vaux: 耐久導航 (stage 5) + 反應訓練 + velocity-aux 修復配方. From SA4_v3f_vaux 完訓 (vaux lineage, GRU+feat_norm). obs 79D, curriculum v3f_react. Requires CHARGE_USE_ACT_HIST=0."
 
 # --- Environment / curriculum ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
@@ -49,10 +50,10 @@ seed: 42
 lr: 0.0005
 rnn_lr: 0.0005
 aux_lr: 0.0
-aux_lr_predict_head: 0.0005
-aux_lr_fc_middle: 0.0005
-aux_lr_fc_front: 0.0005
-aux_lr_extractor: 0.0005  # reluFix:解凍 extractor
+aux_lr_predict_head: 0.0005   # ★vaux: 可訓 readout
+aux_lr_fc_middle: 0.0005      # ★vaux: 可訓 readout
+aux_lr_fc_front: 0.0005       # ★vaux: 可訓 readout
+aux_lr_extractor: 0.0005      # reluFix: 解凍 extractor
 vf_coeff: 0.5
 gamma: 0.995
 gae_lambda: 0.95
@@ -63,12 +64,20 @@ max_grad_norm: 1.0
 tbptt_len: 0
 lr_decay: 0.0
 
+# --- velocity-aux 修復配方 (★vaux 核心) ---
+rnn_type: GRU                 # ★vaux
+feat_norm: true               # ★vaux: 關鍵缺件
+aux_epochs: 8                 # ★vaux
+aux_loss_type: huber          # ★vaux
+aux_huber_delta: 1.0
+aux_target_pos_scale: 0.33    # ★vaux
+
 # --- PPO specific ---
 ppo_epochs: 1
 mini_batches: 1
 clip_eps: 0.2
 
-# --- Entropy ---
+# --- Entropy (SA5 stage: 0.005/0.02) ---
 ent_coeff: 0.0
 ent_coeff_linear: 0.005
 ent_coeff_angular: 0.02
@@ -85,17 +94,16 @@ wd_module_entropy_eps: 0.000000000001
 policy_loss_clamp: 20.0
 vf_term_clamp: 8.0
 
-# --- Model / encoder (RNN64, 維持 SA1_v3f) ---
+# --- Model / encoder (GRU64) ---
 charge_encoder_mode: extractor_rnn
 hidden_dim: 64
 preprocess_dim: 12
 fc_dim: 64
 wd_middle_dim: 48
-rnn_type: RNN
 
-# --- Step 3: velocity aux 13D ---
-predict_dim: 13
-aux_velocity_topk: 3
+# --- aux predict dim (★vaux: position-only 7D) ---
+predict_dim: 7
+aux_velocity_topk: 0
 
 # --- Obstacle / scene controls ---
 obs_lr: 0.0003
@@ -149,8 +157,8 @@ actuator_delay_range: [0, 1]
 actuator_velocity_scale: [0.97, 1.03]
 actuator_motor_lag: 0.5
 
-# Observation latency DR (修好版：關閉，原 [0,1] 是 sin 波兇手)
-obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
+# Observation latency DR (關閉：原 [0,1] 是 sin 波兇手；馬達延遲保留)
+obs_delay_steps: [0, 0]
 # Heading stability (off)
 heading_stability_weight: 0.0
 
@@ -161,10 +169,10 @@ action_table_sample_size: 0
 log_interval: 10
 save_interval: 100
 
-# --- Checkpoint / resume ---
-checkpoint: logs/rnn_car/sa4_v3f_ne1024_s42/checkpoint_420000.pt
+# --- Checkpoint / resume (★vaux lineage SA4 完訓) ---
+checkpoint: logs/rnn_car/sa4_v3f_vaux_ne1024_s42/checkpoint_420000.pt
 no_resume_optimizer: true
 
 # --- Metadata ---
-tags: [wd, sa5, v3f, react, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, no_act_hist, obs79d, smoothness0, obsdelay0, clearance_gated, endurance]
-notes: "SA5 v3f-react: stage 5 耐久導航 + 反應訓練 (clearance-gated 減速 penalty_speed_near_obs=0.8 + 動態速度壓回可反應範圍). From SA4_v3f checkpoint_420000 (SR 88.5%, 無 sin 波). obs 79D, curriculum v3f_react. 對症動態障礙晚反應碰撞."
+tags: [wd, sa5, v3f, react, vaux, velocity_aux_fixed, gru, feat_norm, huber, a2c, aux, asymmetric, gru64, rmin025, no_act_hist, obs79d, smoothness0, obsdelay0, clearance_gated, endurance]
+notes: "SA5 v3f-react_vaux: stage 5 耐久導航 + 反應訓練 (clearance-gated 減速 penalty_speed_near_obs=0.8 + 壓低動態速度) + velocity-aux 修復配方. From SA4_v3f_vaux 完訓 (vaux lineage, GRU+feat_norm). obs 79D, curriculum v3f_react."

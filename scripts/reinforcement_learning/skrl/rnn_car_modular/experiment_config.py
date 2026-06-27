@@ -91,6 +91,19 @@ class ExperimentConfig:
     rnn_type: str = "RNN"
     predict_dim: int = 7                  # aux target dims (7=WD original, 13=+velocity)
     aux_velocity_topk: int = 0            # 0=no velocity target; 3=nearest 3 obstacles
+    aux_loss_type: str = "log"           # log=WD original (grad ∝ 1/|e|); huber=smooth-L1 (大誤差大梯度)
+    aux_huber_delta: float = 1.0          # Huber 轉折點 δ
+    aux_reinit_frozen: bool = False      # 載入時跳過 fc_middle/fc_front/predict_head(隨機 readout)
+    aux_skip_input: bool = False         # predict_head 直接 concat extractor 輸入(繞過 RNN)
+    aux_target_pos_scale: float = 1.0    # WD-diff #2:位置 target 縮放(0.33→std 3m 縮到 ~unit,配 huber 抗常數陷阱)
+    aux_cpc: bool = False                # CPC/InfoNCE contrastive aux(常數 hidden 打不贏對比任務)
+    aux_cpc_dim: int = 64                # CPC proj 維度
+    aux_cpc_temp: float = 0.1            # InfoNCE 溫度 τ
+    aux_cpc_lr: float = 5e-4             # CPC optimizer lr(訓 fc_front+rnn+extractor+proj)
+    aux_cpc_max_samples: int = 2048      # CPC 每步最大樣本數(logits 矩陣)
+    aux_epochs: int = 1                  # 每 iter aux 更新次數(>1 複製離線多 epoch 梯度密度)
+    feat_norm: bool = False              # extractor 輸出 per-dim running 正規化再進 RNN(離線證關鍵缺件)
+    aux_zero_h0: bool = False            # aux 用 h0=0(對標離線 fresh hidden,逼 GRU 從特徵萃取)
 
     # obstacle / scene controls
     obs_lr: float = 3e-4

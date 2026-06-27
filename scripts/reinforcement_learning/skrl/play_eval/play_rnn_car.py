@@ -341,6 +341,17 @@ parser.add_argument("--aux_debug", action="store_true", default=AUX_DEBUG,
                     help="印出 RNN aux 7D 預測 vs simulator ground truth")
 parser.add_argument("--aux_debug_interval", type=int, default=AUX_DEBUG_INTERVAL,
                     help="每 N 步印一次 aux debug")
+parser.add_argument("--probe_dump", type=str, default="",
+                    help="表徵探測：每步收集 (12D preprocess_feat, 真實速度 6D, valid 3D) 存 npz，"
+                         "供離線 probe 擬合判斷『12D 特徵是否裝得下速度資訊』")
+parser.add_argument("--feat_norm", action="store_true", default=False,
+                    help="extractor 輸出進 RNN 前做 per-dim running 正規化（須與訓練端 --feat_norm 一致，"
+                         "否則 GRU 收到錯尺度特徵→hidden 錯亂）。play 端用 fresh running normalizer 近似訓練統計。")
+parser.add_argument("--oracle_dump", type=str, default="",
+                    help="oracle 探測：收集連續 K 幀原始 obs (LiDAR+ego) → 障礙位置/速度 target，"
+                         "判斷『障礙資訊是否本就存在於 obs 串流』(不跨 episode reset)")
+parser.add_argument("--oracle_k", type=int, default=5,
+                    help="oracle 時間窗幀數 (預設 5 ≈ 1.0s @dt=0.2s)")
 parser.add_argument("--no_domain_randomization", action="store_true", default=False,
                     help="關閉 domain randomization")
 
@@ -1334,6 +1345,83 @@ def print_lidar_diagnostic(raw_env, step: int):
 _AUX_VEL_ERR: list[float] = []
 _AUX_VEL_TRUE: list[float] = []
 
+# 表徵探測累計器：收集 (12D preprocess_feat, 真實速度 target, valid) 供離線 probe 擬合
+_PROBE_X: list = []       # 每筆 = 12D preprocess_feat
+_PROBE_XH: list = []      # 每筆 = 64D RNN hidden state（測 RNN 是否編碼速度）
+_PROBE_EXT: list = []     # 每筆 = extractor 輸出（RNN 輸入,測 extractor 是否保留障礙位置）
+_PROBE_Y: list = []       # 每筆 = 6D 真實速度 target（scaled，dims 7-12）
+_PROBE_VALID: list = []   # 每筆 = 3 個 slot 的 valid 旗標
+_PROBE_TGT: list = []     # 每筆 = 13D 完整 target（t0/next/hist 位置 + 速度）
+
+
+def collect_probe_data(raw_env, rnn_feat: torch.Tensor, hidden_state: torch.Tensor, max_obstacles: int, ext_feat: torch.Tensor = None):
+    """收集 (12D preprocess_feat, 真實速度 6D target, valid 3D) — 全 env 全步。
+
+    目的：離線擬合 probe(12D→velocity)，判斷『速度資訊是否存在於 12D 瓶頸特徵裡』。
+    - probe 能還原 → 資訊在，predict_head 讀不出 → 改 MLP head（便宜）
+    - probe 不能 → 12D 沒裝下 → 放大 preprocess_dim / GRU（從頭訓）
+    """
+    tgt13 = build_wd_preprocess_targets(
+        raw_env, max_obstacles=max_obstacles, device=rnn_feat.device, top_k_velocity=3,
+    )  # [E, 13]
+    feat = rnn_feat.detach().reshape(rnn_feat.shape[0], -1)  # [E, 12]
+    hid = hidden_state.detach().reshape(hidden_state.shape[-2], -1) \
+        if hidden_state.dim() == 3 else hidden_state.detach().reshape(hidden_state.shape[0], -1)  # [E, H]
+    vel = tgt13[:, 7:13].detach()                            # [E, 6] scaled velocity target
+    vspd = vel.reshape(-1, 3, 2).norm(dim=-1)               # [E, 3] 速度大小（scaled）
+    valid = (vspd > 1e-3)                                    # [E, 3] 有真動態障礙
+    _PROBE_X.append(feat.cpu().numpy())
+    _PROBE_XH.append(hid.cpu().numpy())
+    _PROBE_Y.append(vel.cpu().numpy())
+    _PROBE_VALID.append(valid.cpu().numpy())
+    _PROBE_TGT.append(tgt13.detach().cpu().numpy())          # [E, 13] 完整 target（含 t0/next/hist 位置）
+    if ext_feat is not None:
+        _PROBE_EXT.append(ext_feat.detach().reshape(ext_feat.shape[0], -1).cpu().numpy())  # [E, 96] extractor 輸出
+
+
+# === oracle 探測：連續 K 幀原始 obs → 障礙位置/速度（判斷 obs 串流是否本就含障礙資訊）===
+_ORACLE_BUF = None        # 滾動緩衝 [K, E, obs_dim]
+_ORACLE_AGE = None        # 每 env 連續未 reset 步數 [E]
+_ORACLE_X: list = []      # 每筆 = K 幀 obs flatten
+_ORACLE_T0: list = []     # 每筆 = 2D t0 障礙當前位置
+_ORACLE_VEL: list = []    # 每筆 = 6D 速度 target
+
+
+def collect_oracle_data(raw_env, obs_t: torch.Tensor, max_obstacles: int, K: int):
+    """收集 [K 幀 obs] → 障礙 t0 位置/速度，窗口不跨 reset（age>=K 才算）。"""
+    global _ORACLE_BUF, _ORACLE_AGE
+    E, D = obs_t.shape
+    if _ORACLE_BUF is None or _ORACLE_BUF.shape[1] != E or _ORACLE_BUF.shape[0] != K:
+        _ORACLE_BUF = torch.zeros(K, E, D, device=obs_t.device)
+        _ORACLE_AGE = torch.zeros(E, dtype=torch.long, device=obs_t.device)
+    # 非 in-place 滾動：丟最舊一幀、接上當前幀
+    _ORACLE_BUF = torch.cat([_ORACLE_BUF[1:], obs_t.detach().unsqueeze(0)], dim=0)
+    _ORACLE_AGE = torch.clamp(_ORACLE_AGE + 1, max=K)
+    ready = _ORACLE_AGE >= K                                   # [E] 窗口滿且未跨 reset
+    if not ready.any():
+        return
+    tgt13 = build_wd_preprocess_targets(
+        raw_env, max_obstacles=max_obstacles, device=obs_t.device, top_k_velocity=3)
+    t0 = tgt13[:, 0:2]; vel = tgt13[:, 7:13]
+    posvalid = (t0.norm(dim=-1) < 9.0) & ready                # 障礙 active + 窗口有效
+    if posvalid.any():
+        win = _ORACLE_BUF[:, posvalid].permute(1, 0, 2).reshape(int(posvalid.sum()), -1)  # [m, K*D]
+        _ORACLE_X.append(win.cpu().numpy())
+        _ORACLE_T0.append(t0[posvalid].cpu().numpy())
+        _ORACLE_VEL.append(vel[posvalid].cpu().numpy())
+
+
+def reset_oracle_age(done_mask):
+    """env reset 時把 age 歸零，避免窗口跨 episode。
+
+    用非 in-place 的 torch.where 重指派（_ORACLE_AGE 可能是 inference tensor，
+    在 inference_mode 外不能 in-place 修改）。
+    """
+    global _ORACLE_AGE
+    if _ORACLE_AGE is not None:
+        dm = done_mask.to(_ORACLE_AGE.device).reshape(-1).bool()
+        _ORACLE_AGE = torch.where(dm, torch.zeros_like(_ORACLE_AGE), _ORACLE_AGE)
+
 
 def print_aux_debug(raw_env, step: int, obs_tensor: torch.Tensor, aux_pred: torch.Tensor, max_obstacles: int):
     """印出 RNN aux 7D 預測 vs simulator ground truth（env 0）。
@@ -2236,6 +2324,19 @@ def main():
     policy_head.load_state_dict(ckpt["policy_head"])
     value_head.load_state_dict(ckpt["value_head"])
     preprocess_rnn.eval()
+    # ★feat_norm:若 checkpoint 存了 feat_normalizer 統計,載入並凍結套用(部署正解;
+    #   否則 play 端用 fresh running normalizer 近似——後者只在舊 ckpt 無此統計時 fallback)。
+    # 注意:charge_features_for_rnn 在後面才定義,這裡存到 local 變數,apply block 再讀。
+    _ckpt_feat_norm = None
+    if args_cli.feat_norm:
+        if "feat_normalizer" in ckpt:
+            _ckpt_feat_norm = {
+                "mean": ckpt["feat_normalizer"]["mean"].to(device).reshape(-1),
+                "var": ckpt["feat_normalizer"]["var"].to(device).reshape(-1),
+            }
+            print("[PLAY] ✅ feat_normalizer 統計已從 checkpoint 載入(凍結套用,部署正解)")
+        else:
+            print("[PLAY] ⚠ checkpoint 無 feat_normalizer → play 端用 fresh running stat 近似(舊 ckpt fallback)")
     policy_head.eval()
     value_head.eval()
     print(
@@ -2730,6 +2831,30 @@ def main():
                           f"delta={_after_min - _before_min:.3f}")
             p_obs = charge_obs_for_rl(obs_normed)             # 取出 policy 觀測切片
             features = charge_features_for_rnn(obs_normed, p_obs)  # RNN 輸入特徵
+            # ★feat_norm:extractor 輸出 per-dim 正規化(須與訓練端一致)。
+            #   _fn_frozen(從 checkpoint 載入)→ 直接套用訓練統計(部署正解);
+            #   否則 fresh running stat 近似(舊 ckpt fallback)。
+            if args_cli.feat_norm:
+                if _ckpt_feat_norm is not None:
+                    # 凍結套用 checkpoint 訓練統計(部署正解)
+                    _fn_mean = _ckpt_feat_norm["mean"]; _fn_var = _ckpt_feat_norm["var"]
+                else:
+                    # fresh running 近似(舊 ckpt fallback):每步更新統計
+                    if not hasattr(charge_features_for_rnn, "_fn_mean"):
+                        charge_features_for_rnn._fn_mean = torch.zeros(features.shape[-1], device=features.device)
+                        charge_features_for_rnn._fn_var = torch.ones(features.shape[-1], device=features.device)
+                        charge_features_for_rnn._fn_cnt = 1e-4
+                    _fb = features.detach().reshape(-1, features.shape[-1])
+                    _bm, _bv, _bc = _fb.mean(0), _fb.var(0, unbiased=False), _fb.shape[0]
+                    _d = _bm - charge_features_for_rnn._fn_mean
+                    _tot = charge_features_for_rnn._fn_cnt + _bc
+                    charge_features_for_rnn._fn_mean = charge_features_for_rnn._fn_mean + _d * _bc / _tot
+                    _m_a = charge_features_for_rnn._fn_var * charge_features_for_rnn._fn_cnt
+                    _m_b = _bv * _bc
+                    charge_features_for_rnn._fn_var = (_m_a + _m_b + _d**2 * charge_features_for_rnn._fn_cnt * _bc / _tot) / _tot
+                    charge_features_for_rnn._fn_cnt = _tot
+                    _fn_mean = charge_features_for_rnn._fn_mean; _fn_var = charge_features_for_rnn._fn_var
+                features = ((features - _fn_mean) / (_fn_var.sqrt() + 1e-8)).clamp(-5.0, 5.0)
             hidden = rnn_state.get()                          # 取得目前 RNN 隱藏狀態
             rnn_feat, aux_pred, new_hidden = preprocess_rnn(  # RNN 前向傳播
                 features, hidden, training=args_cli.aux_debug  # aux_debug 時保留 aux 輸出
@@ -2778,6 +2903,16 @@ def main():
                     and step % max(1, args_cli.aux_debug_interval) == 0):
                 print_aux_debug(raw_env, step, obs_tensor, aux_pred, max_active_obstacles)
 
+            # --- probe_dump: 每步收集 (12D 特徵, 64D hidden, 真實速度) 供離線 probe 擬合 ---
+            # gate 改 >= 7:位置 target(TGT dims 0-5)與 hidden/extractor 在 predict_dim=7 也都存在,
+            # probe_ext_fit 只用 t0 位置(TGT[:,0:2]),故 7D checkpoint 也能 probe RNN hidden→位置。
+            if args_cli.probe_dump and predict_dim >= 7:
+                collect_probe_data(raw_env, rnn_feat, new_hidden, max_active_obstacles, ext_feat=features)
+
+            # --- oracle_dump: 收集 K 幀原始 obs → 障礙位置（測 obs 串流是否含障礙資訊）---
+            if args_cli.oracle_dump:
+                collect_oracle_data(raw_env, obs_tensor, max_active_obstacles, args_cli.oracle_k)
+
         _t_inference = time.time() - start
 
         # inference_mode 產生的 tensor 不允許 in-place 修改，
@@ -2799,6 +2934,9 @@ def main():
             rsgs_filter.step(obs_tensor)
         # 合併 terminated + truncated 為 done 旗標
         done = (terminated.squeeze(-1) | truncated.squeeze(-1)) if terminated.ndim > 1 else (terminated | truncated)
+        # oracle 探測：reset 的 env 把時間窗 age 歸零（避免窗口跨 episode）
+        if args_cli.oracle_dump:
+            reset_oracle_age(done)
         _t_env = time.time() - _t0_env
 
         # 累積回合獎勵與步數
@@ -3170,6 +3308,26 @@ def main():
     # ================================================================
     # 11. Play 結束 — 印出統計摘要
     # ================================================================
+    # --- probe_dump: 存收集到的 (12D 特徵, 真實速度, valid) ---
+    if args_cli.probe_dump and _PROBE_X:
+        import numpy as _np
+        X = _np.concatenate(_PROBE_X, axis=0)          # [N, 12]
+        XH = _np.concatenate(_PROBE_XH, axis=0)        # [N, H] RNN hidden
+        Y = _np.concatenate(_PROBE_Y, axis=0)          # [N, 6]
+        V = _np.concatenate(_PROBE_VALID, axis=0)      # [N, 3]
+        TGT = _np.concatenate(_PROBE_TGT, axis=0)      # [N, 13] 完整 target
+        EXT = _np.concatenate(_PROBE_EXT, axis=0) if _PROBE_EXT else _np.zeros((X.shape[0],0))
+        _np.savez(args_cli.probe_dump, X=X, XH=XH, Y=Y, valid=V, TGT=TGT, EXT=EXT)
+        print(f"\n[PROBE] 已存 {X.shape[0]} 筆 (12D 特徵, {XH.shape[1]}D hidden, 6D 速度, 3 valid, 13D 完整 target) → {args_cli.probe_dump}")
+
+    if args_cli.oracle_dump and _ORACLE_X:
+        import numpy as _np
+        OX = _np.concatenate(_ORACLE_X, axis=0)        # [M, K*obs_dim]
+        OT0 = _np.concatenate(_ORACLE_T0, axis=0)      # [M, 2]
+        OVEL = _np.concatenate(_ORACLE_VEL, axis=0)    # [M, 6]
+        _np.savez(args_cli.oracle_dump, X=OX, t0=OT0, vel=OVEL, K=args_cli.oracle_k)
+        print(f"\n[ORACLE] 已存 {OX.shape[0]} 筆 ({args_cli.oracle_k}幀 obs flatten={OX.shape[1]}D → t0/vel) → {args_cli.oracle_dump}")
+
     print("\n" + "=" * 60)
     print("PLAY 統計摘要")
     print("=" * 60)

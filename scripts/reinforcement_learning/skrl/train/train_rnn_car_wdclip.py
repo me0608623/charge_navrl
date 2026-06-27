@@ -301,6 +301,16 @@ parser.add_argument("--predict_dim", type=int, default=7,
 # --aux_velocity_topk
 parser.add_argument("--aux_velocity_topk", type=int, default=0,
                     help="Append body-frame velocity of nearest K dynamic obstacles to aux target. 0=off, 3=13D total.")
+# --aux_loss_type
+parser.add_argument("--aux_loss_type", type=str, default="log", choices=["log", "huber"],
+                    help="Aux loss form for dims 0-5. log=WD original (grad ∝ 1/|e|, 鼓勵常數陷阱); "
+                         "huber=smooth-L1 (大誤差大梯度, 修正常數陷阱).")
+parser.add_argument("--aux_huber_delta", type=float, default=1.0,
+                    help="Huber 轉折點 δ（target 量級 ~1）。")
+parser.add_argument("--aux_reinit_frozen", action="store_true", default=False,
+                    help="載入 checkpoint 時跳過 fc_middle/fc_front/predict_head(保持隨機初始化),配合凍結=WD 隨機 readout")
+parser.add_argument("--aux_skip_input", action="store_true", default=False,
+                    help="predict_head 直接 concat extractor 輸入(繞過 RNN 洗位置;extractor 已保留障礙位置74%)。")
 
 # --- Obstacle Policy ---
 # --obs_lr
@@ -488,6 +498,63 @@ parser.add_argument("--disable_aux_training", action="store_true", default=False
                          "RL still uses the checkpointed 12D preprocess features, but "
                          "charge_opt_aux is not stepped. Use for pure-RL resume experiments "
                          "to prevent RNN feature drift.")
+# --rnn_rl_grad (un-detach 驗證)
+# - 用意:讓 RL(PPO/A2C) loss 的梯度流進 RNN(rnn_cell+fc_front+fc_middle),拿掉 WD 的 detach。
+# - 機制:PPO update 的 minibatch 內「重算」preprocess_feat(過 RNN,帶梯度),取代 cached rl_in。
+# - 由獨立 optimizer charge_opt_rnn_rl(lr=--rnn_rl_lr)更新,extractor/predict_head 不動。
+# - 用法:配 --disable_aux_training 做乾淨隔離(RNN 只吃 RL 梯度),短訓幾十 iter 後 probe RNN hidden→位置 rel err。
+parser.add_argument("--rnn_rl_grad", action="store_true", default=False,
+                    help="Un-detach validation: let RL loss gradient flow into the RNN "
+                         "(rnn_cell+fc_front+fc_middle) via a separate optimizer. Recomputes "
+                         "preprocess_feat with grad in the PPO update. Pair with "
+                         "--disable_aux_training to isolate the RL gradient's effect on the RNN.")
+parser.add_argument("--rnn_rl_lr", type=float, default=5e-4,
+                    help="Learning rate for the RNN-via-RL optimizer (--rnn_rl_grad).")
+# --aux_target_pos_scale (WD-diff #2:尺度錯配修正)
+# - 用意:把 aux 位置 target(原始公尺 std~3)縮到 ~unit std,與正規化 obs 一致,
+#   配合 huber 讓誤差進二次梯度區,對抗 constant collapse。0.33 ≈ 1/3(std 3m→1)。
+# - probe/live metric scale-invariant,不受影響。
+parser.add_argument("--aux_target_pos_scale", type=float, default=1.0,
+                    help="Scale factor for aux position target (WD-diff #2 scale-match fix). "
+                         "0.33 brings ~3m std targets to ~unit, matching normalized obs.")
+# --aux_cpc (CPC contrastive aux — 文獻最 robust 的反常數塌縮)
+# - 用意:regression aux 易塌成常數;CPC InfoNCE 讓 RNN hidden 對比「自己的障礙位置 target vs 其他樣本」,
+#   常數 hidden 對所有樣本 sim 相同 → 無法對上正樣本 → 高 loss → 逼 RNN 編碼位置(discriminative)。
+# - 機制:q=proj_q(rnn_out_t), k=proj_k(pos_target_t);logits=q@k.T/τ;CE(logits, 對角 label)。
+# - 訓 fc_front+rnn+extractor+proj heads(獨立 cpc_opt)。可與 regression aux 並存(--aux_cpc_weight)。
+parser.add_argument("--aux_cpc", action="store_true", default=False,
+                    help="Enable CPC/InfoNCE contrastive aux: force RNN hidden to discriminatively "
+                         "encode obstacle position (constant hidden fails contrastive task).")
+parser.add_argument("--aux_cpc_dim", type=int, default=64,
+                    help="CPC projection dim for q/k heads.")
+parser.add_argument("--aux_cpc_temp", type=float, default=0.1,
+                    help="CPC InfoNCE temperature τ.")
+parser.add_argument("--aux_cpc_lr", type=float, default=5e-4,
+                    help="CPC optimizer lr (trains fc_front+rnn+extractor+proj heads).")
+parser.add_argument("--aux_cpc_max_samples", type=int, default=2048,
+                    help="Max (L*B) samples used per CPC step (subsample for the logits matrix).")
+# --reinit_rnn:載入 checkpoint 但 RNN cell 重新隨機初始化(extractor/policy 照載)
+# - 用意:隔離「全新 RNN 能否從已訓練好的 extractor(有位置特徵)學會編碼」,避開 from-scratch
+#   extractor 沒位置的 confound,也避開續訓 RNN 已陷常數陷阱。
+parser.add_argument("--reinit_rnn", action="store_true", default=False,
+                    help="Load checkpoint but reinitialize the RNN cell (fresh random). "
+                         "Isolates whether a fresh RNN can learn to encode from a trained extractor.")
+# --aux_epochs:每 iter 做 N 次 aux 更新(複製離線多 epoch,RL 1 update/iter 梯度步數不足是 RNN 學不會的關鍵)
+parser.add_argument("--aux_epochs", type=int, default=1,
+                    help="Number of aux (regression) updates per training iteration. "
+                         ">1 replicates offline multi-epoch density (RL's 1 update/iter is too few "
+                         "gradient steps for the RNN to learn to encode position).")
+# --feat_norm:extractor 輸出進 RNN 前做 per-dim running 正規化(離線診斷出的關鍵缺件)
+parser.add_argument("--feat_norm", action="store_true", default=False,
+                    help="Per-dim running normalization on extractor features before the RNN. "
+                         "Offline diagnostic: raw features 78%% vs per-dim normalized 31%% rel_err — "
+                         "the missing piece preventing the RNN aux from learning to encode position.")
+# --aux_zero_h0:aux 用 h0=0(對標離線 fresh hidden),逼 GRU 從 window 特徵萃取位置
+# - 用意:RL aux 用 rollout 存的舊 hidden 當 h0(stale),GRU 可靠 h0 帶位置而非從特徵萃取→hidden 編碼差。
+#   離線 h0=0 達 30%,RL stale h0 卡 92%。h0=0 + burn_in warm-up 對標離線。
+parser.add_argument("--aux_zero_h0", action="store_true", default=False,
+                    help="Use h0=0 in the aux RNN unroll (instead of stale rollout hidden), "
+                         "forcing the RNN to extract position from window features (matches offline).")
 # --- Aux TBPTT ---
 # --aux_seq_len
 # - 用意：Aux TBPTT 的序列長度（每次展開多少步計算 loss）。
@@ -2555,12 +2622,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return _wd_like_obs(obs_normed)
         return _select_79d(obs_normed)
 
-    def _charge_features_for_rnn(obs_normed: torch.Tensor) -> torch.Tensor:
+    def _charge_features_for_rnn(obs_normed: torch.Tensor, update_norm: bool = False) -> torch.Tensor:
         if use_extractor:
-            return extractor(_select_79d(obs_normed))
-        if wd_exact_mode:
-            return _wd_like_obs(obs_normed)
-        return _select_79d(obs_normed)
+            _f = extractor(_select_79d(obs_normed))
+        elif wd_exact_mode:
+            _f = _wd_like_obs(obs_normed)
+        else:
+            _f = _select_79d(obs_normed)
+        # ★feat_norm:extractor 輸出 per-dim 正規化再進 RNN(各維尺度不一會讓 RNN 學不動;
+        #   離線診斷:raw 78% vs per-dim 標準化 31% — 這是 RL aux 學不會編碼的真正缺件)。
+        if getattr(args_cli, "feat_norm", False):
+            if update_norm:
+                feat_normalizer.update(_f.detach().reshape(-1, _f.shape[-1]))
+            _f = feat_normalizer.normalize(_f)
+        return _f
 
     policy_obs_dim = 113 if wd_exact_mode else len(POLICY_OBS_INDICES)
 
@@ -2600,6 +2675,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         predict_dim=_predict_dim,
         rnn_type=args_cli.rnn_type,
         middle_dim=_middle_dim,
+        aux_skip_input=args_cli.aux_skip_input,
     ).to(device)
     rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # WD principle: concat(obs, preprocess_feat)
     policy_head = PolicyHead(input_dim=rl_input_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
@@ -2613,6 +2689,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO] Value head final bias override: {args_cli.value_init_bias}")
     rnn_state = RNNStateManager(num_envs, args_cli.hidden_dim, device)  # 管理每個 env 的 RNN hidden state
     obs_normalizer = RunningNormalizer(obs_dim, device)                 # 線上均值/方差歸一化
+    feat_normalizer = RunningNormalizer(rnn_input_dim, device)          # ★extractor 輸出 per-dim 正規化(feat_norm)
 
     # WD optimizer structure (custom_trainer.py lines 336-349):
     #   WD 原版: 兩個 optimizer 各包含 ALL params，用 lr=0 控制 freeze:
@@ -2678,6 +2755,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             {"params": charge_params_extractor, "lr": _lr_extractor},     # group 4: extractor
         )
     charge_opt_aux = torch.optim.Adam(_aux_param_groups, eps=1e-5)
+
+    # --- RNN-via-RL optimizer (--rnn_rl_grad un-detach 驗證) ---
+    # 拿掉 detach 後,RL loss 的梯度會流進 rnn_cell+fc_front+fc_middle(產生 12D preprocess_feat
+    # 的路徑)。用獨立 optimizer 更新,不碰 extractor/predict_head,以隔離「RL 梯度是否能把
+    # 障礙位置壓進 RNN hidden」這個假設。
+    charge_opt_rnn_rl = None
+    if args_cli.rnn_rl_grad:
+        _rnn_rl_params = (charge_params_rnn_cell
+                          + charge_params_fc_front
+                          + charge_params_fc_middle)
+        charge_opt_rnn_rl = torch.optim.Adam(_rnn_rl_params, lr=args_cli.rnn_rl_lr, eps=1e-5)
+        print(f"[rnn_rl_grad] ✅ RL 梯度將流進 RNN(rnn_cell+fc_front+fc_middle), "
+              f"lr={args_cli.rnn_rl_lr}, params={sum(p.numel() for p in _rnn_rl_params):,}")
+        if not args_cli.disable_aux_training:
+            print("[rnn_rl_grad] ⚠️ 未配 --disable_aux_training:aux 與 RL 會同時訓 RNN(非乾淨隔離)")
+
+    # --- CPC contrastive aux(--aux_cpc):反常數塌縮 ---
+    # proj_q: rnn_out(H) → d;proj_k: pos_target(2) → d。InfoNCE 逼 RNN hidden discriminative 編碼位置。
+    # cpc_opt 訓 fc_front + rnn + extractor + proj heads(讓整條 input→hidden 學編碼)。
+    cpc_proj_q = cpc_proj_k = charge_opt_cpc = None
+    if args_cli.aux_cpc:
+        _cd = args_cli.aux_cpc_dim
+        cpc_proj_q = nn.Sequential(
+            nn.Linear(args_cli.hidden_dim, _cd), nn.ReLU(), nn.Linear(_cd, _cd)).to(device)
+        cpc_proj_k = nn.Sequential(
+            nn.Linear(2, _cd), nn.ReLU(), nn.Linear(_cd, _cd)).to(device)
+        # extractor 只在 aux_lr_extractor>0 時納入 CPC 訓練;=0 時凍結(用已訓練好的 extractor)
+        _cpc_train_ext = _lr_extractor > 0 and use_extractor
+        _cpc_params = (charge_params_fc_front + charge_params_rnn_cell
+                       + (charge_params_extractor if _cpc_train_ext else [])
+                       + list(cpc_proj_q.parameters()) + list(cpc_proj_k.parameters()))
+        charge_opt_cpc = torch.optim.Adam(_cpc_params, lr=args_cli.aux_cpc_lr, eps=1e-5)
+        print(f"[aux_cpc] ✅ CPC InfoNCE 啟用 dim={_cd} τ={args_cli.aux_cpc_temp} lr={args_cli.aux_cpc_lr} "
+              f"params={sum(p.numel() for p in _cpc_params):,}(訓 fc_front+rnn+proj"
+              f"{'+extractor' if _cpc_train_ext else ',extractor凍結'})")
 
     # Store initial LR for decay
     for pg in charge_opt_rl.param_groups:
@@ -2895,7 +3007,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         ckpt = torch.load(args_cli.checkpoint, map_location=device, weights_only=False)
         if use_extractor and "extractor" in ckpt:
             extractor.load_state_dict(ckpt["extractor"])
-        preprocess_rnn.load_state_dict(ckpt["preprocess_rnn"])
+        # preprocess_rnn: 若 predict_head shape 不符（predict_dim 改變，例 13→7 position-only），
+        # 載入 shape 相符的部分（RNN/fc_front/fc_middle），predict_head 留新初始化。
+        _pp_ckpt = ckpt["preprocess_rnn"]
+        _pp_model = preprocess_rnn.state_dict()
+        # aux_reinit_frozen: 跳過 fc_middle/fc_front/predict_head(保持隨機初始化)=WD 隨機凍結 readout
+        _reinit_prefixes = ("fc_middle", "fc_front", "predict_head") if getattr(args_cli, "aux_reinit_frozen", False) else ()
+        # reinit_rnn: 額外跳過 RNN cell(全新隨機)— 隔離「fresh RNN + 好 extractor」
+        if getattr(args_cli, "reinit_rnn", False):
+            _reinit_prefixes = _reinit_prefixes + ("rnn",)
+            print("[INFO] reinit_rnn: RNN cell 重新隨機初始化(extractor/policy 照載)")
+        _pp_filtered = {k: v for k, v in _pp_ckpt.items()
+                        if k in _pp_model and v.shape == _pp_model[k].shape
+                        and not k.startswith(_reinit_prefixes)}
+        _pp_skipped = [k for k in _pp_ckpt if k not in _pp_filtered]
+        if _reinit_prefixes:
+            print(f"[INFO] aux_reinit_frozen: 跳過載入(保持隨機) {_reinit_prefixes}")
+        _pp_missing, _pp_unexpected = preprocess_rnn.load_state_dict(_pp_filtered, strict=False)
+        if _pp_skipped:
+            print(f"[INFO] preprocess_rnn: 跳過 shape 不符的 keys（重初始化）: {_pp_skipped}")
+        if _pp_missing:
+            print(f"[INFO] preprocess_rnn: 新初始化 params（checkpoint 缺）: {list(_pp_missing)}")
         policy_head.load_state_dict(ckpt["policy_head"])
         _vh_strict = not _use_asymmetric_critic
         _vh_missing, _vh_unexpected = value_head.load_state_dict(ckpt["value_head"], strict=_vh_strict)
@@ -2910,6 +3042,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs_normalizer.mean = ckpt["obs_normalizer"]["mean"]
             obs_normalizer.var = ckpt["obs_normalizer"]["var"]
             obs_normalizer.count = ckpt["obs_normalizer"]["count"]
+        if args_cli.feat_norm and "feat_normalizer" in ckpt:
+            feat_normalizer.mean = ckpt["feat_normalizer"]["mean"].to(device)
+            feat_normalizer.var = ckpt["feat_normalizer"]["var"].to(device)
+            feat_normalizer.count = ckpt["feat_normalizer"]["count"]
+            print("[INFO] feat_normalizer 統計已從 checkpoint 載入")
         if not args_cli.no_resume_optimizer and not args_cli.play:
             for key, opt in (
                 ("charge_opt_rl", charge_opt_rl),
@@ -3167,7 +3304,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             with torch.no_grad():
                 obs_normalizer.update(policy_obs)   # 更新 running stats（用 policy 看到的觀測）
                 obs_normed = obs_normalizer.normalize(policy_obs)  # 標準化觀測
-                features = _charge_features_for_rnn(obs_normed)  # 提取 RNN 輸入特徵（extractor 或 raw）
+                features = _charge_features_for_rnn(obs_normed, update_norm=True)  # 提取 RNN 輸入特徵（extractor 或 raw）+ 更新 feat_norm 統計
                 hidden = rnn_state.get()                          # 取得當前 hidden state [1, E, H]
                 rnn_feat, _, new_hidden = preprocess_rnn(features, hidden)  # RNN forward → 12D preprocess feature
                 p_obs = _charge_obs_for_rl(obs_normed)    # 取得 RL head 的觀測部分（79D 或 113D）
@@ -3252,7 +3389,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             with torch.no_grad():
                 wd_aux_tgt = build_wd_preprocess_targets(
                     env.unwrapped, N_obs, device,
-                    top_k_velocity=_aux_vel_topk)  # [E, predict_dim]
+                    top_k_velocity=_aux_vel_topk,
+                    pos_scale=args_cli.aux_target_pos_scale)  # [E, predict_dim]
             charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
                            aux_target=wd_aux_tgt, privileged=_priv_obs)
             if obs_buf is not None:
@@ -3349,43 +3487,129 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _seq_len = args_cli.aux_seq_len
                 _burn_in = args_cli.aux_burn_in
                 _seq_bs = args_cli.aux_seq_batch_size
+                # --aux_epochs:每 iter 多做 (N-1) 次 regression aux 更新(複製離線多 epoch 梯度密度)。
+                # 離線 clean supervised 證 fresh GRU hidden 可達 30.9%,但需 ~1000 次更新;RL 1 update/iter
+                # 太少。這裡每 iter 重採樣多更新幾次,快速逼近離線收斂。(僅 regression 路徑,非 CPC)
+                if not args_cli.aux_cpc and args_cli.aux_epochs > 1:
+                    for _xep in range(args_cli.aux_epochs - 1):
+                        _smp = charge_buf.sample_aux_sequences(_seq_len, _seq_bs, _burn_in)
+                        if _smp is None:
+                            break
+                        _os, _ts, _h0x, _ = _smp
+                        if args_cli.aux_zero_h0:
+                            _h0x = torch.zeros_like(_h0x)
+                        _Bx, _Lx = _os.shape[0], _os.shape[1]
+                        _of = obs_normalizer.normalize(_os.reshape(_Bx * _Lx, -1))
+                        _ff = _charge_features_for_rnn(_of)
+                        _fs = _ff.reshape(_Bx, _Lx, -1).permute(1, 0, 2).contiguous()  # [L,B,*] 已修 reshape
+                        _, _ps, _ = preprocess_rnn(_fs, _h0x, training=True)
+                        _te = _ts.permute(1, 0, 2)[_burn_in:]
+                        _pe = _ps[_burn_in:]
+                        _tl = torch.tensor(0.0, device=device)
+                        for _ti in range(_pe.shape[0]):
+                            _l, _ = compute_wd_module_loss(
+                                _pe[_ti], _te[_ti], weight=_aux_weight,
+                                loss_type=args_cli.aux_loss_type, huber_delta=args_cli.aux_huber_delta)
+                            _tl = _tl + _l
+                        _tl = _tl / max(_pe.shape[0], 1)
+                        charge_opt_aux.zero_grad()
+                        _tl.backward()
+                        nn.utils.clip_grad_norm_(charge_params_aux, _current_aux_grad_clip)
+                        charge_opt_aux.step()
                 sampled = charge_buf.sample_aux_sequences(_seq_len, _seq_bs, _burn_in)
                 _wd_aux_valid_count = 0
                 _wd_aux_batch = 0
                 _wd_aux_grad_norms = {k: 0.0 for k in _mon_modules_pre}
                 _wd_aux_delta_norms = {k: 0.0 for k in _mon_modules_pre}
+                _wd_aux_pos = {"rel": float("nan"), "r2": float("nan"), "vf": float("nan")}
                 if sampled is not None:
                     obs_seq, target_seq, h0, _wd_aux_valid_count = sampled
+                    if args_cli.aux_zero_h0:
+                        h0 = torch.zeros_like(h0)  # 對標離線 fresh hidden,逼 GRU 從特徵萃取
                     B_seq, L_seq = obs_seq.shape[0], obs_seq.shape[1]
                     _wd_aux_batch = B_seq
                     obs_flat = obs_seq.reshape(B_seq * L_seq, -1)
                     obs_normed_aux = obs_normalizer.normalize(obs_flat)
                     feat_flat = _charge_features_for_rnn(obs_normed_aux)
-                    feat_seq = feat_flat.reshape(L_seq, B_seq, -1)
+                    # ★BUG FIX:obs_seq 是 [B,L,obs](batch-major),reshape(L,B) 會把時間/batch 維度打亂
+                    #   → 特徵與 permute 過的 target 不對應 → RNN 學不出映射 → constant collapse 真根因。
+                    #   正解:先 reshape 回 [B,L] 再 permute → [L,B](與 target_seq.permute 一致)。
+                    feat_seq = feat_flat.reshape(B_seq, L_seq, -1).permute(1, 0, 2).contiguous()
                     _, pred_seq, _ = preprocess_rnn(feat_seq, h0, training=True)
                     effective_start = _burn_in
                     effective_len = L_seq - effective_start
                     pred_eff = pred_seq[effective_start:]
                     tgt_eff = target_seq.permute(1, 0, 2)[effective_start:]
+                    # 即時 tracking 指標：位置 rel err + R²（避開 aux log-loss 常數陷阱）
+                    with torch.no_grad():
+                        _pe = pred_eff.reshape(-1, pred_eff.shape[-1])
+                        _te = tgt_eff.reshape(-1, tgt_eff.shape[-1])
+                        _nd = min(6, _pe.shape[-1])
+                        _pv = _te[:, 0:2].norm(dim=-1) < 9.0
+                        _m = _pv if _pv.any() else torch.ones(_te.shape[0], dtype=torch.bool, device=_te.device)
+                        _p = _pe[_m][:, 0:_nd]; _t = _te[_m][:, 0:_nd]
+                        _wd_aux_pos["rel"] = ((_p - _t).norm(dim=-1).mean()
+                                              / _t.norm(dim=-1).mean().clamp(min=1e-6)).item()
+                        _ssr = ((_p - _t) ** 2).sum().item()
+                        _sst = ((_t - _t.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
+                        _wd_aux_pos["r2"] = 1.0 - _ssr / _sst
+                        _wd_aux_pos["vf"] = _pv.float().mean().item()
+
+                    # ===== CPC contrastive aux(--aux_cpc):逼 RNN hidden discriminative 編碼位置 =====
+                    # 獨立 fresh forward(不重用 regression graph)。q=proj_q(rnn_out), k=proj_k(pos_target)。
+                    # InfoNCE:常數 hidden 對所有樣本 sim 相同→無法對上對角正樣本→高 loss→逼 RNN 編碼。
+                    if args_cli.aux_cpc and charge_opt_cpc is not None:
+                        _feat_cpc = _charge_features_for_rnn(obs_normed_aux)            # fresh extractor
+                        _Lc, _Bc = L_seq, B_seq
+                        # ★同 BUG FIX:_feat_cpc 是 [B*L] batch-major,要 reshape(B,L).permute→[L,B]
+                        _fc_c = preprocess_rnn.fc_front(_feat_cpc).reshape(_Bc, _Lc, -1).permute(1, 0, 2).contiguous()
+                        _rnn_out_c, _ = preprocess_rnn.rnn(_fc_c, h0)                   # [L,B,H] 每步 hidden
+                        _ro = _rnn_out_c[effective_start:].reshape(-1, args_cli.hidden_dim)
+                        _tg2 = target_seq.permute(1, 0, 2)[effective_start:].reshape(
+                            -1, target_seq.shape[-1])[:, 0:2]                          # [N,2] pos(已含 scale)
+                        _far_t = 9.0 * args_cli.aux_target_pos_scale
+                        _vm = _tg2.norm(dim=-1) < _far_t
+                        _ro = _ro[_vm]; _tg2 = _tg2[_vm]
+                        _Ncpc = _ro.shape[0]
+                        if _Ncpc > args_cli.aux_cpc_max_samples:
+                            _perm = torch.randperm(_Ncpc, device=device)[:args_cli.aux_cpc_max_samples]
+                            _ro = _ro[_perm]; _tg2 = _tg2[_perm]
+                        if _ro.shape[0] >= 8:
+                            _q = F.normalize(cpc_proj_q(_ro), dim=-1)
+                            _k = F.normalize(cpc_proj_k(_tg2), dim=-1)
+                            _logits = (_q @ _k.t()) / args_cli.aux_cpc_temp
+                            _labels = torch.arange(_ro.shape[0], device=device)
+                            _cpc_loss = F.cross_entropy(_logits, _labels)
+                            with torch.no_grad():
+                                _cpc_acc = (_logits.argmax(dim=-1) == _labels).float().mean().item()
+                            charge_opt_cpc.zero_grad()
+                            _cpc_loss.backward()
+                            nn.utils.clip_grad_norm_(_cpc_params, _current_aux_grad_clip)
+                            charge_opt_cpc.step()
+                            _wd_aux_pos["cpc_loss"] = _cpc_loss.item()
+                            _wd_aux_pos["cpc_acc"] = _cpc_acc
+                            aux_loss_val = _cpc_loss.item()
+
                     total_loss = torch.tensor(0.0, device=device)
                     last_display_pre = {}
-                    for t_idx in range(effective_len):
-                        l_t, last_display_pre = compute_wd_module_loss(pred_eff[t_idx], tgt_eff[t_idx], weight=_aux_weight)
-                        total_loss = total_loss + l_t
-                    total_loss = total_loss / max(effective_len, 1)
-                    charge_opt_aux.zero_grad()
-                    # WD: reset_model_mentum 只在訓練啟動時一次性 reset（預設 False）
-                    # 之前誤解為每步 reset → Adam 退化為無 momentum SGD → RNN 無法收斂
-                    # 修正：移除 unconditional momentum reset，保留 Adam 正常累積
-                    total_loss.backward()
-                    nn.utils.clip_grad_norm_(
-                        charge_params_aux,
-                        _current_aux_grad_clip,
-                    )
-                    # Capture grad norms before step
-                    for k, ps in _mon_modules_pre.items():
-                        _wd_aux_grad_norms[k] = _grad_l2_norm(ps)
-                    charge_opt_aux.step()
+                    if not args_cli.aux_cpc:
+                        for t_idx in range(effective_len):
+                            l_t, last_display_pre = compute_wd_module_loss(pred_eff[t_idx], tgt_eff[t_idx], weight=_aux_weight, loss_type=args_cli.aux_loss_type, huber_delta=args_cli.aux_huber_delta)
+                            total_loss = total_loss + l_t
+                        total_loss = total_loss / max(effective_len, 1)
+                        charge_opt_aux.zero_grad()
+                        # WD: reset_model_mentum 只在訓練啟動時一次性 reset（預設 False）
+                        # 之前誤解為每步 reset → Adam 退化為無 momentum SGD → RNN 無法收斂
+                        # 修正：移除 unconditional momentum reset，保留 Adam 正常累積
+                        total_loss.backward()
+                        nn.utils.clip_grad_norm_(
+                            charge_params_aux,
+                            _current_aux_grad_clip,
+                        )
+                        # Capture grad norms before step
+                        for k, ps in _mon_modules_pre.items():
+                            _wd_aux_grad_norms[k] = _grad_l2_norm(ps)
+                        charge_opt_aux.step()
                     # Capture param delta norms after step
                     for k, ps in _mon_modules_pre.items():
                         _wd_aux_delta_norms[k] = _param_delta_norm(_snaps_pre[k], ps)
@@ -3478,6 +3702,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flat_value_target = value_targets.reshape(-1)
             flat_priv = charge_buf.privileged_obs[:RL].reshape(-1, _priv_dim) if _use_asymmetric_critic else None
 
+            # --rnn_rl_grad: 準備在 minibatch 內重算 preprocess_feat(過 RNN,帶梯度)所需的
+            # raw_obs 與 input hidden(rollout 當步存的)。讓 RL 梯度可流進 RNN。
+            if args_cli.rnn_rl_grad:
+                _obs_dim_rr = charge_buf.raw_obs.shape[-1]
+                flat_raw_rr = charge_buf.raw_obs[:RL].reshape(-1, _obs_dim_rr)         # [T*E, obs_dim]
+                flat_hid_rr = charge_buf.hiddens[:RL].reshape(-1, args_cli.hidden_dim)  # [T*E, H]
+                preprocess_rnn.train()  # 開啟(對無 dropout 的 cell 無副作用;確保梯度路徑啟用)
+
             # --- Patch 2: returns/advantage statistics for WandB ---
             _ret_mean = flat_ret_raw.mean().item()
             _ret_std = flat_ret_raw.std().item()
@@ -3536,10 +3768,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                for s in range(0, batch_size, mini_batch_size)]
 
                 for (mb,) in batches:
-                    nl = policy_head(flat_ri[mb])
+                    # --rnn_rl_grad: 重算 preprocess_feat(過 RNN,帶梯度),取代 cached flat_ri[mb]，
+                    # 讓 RL loss 的梯度經 policy/value head 流回 RNN。
+                    if args_cli.rnn_rl_grad:
+                        with torch.no_grad():
+                            _normed_mb = obs_normalizer.normalize(flat_raw_rr[mb])
+                        _feat_mb = _charge_features_for_rnn(_normed_mb)            # extractor(凍結,grad 不 step)
+                        _h_mb = flat_hid_rr[mb].unsqueeze(0)                       # [1, b, H] rollout 當步 input hidden
+                        _rnnfeat_mb, _, _ = preprocess_rnn(_feat_mb, _h_mb)        # [b,12] 帶梯度
+                        _pobs_mb = _charge_obs_for_rl(_normed_mb)                  # [b, policy_obs_dim]
+                        _ri_mb = torch.cat([_pobs_mb, _rnnfeat_mb], dim=-1)        # [b, rl_input_dim]
+                    else:
+                        _ri_mb = flat_ri[mb]
+                    nl = policy_head(_ri_mb)
                     nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
                     _priv_mb = flat_priv[mb] if flat_priv is not None else None
-                    nv = value_head(flat_ri[mb], _priv_mb).squeeze(-1)
+                    nv = value_head(_ri_mb, _priv_mb).squeeze(-1)
 
                     # Patch 3: approx KL (old_logprob - new_logprob)
                     with torch.no_grad():
@@ -3588,6 +3832,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     critic_before = _snapshot_params(charge_params_critic)
 
                     charge_opt_rl.zero_grad()
+                    if charge_opt_rnn_rl is not None:
+                        charge_opt_rnn_rl.zero_grad()
                     loss.backward()
 
                     # WD thesis-inspired update monitor（模組熵診斷）：
@@ -3630,6 +3876,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _critic_grad_post = _grad_l2_norm(charge_params_critic)
 
                     charge_opt_rl.step()
+                    if charge_opt_rnn_rl is not None:
+                        # RNN 走 RL 梯度:clip 後 step(防 spike)
+                        _rnn_rl_gn = nn.utils.clip_grad_norm_(
+                            [p for g in charge_opt_rnn_rl.param_groups for p in g["params"]],
+                            _current_max_grad_norm)
+                        charge_opt_rnn_rl.step()
 
                     # --- post-update policy diagnostics ---
                     with torch.no_grad():
@@ -3821,6 +4073,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _grad_norms = _wd_aux_grad_norms
                 _delta_norms = _wd_aux_delta_norms
                 aux_monitor["aux/loss_per_step"] = aux_loss_val / max(args_cli.aux_seq_len - args_cli.aux_burn_in, 1)
+                # carry forward 即時 tracking 指標（block A 算的）
+                aux_monitor["aux/pos_rel_err"] = _wd_aux_pos["rel"]
+                aux_monitor["aux/pos_r2"] = _wd_aux_pos["r2"]
+                aux_monitor["aux/pos_valid_frac"] = _wd_aux_pos["vf"]
+                # CPC contrastive 監控:cpc_acc 爬高(>對角 random 1/N)= hidden 編碼位置成功
+                if "cpc_acc" in _wd_aux_pos:
+                    aux_monitor["aux/cpc_loss"] = _wd_aux_pos["cpc_loss"]
+                    aux_monitor["aux/cpc_acc"] = _wd_aux_pos["cpc_acc"]
             elif args_cli.disable_aux_training:
                 # Pure-RL resume: keep checkpointed RNN/preprocess representation fixed.
                 # Still log feature distribution/VE below to detect any unexpected drift.
@@ -3847,8 +4107,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     obs_normed = obs_normalizer.normalize(obs_flat)
 
                     # Features: extractor, legacy 79D, or wd_exact 113D path
-                    feat_flat = _charge_features_for_rnn(obs_normed)   # [B*L, D]
-                    feat_seq = feat_flat.reshape(L_seq, B_seq, -1)     # [L, B, D] time-first
+                    feat_flat = _charge_features_for_rnn(obs_normed)   # [B*L, D] batch-major
+                    # ★BUG FIX:reshape(L,B) 打亂時間/batch → 改 reshape(B,L).permute→[L,B](對齊 target permute)
+                    feat_seq = feat_flat.reshape(B_seq, L_seq, -1).permute(1, 0, 2).contiguous()  # [L, B, D]
 
                     # RNN unroll: sequence mode
                     _, pred_seq, _ = preprocess_rnn(
@@ -3866,11 +4127,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     last_display = {}
                     for t_idx in range(effective_len):
                         l_t, disp_t = compute_wd_module_loss(
-                            pred_eff[t_idx], tgt_eff[t_idx], weight=_aux_weight)
+                            pred_eff[t_idx], tgt_eff[t_idx], weight=_aux_weight,
+                            loss_type=args_cli.aux_loss_type, huber_delta=args_cli.aux_huber_delta)
                         total_loss = total_loss + l_t
                         n_loss_steps += 1
                         last_display = disp_t
                     total_loss = total_loss / max(n_loss_steps, 1)
+
+                    # --- 即時 tracking 指標：位置 rel err + R²（避開 aux log-loss 的常數陷阱）---
+                    # rel err = mean‖pred−tgt‖/mean‖tgt‖（100%≈猜均值）；R²≤0=沒追蹤（常數），>0=有追蹤。
+                    # 注意：訓練端 TBPTT/burn-in 與 decode 連續 rollout 略有差異，但「有無追蹤」結論一致。
+                    with torch.no_grad():
+                        _pe = pred_eff.reshape(-1, pred_eff.shape[-1])      # [L*B, D]
+                        _te = tgt_eff.reshape(-1, tgt_eff.shape[-1])
+                        _nd = min(6, _pe.shape[-1])                          # 位置維數（最多 6）
+                        _pos_valid = _te[:, 0:2].norm(dim=-1) < 9.0          # 障礙 active（非 FAR_DEFAULT）
+                        # 永遠記錄（valid 子集；若無 valid 則全集），另記 valid 佔比診斷
+                        _m = _pos_valid if _pos_valid.any() else torch.ones(
+                            _te.shape[0], dtype=torch.bool, device=_te.device)
+                        _p = _pe[_m][:, 0:_nd]
+                        _t = _te[_m][:, 0:_nd]
+                        _rel = ((_p - _t).norm(dim=-1).mean()
+                                / _t.norm(dim=-1).mean().clamp(min=1e-6)).item()
+                        _ss_res = ((_p - _t) ** 2).sum().item()
+                        _ss_tot = ((_t - _t.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
+                        aux_monitor["aux/pos_rel_err"] = _rel
+                        aux_monitor["aux/pos_r2"] = 1.0 - _ss_res / _ss_tot
+                        aux_monitor["aux/pos_valid_frac"] = _pos_valid.float().mean().item()
 
                     # Backward + step with monitoring
                     _snaps = {k: _snapshot_params(ps) for k, ps in _mon_modules.items()}
@@ -4257,6 +4540,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             }
             if use_extractor:
                 _ckpt_dict["extractor"] = extractor.state_dict()  # Conv1d extractor（only in extractor_rnn mode）
+            if args_cli.feat_norm:
+                # ★部署關鍵:feat_norm 統計必須存進 checkpoint,否則 play/車端餵錯尺度特徵→hidden 錯亂
+                _ckpt_dict["feat_normalizer"] = {
+                    "mean": feat_normalizer.mean,   # extractor 輸出 per-dim running mean
+                    "var": feat_normalizer.var,     # per-dim running variance
+                    "count": feat_normalizer.count,
+                }
             torch.save(_ckpt_dict, ckpt_path)
             print(f"[SAVE] {ckpt_path}")
 

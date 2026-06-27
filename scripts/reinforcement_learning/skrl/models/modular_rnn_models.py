@@ -193,7 +193,7 @@ class PreprocessRNN(nn.Module):
     → RL loss 永遠不訓練此模組。RNN 只被 module loss (aux) 訓練。
 
     Predict head (WD-style):
-      - 單層 Linear(12→7) + ReLU — 與 WD preprocess_info_back 完全一致
+      - 單層 Linear(preprocess_dim→predict_dim) — 2026-06-23 移除末端 ReLU(dead-head bug,見 predict_head 註解)
         (WD config: module_network=[64,'rnn',32,'rl'], network_feture_dim=7 → back=[12→7])
       - Target: 7D privileged geometry (2 nearest obstacles body-frame x,y,dist + timestep)
       - Loss: WD module loss — log(clamp(L1, 0.01)) × per-dim weight
@@ -217,6 +217,7 @@ class PreprocessRNN(nn.Module):
         middle_dim: int | None = None,
         concat_rnn: bool = True,
         rnn_type: str = "RNN",  # "RNN" (WD default) or "GRU"
+        aux_skip_input: bool = False,  # True: predict_head 直接 concat extractor 輸入(繞過 RNN 洗位置)
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -224,6 +225,8 @@ class PreprocessRNN(nn.Module):
         self.rnn_type = rnn_type
         self.fc_dim = fc_dim
         self.middle_dim = middle_dim
+        self.aux_skip_input = aux_skip_input
+        self.input_dim = input_dim
 
         # FC front
         self.fc_front = nn.Sequential(
@@ -261,8 +264,10 @@ class PreprocessRNN(nn.Module):
         #   body-frame 位置/速度（vbx/vby 可負）→ ReLU 強制 ≥0 + dead-ReLU 死亡螺旋 →
         #   predict_head 輸出恆 0、零梯度、RNN 從未被監督學會預測障礙運動。移除末端 ReLU。
         #   保留 nn.Sequential 結構使 state_dict key 仍為 predict_head.0.* (相容舊 checkpoint)。
+        # aux_skip_input: predict_head 額外吃 extractor 輸入(input_dim)，位置不過 RNN 洗
+        _ph_in = preprocess_dim + input_dim if aux_skip_input else preprocess_dim
         self.predict_head = nn.Sequential(
-            nn.Linear(preprocess_dim, predict_dim),
+            nn.Linear(_ph_in, predict_dim),
         )
 
         self.preprocess_dim = preprocess_dim
@@ -311,8 +316,10 @@ class PreprocessRNN(nn.Module):
 
             prediction = None
             if training:
-                prediction = self.predict_head(
-                    preprocess_feat.reshape(L * B, -1)).reshape(L, B, -1)  # [L, B, 7]
+                _ph = preprocess_feat.reshape(L * B, -1)
+                if self.aux_skip_input:
+                    _ph = torch.cat([_ph, features.reshape(L * B, D)], dim=-1)  # skip extractor 輸入
+                prediction = self.predict_head(_ph).reshape(L, B, -1)  # [L, B, predict_dim]
 
             if detach_output:
                 return preprocess_feat.detach(), prediction, new_hidden
@@ -333,7 +340,10 @@ class PreprocessRNN(nn.Module):
 
         prediction = None
         if training:
-            prediction = self.predict_head(preprocess_feat) # [B, 7] WD-style privileged target
+            _ph = preprocess_feat
+            if self.aux_skip_input:
+                _ph = torch.cat([_ph, features], dim=-1)  # skip extractor 輸入(繞過 RNN 洗位置)
+            prediction = self.predict_head(_ph)  # [B, predict_dim] WD-style privileged target
 
         # WD 原版 (line 573): concat_input = rl_in_.detach()
         # WD 設計: RNN 永遠不吃 RL gradient。detach 在 RL concat 階段完成。

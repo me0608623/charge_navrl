@@ -1,30 +1,32 @@
-# wd_sa4_v3f — SA4 v3f: 空間規劃 (stage 4) — 接 SA3_v3f 修好版乾淨 baseline
+# wd_sa4_v3f_vaux — SA4 v3f + velocity-aux 修復配方 (空間規劃 stage 4)
 #
-# 起點 (2026-06-22):
-#   ckpt = sa3_v3f_noobsdelay_cont_ne1024_s42/checkpoint_180000.pt
-#   (SA3_v3f 修好版完訓：obs_delay [0,1]→[0,0] 修掉 sin 波後，效果 iter 1400，
-#    SR ~89% / CR ~11% / deterministic 無 sin 波。詳見記憶 finding_obsdelay_misimplemented_as_motordelay)
+# ★ velocity-aux 修復配方 (同 vaux lineage)：
+#   reshape bug 修復 (程式碼) + GRU + feat_norm + aux_epochs 8 + 可訓 readout
+#   + huber + aux_target_pos_scale 0.33 + predict_dim 7。
 #
 # SA4 = stage 4 (SA4_spatial_plan): goals 2 (更長導航路徑)、dynamic 5 (min 4)、
 #   wall 1-2/4.0m、goal random_walk movement、penalty_hit -15、episode 60s、gamma 0.994。
-#   penalty_smoothness=0 (v3e patch，sin 波元兇移除)。
+#   penalty_smoothness=0 (curriculum v3e)。
 #
-# v3f 與 v3e 的唯一差別：obs 79D (act_hist 整個移除) ← env var CHARGE_USE_ACT_HIST=0（必須設！）
-# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0。obs 79D。不相容 v2/v3b/v3c/v3d/v3e ckpt (83D)。
+# ⚠️ 相容性：resume【vaux lineage】SA3 完訓 checkpoint，不是舊 v3f 的。
+#   起點 ckpt 路徑見下方 checkpoint 欄位 — 請依 SA3_v3f_vaux 實際完訓 step 調整。
 #
-# 用法 (用 launcher 設好 env var):
+# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 (obs 79D)。
+#
+# 用法:
 #   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
 #   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
-#     --experiment_config wd_sa4_v3f --headless \
-#     --checkpoint logs/rnn_car/sa3_v3f_noobsdelay_cont_ne1024_s42/checkpoint_180000.pt \
-#     --run_name sa4_v3f_ne1024_s42
+#     --experiment_config wd_sa4_v3f_vaux --headless \
+#     --feat_norm --aux_epochs 8 \
+#     --checkpoint logs/rnn_car/sa3_v3f_vaux_ne1024_s42/checkpoint_420000.pt \
+#     --run_name sa4_v3f_vaux_ne1024_s42
 
-name: wd_sa4_v3f
-description: "SA4 v3f: 空間規劃 (stage 4, goals 2/dynamic 5/goal movement). From SA3_v3f 修好版 cont/checkpoint_180000 (obs_delay 修好,無 sin 波). obs 79D, curriculum v3e (penalty_smoothness=0). Requires CHARGE_USE_ACT_HIST=0."
+name: wd_sa4_v3f_vaux
+description: "SA4 v3f_vaux: 空間規劃 (stage 4, goals 2/dynamic 5/goal movement) + velocity-aux 修復配方. From SA3_v3f_vaux 完訓 (vaux lineage, GRU+feat_norm). obs 79D, curriculum v3e. Requires CHARGE_USE_ACT_HIST=0."
 
 # --- Environment / curriculum ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
-curriculum_version: warp_drive_single_agent_v3e   # v3e: penalty_smoothness=0 (sin 波元兇移除) + ent_ang floor=0.02
+curriculum_version: warp_drive_single_agent_v3e   # v3e: penalty_smoothness=0 + ent_ang floor=0.02
 initial_stage: 4
 fixed_stage: true
 scene_profile: warp_drive_single_agent_v3
@@ -43,14 +45,14 @@ rollout_length: 300
 timesteps: 420000
 seed: 42
 
-# --- RL optimizer (與 SA3 stage 一致) ---
+# --- RL optimizer (SA4 stage) ---
 lr: 0.0005
 rnn_lr: 0.0005
 aux_lr: 0.0
-aux_lr_predict_head: 0.0005
-aux_lr_fc_middle: 0.0005
-aux_lr_fc_front: 0.0005
-aux_lr_extractor: 0.0005  # reluFix:解凍 extractor
+aux_lr_predict_head: 0.0005   # ★vaux: 可訓 readout
+aux_lr_fc_middle: 0.0005      # ★vaux: 可訓 readout
+aux_lr_fc_front: 0.0005       # ★vaux: 可訓 readout
+aux_lr_extractor: 0.0005      # reluFix: 解凍 extractor
 vf_coeff: 0.5
 gamma: 0.994
 gae_lambda: 0.95
@@ -61,12 +63,20 @@ max_grad_norm: 1.0
 tbptt_len: 0
 lr_decay: 0.0
 
+# --- velocity-aux 修復配方 (★vaux 核心) ---
+rnn_type: GRU                 # ★vaux
+feat_norm: true               # ★vaux: 關鍵缺件
+aux_epochs: 8                 # ★vaux
+aux_loss_type: huber          # ★vaux
+aux_huber_delta: 1.0
+aux_target_pos_scale: 0.33    # ★vaux
+
 # --- PPO specific ---
 ppo_epochs: 1
 mini_batches: 1
 clip_eps: 0.2
 
-# --- Entropy ---
+# --- Entropy (SA4 stage: 0.005/0.02) ---
 ent_coeff: 0.0
 ent_coeff_linear: 0.005
 ent_coeff_angular: 0.02
@@ -83,17 +93,16 @@ wd_module_entropy_eps: 0.000000000001
 policy_loss_clamp: 20.0
 vf_term_clamp: 8.0
 
-# --- Model / encoder (RNN64, 維持 SA1_v3f) ---
+# --- Model / encoder (GRU64) ---
 charge_encoder_mode: extractor_rnn
 hidden_dim: 64
 preprocess_dim: 12
 fc_dim: 64
 wd_middle_dim: 48
-rnn_type: RNN
 
-# --- Step 3: velocity aux 13D ---
-predict_dim: 13
-aux_velocity_topk: 3
+# --- aux predict dim (★vaux: position-only 7D) ---
+predict_dim: 7
+aux_velocity_topk: 0
 
 # --- Obstacle / scene controls ---
 obs_lr: 0.0003
@@ -147,8 +156,8 @@ actuator_delay_range: [0, 1]
 actuator_velocity_scale: [0.97, 1.03]
 actuator_motor_lag: 0.5
 
-# Observation latency DR (修好版：關閉，原 [0,1] 是 sin 波兇手)
-obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
+# Observation latency DR (關閉：原 [0,1] 是 sin 波兇手；馬達延遲保留)
+obs_delay_steps: [0, 0]
 # Heading stability (off)
 heading_stability_weight: 0.0
 
@@ -159,10 +168,10 @@ action_table_sample_size: 0
 log_interval: 10
 save_interval: 100
 
-# --- Checkpoint / resume ---
-checkpoint: logs/rnn_car/sa3_v3f_noobsdelay_cont_ne1024_s42/checkpoint_180000.pt
+# --- Checkpoint / resume (★vaux lineage SA3 完訓) ---
+checkpoint: logs/rnn_car/sa3_v3f_vaux_ne1024_s42/checkpoint_420000.pt
 no_resume_optimizer: true
 
 # --- Metadata ---
-tags: [wd, sa4, v3f, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, no_act_hist, obs79d, smoothness0, obsdelay0, spatial_plan]
-notes: "SA4 v3f: stage 4 空間規劃 (goals 2/dynamic 5/goal movement/penalty -15). From SA3_v3f 修好版 cont/checkpoint_180000 (obs_delay 修好無 sin 波). obs 79D, curriculum v3e (penalty_smoothness=0). 延遲 DR: 馬達延遲保留 + 觀測延遲關閉."
+tags: [wd, sa4, v3f, vaux, velocity_aux_fixed, gru, feat_norm, huber, a2c, aux, asymmetric, gru64, rmin025, no_act_hist, obs79d, smoothness0, obsdelay0, spatial_plan]
+notes: "SA4 v3f_vaux: stage 4 空間規劃 (goals 2/dynamic 5/goal movement/penalty -15) + velocity-aux 修復配方. From SA3_v3f_vaux 完訓 (vaux lineage, GRU+feat_norm). obs 79D, curriculum v3e."

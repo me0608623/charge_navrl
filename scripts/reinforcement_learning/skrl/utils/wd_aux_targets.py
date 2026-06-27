@@ -258,6 +258,7 @@ def build_wd_preprocess_targets(
     robot_radius: float = 0.33,
     prediction_horizon_s: float = 0.2,
     top_k_velocity: int = 0,
+    pos_scale: float = 1.0,
 ) -> torch.Tensor:
     """建立 WD-original dynamic 7D temporal aux target，可選擴充 velocity targets。
 
@@ -417,6 +418,13 @@ def build_wd_preprocess_targets(
         hist_total_dis,  # [6] obstacle PAST center distance
     ], dim=-1)
 
+    # WD-diff #2 修正:位置 target 是原始公尺(std~3m),但 RNN 輸入是正規化 obs(std~1)→
+    # input/target 尺度錯配,最省力解=輸出常數。pos_scale 把位置 target 縮到 ~unit std,
+    # 與正規化 obs 一致,且配合 huber 讓誤差落進二次梯度區(梯度∝e,逼模型追蹤)。
+    # probe/live metric 都是 scale-invariant(rel_err=e/‖t‖、r2),不受影響。
+    if pos_scale != 1.0:
+        target = target * pos_scale
+
     # ------------------------------------------------------------------
     # 10. (可選) 附加 top-K 障礙物 body-frame velocity
     # ------------------------------------------------------------------
@@ -435,19 +443,25 @@ def compute_wd_module_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     weight: list[float] | None = None,
+    loss_type: str = "log",
+    huber_delta: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """WD-style preprocess module aux loss。
 
-    公式（dim 0~5）：
-      L_i = mean( w_i × log(clamp(|pred_i - target_i|, min=0.01)) )
+    公式（dim 0~5）依 loss_type：
+      "log"（WD 原版）  : L_i = mean( w_i × log(clamp(|e|, 0.01)) )
+          ⚠️ 梯度 ∝ 1/|e| — 誤差越大梯度越小 → 大錯幾乎不修 → 鼓勵常數陷阱。
+      "huber"（修正）  : L_i = mean( w_i × Huber(e, δ) )
+          梯度 = e（|e|<δ）/ δ·sign(e)（|e|≥δ）— 大誤差大梯度 → 逼模型用 input 追蹤。
 
-    dim 6: L_i = mean( w_i × |pred_i - target_i|² )
-    但預設 w_6=0，不影響訓練梯度。
+    dim 6: L_i = mean( w_i × |pred_i - target_i|² )  但預設 w_6=0，不影響梯度。
 
     Args:
-        pred: [B, 7] or [..., 7] — model predict_head 輸出
-        target: [B, 7] or [..., 7] — 7D privileged geometry target
+        pred: [B, D] — model predict_head 輸出
+        target: [B, D] — privileged geometry target
         weight: 每維 loss 權重，None → WD_DEFAULT_WEIGHT
+        loss_type: "log"（WD 原版）或 "huber"（smooth-L1，修正常數陷阱）
+        huber_delta: Huber 轉折點（target 量級 ~1）
 
     Returns:
         (loss_scalar, display_dict)
@@ -469,8 +483,17 @@ def compute_wd_module_loss(
         loss_ = nn.L1Loss(reduction="none")(input_flat, target_flat)
 
         if idx < 6:
-            loss_ = torch.clamp(loss_, min=0.01)
-            loss_ = torch.log(loss_)
+            if loss_type == "huber":
+                # Huber/smooth-L1: 大誤差大梯度（與 log 相反，避免常數陷阱）
+                _abs = loss_
+                loss_ = torch.where(
+                    _abs < huber_delta,
+                    0.5 * _abs * _abs,
+                    huber_delta * (_abs - 0.5 * huber_delta),
+                )
+            else:
+                loss_ = torch.clamp(loss_, min=0.01)
+                loss_ = torch.log(loss_)
         else:
             loss_ = loss_ * loss_
 
