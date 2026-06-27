@@ -32,6 +32,7 @@ from obstacle_agent.behavior_config import (
     BEHAVIOR_STATIC, BEHAVIOR_PATROL, BEHAVIOR_RANDOM_WALK,
     BEHAVIOR_HORIZONTAL_CROSSING, BEHAVIOR_PATH_CROSSING,
     BEHAVIOR_NEAR_MISS, BEHAVIOR_CORRIDOR_CROSSING, BEHAVIOR_OCCLUSION,
+    BEHAVIOR_HEAD_ON,
     BehaviorConfig,
 )
 
@@ -828,3 +829,125 @@ def spawn_occlusion(
 
     # Frame counter (用於 metrics: 可見了多少幀)
     sched.occ_frame_counter[env_ids, slot_ids] = 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Head-On Behavior — 直線迎面
+#
+# spawn 在 LiDAR 邊界附近、隨機方位 (velocity=0 待命)。
+# 等 activation_delay 後，「激活當下」對準 robot 當前位置算一次方向，
+# 之後等速直線衝過去 (不再重新瞄準 → 軌跡固定，符合「不依賴 robot 動作」原則)。
+# 對症 SA4「晚反應撞動態」：現有 crossing/near_miss 都不正面來。
+# 刻意非持續 homing → 避免與致動延遲疊成舞龍舞獅極限環。
+# ═══════════════════════════════════════════════════════════════════════════
+def spawn_head_on(
+    sched: "BehaviorScheduler",
+    env_ids: Tensor,
+    slot_ids: Tensor,
+    boundary: float = 8.5,
+) -> None:
+    """Head-On spawn: 在離場景中心 D 的隨機方位生成，待命 (velocity=0)，
+    速度與激活方向於 step 激活瞬間才決定 (對準 robot 當下位置)。"""
+    K = len(env_ids)
+    device = sched.device
+    cfg = sched.cfg.head_on
+
+    # 1. spawn 距離 + 隨機方位 (env-local frame，robot reset 約在原點)
+    dist = torch.empty(K, device=device).uniform_(
+        cfg.spawn_distance_range[0], cfg.spawn_distance_range[1])
+    bearing = torch.rand(K, device=device) * 2 * math.pi
+    spawn_x = dist * torch.cos(bearing)
+    spawn_y = dist * torch.sin(bearing)
+    sched.positions[env_ids, slot_ids, 0] = spawn_x
+    sched.positions[env_ids, slot_ids, 1] = spawn_y
+    sched.ho_spawn_pos[env_ids, slot_ids, 0] = spawn_x
+    sched.ho_spawn_pos[env_ids, slot_ids, 1] = spawn_y
+
+    # 2. 速度大小 (方向待激活才定)
+    sched.ho_speed[env_ids, slot_ids] = torch.empty(K, device=device).uniform_(
+        cfg.speed_range[0], cfg.speed_range[1])
+
+    # 3. 待命: velocity=0, 未瞄準
+    sched.velocities[env_ids, slot_ids] = 0.0
+    sched.ho_velocity[env_ids, slot_ids] = 0.0
+    sched.ho_aimed[env_ids, slot_ids] = False
+    sched.ho_done[env_ids, slot_ids] = False
+    sched.ho_activation_delay[env_ids, slot_ids] = torch.randint(
+        cfg.activation_delay_range[0], cfg.activation_delay_range[1] + 1,
+        (K,), device=device,
+    )
+
+
+def step_head_on(sched: "BehaviorScheduler", mask: Tensor, dt: float) -> None:
+    """Head-On step:
+    Phase waiting: delay>0 → 倒數，不動。
+    Phase activate: delay<=0 且未瞄準 → 對準 robot 當下位置算 velocity，標記 aimed。
+    Phase moving: aimed → 等速直線；超過 travel_cap 或出界 → done 停止。
+    """
+    if not mask.any():
+        return
+
+    env_idx, obs_idx = mask.nonzero(as_tuple=True)
+    device = sched.device
+    cfg = sched.cfg.head_on
+
+    delay = sched.ho_activation_delay[env_idx, obs_idx]  # [K]
+    aimed = sched.ho_aimed[env_idx, obs_idx]             # [K] bool
+    done = sched.ho_done[env_idx, obs_idx]               # [K] bool
+
+    # Phase waiting
+    waiting = (delay > 0) & ~aimed & ~done
+    if waiting.any():
+        sched.ho_activation_delay[env_idx[waiting], obs_idx[waiting]] -= 1
+        sched.velocities[env_idx[waiting], obs_idx[waiting]] = 0.0
+
+    # Phase activate: 對準 robot 當下位置 (一次性)
+    activate = (delay <= 0) & ~aimed & ~done
+    if activate.any():
+        a_env = env_idx[activate]
+        a_obs = obs_idx[activate]
+        obs_pos = sched.positions[a_env, a_obs]              # [Ka, 2] local
+        # robot 當下 local 位置 (step() 開頭快取);無快取則退回原點
+        robot_xy = getattr(sched, "_robot_local_xy", None)
+        if robot_xy is not None:
+            target = robot_xy[a_env]                         # [Ka, 2]
+        else:
+            target = torch.zeros_like(obs_pos)
+        direction = target - obs_pos                         # [Ka, 2]
+        dnorm = direction.norm(dim=-1, keepdim=True).clamp_min(1e-4)
+        unit = direction / dnorm
+        # 瞄準角度抖動 ±aim_jitter_deg (防 overfit)
+        if cfg.aim_jitter_deg > 0:
+            jit = (torch.rand(len(a_env), device=device) * 2 - 1) * math.radians(cfg.aim_jitter_deg)
+            cos_j, sin_j = torch.cos(jit), torch.sin(jit)
+            ux = unit[:, 0] * cos_j - unit[:, 1] * sin_j
+            uy = unit[:, 0] * sin_j + unit[:, 1] * cos_j
+            unit = torch.stack([ux, uy], dim=-1)
+        speed = sched.ho_speed[a_env, a_obs].unsqueeze(-1)   # [Ka, 1]
+        vel = unit * speed                                   # [Ka, 2]
+        sched.ho_velocity[a_env, a_obs] = vel
+        sched.ho_aimed[a_env, a_obs] = True
+        # 本步即開始移動
+        sched.positions[a_env, a_obs] += vel * dt
+        sched.velocities[a_env, a_obs] = vel
+
+    # Phase moving: 已瞄準者等速直線
+    moving = aimed & ~done
+    if moving.any():
+        m_env = env_idx[moving]
+        m_obs = obs_idx[moving]
+        vel = sched.ho_velocity[m_env, m_obs]
+        sched.positions[m_env, m_obs] += vel * dt
+        sched.velocities[m_env, m_obs] = vel
+        # 完成判定: 行進距離超過 spawn_distance×cap，或出界
+        spawn_pos = sched.ho_spawn_pos[m_env, m_obs]
+        travelled = (sched.positions[m_env, m_obs] - spawn_pos).norm(dim=-1)
+        spawn_dist = spawn_pos.norm(dim=-1).clamp_min(1e-4)
+        pos = sched.positions[m_env, m_obs]
+        oob = (pos[:, 0].abs() > sched.boundary + 1.0) | (pos[:, 1].abs() > sched.boundary + 1.0)
+        finished = (travelled > spawn_dist * cfg.travel_cap_mult) | oob
+        if finished.any():
+            f_env = m_env[finished]
+            f_obs = m_obs[finished]
+            sched.ho_done[f_env, f_obs] = True
+            sched.velocities[f_env, f_obs] = 0.0

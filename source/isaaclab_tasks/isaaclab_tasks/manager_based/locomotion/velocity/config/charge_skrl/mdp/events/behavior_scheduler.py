@@ -32,6 +32,7 @@ from obstacle_agent.behavior_config import (
     BEHAVIOR_INACTIVE, BEHAVIOR_STATIC, BEHAVIOR_PATROL, BEHAVIOR_RANDOM_WALK,
     BEHAVIOR_HORIZONTAL_CROSSING, BEHAVIOR_PATH_CROSSING,
     BEHAVIOR_NEAR_MISS, BEHAVIOR_CORRIDOR_CROSSING, BEHAVIOR_OCCLUSION,
+    BEHAVIOR_HEAD_ON,
     BEHAVIOR_NAMES, NUM_BEHAVIOR_TYPES,
 )
 try:
@@ -44,6 +45,7 @@ try:
         step_near_miss, spawn_near_miss,
         step_corridor_crossing, spawn_corridor_crossing,
         step_occlusion, spawn_occlusion,
+        step_head_on, spawn_head_on,
     )
 except ImportError:
     from rule_behaviors import (
@@ -55,6 +57,7 @@ except ImportError:
         step_near_miss, spawn_near_miss,
         step_corridor_crossing, spawn_corridor_crossing,
         step_occlusion, spawn_occlusion,
+        step_head_on, spawn_head_on,
     )
 
 
@@ -195,6 +198,16 @@ class BehaviorScheduler:
         self.occ_frame_counter = torch.zeros(E, N, dtype=torch.long, device=device)
 
         # ══════════════════════════════════════════════════════════════════
+        # Head-On State (直線迎面)
+        # ══════════════════════════════════════════════════════════════════
+        self.ho_velocity = torch.zeros(E, N, 2, device=device)
+        self.ho_spawn_pos = torch.zeros(E, N, 2, device=device)
+        self.ho_speed = torch.zeros(E, N, device=device)
+        self.ho_activation_delay = torch.zeros(E, N, dtype=torch.long, device=device)
+        self.ho_aimed = torch.zeros(E, N, dtype=torch.bool, device=device)
+        self.ho_done = torch.zeros(E, N, dtype=torch.bool, device=device)
+
+        # ══════════════════════════════════════════════════════════════════
         # Metrics
         # ══════════════════════════════════════════════════════════════════
         self._collision_by_type = torch.zeros(NUM_BEHAVIOR_TYPES, device=device)
@@ -275,6 +288,13 @@ class BehaviorScheduler:
         """
         self._step_count += 1
 
+        # 快取 robot 當下 local 位置 (head_on 激活時對準用;positions 走 env-local frame)
+        try:
+            robot = env.scene["robot"]
+            self._robot_local_xy = robot.data.root_pos_w[:, :2] - env.scene.env_origins[:, :2]
+        except (KeyError, AttributeError):
+            self._robot_local_xy = None
+
         # 各 behavior mask: [num_envs, max_obstacles] bool
         static_mask = (self.behavior_type == BEHAVIOR_STATIC)
         patrol_mask = (self.behavior_type == BEHAVIOR_PATROL)
@@ -290,12 +310,14 @@ class BehaviorScheduler:
         step_random_walk(self, rw_mask, dt)
         cc_mask = (self.behavior_type == BEHAVIOR_CORRIDOR_CROSSING)
         occ_mask = (self.behavior_type == BEHAVIOR_OCCLUSION)
+        ho_mask = (self.behavior_type == BEHAVIOR_HEAD_ON)
 
         step_horizontal_crossing(self, hc_mask, dt)
         step_path_crossing(self, pc_mask, dt)
         step_near_miss(self, nm_mask, dt)
         step_corridor_crossing(self, cc_mask, dt)
         step_occlusion(self, occ_mask, dt)
+        step_head_on(self, ho_mask, dt)
 
         # 邊界反彈 (所有 active obstacles)
         active_mask = (self.behavior_type != BEHAVIOR_INACTIVE)
@@ -381,6 +403,8 @@ class BehaviorScheduler:
             spawn_corridor_crossing(self, env_ids, slot_ids, self.boundary)
         elif btype_id == BEHAVIOR_OCCLUSION:
             spawn_occlusion(self, env_ids, slot_ids, self.boundary)
+        elif btype_id == BEHAVIOR_HEAD_ON:
+            spawn_head_on(self, env_ids, slot_ids, self.boundary)
 
         # spawn_zones 校正：將不在可行走區域的 obstacle 重新採樣到合法位置
         if self.spawn_zones is not None:

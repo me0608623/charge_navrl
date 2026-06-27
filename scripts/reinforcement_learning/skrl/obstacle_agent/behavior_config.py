@@ -28,6 +28,7 @@ BEHAVIOR_PATH_CROSSING = 5
 BEHAVIOR_NEAR_MISS = 6
 BEHAVIOR_CORRIDOR_CROSSING = 7
 BEHAVIOR_OCCLUSION = 8
+BEHAVIOR_HEAD_ON = 9  # 直線迎面：spawn 後對準 robot 當下位置直直衝過來 (訓練提早避讓)
 
 BEHAVIOR_NAMES = {
     0: "inactive",
@@ -39,9 +40,10 @@ BEHAVIOR_NAMES = {
     6: "near_miss",
     7: "corridor_crossing",
     8: "occlusion",
+    9: "head_on",
 }
 
-NUM_BEHAVIOR_TYPES = 9  # 0~8
+NUM_BEHAVIOR_TYPES = 10  # 0~9
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -204,6 +206,22 @@ class OcclusionGroupConfig:
     min_spawn_from_robot: float = 2.5
 
 
+@dataclass
+class HeadOnConfig:
+    """直線迎面 — spawn 後等待 activation_delay，激活當下對準 robot 位置，
+    之後等速直線衝過去 (不再重新瞄準 → 軌跡固定、不依賴 robot 動作)。
+
+    用途: 訓練 policy「有東西直直朝我來」時提早偵測 + 側讓。
+    對症 SA4 診斷的「晚反應全速撞動態」(現有 crossing/near_miss 都不正面來)。
+    設計刻意只在激活瞬間瞄準一次 (非持續 homing),避免與致動延遲疊成舞龍舞獅極限環。
+    """
+    speed_range: tuple[float, float] = (0.30, 0.65)        # 迎面速度 (m/s),由 stage speed_overrides 覆寫
+    spawn_distance_range: tuple[float, float] = (5.5, 8.0)  # spawn 離場景中心距離 (LiDAR 邊界附近)
+    activation_delay_range: tuple[int, int] = (5, 15)       # 激活前等待 1~3s (10steps=2s),讓 robot 先動
+    aim_jitter_deg: float = 8.0                             # 瞄準角度抖動 ±8°,避免完全精準(防 overfit)
+    travel_cap_mult: float = 2.2                            # 行進超過 spawn_distance×此倍數即完成(穿過離場)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 完整 Config (組合所有 behavior)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -225,6 +243,7 @@ class BehaviorConfig:
     near_miss: NearMissConfig = field(default_factory=NearMissConfig)
     corridor_crossing: CorridorCrossingConfig = field(default_factory=CorridorCrossingConfig)
     occlusion: OcclusionGroupConfig = field(default_factory=OcclusionGroupConfig)
+    head_on: HeadOnConfig = field(default_factory=HeadOnConfig)
 
     def apply_stage_overrides(self, overrides: dict) -> None:
         """從 curriculum stage config 覆寫參數。

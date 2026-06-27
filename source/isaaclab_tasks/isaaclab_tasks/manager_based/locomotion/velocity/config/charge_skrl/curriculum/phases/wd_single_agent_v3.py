@@ -324,15 +324,17 @@ STAGES = [
         "behavior": {
             "obstacle_speed": 0.85,             # ↑ from 0.80
             "behavior_mix": {
-                "patrol": 0.30,
-                "random_walk": 0.25,
-                "static": 0.20,
-                "horizontal_crossing": 0.25,    # 新增：首個 crossing behavior
+                "patrol": 0.25,
+                "random_walk": 0.20,
+                "static": 0.15,
+                "horizontal_crossing": 0.20,
+                "head_on": 0.20,                # 新增：直線迎面 (訓練提早避讓正面來車)
             },
             "speed_overrides": {
                 "patrol": {"speed_range": (0.25, 0.50)},
                 "random_walk": {"speed_range": (0.20, 0.45)},
                 "horizontal_crossing": {"speed_range": (0.25, 0.50)},
+                "head_on": {"speed_range": (0.30, 0.55)},
             },
         },
 
@@ -412,17 +414,19 @@ STAGES = [
         "behavior": {
             "obstacle_speed": 0.85,
             "behavior_mix": {
-                "patrol": 0.25,
-                "random_walk": 0.20,
+                "patrol": 0.20,
+                "random_walk": 0.15,
                 "static": 0.10,
-                "horizontal_crossing": 0.20,
-                "path_crossing": 0.25,          # 新增：robot→goal 路徑交叉
+                "horizontal_crossing": 0.15,
+                "path_crossing": 0.20,          # robot→goal 路徑交叉
+                "head_on": 0.20,                # 新增：直線迎面 (訓練提早避讓正面來車)
             },
             "speed_overrides": {
                 "patrol": {"speed_range": (0.25, 0.55)},
                 "random_walk": {"speed_range": (0.20, 0.50)},
                 "horizontal_crossing": {"speed_range": (0.30, 0.60)},
                 "path_crossing": {"speed_range": (0.25, 0.55)},
+                "head_on": {"speed_range": (0.30, 0.60)},
             },
         },
 
@@ -502,12 +506,13 @@ STAGES = [
         "behavior": {
             "obstacle_speed": 0.85,
             "behavior_mix": {
-                "patrol": 0.20,
-                "random_walk": 0.15,
+                "patrol": 0.15,
+                "random_walk": 0.10,
                 "static": 0.10,
                 "horizontal_crossing": 0.15,
-                "path_crossing": 0.15,
-                "corridor_crossing": 0.25,      # 新增：狹窄通道穿越
+                "path_crossing": 0.10,
+                "corridor_crossing": 0.20,      # 狹窄通道穿越
+                "head_on": 0.20,                # 新增：直線迎面 (訓練提早避讓正面來車)
             },
             "speed_overrides": {
                 "patrol": {"speed_range": (0.30, 0.65)},
@@ -515,6 +520,7 @@ STAGES = [
                 "horizontal_crossing": {"speed_range": (0.35, 0.70)},
                 "path_crossing": {"speed_range": (0.30, 0.65)},
                 "corridor_crossing": {"speed_range": (0.20, 0.45)},
+                "head_on": {"speed_range": (0.35, 0.65)},
             },
         },
 
