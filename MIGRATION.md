@@ -49,6 +49,16 @@ USD 已被 git **強制追蹤**，clone 一完成就在正確位置，policy 自
   rsync -avhP PC-A:/home/aa/IsaacLab/logs/rnn_car/<run>/ /home/aa/IsaacLab/logs/rnn_car/<run>/
   ```
 
+## 3b. Claude Code 記憶 (隨 git 走，setup 腳本自動同步)
+
+PC-A 的 Claude 研究記憶(82 個 .md：findings / feedback / project plans)已複製進 repo 的
+`.claude-memory/`，隨 git clone 自帶。`setup_machine_b.sh` 會把它 rsync 到本機
+`~/.claude/projects/-home-aa-IsaacLab/memory/`(不加 `--delete`，保留本機既有記憶，只新增/更新)，
+讓 PC-B 的 Claude Code 擁有相同脈絡。
+
+> 手動同步：`rsync -a /home/aa/IsaacLab/.claude-memory/ ~/.claude/projects/-home-aa-IsaacLab/memory/`
+> ⚠️ `.claude-memory/` 是「PC-A 記憶快照」，會隨每次 `git pull` 更新；PC-B 本機新產生的記憶不會自動回推 PC-A。
+
 ## 4. ⚠️ 平行訓練 — 兩台機別共用同一 branch
 
 PC-B 若要 commit 訓練改動：

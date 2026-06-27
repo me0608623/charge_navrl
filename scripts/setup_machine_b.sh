@@ -79,6 +79,17 @@ else
   warn "USD 不在 $USD — 檢查 clone 是否完整 / .gitignore 是否誤擋"
 fi
 
+# ---- 4b. Claude Code 記憶同步 (PC-A 研究記憶 → 本機 ~/.claude) ----
+MEM_SRC="$DEST/.claude-memory"
+MEM_DST="$HOME/.claude/projects/-home-aa-IsaacLab/memory"
+if [ -d "$MEM_SRC" ]; then
+  mkdir -p "$MEM_DST"
+  rsync -a "$MEM_SRC/" "$MEM_DST/"   # 不加 --delete：保留本機既有記憶，只新增/更新
+  ok "Claude 記憶同步: $(ls "$MEM_DST"/*.md 2>/dev/null | wc -l) 個 .md → $MEM_DST"
+else
+  warn "repo 內無 .claude-memory/ (略過記憶同步)"
+fi
+
 # ---- 5. (可選) 煙霧測試：4 envs × 10 steps ----
 if [ "$SMOKE" = "1" ]; then
   log "煙霧測試: wd_sa1_v3f_vaux, 4 envs × 10 steps"
