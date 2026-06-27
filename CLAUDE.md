@@ -209,13 +209,25 @@ PYTHONUNBUFFERED=1 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_ch
 
 ## PC-B 首次設定 Checklist
 
-1. Clone repo: `git clone git@github.com:me0608623/charge_skrl.git IsaacLab` 或 add remote
-2. `git checkout charge_skrl/abl`
-3. `conda activate env_isaaclab`
-4. USD 已在 repo 內 (`assets/usd/charge/charge.usd`)，無需額外設定
-5. `wandb login`
-6. 跑一個快速測試: `./isaaclab.sh -p scripts/reinforcement_learning/skrl/train_charge_ac.py --task Isaac-Navigation-Charge-VLP16-Curriculum-NavRL --num_envs 4 --headless --timesteps 10`
-7. 確認 WandB 出現 `ablation/*` metrics
+> 完整遷移指南見 [MIGRATION.md](MIGRATION.md)；一鍵設定用 `scripts/setup_machine_b.sh`。
+> 原則：**代碼走 git，大資料 (logs 70G / wandb 31G) 不搬**（各機獨立產生，wandb 各自 sync 雲端）。
+
+1. Clone repo: `git clone git@github.com:me0608623/charge_navrl.git /home/aa/IsaacLab`
+2. `cd /home/aa/IsaacLab && git checkout wdclean-repro-20260429`
+3. 一鍵設定: `bash scripts/setup_machine_b.sh`（冪等；checkout+pull → 啟用 env_isaaclab → 需要時 `./isaaclab.sh -i` → 驗證 USD → 同步 Claude 記憶到 ~/.claude）
+   - 全新機（repo 還沒 clone）：把這支腳本單獨 scp/貼過去 `bash setup_machine_b.sh`，它會自動 clone
+   - 加 `--smoke` 多跑 4 envs × 10 steps 煙霧測試
+4. `wandb login`（API key 各機自行設定）
+5. USD 免手動搬：`assets/usd/charge/charge.usd` 隨 git clone 自帶，`charge_cfg.py` 用 `_REPO_ROOT` 相對路徑自動定位
+6. 正式訓練（從頭訓 SA1 vaux）：
+   ```bash
+   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 ./isaaclab.sh -p \
+     scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+     --experiment_config wd_sa1_v3f_vaux --headless --feat_norm --aux_epochs 8 \
+     --run_name sa1_v3f_vaux_ne1024_s42
+   ```
+
+⚠️ **平行訓練**：PC-B 若要 commit，先開自己的 branch（`git checkout -b wdclean-repro-20260429-pcB`），push 前先 `git fetch`，避免與 PC-A 互蓋。
 
 ## 注意事項
 
