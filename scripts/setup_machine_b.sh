@@ -73,16 +73,18 @@ else
 fi
 
 # ---- 4. USD 驗證 (隨 repo 走，不需另搬) ----
-# charge.usd 已移出 LFS 改走普通 blob → fresh clone 必有真內容。
+# 驗證 charge_cfg.py 實際載入的「自包含 66MB robot」(../charge.usd)，不是舊的 11.5KB 殼。
+# 此檔已移出 LFS 改走普通 blob → fresh clone 必有真內容。
 # 仍加固：舊版只有 [ -f ] 會把 130B 的 LFS pointer 誤判成「USD OK」，訓練啟動才炸。
-# 這裡偵測 pointer → 試 git lfs pull → 仍失敗就 die，絕不假性通過。
-USD="$DEST/assets/usd/charge/charge.usd"
+# 偵測 pointer → 試 git lfs pull → 仍失敗就 die，絕不假性通過。
+USD_REL="source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/charge.usd"
+USD="$DEST/$USD_REL"
 is_lfs_pointer() { head -c 64 "$1" 2>/dev/null | grep -q '^version https://git-lfs'; }
 if [ ! -f "$USD" ]; then
   die "USD 不在 $USD — 檢查 clone 是否完整 / .gitignore 是否誤擋"
 elif is_lfs_pointer "$USD"; then
   warn "USD 是 LFS pointer (內容沒抓下來)，嘗試 git lfs pull ..."
-  ( cd "$DEST" && git lfs pull --include="assets/usd/charge/charge.usd" ) 2>&1 | tail -3 || true
+  ( cd "$DEST" && git lfs pull --include="$USD_REL" ) 2>&1 | tail -3 || true
   if is_lfs_pointer "$USD"; then
     warn "LFS 內容仍抓不到 (常見: SSH 遠端 LFS auth 被拒)。修法擇一："
     echo "    1) git lfs install && git lfs pull        # 需遠端可 auth" >&2
@@ -92,7 +94,7 @@ elif is_lfs_pointer "$USD"; then
   fi
   ok "USD 已補回真內容: $USD ($(du -h "$USD" | cut -f1))"
 else
-  ok "USD OK: $USD ($(du -h "$USD" | cut -f1))  ← charge_cfg.py 用 _REPO_ROOT 相對路徑自動定位"
+  ok "USD OK: $USD ($(du -h "$USD" | cut -f1))  ← charge_cfg.py 用 ../charge.usd 自動定位"
 fi
 
 # ---- 4b. Claude Code 記憶同步 (PC-A 研究記憶 → 本機 ~/.claude) ----

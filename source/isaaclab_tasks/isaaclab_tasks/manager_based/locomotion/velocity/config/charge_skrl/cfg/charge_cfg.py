@@ -16,14 +16,17 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
-# USD 路徑: 優先使用環境變數 CHARGE_USD_PATH，其次 repo 內 assets/，最後本機路徑
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", "..", ".."))
+# USD 路徑優先序: 環境變數 CHARGE_USD_PATH > repo 內自包含 robot (本檔上層 ../charge.usd) > 本機 fallback
+#   ../charge.usd = 自包含完整機器人 (Mesh + RigidBody, 無 payload)，已隨 repo (de-LFS) 一起 clone，
+#                   fresh clone 即可用、不依賴 LFS auth 也不依賴本機檔。
+#   ⚠ 舊 assets/usd/charge/charge.usd 是「殼 + payload」，單獨載入沒有 rigid body
+#     (ValueError: ...no rigid bodies)，故不再列入候選。
 _USD_CANDIDATES = [
     os.environ.get("CHARGE_USD_PATH", ""),
-    os.path.join(_REPO_ROOT, "assets", "usd", "charge", "charge.usd"),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "charge.usd")),
     "/home/aa/usd/charge/charge.usd",
 ]
-_USD_PATH = next((p for p in _USD_CANDIDATES if p and os.path.isfile(p)), _USD_CANDIDATES[-1])
+_USD_PATH = next((p for p in _USD_CANDIDATES if p and os.path.isfile(p)), _USD_CANDIDATES[1])
 
 CHARGE_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
