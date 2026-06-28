@@ -41,6 +41,7 @@ done
 log()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m✓ %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m⚠ %s\033[0m\n' "$*"; }
+die()  { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ---- 1. 取得 / 更新 repo ----
 if [ -d "$DEST/.git" ]; then
@@ -72,11 +73,26 @@ else
 fi
 
 # ---- 4. USD 驗證 (隨 repo 走，不需另搬) ----
+# charge.usd 已移出 LFS 改走普通 blob → fresh clone 必有真內容。
+# 仍加固：舊版只有 [ -f ] 會把 130B 的 LFS pointer 誤判成「USD OK」，訓練啟動才炸。
+# 這裡偵測 pointer → 試 git lfs pull → 仍失敗就 die，絕不假性通過。
 USD="$DEST/assets/usd/charge/charge.usd"
-if [ -f "$USD" ]; then
-  ok "USD OK: $USD ($(du -h "$USD" | cut -f1))  ← charge_cfg.py 用 _REPO_ROOT 相對路徑自動定位"
+is_lfs_pointer() { head -c 64 "$1" 2>/dev/null | grep -q '^version https://git-lfs'; }
+if [ ! -f "$USD" ]; then
+  die "USD 不在 $USD — 檢查 clone 是否完整 / .gitignore 是否誤擋"
+elif is_lfs_pointer "$USD"; then
+  warn "USD 是 LFS pointer (內容沒抓下來)，嘗試 git lfs pull ..."
+  ( cd "$DEST" && git lfs pull --include="assets/usd/charge/charge.usd" ) 2>&1 | tail -3 || true
+  if is_lfs_pointer "$USD"; then
+    warn "LFS 內容仍抓不到 (常見: SSH 遠端 LFS auth 被拒)。修法擇一："
+    echo "    1) git lfs install && git lfs pull        # 需遠端可 auth" >&2
+    echo "    2) 用 HTTPS 的 charge_navrl remote 重新 clone  # 無 SSH LFS auth 問題" >&2
+    echo "    3) export CHARGE_USD_PATH=/path/to/charge.usd  # 指向本機既有檔" >&2
+    die "USD 仍是 pointer，無法訓練 — 依上面任一法修復後重跑。"
+  fi
+  ok "USD 已補回真內容: $USD ($(du -h "$USD" | cut -f1))"
 else
-  warn "USD 不在 $USD — 檢查 clone 是否完整 / .gitignore 是否誤擋"
+  ok "USD OK: $USD ($(du -h "$USD" | cut -f1))  ← charge_cfg.py 用 _REPO_ROOT 相對路徑自動定位"
 fi
 
 # ---- 4b. Claude Code 記憶同步 (PC-A 研究記憶 → 本機 ~/.claude) ----

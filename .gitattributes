@@ -11,4 +11,10 @@
 *.jit filter=lfs diff=lfs merge=lfs -text
 *.hdf5 filter=lfs diff=lfs merge=lfs -text
 
+# charge 機器人模型 (11.5KB, USDC) 走普通 git blob，不走 LFS：
+# 它是訓練啟動唯一必需檔 (charge_cfg.py 引用)，必須 fresh clone 即可用、
+# 不依賴 LFS auth (SSH 遠端 LFS auth 被拒時舊作法會留 130B pointer → 訓練炸)。
+# 大的 source/.../charge_skrl/charge.usd (66MB) 仍由上面 *.usd 規則走 LFS。
+assets/usd/charge/charge.usd -filter -diff -merge -text
+
 *.bat text eol=crlf
