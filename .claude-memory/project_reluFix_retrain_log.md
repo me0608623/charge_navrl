@@ -805,3 +805,21 @@ reshape bug 修復（aux 特徵序列 reshape(L,B)→reshape(B,L).permute,真 bu
 → **結論定案:RNN hidden 確實能編碼障礙位置（WD 能用 RNN 成功,我們也能）。** 見 [[finding_velocity_aux_bottleneck]]、Obsidian rnn/「velocity-aux 完整破案」。
 
 **下一步**: SA2 — `wd_sa2_v3f_vaux`,resume `--checkpoint logs/rnn_car/sa1_v3f_vaux_ne1024_s42/checkpoint_270000.pt`（已對齊實際存出步數 270000）。⚠️ train/play 須 `CHARGE_USE_ACT_HIST=0`;probe 須 `--feat_norm`。
+
+---
+
+## ⚠️ SA2 vaux — CUDA hang 中斷 2026-06-28 10:40 CST（Cycle90 確診真 stall）
+
+**run** sa2_v3f_vaux_ne1024_s42 | wandb q9pona98 | 中斷於 **iter 990/1400（71% budget）**。
+
+**88 cycle（~22hr）全程健康**: SR 全程 94–98.5%（stage2 後段穩定 98.x%）、CR 1.4–6%、aux rel_err 23–31%/pos_r2 0.74–0.88,全程零 NaN、GPU 多數獨佔。**SA2 stage-2 再適應徹底成功,指標優於 SA1 完訓水準且平台化 ~25 cycle。**
+
+**stall 確診（Cycle90, 10:40 CST）**:
+- log 凍結 25 分鐘（mtime 10:14:27,iter 釘 990）、GPU util 0%、無他人 job 競爭。
+- py-spy 連續 5/5 dump 全釘死 `sample_aux_sequences (train_rnn_car_wdclip.py:943)` = `valid_mask.nonzero()`（CUDA op）。
+- process state R 112% CPU（busy-wait on CUDA sync)→ **CUDA-level hang**（非資料相依 Python 無窮迴圈,.nonzero() 必終止;故 resume 不會立即再卡,屬 transient CUDA 故障）。
+- 符合 [[feedback_stall_autorecover]] 三條件（log停滯+GPU0%+py-spy卡同行)+用戶自動 loop 失聯 → 授權 kill。
+
+**處置**: `kill -9 3746015`(python)→ DEAD ✓、GPU 12263MiB 已釋放。最近 checkpoint = `logs/rnn_car/sa2_v3f_vaux_ne1024_s42/checkpoint_270000.pt`（08:03,≈iter 875,含 feat_normalizer)。
+
+**⚠️ resume 語義關鍵發現（讀 code L3006-3064）**: `--checkpoint` 只還原權重+normalizer+optimizer,**不還原 iteration/curriculum 計數器**(L4537 存的 iteration 沒被讀回)→ resume 會計數器歸零、重跑完整 1400 iter（≈31hr）。因 SA2 已平台化於優秀指標,「重跑整個 budget」CP 值低。→ 已 PushNotify + AskUserQuestion 請用戶裁決恢復路徑(重跑 vs 接受 ckpt_270000 當 SA2-final 直接接 SA3)。loop 暫停待用戶決定。
