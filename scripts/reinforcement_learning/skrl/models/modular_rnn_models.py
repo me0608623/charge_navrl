@@ -51,6 +51,7 @@ import numpy as np
 EGO_START, EGO_END = 0, 4        # accel + vel + omega + radius
 GOAL_START, GOAL_END = 4, 6      # waypoint (x, y)
 LIDAR_START, LIDAR_END = 6, 78   # 72 bins
+LIDAR_LEN = LIDAR_END - LIDAR_START   # 72 (多幀 stacking 用)
 TIME_START, TIME_END = 78, 79    # remaining ratio (was 138:139 when obs=139D)
 ACT_HIST_START, ACT_HIST_END = 79, 83   # v3c: past 2 actions (a, ω) × 2 = 4D
 
@@ -87,8 +88,12 @@ class LidarStateExtractor(nn.Module):
       （影響正前方那段角度的卷積特徵），改環狀填充修正；不改 tensor 形狀、不影響相容性。
     """
 
-    def __init__(self, legacy: bool = False, include_act_hist: bool = True, act_hist_dropout: float = 0.0):
+    def __init__(self, legacy: bool = False, include_act_hist: bool = True, act_hist_dropout: float = 0.0,
+                 frame_stack: int = 1):
         super().__init__()
+        # frame_stack>1 (多幀 LiDAR): obs 尾端附 (K-1)×72 幀歷史 LiDAR,讓 Conv1d 在「原始 LiDAR 層」
+        #   直接算跨幀運動(類光流),RNN 再整合 → 給 RNN 做 MOT 必需的連續幀。frame_stack=1=現狀。
+        self.frame_stack = int(frame_stack)
         # legacy=True：還原 2026-06-02 之前的舊架構（Conv1d 零填充 + AdaptiveMaxPool1d(1)
         #   + Linear(64,64)），用來載入舊 checkpoint（lidar_proj 形狀 64→64）。
         #   僅供 play/eval 相容，不影響新訓練（預設 legacy=False = 新架構）。
@@ -108,7 +113,7 @@ class LidarStateExtractor(nn.Module):
         # legacy 模式用零填充（'zeros'），對齊舊 checkpoint 訓練時的行為。
         pad_mode = "zeros" if legacy else "circular"
         self.lidar_conv = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=5, padding=2, padding_mode=pad_mode),
+            nn.Conv1d(self.frame_stack, 32, kernel_size=5, padding=2, padding_mode=pad_mode),  # 多幀:K input channels
             nn.ReLU(),
             nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, padding_mode=pad_mode),
             nn.ReLU(),
@@ -147,7 +152,14 @@ class LidarStateExtractor(nn.Module):
         Returns:
             [B, 96] feature embedding
         """
-        lidar = obs[:, LIDAR_START:LIDAR_END].unsqueeze(1)   # [B, 1, 72]
+        if self.frame_stack > 1:
+            # 多幀: current frame 在 LIDAR_START:LIDAR_END,前 (K-1) 幀附在 obs 尾端 (rollout 時 augment)
+            cur = obs[:, LIDAR_START:LIDAR_END]                              # [B, 72] 當前幀
+            hist = obs[:, -(self.frame_stack - 1) * LIDAR_LEN:]             # [B, (K-1)*72] 歷史幀
+            lidar = torch.cat([cur, hist], dim=-1).reshape(
+                obs.shape[0], self.frame_stack, LIDAR_LEN)                   # [B, K, 72]
+        else:
+            lidar = obs[:, LIDAR_START:LIDAR_END].unsqueeze(1)   # [B, 1, 72]
         lidar = self.lidar_conv(lidar)                        # [B, 64, 18]
         if self.legacy:
             lidar = self.lidar_pool(lidar).squeeze(-1)        # [B, 64]  舊架構 global max pool

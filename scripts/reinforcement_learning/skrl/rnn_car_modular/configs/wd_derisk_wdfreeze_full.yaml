@@ -1,0 +1,173 @@
+# wd_sa3_v3f_vaux — SA3 v3f + velocity-aux 修復配方 (牆壁穿越 + 密集動態)
+#
+# ★ velocity-aux 修復配方 (同 vaux lineage)：
+#   reshape bug 修復 (程式碼) + GRU + feat_norm + aux_epochs 8 + 可訓 readout
+#   + huber + aux_target_pos_scale 0.33 + predict_dim 7。
+#
+# ⚠️ 相容性：resume【vaux lineage】SA2 完訓 checkpoint，不是舊 v3f 的。
+#   起點 ckpt 路徑見下方 checkpoint 欄位 — 請依 SA2_v3f_vaux 實際完訓 step 調整。
+#
+# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 (obs 79D)。
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa3_v3f_vaux --headless \
+#     --feat_norm --aux_epochs 8 \
+#     --checkpoint logs/rnn_car/sa2_v3f_vaux_ne1024_s42/checkpoint_420000.pt \
+#     --run_name sa3_v3f_vaux_ne1024_s42
+
+name: wd_sa3_v3f_vaux
+description: "SA3 v3f_vaux: 牆壁穿越+密集動態 + velocity-aux 修復配方. From SA2_v3f_vaux 完訓 (vaux lineage, GRU+feat_norm). obs 79D, curriculum v3e. Requires CHARGE_USE_ACT_HIST=0."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3e   # v3e: penalty_smoothness=0 + ent_ang floor=0.02
+initial_stage: 3
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 420000
+seed: 42
+
+# --- RL optimizer (SA3 stage) ---
+lr: 0.0005
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0      # ★完整凍法: 凍 readout
+aux_lr_fc_middle: 0.0         # ★完整凍法: 凍 fc_middle (= WD preprocess_model_lr=0)
+aux_lr_fc_front: 0.0          # ★完整凍法: 凍 fc_front (= WD preprocess_model_lr=0)
+aux_lr_extractor: 0.0005      # extractor 保持可訓(從零凍 Conv=隨機特徵進 RNN 會餵垃圾;只凍 readout/fc 路徑 = WD preprocess_model 主體)
+vf_coeff: 0.5
+gamma: 0.990
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 1.0
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- velocity-aux 修復配方 (★vaux 核心) ---
+rnn_type: GRU                 # ★vaux
+feat_norm: true               # ★vaux: 關鍵缺件
+aux_epochs: 8                 # ★vaux
+aux_loss_type: huber          # ★vaux
+aux_huber_delta: 1.0
+aux_target_pos_scale: 0.33    # ★vaux
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (SA3 stage: 0.005/0.02) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.005
+ent_coeff_angular: 0.02
+
+# --- v3f: 無 act_hist → dropout 無意義 ---
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (GRU64) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+
+# --- aux predict dim (★vaux: position-only 7D) ---
+predict_dim: 7
+aux_velocity_topk: 0
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.85
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (全噪聲 ON，50% 校準) ---
+lidar_no_noise: false
+lidar_displacement_std_per_meter: 0.00020
+lidar_displacement_std_soft: 0.001
+lidar_displacement_std: 0.0
+lidar_hole_rate: 0.10
+lidar_distractor_rate: 0.001
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+lidar_obs_noise_std: 0.003
+lidar_block_dropout_prob: 0.03
+lidar_block_dropout_width: [3, 8]
+lidar_displacement_std_per_meter_dr: [0.00015, 0.00030]
+lidar_displacement_std_soft_dr: [0.001, 0.010]
+lidar_displacement_std_dr: null
+lidar_hole_rate_dr: [0.05, 0.15]
+
+# --- Sim-to-Real DR (延遲 DR 保留) ---
+no_domain_randomization: false
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (關閉：sin 波兇手；馬達延遲保留)
+obs_delay_steps: [0, 0]
+# Heading stability (off)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume — ★DERISK: 從零訓練(清空 checkpoint),不 resume 任何 lineage ---
+checkpoint: ""
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa3, v3f, vaux, velocity_aux_fixed, gru, feat_norm, huber, a2c, aux, asymmetric, gru64, rmin025, no_act_hist, obs79d, smoothness0, dynamic]
+notes: "SA3 v3f_vaux: 牆壁穿越+密集動態 + velocity-aux 修復配方. From SA2_v3f_vaux 完訓 (vaux lineage, GRU+feat_norm). obs 79D, curriculum v3e."

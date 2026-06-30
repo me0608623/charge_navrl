@@ -301,6 +301,16 @@ parser.add_argument("--predict_dim", type=int, default=7,
 # --aux_velocity_topk
 parser.add_argument("--aux_velocity_topk", type=int, default=0,
                     help="Append body-frame velocity of nearest K dynamic obstacles to aux target. 0=off, 3=13D total.")
+# --hybrid_predict_to_policy (RNN 當顯式 MOT:把 predict_head 輸出的障礙動態預測接進 policy 輸入)
+parser.add_argument("--hybrid_predict_to_policy", action="store_true", default=False,
+                    help="Hybrid: feed predict_head output (障礙動態預測) into the policy/value input "
+                         "(rl_input += predict_dim). RNN 成為顯式 MOT,其輸出餵 RL,而非只當訓練鷹架. "
+                         "predict_head 仍由 aux 監督(位移 label);policy 每步吃其輸出. 預設關=現有隱式架構.")
+# --lidar_frame_stack (多幀 LiDAR:給 RNN 做 MOT 必需的連續幀;obs 尾端附 (K-1)×72 幀歷史)
+parser.add_argument("--lidar_frame_stack", type=int, default=1,
+                    help="LiDAR frame stacking K. K=1=現狀(單幀). K>1: extractor Conv1d 吃 K 幀,"
+                         "rollout 維護滾動歷史 buffer 並把前 (K-1) 幀附在 obs 尾端,讓 Conv1d 在原始 LiDAR "
+                         "層算跨幀運動(類光流). ⚠ 改 extractor 形狀→與舊 checkpoint 不相容,從頭訓.")
 # --aux_loss_type
 parser.add_argument("--aux_loss_type", type=str, default="log", choices=["log", "huber"],
                     help="Aux loss form for dims 0-5. log=WD original (grad ∝ 1/|e|, 鼓勵常數陷阱); "
@@ -2622,9 +2632,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return _wd_like_obs(obs_normed)
         return _select_79d(obs_normed)
 
-    def _charge_features_for_rnn(obs_normed: torch.Tensor, update_norm: bool = False) -> torch.Tensor:
+    def _charge_features_for_rnn(obs_normed: torch.Tensor, update_norm: bool = False,
+                                 lidar_hist: torch.Tensor = None) -> torch.Tensor:
         if use_extractor:
-            _f = extractor(_select_79d(obs_normed))
+            _ext_in = _select_79d(obs_normed)
+            if args_cli.lidar_frame_stack > 1:
+                # 多幀:把 (K-1) 幀歷史 LiDAR 附在 extractor 輸入尾端。重要路徑(rollout/recompute/aux)
+                #   傳真歷史;未傳則 fallback 複製當前幀(無運動)防 crash。
+                if lidar_hist is None:
+                    _cur_lidar = _ext_in[:, LIDAR_START:LIDAR_END]
+                    lidar_hist = _cur_lidar.repeat(1, args_cli.lidar_frame_stack - 1)
+                _ext_in = torch.cat([_ext_in, lidar_hist], dim=-1)
+            _f = extractor(_ext_in)
         elif wd_exact_mode:
             _f = _wd_like_obs(obs_normed)
         else:
@@ -2653,7 +2672,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         extractor = LidarStateExtractor(
             include_act_hist=_use_act_hist,
             act_hist_dropout=(_act_hist_dropout if _use_act_hist else 0.0),
+            frame_stack=args_cli.lidar_frame_stack,   # 多幀 LiDAR (K=1=現狀)
         ).to(device)   # Conv1d LiDAR + MLP obs 特徵抽取器
+        if args_cli.lidar_frame_stack > 1:
+            print(f"[INFO] 多幀 LiDAR: frame_stack={args_cli.lidar_frame_stack} "
+                  f"(extractor Conv1d 吃 {args_cli.lidar_frame_stack} 幀;obs 尾端附 "
+                  f"{(args_cli.lidar_frame_stack-1)*72}D 歷史;⚠ 與舊 ckpt 不相容,從頭訓)")
         if not _use_act_hist:
             print("[v3f] CHARGE_USE_ACT_HIST=0 → act_hist 移除，obs 79D / state 7D（含 action_error 速度落差移除）")
         elif _act_hist_dropout > 0.0:
@@ -2677,7 +2701,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         middle_dim=_middle_dim,
         aux_skip_input=args_cli.aux_skip_input,
     ).to(device)
-    rl_input_dim = policy_obs_dim + args_cli.preprocess_dim  # WD principle: concat(obs, preprocess_feat)
+    # Hybrid: 把 predict_head 輸出的障礙動態預測接進 policy 輸入(RNN 當顯式 MOT,輸出餵 RL)
+    _hybrid_pred_dim = _predict_dim if args_cli.hybrid_predict_to_policy else 0
+    rl_input_dim = policy_obs_dim + args_cli.preprocess_dim + _hybrid_pred_dim  # concat(obs, preprocess_feat[, prediction])
+    if args_cli.hybrid_predict_to_policy:
+        if getattr(args_cli, "rnn_rl_grad", False):
+            raise NotImplementedError(
+                "--hybrid_predict_to_policy 暫不支援與 --rnn_rl_grad 並用"
+                "(PPO recompute 路徑未含 prediction 會造成維度不符);請擇一。")
+        print(f"[INFO] Hybrid predict→policy: rl_input += predict_dim({_predict_dim}) → {rl_input_dim}D "
+              f"(predict_head 輸出當 policy 顯式輸入;仍由 aux 監督)")
     policy_head = PolicyHead(input_dim=rl_input_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
     _use_asymmetric_critic = getattr(args_cli, 'critic_profile', 'symmetric') == 'asymmetric'
     _priv_dim = PRIVILEGED_OBS_DIM if _use_asymmetric_critic else 0
@@ -2688,6 +2721,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         nn.init.constant_(value_head.net[-1].bias, args_cli.value_init_bias)
         print(f"[INFO] Value head final bias override: {args_cli.value_init_bias}")
     rnn_state = RNNStateManager(num_envs, args_cli.hidden_dim, device)  # 管理每個 env 的 RNN hidden state
+    # 多幀 LiDAR:每 env 滾動歷史 buffer [E,(K-1)*72](most-recent-first),與 hidden 同生命週期+同步 reset。
+    _K_stack = args_cli.lidar_frame_stack
+    _LL = LIDAR_END - LIDAR_START   # 72
+    _lidar_hist = (torch.zeros(num_envs, (_K_stack - 1) * _LL, device=device)
+                   if _K_stack > 1 else None)
     obs_normalizer = RunningNormalizer(obs_dim, device)                 # 線上均值/方差歸一化
     feat_normalizer = RunningNormalizer(rnn_input_dim, device)          # ★extractor 輸出 per-dim 正規化(feat_norm)
 
@@ -3304,14 +3342,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             with torch.no_grad():
                 obs_normalizer.update(policy_obs)   # 更新 running stats（用 policy 看到的觀測）
                 obs_normed = obs_normalizer.normalize(policy_obs)  # 標準化觀測
-                features = _charge_features_for_rnn(obs_normed, update_norm=True)  # 提取 RNN 輸入特徵（extractor 或 raw）+ 更新 feat_norm 統計
+                features = _charge_features_for_rnn(obs_normed, update_norm=True, lidar_hist=_lidar_hist)  # 多幀:帶歷史
+                if _lidar_hist is not None:
+                    # prepend 當前 normed lidar、drop oldest → 供下一步用([t, t-1, ...])
+                    _cur_lidar = _select_79d(obs_normed)[:, LIDAR_START:LIDAR_END]
+                    _lidar_hist = torch.cat([_cur_lidar, _lidar_hist[:, :-_LL]], dim=-1)
                 hidden = rnn_state.get()                          # 取得當前 hidden state [1, E, H]
-                rnn_feat, _, new_hidden = preprocess_rnn(features, hidden)  # RNN forward → 12D preprocess feature
+                rnn_feat, _pred_rl, new_hidden = preprocess_rnn(
+                    features, hidden, training=args_cli.hybrid_predict_to_policy)  # hybrid 時順便算 prediction
                 p_obs = _charge_obs_for_rl(obs_normed)    # 取得 RL head 的觀測部分（79D 或 113D）
                 # Ablation: zero out RNN feature for RL（aux path 照常訓練，只是 RL 看不到）
                 _rnn_for_rl = (torch.zeros_like(rnn_feat)
                                if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
-                rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)  # concat obs + preprocess_feat → RL input
+                rl_in = (torch.cat([p_obs, _rnn_for_rl, _pred_rl], dim=-1)  # hybrid: + 障礙動態預測(顯式 MOT 輸出)
+                         if args_cli.hybrid_predict_to_policy
+                         else torch.cat([p_obs, _rnn_for_rl], dim=-1))  # concat obs + preprocess_feat → RL input
                 logits = policy_head(rl_in)                       # [E, 38] policy logits（雙頭各 19）
                 _priv_obs = extract_privileged_obs(env.unwrapped) if _use_asymmetric_critic else None
                 value = value_head(rl_in, _priv_obs).squeeze(-1)  # [E] critic value
@@ -3414,6 +3459,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if done_mask.any():
                 done_ids = done_mask.nonzero(as_tuple=False).reshape(-1)
                 rnn_state.reset(done_ids)  # episode 結束的 env 重置 hidden state 為 0
+                if _lidar_hist is not None:
+                    _lidar_hist[done_ids] = 0.0   # 多幀:同步 reset LiDAR 歷史(新 episode 從零)
                 # 重置障礙物速度 cache（避免舊 episode 的速度污染新 episode）
                 if hasattr(env.unwrapped, "_obstacle_velocities"):
                     env.unwrapped._obstacle_velocities[done_ids] = 0.0
@@ -3554,6 +3601,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _sst = ((_t - _t.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
                         _wd_aux_pos["r2"] = 1.0 - _ssr / _sst
                         _wd_aux_pos["vf"] = _pv.float().mean().item()
+                        # ★aux/disp_r2: 預測位移(next−t0) vs 真位移 R² — 直接量「移動編碼」。
+                        #   塌成靜態(pred_next≈pred_t0)→pred_disp≈0→disp_r2≈0/負;學到移動→>0。
+                        #   pos_r2 高分不出移動vs塌陷(next≈now 時絕對位置照樣對),故另記(監控協定第0層命脈)。
+                        if _nd >= 4:
+                            _pd = _p[:, 2:4] - _p[:, 0:2]
+                            _td = _t[:, 2:4] - _t[:, 0:2]
+                            _dssr = ((_td - _pd) ** 2).sum().item()
+                            _dsst = ((_td - _td.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
+                            _wd_aux_pos["disp_r2"] = 1.0 - _dssr / _dsst
+                        # ★aux/velocity_r2: 預測速度(dims 7:13) vs 真速度 R² — predict_dim>=13(--aux_velocity_topk) 才有。
+                        if _pe.shape[-1] >= 13:
+                            _pvel = _pe[_m][:, 7:13]; _tvel = _te[_m][:, 7:13]
+                            _vssr = ((_pvel - _tvel) ** 2).sum().item()
+                            _vsst = ((_tvel - _tvel.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
+                            _wd_aux_pos["velocity_r2"] = 1.0 - _vssr / _vsst
 
                     # ===== CPC contrastive aux(--aux_cpc):逼 RNN hidden discriminative 編碼位置 =====
                     # 獨立 fresh forward(不重用 regression graph)。q=proj_q(rnn_out), k=proj_k(pos_target)。
@@ -3629,11 +3691,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _obs_t = charge_buf.raw_obs[t]
                         _obs_n_t = obs_normalizer.normalize(_obs_t)
                         _feat_t = _charge_features_for_rnn(_obs_n_t)
-                        _rnn_feat_t, _, _fresh_h = preprocess_rnn(_feat_t, _fresh_h)
+                        _rnn_feat_t, _pred_t, _fresh_h = preprocess_rnn(
+                            _feat_t, _fresh_h, training=args_cli.hybrid_predict_to_policy)
                         _p_obs_t = _charge_obs_for_rl(_obs_n_t)
                         if args_cli.zero_preprocess_feature_for_rl:
                             _rnn_feat_t = torch.zeros_like(_rnn_feat_t)
-                        charge_buf.rl_inputs[t] = torch.cat([_p_obs_t, _rnn_feat_t], dim=-1)
+                        charge_buf.rl_inputs[t] = (
+                            torch.cat([_p_obs_t, _rnn_feat_t, _pred_t], dim=-1)  # hybrid: + 障礙動態預測
+                            if args_cli.hybrid_predict_to_policy
+                            else torch.cat([_p_obs_t, _rnn_feat_t], dim=-1))
                         _priv_t = charge_buf.privileged_obs[t] if _use_asymmetric_critic else None
                         charge_buf.values[t] = value_head(charge_buf.rl_inputs[t], _priv_t).squeeze(-1)
                         # Handle episode resets: zero hidden for envs that were done at step t
@@ -3646,11 +3712,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs_normed = obs_normalizer.normalize(obs)
                 features = _charge_features_for_rnn(obs_normed)
                 hidden = rnn_state.get()
-                rnn_feat, _, _ = preprocess_rnn(features, hidden)
+                rnn_feat, _pred_bt, _ = preprocess_rnn(
+                    features, hidden, training=args_cli.hybrid_predict_to_policy)
                 p_obs = _charge_obs_for_rl(obs_normed)
                 _rnn_for_rl = (torch.zeros_like(rnn_feat)
                                if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
-                rl_in = torch.cat([p_obs, _rnn_for_rl], dim=-1)
+                rl_in = (torch.cat([p_obs, _rnn_for_rl, _pred_bt], dim=-1)
+                         if args_cli.hybrid_predict_to_policy
+                         else torch.cat([p_obs, _rnn_for_rl], dim=-1))
                 _priv_bootstrap = extract_privileged_obs(env.unwrapped) if _use_asymmetric_critic else None
                 last_value = value_head(rl_in, _priv_bootstrap).squeeze(-1)  # [E] bootstrap value V_{T+1}
 
@@ -4077,6 +4146,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 aux_monitor["aux/pos_rel_err"] = _wd_aux_pos["rel"]
                 aux_monitor["aux/pos_r2"] = _wd_aux_pos["r2"]
                 aux_monitor["aux/pos_valid_frac"] = _wd_aux_pos["vf"]
+                # ★移動編碼命脈指標(監控協定第0層 live 版):disp_r2/velocity_r2
+                aux_monitor["aux/disp_r2"] = _wd_aux_pos.get("disp_r2", float("nan"))
+                aux_monitor["aux/velocity_r2"] = _wd_aux_pos.get("velocity_r2", float("nan"))
                 # CPC contrastive 監控:cpc_acc 爬高(>對角 random 1/N)= hidden 編碼位置成功
                 if "cpc_acc" in _wd_aux_pos:
                     aux_monitor["aux/cpc_loss"] = _wd_aux_pos["cpc_loss"]
@@ -4154,6 +4226,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         aux_monitor["aux/pos_rel_err"] = _rel
                         aux_monitor["aux/pos_r2"] = 1.0 - _ss_res / _ss_tot
                         aux_monitor["aux/pos_valid_frac"] = _pos_valid.float().mean().item()
+                        # aux/disp_r2: 預測位移(next-t0) vs 真位移 的 R² — 直接量測 RNN 有沒有學到「移動」。
+                        #   塌成靜態(pred_next≈pred_t0)→ pred_disp≈0 → disp_r2≈0/負;學到移動 → disp_r2>0。
+                        #   pos_r2 高分不出「移動 vs 塌陷」(next≈now 時絕對位置照樣對),故另記此項。
+                        #   見 finding_sa4_vaux_low_sr_is_headon / project_sa4_headon_fix_directions。
+                        if _nd >= 4:
+                            _pd = (_p[:, 2:4] - _p[:, 0:2]).detach()      # 預測位移 next-t0
+                            _td = (_t[:, 2:4] - _t[:, 0:2]).detach()      # 真位移 next-t0
+                            _dssr = ((_td - _pd) ** 2).sum().item()
+                            _dsst = ((_td - _td.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
+                            aux_monitor["aux/disp_r2"] = 1.0 - _dssr / _dsst
 
                     # Backward + step with monitoring
                     _snaps = {k: _snapshot_params(ps) for k, ps in _mon_modules.items()}
@@ -4201,7 +4283,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # RNN/preprocess feature distribution seen by the RL heads this rollout.
             # This diagnoses whether critic spikes are preceded by input-feature drift.
             with torch.no_grad():
-                rnn_features = charge_buf.rl_inputs[:RL, :, policy_obs_dim:].reshape(-1, args_cli.preprocess_dim)
+                rnn_features = charge_buf.rl_inputs[:RL, :, policy_obs_dim:policy_obs_dim + args_cli.preprocess_dim].reshape(-1, args_cli.preprocess_dim)
                 rnn_feature_mean_vec = rnn_features.mean(dim=0)
                 aux_monitor["aux/rnn_feature_mean"] = rnn_features.mean().item()
                 aux_monitor["aux/rnn_feature_std"] = rnn_features.std().item()
