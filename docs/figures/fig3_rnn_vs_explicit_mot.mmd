@@ -1,0 +1,24 @@
+flowchart LR
+  subgraph TRAD["傳統 Explicit MOT pipeline (modular)"]
+    direction LR
+    t1["LiDAR scan"]:::trad --> t2["Object<br>detection"]:::trad --> t3["Data<br>association"]:::trad --> t4["Kalman filter<br>track state"]:::trad --> t5["Tracks<br>{pos, vel}"]:::trad --> t6["Planner /<br>Policy"]:::trad
+  end
+
+  subgraph OURS["本文 RNN-as-MOT (LiDAR-only, end-to-end)"]
+    direction LR
+    o1["LiDAR scan<br>(+ multi-frame)"]:::obs --> o2["Extractor<br>96D"]:::ext --> o3["<b>RNN hidden h_t (30D)</b><br>implicit belief over<br>obstacle dynamics"]:::rnn
+    o3 --> o4["<b>predict_head</b><br>decode motion 13D<br>pos now/future/past + vel"]:::mot
+    o4 -.->|aux loss| o5["GT obstacle motion<br>disp_r2 / velocity_r2"]:::aux
+    o3 --> o6["Policy"]:::head
+    o4 ==>|hybrid skip| o6
+  end
+
+  TRAD -.->|"replace the whole module chain<br>with one learned recurrent estimator"| OURS
+
+  classDef trad fill:#ECEFF1,stroke:#546E7A,color:#1c2429;
+  classDef obs fill:#E3F2FD,stroke:#1565C0,color:#0D2B45;
+  classDef ext fill:#E8F5E9,stroke:#2E7D32,color:#13361b;
+  classDef rnn fill:#FFF3E0,stroke:#E65100,color:#3d2400;
+  classDef mot fill:#F3E5F5,stroke:#6A1B9A,color:#2e0a3d,stroke-width:2px;
+  classDef aux fill:#FFFDE7,stroke:#F9A825,color:#3d3500,stroke-dasharray:5 3;
+  classDef head fill:#FFEBEE,stroke:#C62828,color:#3d0c0e;

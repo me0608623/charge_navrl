@@ -1,0 +1,55 @@
+flowchart TB
+  subgraph OBS["觀測 Observation — 79D (LiDAR-only, act_hist off)"]
+    direction LR
+    ego["ego 4D<br>accel · vel · ω · radius"]:::obs
+    goal["goal 2D<br>body-frame (x,y)"]:::obs
+    lidar["LiDAR 72D<br>72 bins @ 5°"]:::obs
+    timev["time 1D<br>remaining ratio"]:::obs
+  end
+
+  subgraph EXT["特徵抽取 2-branch Extractor"]
+    direction LR
+    conv["LiDAR branch<br>Conv1d ×3 → flatten(1152)<br>→ Linear(→64) → LN<br><b>64D</b>"]:::ext
+    smlp["State branch<br>(ego+goal+time = 7D)<br>MLP(7→32→32) → LN<br><b>32D</b>"]:::ext
+  end
+  cat96["concat → <b>96D</b>"]:::cat
+
+  ff["fc_front<br>Linear(96→48) + ReLU"]:::rnn
+  rnn["<b>RNN</b> (ReLU, 1 layer)<br>in 48 → hidden <b>30</b><br>reset on episode done"]:::rnn
+  cat78["concat(rnn_out 30, fc_out 48)<br>→ 78D"]:::cat
+  fm["fc_middle<br>Linear(78→32→12)<br>preprocess_feat <b>12D</b>"]:::rnn
+  ph["<b>predict_head</b><br>Linear(12→13), no activation"]:::mot
+  pred["predicted obstacle motion <b>13D</b><br>now2 · future2 · past2 · dist1 · vel6"]:::mot
+  aux["Aux loss (log / Huber)<br>monitors: pos_r2 · disp_r2 · velocity_r2<br><i>updates RNN cell</i>"]:::aux
+
+  rlin["<b>rl_input 104D</b><br>obs 79 ⊕ feat 12 ⊕ pred 13"]:::cat
+  policy["<b>Policy Head</b><br>104→256→256→256→512→38<br>→ 2 × Categorical(19)<br><b>MultiDiscrete([19,19])</b>"]:::head
+  priv["特權 Privileged 50D<br>10 obstacles × 5D<br>(rel_x, rel_y, dir, speed, size)"]:::priv
+  value["<b>Value Head</b> (asymmetric)<br>rl_proj(104→128) ⊕ priv_proj(50→128)<br>→ merge 256 → MLP → <b>V(s)</b>"]:::head
+
+  lidar --> conv
+  ego --> smlp
+  goal --> smlp
+  timev --> smlp
+  conv --> cat96
+  smlp --> cat96
+  cat96 --> ff --> rnn
+  rnn --> cat78
+  ff --> cat78
+  cat78 --> fm --> ph --> pred
+  pred -.->|training only| aux
+  pred ==>|hybrid skip| rlin
+  OBS --> rlin
+  fm --> rlin
+  rlin --> policy
+  rlin --> value
+  priv --> value
+
+  classDef obs fill:#E3F2FD,stroke:#1565C0,color:#0D2B45;
+  classDef ext fill:#E8F5E9,stroke:#2E7D32,color:#13361b;
+  classDef rnn fill:#FFF3E0,stroke:#E65100,color:#3d2400;
+  classDef mot fill:#F3E5F5,stroke:#6A1B9A,color:#2e0a3d,stroke-width:2px;
+  classDef aux fill:#ECEFF1,stroke:#546E7A,color:#1c2429,stroke-dasharray:5 3;
+  classDef head fill:#FFEBEE,stroke:#C62828,color:#3d0c0e;
+  classDef priv fill:#FFFDE7,stroke:#F9A825,color:#3d3500;
+  classDef cat fill:#FAFAFA,stroke:#9E9E9E,color:#222;
