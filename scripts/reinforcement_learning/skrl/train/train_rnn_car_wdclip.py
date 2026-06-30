@@ -3216,6 +3216,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     for iteration in range(num_iterations):
         iter_start = time.time()
         charge_buf.reset()         # 重置 Charge rollout buffer（ptr=0）
+        if _lidar_hist is not None:
+            _lidar_hist.zero_()    # 多幀:rollout 起始 LiDAR 歷史歸零(對齊 recompute 從零起,三路一致)
         if obs_buf is not None:
             obs_buf.reset()        # 重置 Obstacle rollout buffer
         metrics.reset()            # 清空 MetricsCollector（完成 episode 統計）
@@ -3577,7 +3579,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _wd_aux_batch = B_seq
                     obs_flat = obs_seq.reshape(B_seq * L_seq, -1)
                     obs_normed_aux = obs_normalizer.normalize(obs_flat)
-                    feat_flat = _charge_features_for_rnn(obs_normed_aux)
+                    _lhist_aux = None
+                    if args_cli.lidar_frame_stack > 1:
+                        # 多幀:chunk 內 shift 建歷史(序列不跨 episode 由 sampling 保證);
+                        #   前 (K-1) 幀 zero-pad,靠 aux_burn_in>=K-1 把它們排除出 loss(只當 hidden 暖機)。
+                        _on_s = obs_normed_aux.reshape(B_seq, L_seq, -1)
+                        _ld_s = _on_s[..., LIDAR_START:LIDAR_END]            # [B,L,72]
+                        _hf = []
+                        for _j in range(1, args_cli.lidar_frame_stack):
+                            _shf = torch.zeros_like(_ld_s)
+                            _shf[:, _j:] = _ld_s[:, :-_j]                    # j 步前的幀,前 j 步 zero
+                            _hf.append(_shf)
+                        _lhist_aux = torch.cat(_hf, dim=-1).reshape(B_seq * L_seq, -1)
+                    feat_flat = _charge_features_for_rnn(obs_normed_aux, lidar_hist=_lhist_aux)
                     # ★BUG FIX:obs_seq 是 [B,L,obs](batch-major),reshape(L,B) 會把時間/batch 維度打亂
                     #   → 特徵與 permute 過的 target 不對應 → RNN 學不出映射 → constant collapse 真根因。
                     #   正解:先 reshape 回 [B,L] 再 permute → [L,B](與 target_seq.permute 一致)。
@@ -3687,10 +3701,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 preprocess_rnn.eval()
                 with torch.no_grad():
                     _fresh_h = charge_buf.hiddens[0].unsqueeze(0)  # [1, E, H] initial hidden
+                    _rc_hist = (torch.zeros(num_envs, (_K_stack - 1) * _LL, device=device)
+                                if _K_stack > 1 else None)  # 多幀:sequential 重放重建 rollout 真歷史
                     for t in range(RL):
                         _obs_t = charge_buf.raw_obs[t]
                         _obs_n_t = obs_normalizer.normalize(_obs_t)
-                        _feat_t = _charge_features_for_rnn(_obs_n_t)
+                        _feat_t = _charge_features_for_rnn(_obs_n_t, lidar_hist=_rc_hist)
+                        if _rc_hist is not None:
+                            _cur_l = _select_79d(_obs_n_t)[:, LIDAR_START:LIDAR_END]
+                            _rc_hist = torch.cat([_cur_l, _rc_hist[:, :-_LL]], dim=-1)
                         _rnn_feat_t, _pred_t, _fresh_h = preprocess_rnn(
                             _feat_t, _fresh_h, training=args_cli.hybrid_predict_to_policy)
                         _p_obs_t = _charge_obs_for_rl(_obs_n_t)
@@ -3705,12 +3724,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         # Handle episode resets: zero hidden for envs that were done at step t
                         _done_mask = charge_buf.dones[t].unsqueeze(0).unsqueeze(-1)  # [1,E,1]
                         _fresh_h = _fresh_h * (1.0 - _done_mask)
+                        if _rc_hist is not None:
+                            _rc_hist = _rc_hist * (1.0 - charge_buf.dones[t].unsqueeze(-1))  # 多幀:同步 reset
 
             # Bootstrap：用 rollout 最後一個 obs 的 value 做 GAE 的 V_{T+1}
             # （WD-order 模式時，使用 fresh features；legacy 模式使用原始 features）
             with torch.no_grad():
                 obs_normed = obs_normalizer.normalize(obs)
-                features = _charge_features_for_rnn(obs_normed)
+                features = _charge_features_for_rnn(obs_normed, lidar_hist=_lidar_hist)  # 多幀:用 rollout 末尾歷史
                 hidden = rnn_state.get()
                 rnn_feat, _pred_bt, _ = preprocess_rnn(
                     features, hidden, training=args_cli.hybrid_predict_to_policy)
