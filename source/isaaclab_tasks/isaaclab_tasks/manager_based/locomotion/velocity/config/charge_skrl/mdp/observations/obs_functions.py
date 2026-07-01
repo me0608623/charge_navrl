@@ -281,48 +281,64 @@ def _dynamic_human_ray_mask(
     hit_points_w: torch.Tensor,   # [N, R, 3] world-frame ray hits
     valid: torch.Tensor,          # [N, R] bool
     margin: float,
-    vel_eps: float,
+    move_eps: float,
+    move_max: float,
     max_obstacles: int = 10,
 ) -> torch.Tensor:
     """Mark rays whose world hit-point lies inside a visible, MOVING obstacle (=human material).
 
-    Dynamic (human) obstacle = visible (root z > 0) AND assigned speed > ``vel_eps``
-    (from ``env._obstacle_velocities``). Geometric in-circle test against each dynamic
-    obstacle's (x, y) centre + radius; no mesh-index-layout dependency. Missed rays hold
-    NaN hit points, so the ``<`` comparisons are False for them (and ``& valid`` re-guards).
+    Dynamic (human) is detected by **per-step position finite-difference** — robust because
+    the rule-based BehaviorScheduler moves obstacles via ``write_root_pose_to_sim`` (kinematic
+    pose writes), so ``_obstacle_velocities`` / physics ``root_vel_w`` stay ~0 for them.
+    An obstacle counts as human when it is visible (root z > 0) AND its centre moved between
+    ``move_eps`` and ``move_max`` metres since the last call (upper bound excludes reset
+    teleports). Geometric in-circle test; no mesh-index-layout dependency. Missed rays hold
+    NaN hit points → the ``<`` comparisons are False for them (and ``& valid`` re-guards).
 
     Returns:
         ``[N, R]`` bool mask of rays that hit a dynamic (human) obstacle.
     """
     N, R, _ = hit_points_w.shape
     device = hit_points_w.device
-    human = torch.zeros(N, R, dtype=torch.bool, device=device)
     hit_xy = hit_points_w[..., :2]  # [N, R, 2]
 
-    vels = getattr(env, "_obstacle_velocities", None)   # [N, max_obs, 2] or None
+    # 1) Gather current obstacle centres / visibility / radii
+    cur_xy = torch.zeros(N, max_obstacles, 2, device=device)
+    visible = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+    radius = torch.full((N, max_obstacles), 0.3, device=device)
     sizes = getattr(env, "_obstacle_sizes", None)
-
     for i in range(max_obstacles):
         name = f"obstacle_{i}"
         if name not in env.scene.keys():
             continue
-        pos_w = env.scene[name].data.root_pos_w          # [N, 3]
-        visible = pos_w[:, 2] > 0.0                      # [N] (z = -10 → hidden)
-        if vels is not None and i < vels.shape[1]:
-            is_dyn = torch.linalg.norm(vels[:, i, :], dim=-1) > vel_eps   # [N]
-        else:
-            is_dyn = torch.zeros(N, dtype=torch.bool, device=device)
-        active = visible & is_dyn                         # [N]
-        if not bool(active.any()):
-            continue
-        radius = 0.3
+        pos_w = env.scene[name].data.root_pos_w      # [N, 3]
+        cur_xy[:, i] = pos_w[:, :2]
+        visible[:, i] = pos_w[:, 2] > 0.0            # z = -10 → hidden
         if sizes is not None:
             try:
-                radius = float(sizes[i])
+                radius[:, i] = float(sizes[i])
             except (IndexError, TypeError):
                 pass
-        d = torch.linalg.norm(hit_xy - pos_w[:, None, :2], dim=-1)   # [N, R]
-        human |= (d < (radius + margin)) & active.unsqueeze(1)
+
+    # 2) Dynamic = moved this step (finite-diff), excluding reset teleports (> move_max)
+    prev = getattr(env, "_matnoise_prev_obs_xy", None)
+    if prev is not None and prev.shape == cur_xy.shape:
+        disp = torch.linalg.norm(cur_xy - prev, dim=-1)   # [N, max_obs]
+        is_dyn = (disp > move_eps) & (disp < move_max)
+    else:
+        is_dyn = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+    env._matnoise_prev_obs_xy = cur_xy.detach().clone()
+
+    # 3) Rays inside any visible+moving obstacle circle
+    active = visible & is_dyn                        # [N, max_obs]
+    human = torch.zeros(N, R, dtype=torch.bool, device=device)
+    if bool(active.any()):
+        for i in range(max_obstacles):
+            a = active[:, i]
+            if not bool(a.any()):
+                continue
+            d = torch.linalg.norm(hit_xy - cur_xy[:, i:i + 1, :], dim=-1)   # [N, R]
+            human |= (d < (radius[:, i:i + 1] + margin)) & a.unsqueeze(1)
 
     return human & valid
 
@@ -385,7 +401,8 @@ def wd_like_sweep_72(
     human_dropout_intercept: float = 0.196,
     human_mixed_pixel_rate: float = 0.178,    # human ghost/mixed-pixel (high but noisy; provisional)
     human_obs_margin: float = 0.15,           # extra margin (m) added to obstacle radius for the in-circle test
-    human_vel_eps: float = 0.05,              # obstacle speed (m/s) above which it counts as dynamic (=human)
+    human_move_eps: float = 0.01,             # min per-step obstacle displacement (m) to count as moving (=human)
+    human_move_max: float = 0.5,              # max per-step displacement (m); above → reset teleport, not motion
 ) -> torch.Tensor:
     """Build a WD-style 72-bin sweep from raw ray hits in the robot yaw frame.
 
@@ -449,18 +466,23 @@ def wd_like_sweep_72(
     human_mask = None
     if human_dynamic_dropout:
         human_mask = _dynamic_human_ray_mask(
-            env, hit_points_w, valid, human_obs_margin, human_vel_eps,
+            env, hit_points_w, valid, human_obs_margin, human_move_eps, human_move_max,
         )  # [N, R] bool
-        # One-time runtime sanity log (README "verify the mapping with one frame"):
-        # a nonzero human-ray fraction confirms the classifier fires on real dynamic obstacles.
+        # Runtime sanity log: finite-diff needs a prior step, so log the first NONZERO
+        # fraction (confirms the classifier fires) — or after 50 calls if still zero
+        # (surfaces a permanent no-op instead of silently applying nothing).
         if not getattr(env, "_vlp16_human_logged", False):
             frac = human_mask.float().mean().item()
-            envs_with = (human_mask.any(dim=1)).float().mean().item()
-            print(
-                f"[SIM2REAL][full_material] human-ray classifier: "
-                f"frac={frac:.4f} of rays, envs-with-human={envs_with:.1%} (first call)"
-            )
-            env._vlp16_human_logged = True
+            calls = getattr(env, "_vlp16_human_calls", 0) + 1
+            env._vlp16_human_calls = calls
+            if frac > 0.0 or calls >= 50:
+                envs_with = (human_mask.any(dim=1)).float().mean().item()
+                print(
+                    f"[SIM2REAL][full_material] human-ray classifier: "
+                    f"frac={frac:.4f} of rays, envs-with-human={envs_with:.1%} "
+                    f"(call #{calls}{'' if frac > 0 else ' — STILL ZERO, check obstacle motion'})"
+                )
+                env._vlp16_human_logged = True
 
     # --- L3 per-episode DR: resample noise scales at episode reset ---
     if displacement_std_per_meter_dr_min > 0 and displacement_std_per_meter_dr_max > displacement_std_per_meter_dr_min:
