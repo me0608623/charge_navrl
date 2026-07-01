@@ -193,8 +193,9 @@ parser.add_argument("--arena_size", type=float, default=None,
 parser.add_argument("--obstacle_behavior", type=str, default=OBSTACLE_BEHAVIOR,
                     choices=["static", "patrol", "random_walk", "horizontal_crossing",
                              "path_crossing", "near_miss", "corridor_crossing", "occlusion",
-                             "mixed"],
+                             "head_on", "mixed"],
                     help="覆寫障礙物行為模式（需要 BehaviorScheduler）。"
+                         "head_on=直線迎面（測 reactive+gap 轉彎閃避）；"
                          "mixed=使用 stage config 的 behavior_mix 比例")
 
 # --- Reward 模式（消融實驗用） ---
@@ -1023,8 +1024,11 @@ def configure_camera(env_cfg, camera: str):
     side:   側面遠距觀察
     """
     if camera == "top":
+        # ⚠ 不用正上方 (0,0,30)→(0,0,0)：eye 與 target 在同一垂直線上 = 視線平行 up 軸，
+        #   up 向量退化，Isaac Sim set_camera_view 可能套用失敗 → 保留原本(常跟隨機器人的)
+        #   預設 Persp 相機。稍微往 -Y 偏移 (~9° 傾角) 打破退化，視覺上仍是俯視。
         env_cfg.viewer = ViewerCfg(
-            eye=(0.0, 0.0, 30.0), lookat=(0.0, 0.0, 0.0),
+            eye=(0.0, -5.0, 30.0), lookat=(0.0, 0.0, 0.0),
             origin_type="env", env_index=0, resolution=(1920, 1080),
         )
     elif camera == "follow":
@@ -2230,8 +2234,18 @@ def main():
     preprocess_dim = int(ckpt_args.get("preprocess_dim", 12))   # RNN 輸出特徵維度
     fc_dim = int(ckpt_args.get("fc_dim", 48))                   # RNN 前全連接層維度（baseline 48, v2=64）
     predict_dim = int(ckpt_args.get("predict_dim", 7))          # Aux 預測維度（baseline 7, v2=13）
+    # 與訓練端 auto-bump 一致:--aux_velocity_topk>0 時 predict_dim 7→7+topk*2(velocity aux,如 13)。
+    #   trainer 的 bump 改 local 變數,vars(args_cli) 仍存原始 predict_dim=7 → 這裡補回。
+    _avk = int(ckpt_args.get("aux_velocity_topk", 0))
+    if _avk > 0 and predict_dim == 7:
+        predict_dim = 7 + _avk * 2
+        print(f"[PLAY] aux_velocity_topk={_avk} → predict_dim auto-set to {predict_dim}")
     rnn_type = ckpt_args.get("rnn_type", "RNN")                 # RNN 類型（RNN/GRU/LSTM）
     encoder_mode = ckpt_args.get("charge_encoder_mode", "extractor_rnn")  # 編碼器模式
+    lidar_frame_stack = int(ckpt_args.get("lidar_frame_stack", 1))  # 多幀 LiDAR (run2=4);從 ckpt args 自動偵測
+    if lidar_frame_stack > 1:
+        print(f"[PLAY] 多幀 LiDAR: frame_stack={lidar_frame_stack} "
+              f"(extractor Conv1d 吃 {lidar_frame_stack} 幀;rollout 維護歷史 buffer 餵 probe)")
     zero_preprocess = ckpt_args.get("zero_preprocess_feature_for_rl", False)  # RNN 特徵是否歸零
     max_active_obstacles = int(ckpt_args.get("max_active_obstacles", 10))  # aux 用的最大障礙物數
     if zero_preprocess:
@@ -2290,7 +2304,8 @@ def main():
                 "[PLAY] 偵測到 7D state checkpoint → LidarStateExtractor(include_act_hist=False)"
             )
         extractor = LidarStateExtractor(
-            legacy=legacy_extractor, include_act_hist=include_act_hist
+            legacy=legacy_extractor, include_act_hist=include_act_hist,
+            frame_stack=lidar_frame_stack,   # 多幀 LiDAR (K=1=現狀,run2=4)
         ).to(device)
         rnn_input_dim = extractor.output_dim  # 96D
     else:
@@ -2308,13 +2323,17 @@ def main():
         middle_dim=middle_dim,
     ).to(device)
     print(f"[PLAY] PreprocessRNN: input={rnn_input_dim} fc={fc_dim} hidden={hidden_dim} middle={middle_dim} preprocess={preprocess_dim} predict={predict_dim} rnn={rnn_type}")
-    policy_head = PolicyHead(input_dim=policy_obs_dim + preprocess_dim).to(device)
+    _hybrid = bool(ckpt_args.get("hybrid_predict_to_policy", False))
+    _rl_in_dim = policy_obs_dim + preprocess_dim + (predict_dim if _hybrid else 0)  # hybrid:+障礙動態預測(顯式MOT輸出)
+    if _hybrid:
+        print(f"[PLAY] hybrid_predict_to_policy → rl_input={_rl_in_dim} (含 predict_dim {predict_dim})")
+    policy_head = PolicyHead(input_dim=_rl_in_dim).to(device)
     # Asymmetric critic（v2）：ValueHead 多一條 50D privileged 通道
     # 雖然 play 不會真的呼叫 value forward，但 load_state_dict 必須 shape 對齊
     critic_profile = ckpt_args.get("critic_profile", "symmetric")
     privileged_dim = 50 if critic_profile == "asymmetric" else 0
-    value_head = ValueHead(input_dim=policy_obs_dim + preprocess_dim, privileged_dim=privileged_dim).to(device)
-    print(f"[PLAY] ValueHead: input={policy_obs_dim + preprocess_dim} privileged={privileged_dim} (profile={critic_profile})")
+    value_head = ValueHead(input_dim=_rl_in_dim, privileged_dim=privileged_dim).to(device)
+    print(f"[PLAY] ValueHead: input={_rl_in_dim} privileged={privileged_dim} (profile={critic_profile})")
 
     # 載入訓練權重
     if use_extractor:
@@ -2328,6 +2347,12 @@ def main():
     #   否則 play 端用 fresh running normalizer 近似——後者只在舊 ckpt 無此統計時 fallback)。
     # 注意:charge_features_for_rnn 在後面才定義,這裡存到 local 變數,apply block 再讀。
     _ckpt_feat_norm = None
+    # ★auto-detect:checkpoint 內含 feat_normalizer 統計 = 訓練時開了 feat_norm，
+    #   則必須在 inference 端套用（否則 RNN 吃未正規化輸入 = 行為錯亂）。自動啟用，
+    #   免手動 --feat_norm（尤其 play_launcher.py GUI 沒有此選項）。v3f/vaux 全系列適用。
+    if not args_cli.feat_norm and "feat_normalizer" in ckpt:
+        args_cli.feat_norm = True
+        print("[PLAY] 🔍 checkpoint 內含 feat_normalizer → 自動啟用 feat_norm（免手動 --feat_norm）")
     if args_cli.feat_norm:
         if "feat_normalizer" in ckpt:
             _ckpt_feat_norm = {
@@ -2624,10 +2649,25 @@ def main():
     if args_cli.bev_vis:
         if args_cli.num_envs != 1:
             print("[PLAY] --bev_vis 只顯示 env 0；num_envs > 1 可用但可讀性較低")
+        # ★auto-sync:BEV 盲區取 env 實際 obs 的 r_min（policy 真正看到的值，通常 0.25），
+        #   讓 BEV 視覺與 policy 感測一致。r_min 不在 ckpt_args（是 env config 的 ObsTerm
+        #   param，非訓練 CLI arg），故讀 env_cfg。使用者若顯式改了 --lidar_r_min（非預設
+        #   0.1）則尊重其設定。
+        _bev_r_min = args_cli.lidar_r_min
+        if args_cli.lidar_r_min == LIDAR_R_MIN:
+            try:
+                for _g in vars(env_cfg.observations).values():
+                    _lt = getattr(_g, "lidar_static", None)
+                    if _lt is not None and isinstance(getattr(_lt, "params", None), dict) and "r_min" in _lt.params:
+                        _bev_r_min = float(_lt.params["r_min"])
+                        print(f"[PLAY] 🔍 BEV r_min 自動同步 env obs 值 = {_bev_r_min}（policy 實際盲區）")
+                        break
+            except Exception:
+                pass
         try:
             bev_visualizer = LiveBEVVisualizer(
                 raw_env, max_range=args_cli.bev_max_range, frame=args_cli.bev_frame,
-                lidar_r_min=args_cli.lidar_r_min,
+                lidar_r_min=_bev_r_min,
                 trail_length=args_cli.bev_trail_length,
             )
             print(f"[PLAY] BEV 視窗已啟用（座標系={args_cli.bev_frame}，軌跡={args_cli.bev_trail_length}點）。關閉視窗即停止 play。")
@@ -2672,6 +2712,16 @@ def main():
     def charge_features_for_rnn(obs_normed: torch.Tensor, p_obs: torch.Tensor) -> torch.Tensor:
         """取出 RNN 的輸入特徵。extractor 模式用 LidarStateExtractor，否則直接用 p_obs。"""
         if use_extractor:
+            if lidar_frame_stack > 1:
+                # 多幀:obs 尾端附 (K-1)×72 幀歷史 LiDAR(與訓練端一致);維護滾動 buffer,done 由 reset 歸零
+                _lh = getattr(charge_features_for_rnn, "_lh", None)
+                if _lh is None or _lh.shape[0] != obs_normed.shape[0]:
+                    _lh = torch.zeros(obs_normed.shape[0], (lidar_frame_stack - 1) * 72,
+                                      device=obs_normed.device)
+                _ext_in = torch.cat([obs_normed, _lh], dim=-1)
+                _cur = obs_normed[:, 6:78]                          # 當前 normed lidar
+                charge_features_for_rnn._lh = torch.cat([_cur, _lh[:, :-72]], dim=-1)  # prepend,drop oldest
+                return extractor(_ext_in)
             return extractor(obs_normed)
         return p_obs
 
@@ -2857,11 +2907,12 @@ def main():
                 features = ((features - _fn_mean) / (_fn_var.sqrt() + 1e-8)).clamp(-5.0, 5.0)
             hidden = rnn_state.get()                          # 取得目前 RNN 隱藏狀態
             rnn_feat, aux_pred, new_hidden = preprocess_rnn(  # RNN 前向傳播
-                features, hidden, training=args_cli.aux_debug  # aux_debug 時保留 aux 輸出
+                features, hidden, training=(args_cli.aux_debug or _hybrid)  # hybrid 需 prediction 餵 policy
             )
             # zero_preprocess 模式：RNN 特徵歸零，policy 只靠當前觀測決策
             rnn_for_rl = torch.zeros_like(rnn_feat) if zero_preprocess else rnn_feat
-            rl_in = torch.cat([p_obs, rnn_for_rl], dim=-1)    # 拼接觀測 + RNN 特徵
+            rl_in = (torch.cat([p_obs, rnn_for_rl, aux_pred], dim=-1)  # hybrid:+障礙動態預測
+                     if _hybrid else torch.cat([p_obs, rnn_for_rl], dim=-1))
             logits = policy_head(rl_in)                        # Policy head 輸出 logits
             actions = sample_action(logits, args_cli.deterministic)  # 取樣或 argmax
 
@@ -3221,6 +3272,10 @@ def main():
 
             # 重置結束 env 的 RNN 狀態和累積器
             rnn_state.reset(done_ids)
+            if getattr(charge_features_for_rnn, "_lh", None) is not None and len(done_ids) > 0:
+                _lh_c = charge_features_for_rnn._lh.clone()   # clone→normal tensor(避開 inference inplace 限制)
+                _lh_c[done_ids] = 0.0
+                charge_features_for_rnn._lh = _lh_c           # 多幀:同步 reset LiDAR 歷史
             episode_reward[done_ids] = 0.0
             episode_step[done_ids] = 0
             episode_speed_sum[done_ids] = 0.0

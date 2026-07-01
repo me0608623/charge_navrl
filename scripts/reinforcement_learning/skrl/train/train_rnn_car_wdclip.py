@@ -311,6 +311,16 @@ parser.add_argument("--lidar_frame_stack", type=int, default=1,
                     help="LiDAR frame stacking K. K=1=現狀(單幀). K>1: extractor Conv1d 吃 K 幀,"
                          "rollout 維護滾動歷史 buffer 並把前 (K-1) 幀附在 obs 尾端,讓 Conv1d 在原始 LiDAR "
                          "層算跨幀運動(類光流). ⚠ 改 extractor 形狀→與舊 checkpoint 不相容,從頭訓.")
+# --penalty_speed_near_obs (reactive:clearance-gated 減速懲罰;覆寫 curriculum,可在任何 stage 套用)
+parser.add_argument("--penalty_speed_near_obs", type=float, default=-1.0,
+                    help="Reactive clearance-gated speed penalty weight w. <0=用 curriculum 值(預設,不影響). "
+                         ">=0=CLI 覆寫(SA4-reactive 用 0.8):近障礙[d_stop 0.45m,d_react 1.2m]區內罰 -(w/fps)·p²·v_fwd, "
+                         "p=clip((d_react-d)/(d_react-d_stop),0,1). 對症動態障礙晚反應,不靠 RNN 預測.")
+# --gap_heading_weight (reactive 轉彎閃避:近障礙時獎勵 heading 朝最大可通行間隙,往側邊空隙轉)
+parser.add_argument("--gap_heading_weight", type=float, default=0.0,
+                    help="Gap-heading reward weight (轉彎閃避 head-on). 0=off. >0: 障礙近(d_safe<2m)時找最大可通行"
+                         "弧段(>0.9m)中心角,獎勵 +(w·dt)·cos(gap_angle) → heading 朝 gap=往側邊空隙轉(reactive on "
+                         "LiDAR,bin36=前,不靠速度預測). 配 --penalty_speed_near_obs 成完整 head-on dodge.")
 # --aux_loss_type
 parser.add_argument("--aux_loss_type", type=str, default="log", choices=["log", "huber"],
                     help="Aux loss form for dims 0-5. log=WD original (grad ∝ 1/|e|, 鼓勵常數陷阱); "
@@ -3270,6 +3280,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _spot_penalty_smoothness = metrics._curriculum_info.get("spot_penalty_smoothness", 0.0)  # v3
         _spot_penalty_speed_near_obs = metrics._curriculum_info.get(
             "spot_penalty_speed_near_obs", 0.0)  # v3f-react
+        if getattr(args_cli, "penalty_speed_near_obs", -1.0) >= 0.0:
+            # CLI 覆寫:reactive 減速懲罰不靠 curriculum,可在任何 stage 套用(SA4-reactive,A 方案)。
+            #   注入 curriculum_info 讓 reward module update_params 拿到。
+            _spot_penalty_speed_near_obs = args_cli.penalty_speed_near_obs
+            metrics._curriculum_info["spot_penalty_speed_near_obs"] = _spot_penalty_speed_near_obs
         _reward_module.update_params(metrics._curriculum_info)
 
         # Sync WD entropy params from curriculum (per-phase, A2CK per-head)
@@ -3405,6 +3420,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 reward_flat = reward_flat + _heading_pen
                 reward_breakdown["heading_stability"] = _heading_pen
                 _prev_omega = _curr_omega.clone()
+
+            # --- Gap-heading reward (轉彎閃避 head-on:獎勵 heading 朝最大可通行間隙) ---
+            # 障礙近(d_safe<2m)時,找 LiDAR 最大連續可通行弧段(>0.9m)中心角,獎勵 cos(gap_angle):
+            #   gap 在前=+1 → policy 轉頭對準 gap = 往側邊空隙閃。obs[6:78] bin36=正前方(已驗 atan2 body frame)。
+            #   reactive、用當前位置(RNN 有編碼)、不靠速度預測 → 對症「直直來的 head-on 要轉彎避開」。
+            if getattr(args_cli, "gap_heading_weight", 0.0) > 0:
+                with torch.no_grad():
+                    _lnorm = obs[:, 6:78]                                       # [E,72] norm[0,1]
+                    _lm = torch.where(_lnorm < 0.02, torch.ones_like(_lnorm), _lnorm) * _LIDAR_MAX_DISTANCE_M  # hole→max(m)
+                    _gactive = (_lm.min(dim=1).values < 2.0)                   # d_safe<2m 才啟用
+                    _passable = _lm > 0.9                                      # min_gap_width
+                    _pext = torch.cat([_passable, _passable], dim=1)           # [E,144] 環形
+                    _cs = _pext.float().cumsum(dim=1)
+                    _rb = (_cs * (~_pext).float()).cummax(dim=1).values
+                    _runl = _cs - _rb                                          # 連續可通行長度
+                    _mrl, _mre = _runl.max(dim=1)
+                    _gci = (_mre.float() - _mrl.float() / 2).long() % 72       # gap 中心 bin
+                    _bin_ang = (_gci.float() * 5.0 - 180.0) * (math.pi / 180.0)  # bin36→0=正前方
+                    _gap_r = torch.cos(_bin_ang) * _gactive.float() * (_mrl > 0).float()
+                    _gap_r = _gap_r * (obs[:, 1].abs() > 0.05).float()         # 速度門檻:靜止不給
+                _gap_term = (args_cli.gap_heading_weight * 0.2) * _gap_r       # ×dt(=1/rl_fps5) per-step dense
+                reward_flat = reward_flat + _gap_term
+                reward_breakdown["gap_heading"] = _gap_term
 
             # --- 3. Obstacle forward + apply（若無動態障礙物則跳過）---
             if _obs_agent_active:
@@ -3622,14 +3660,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             _pd = _p[:, 2:4] - _p[:, 0:2]
                             _td = _t[:, 2:4] - _t[:, 0:2]
                             _dssr = ((_td - _pd) ** 2).sum().item()
-                            _dsst = ((_td - _td.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
-                            _wd_aux_pos["disp_r2"] = 1.0 - _dssr / _dsst
+                            _dsst = ((_td - _td.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-3).item()
+                            _wd_aux_pos["disp_r2"] = max(-1.0, 1.0 - _dssr / _dsst)  # floor:未訓頭+小變異會爆,只關心爬向>0
                         # ★aux/velocity_r2: 預測速度(dims 7:13) vs 真速度 R² — predict_dim>=13(--aux_velocity_topk) 才有。
                         if _pe.shape[-1] >= 13:
                             _pvel = _pe[_m][:, 7:13]; _tvel = _te[_m][:, 7:13]
                             _vssr = ((_pvel - _tvel) ** 2).sum().item()
-                            _vsst = ((_tvel - _tvel.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-6).item()
-                            _wd_aux_pos["velocity_r2"] = 1.0 - _vssr / _vsst
+                            _vsst = ((_tvel - _tvel.mean(dim=0, keepdim=True)) ** 2).sum().clamp(min=1e-3).item()
+                            _wd_aux_pos["velocity_r2"] = max(-1.0, 1.0 - _vssr / _vsst)  # floor:同 disp_r2
 
                     # ===== CPC contrastive aux(--aux_cpc):逼 RNN hidden discriminative 編碼位置 =====
                     # 獨立 fresh forward(不重用 regression graph)。q=proj_q(rnn_out), k=proj_k(pos_target)。

@@ -226,6 +226,7 @@ OBSTACLE_BEHAVIORS = [
     "near_miss",
     "corridor_crossing",
     "occlusion",
+    "head_on",
     "mixed",
 ]
 
