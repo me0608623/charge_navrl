@@ -122,12 +122,13 @@ aux_seq_batch_size: 256
 aux_grad_clip: 0.5
 zero_preprocess_feature_for_rl: false
 
-# --- LiDAR (SA1: clean noise OFF, bias + per_ring ON) ---
-lidar_no_noise: true
-lidar_distance_bias: true
-lidar_distance_bias_k_dr: [-0.005, 0.005]
-lidar_distance_bias_b_dr: [-0.012, 0.012]
-lidar_per_ring_bias: true
+# --- LiDAR (SA1 v3h: clean bootstrap = 只留系統偏差，隨機雜訊全關) ---
+# vlp16_noise_mode=bias → 只注入 VLP-16 實測 per-ring 系統偏差 (mean~+12.9mm)，
+#   無隨機 σ、無丟點。policy 先在乾淨感測下學會信任 LiDAR / 避障，SA2 起改 full。
+# (取代舊 lidar_no_noise + distance_bias DR 組合；per-ring 實測值即權威系統偏差，
+#  data-first 忠實注入，無臆造 DR。source: vlp16_noise/ 2026-07-01)
+vlp16_noise_mode: bias
+lidar_no_noise: false
 no_domain_randomization: false
 
 # --- Sim-to-Real DR (SA1: physics + disturbance + light actuator) ---
