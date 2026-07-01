@@ -1,22 +1,19 @@
-# wd_sa2_v3f_vaux — SA2 v3f + velocity-aux 修復配方 (動態場景)
+# wd_sa2_v3h — SA2 v3h 部署主線 (動態場景 + VLP-16 實測雜訊 full)
 #
-# ★ velocity-aux 修復配方 (同 SA1_v3f_vaux)：
-#   reshape bug 修復 (程式碼，無條件) + GRU + feat_norm + aux_epochs 8 + 可訓 readout
-#   + huber + aux_target_pos_scale 0.33 + predict_dim 7。
+# ★ 配方沿用 v3f_vaux: GRU + feat_norm + aux_epochs 8 + 可訓 readout
+#   + huber + aux_target_pos_scale 0.33 + predict_dim 7 (position-only)。
+# ★ LiDAR: vlp16_noise_mode=full → 真機實測 σ 8.67mm(固定) + per-ring bias + 19.5% dropout。
 #
-# ⚠️ 相容性：resume【vaux lineage】SA1 完訓 checkpoint，不是舊 v3f 的。
-#   (GRU + feat_norm 架構與舊 v3f vanilla RNN ckpt 不相容)
-#   起點 ckpt 路徑見下方 checkpoint 欄位 — 請依 SA1_v3f_vaux 實際完訓 step 調整。
-#
+# ⚠️ 相容性：resume【v3h lineage】SA1 完訓 checkpoint (GRU+feat_norm，與舊 vanilla RNN ckpt 不相容)。
 # ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 (obs 79D)。
 #
-# 用法:
+# 用法 (待 SA1_v3h 跑完 → checkpoint_270000.pt):
 #   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
 #   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
-#     --experiment_config wd_sa2_v3f_vaux --headless \
+#     --experiment_config wd_sa2_v3h --headless \
 #     --feat_norm --aux_epochs 8 \
-#     --checkpoint logs/rnn_car/sa1_v3f_vaux_ne1024_s42/checkpoint_270000.pt \
-#     --run_name sa2_v3f_vaux_ne1024_s42
+#     --checkpoint logs/rnn_car/sa1_v3h_ne1024_s42/checkpoint_270000.pt \
+#     --run_name sa2_v3h_ne1024_s42
 
 name: wd_sa2_v3h
 description: "SA2 v3h 部署主線: 動態場景 + v3f_vaux 配方. From SA1_v3h 完訓 (GRU+feat_norm+position aux). obs 79D, curriculum v3h (小比例 head_on). Requires CHARGE_USE_ACT_HIST=0."
