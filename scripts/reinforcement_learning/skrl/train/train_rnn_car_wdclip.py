@@ -472,6 +472,14 @@ parser.add_argument("--curriculum_version", type=str, default="warp_drive_single
 # - 正常範圍：布林旗標（預設 False = 有噪聲）。
 # - 更改影響：啟用後 LiDAR 資訊更乾淨，policy 更容易信任 LiDAR，但 sim-to-real gap 可能增大。
 parser.add_argument("--lidar_no_noise", action="store_true", default=False)
+# --vlp16_noise_mode
+# - 用意：VLP-16 實測經驗雜訊 ablation 開關（README §5）。設定後覆蓋 lidar_* 細項參數，
+#   以「實測固定值」注入（無 DR）。None = 用 YAML 的細項參數。
+# - 選項：ideal(乾淨) / sigma(只 8.67mm σ) / bias(只 per-ring 系統偏差) /
+#   dropout(只 19.5% 丟點+mixed-pixel) / full(σ+bias+dropout, 部署/sim2real)。
+parser.add_argument("--vlp16_noise_mode", type=str, default=None,
+                    choices=["ideal", "sigma", "bias", "dropout", "full"],
+                    help="VLP-16 empirical-noise ablation preset (overrides fine-grained lidar_* params).")
 # --no_domain_randomization
 # - 用意：關閉所有 domain randomization（物理參數、摩擦、質量等隨機化）。
 # - 正常範圍：布林旗標。

@@ -549,12 +549,73 @@ def _find_lidar_obs_terms(env_cfg):
             yield group_name, term_name, term
 
 
+# ── VLP-16 empirical noise (measured white_wall, 2026-07-01) ─────────────────
+# Source: vlp16_noise/isaac_lab_noise_params.py. σ is distance-independent (R²=0.078),
+# so it maps to the fixed-σ "soft" slot. The per-ring systematic bias lives in
+# obs_functions.wd_like_sweep_72 (activated by per_ring_bias=True); the global bias is NOT
+# added separately, to avoid double-counting the common-mode already in the per-ring array.
+_VLP16_SIGMA_FIXED_M = 0.008672     # measured range σ (point-to-plane residual std, ~8.67mm)
+_VLP16_HOLE_RATE = 0.194859         # measured dropout (low-reflectivity / intensity<thr, ~19.5%)
+_VLP16_DISTRACTOR_RATE = 0.002515   # measured mixed-pixel / edge-outlier rate
+_VLP16_NOISE_MODES = ("ideal", "sigma", "bias", "dropout", "full")
+
+
+def _apply_vlp16_ablation_mode(env_cfg, mode: str):
+    """Override LiDAR ObsTerms with the measured VLP-16 preset for one ablation arm.
+
+    Faithful (fixed) injection — no domain-randomization ranges. Reuses wd_like_sweep_72;
+    adds no new noise math. Modes (README §5 in vlp16_noise/):
+      ideal | sigma | bias | dropout | full
+    """
+    mode = str(mode).lower()
+    if mode not in _VLP16_NOISE_MODES:
+        raise ValueError(
+            f"vlp16_noise_mode={mode!r} invalid; choose one of {_VLP16_NOISE_MODES}"
+        )
+    on_sigma = mode in ("sigma", "full")
+    on_bias = mode in ("bias", "full")
+    on_drop = mode in ("dropout", "full")
+    for _gn, _tn, term in _find_lidar_obs_terms(env_cfg):
+        p = term.params
+        # random range σ (fixed, distance-independent) → soft slot; kill distance-scaled path
+        p["displacement_std_per_meter"] = 0.0
+        p["displacement_std"] = 0.0
+        p["displacement_std_soft"] = _VLP16_SIGMA_FIXED_M if on_sigma else 0.0
+        # dropout family: hole (low-reflectivity) + mixed-pixel ghost
+        p["hole_rate"] = _VLP16_HOLE_RATE if on_drop else 0.0
+        p["distractor_rate"] = _VLP16_DISTRACTOR_RATE if on_drop else 0.0
+        # systematic bias = measured per-ring array (carries common-mode); no separate global bias
+        p["per_ring_bias"] = on_bias
+        p["distance_bias_k"] = 0.0
+        p["distance_bias_b"] = 0.0
+        # faithful/fixed → clear every per-episode DR range key
+        for k in list(p.keys()):
+            if k.endswith("_dr_min") or k.endswith("_dr_max"):
+                p[k] = 0.0
+        # measured model has no L2 per-bin blanket and no block dropout
+        p["block_dropout_prob"] = 0.0
+        if hasattr(term, "noise"):
+            term.noise = None
+    print(
+        f"[SIM2REAL][VLP16-ablation] mode={mode} "
+        f"σ={'ON' if on_sigma else 'off'} "
+        f"bias={'ON' if on_bias else 'off'} "
+        f"dropout={'ON' if on_drop else 'off'} "
+        f"(fixed measured values, no DR)"
+    )
+
+
 def _apply_lidar_noise_config(env_cfg, args_cli):
     """Apply LiDAR noise params from YAML/CLI to env_cfg ObsTerms.
 
-    When lidar_no_noise=True, all noise is zeroed (legacy behavior).
-    When lidar_no_noise=False, individual params are applied from YAML.
+    When vlp16_noise_mode is set, the measured VLP-16 ablation preset takes precedence.
+    Otherwise: when lidar_no_noise=True all random noise is zeroed (bias kept);
+    when lidar_no_noise=False, individual params are applied from YAML.
     """
+    mode = getattr(args_cli, "vlp16_noise_mode", None)
+    if mode:
+        _apply_vlp16_ablation_mode(env_cfg, mode)
+        return
     if getattr(args_cli, "lidar_no_noise", False):
         # Noise-only path: 歸零隨機 noise（每 step 變化），但保留 bias（硬體屬性）
         # bias 是「這台機器人的固定特性」，連 SA1 bootstrap 也該訓 policy 適應

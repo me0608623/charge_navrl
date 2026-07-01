@@ -141,19 +141,32 @@ class ExperimentConfig:
     # ── Sim-to-Real Domain Randomization (TLNI + Physics + Disturbance) ──
 
     # LiDAR Layer 1: Per-Ray noise (before min-pool)
-    # distance-dependent σ(r) = lidar_displacement_std_per_meter × r  [preferred]
-    lidar_displacement_std_per_meter: float = 0.00036  # fitted from VLP-16 measurement: σ(r)≈0.00036·r
-    lidar_displacement_std_soft: float = 0.0          # fixed-σ for soft targets (human/clothing); RSS-combined with per_meter
-    lidar_displacement_std: float = 0.0               # legacy fixed-σ; use per_meter instead
-    lidar_hole_rate: float = 0.20                     # ray dropout rate, VLP-16 measured ~21%
-    lidar_distractor_rate: float = 0.002              # ghost/mixed-pixel rate
-    lidar_distance_bias: bool = False                 # distance-dependent bias k=0.021, b=-0.030
-    lidar_per_ring_bias: bool = False                 # 16ch per-ring calibration offset
+    # ── Defaults calibrated to measured VLP-16 white_wall data (2026-07-01) ──
+    #    source: vlp16_noise/isaac_lab_noise_params.py. σ is FIXED (R²=0.078 → distance-independent),
+    #    so per_meter=0 and the fixed σ lives in displacement_std_soft.
+    lidar_displacement_std_per_meter: float = 0.0     # measured slope≈0 (σ not distance-dependent)
+    lidar_displacement_std_soft: float = 0.008672     # measured fixed σ = 8.67mm (point-to-plane residual std)
+    lidar_displacement_std: float = 0.0               # legacy fixed-σ; use soft instead
+    lidar_hole_rate: float = 0.194859                 # measured dropout rate (intensity<thr), ~19.5%
+    lidar_distractor_rate: float = 0.002515           # measured mixed-pixel / ghost rate
+    lidar_distance_bias: bool = False                 # keep OFF: per_ring_bias carries systematic bias (no double-count)
+    lidar_per_ring_bias: bool = False                 # 16ch measured per-ring calibration offset (mean ~+12.9mm)
 
     # LiDAR Layer 2: Per-Bin noise (after min-pool)
-    lidar_obs_noise_std: float = 0.005           # ObsTerm Gaussian noise σ (replaces Unoise)
-    lidar_block_dropout_prob: float = 0.0        # block dropout probability per step
+    # ⚠ Removed the old 6cm blanket (0.005 norm × 20m): not in the measured model and it buried the
+    #    real 8.67mm L1 σ (~7×). Default 0 → measured L1 σ is the honest range noise.
+    lidar_obs_noise_std: float = 0.0             # ObsTerm Gaussian noise σ (0 = off; measured model has none)
+    lidar_block_dropout_prob: float = 0.0        # block dropout probability per step (scene occlusion aug, not sensor)
     lidar_block_dropout_width: tuple[int, int] = (3, 8)  # contiguous bin width range
+
+    # VLP-16 empirical-noise ablation switch (README §5): overrides the fine-grained lidar_* params
+    # above with the measured preset for the chosen component. None = use fine-grained params as-is.
+    #   ideal   → clean rays (no noise, no bias)
+    #   sigma   → only measured N(0, 8.67mm)
+    #   bias    → only measured per-ring systematic bias
+    #   dropout → only measured hole (19.5%) + mixed-pixel (0.25%)
+    #   full    → sigma + bias + dropout (deployment / sim-to-real)
+    vlp16_noise_mode: str | None = None
 
     # LiDAR Layer 3: Per-Episode DR ranges (reset-time sampling)
     # per-meter scale: covers between-robot calibration variation

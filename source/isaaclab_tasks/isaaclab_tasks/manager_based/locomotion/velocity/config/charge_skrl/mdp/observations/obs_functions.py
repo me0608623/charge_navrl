@@ -450,17 +450,26 @@ def wd_like_sweep_72(
         bias = k_eff.unsqueeze(1) * distances_2d + b_eff.unsqueeze(1)
         distances_2d = torch.clamp(distances_2d + bias, min=0.0, max=r_max)
 
-    # --- L1 per-ring bias: VLP-16 16-channel calibration offsets (±22.7mm) ---
+    # --- L1 per-ring bias: VLP-16 16-channel calibration offsets ---
+    # Measured white_wall calibration (2026-07-01, source: vlp16_noise/isaac_lab_noise_params.py,
+    # LIDAR_PER_RING_BIAS). Each value = that ring's absolute systematic offset vs GT.
+    # The mean (~+12.9mm) carries the common-mode ToF bias; the spread (-0.5..+23.6mm) is the
+    # ring-to-ring variation. This array is the AUTHORITATIVE systematic bias — do NOT also add a
+    # fixed global distance_bias_b on top (that double-counts the common-mode ~1.3-1.5cm).
     if per_ring_bias:
         cache_attr = "_lidar_per_ring_bias_cache"
         if not hasattr(env, cache_attr):
-            # VLP-16 measured per-ring biases (m), from white-wall calibration
             _PER_RING_BIAS_M = torch.tensor([
-                -0.0041, +0.0019, -0.0031, -0.0093, -0.0071, +0.0083, +0.0140, +0.0027,
-                +0.0157, +0.0167, +0.0123, +0.0068, -0.0113, -0.0227, -0.0137, -0.0196,
+                +0.004389, +0.009268, +0.018511, +0.023619, +0.004456, +0.013587, +0.014694, +0.001912,
+                +0.014077, +0.023182, +0.019564, +0.019096, +0.019010, +0.016875, -0.000476, +0.005355,
             ], device=device, dtype=dtype)
-            # Broadcast to [R]: assume ray_idx % 16 → ring_id (VLP-16 convention)
-            ring_ids = torch.arange(num_rays, device=device) % 16
+            # Ray→ring mapping: LidarPatternCfg builds rays with
+            # meshgrid(vertical, horizontal, indexing="ij").reshape(-1,3) → row-major, i.e.
+            # ray_idx = ring * H + azimuth, so ring_id = ray_idx // H  (H = num_rays // 16).
+            # Verified against isaaclab/.../ray_caster/patterns/patterns.py:lidar_pattern (2026-07-01).
+            # (Was `% 16`, which scrambled each ring's azimuths across all 16 offsets — fixed.)
+            H = max(1, num_rays // 16)
+            ring_ids = (torch.arange(num_rays, device=device) // H).clamp_(max=15)
             ring_offsets = _PER_RING_BIAS_M[ring_ids]  # [R]
             setattr(env, cache_attr, ring_offsets)
         ring_offsets = getattr(env, cache_attr)  # [R]
