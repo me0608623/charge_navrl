@@ -121,24 +121,14 @@ aux_seq_batch_size: 256
 aux_grad_clip: 0.5
 zero_preprocess_feature_for_rl: false
 
-# --- LiDAR (SA2: 全噪聲 ON，50% 校準) ---
+# --- LiDAR (SA2 v3h: VLP-16 實測經驗雜訊 full，data-first 忠實注入) ---
+# vlp16_noise_mode=full 覆蓋所有 lidar_* 細項，以實測固定值注入：
+#   σ 8.67mm (固定，R²=0.078 不隨距離變) + per-ring 系統偏差 (mean~+12.9mm) + 19.5% 丟點 + 0.25% mixed-pixel。
+# 刻意「不帶」：舊 6cm L2 blanket (obs_noise 0.003，會淹掉真實 σ ~7×)、block dropout、per-episode DR。
+#   全部以實測為準 (source: vlp16_noise/isaac_lab_noise_params.py 2026-07-01)。
+# 想改「以實測值為中心的 DR (部署更 robust)」→ 移除本行、改回細項 lidar_*_dr 範圍。
+vlp16_noise_mode: full
 lidar_no_noise: false
-lidar_displacement_std_per_meter: 0.00020
-lidar_displacement_std_soft: 0.001
-lidar_displacement_std: 0.0
-lidar_hole_rate: 0.10
-lidar_distractor_rate: 0.001
-lidar_distance_bias: true
-lidar_distance_bias_k_dr: [-0.005, 0.005]
-lidar_distance_bias_b_dr: [-0.012, 0.012]
-lidar_per_ring_bias: true
-lidar_obs_noise_std: 0.003
-lidar_block_dropout_prob: 0.03
-lidar_block_dropout_width: [3, 8]
-lidar_displacement_std_per_meter_dr: [0.00015, 0.00030]
-lidar_displacement_std_soft_dr: [0.001, 0.010]
-lidar_displacement_std_dr: null
-lidar_hole_rate_dr: [0.05, 0.15]
 
 # --- Sim-to-Real DR (延遲 DR 保留) ---
 no_domain_randomization: false
