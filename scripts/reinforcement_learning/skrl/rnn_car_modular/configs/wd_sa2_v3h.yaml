@@ -7,12 +7,12 @@
 # ⚠️ 相容性：resume【v3h lineage】SA1 完訓 checkpoint (GRU+feat_norm，與舊 vanilla RNN ckpt 不相容)。
 # ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 (obs 79D)。
 #
-# 用法 (待 SA1_v3h 跑完 → checkpoint_270000.pt):
+# 用法 (SA1 提早切換：stage1 已精通 SR98.7%/pos_r2 0.82，於 ~110k 手動停，resume 最新 ckpt 90k):
 #   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
 #   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
 #     --experiment_config wd_sa2_v3h --headless \
 #     --feat_norm --aux_epochs 8 \
-#     --checkpoint logs/rnn_car/sa1_v3h_ne1024_s42/checkpoint_270000.pt \
+#     --checkpoint logs/rnn_car/sa1_v3h_ne1024_s42/checkpoint_90000.pt \
 #     --run_name sa2_v3h_ne1024_s42
 
 name: wd_sa2_v3h
@@ -153,7 +153,7 @@ log_interval: 10
 save_interval: 100
 
 # --- Checkpoint / resume (★v3h lineage SA1 完訓；實際 step 由 --checkpoint CLI 覆寫) ---
-checkpoint: logs/rnn_car/sa1_v3h_ne1024_s42/checkpoint_270000.pt
+checkpoint: logs/rnn_car/sa1_v3h_ne1024_s42/checkpoint_90000.pt
 no_resume_optimizer: true
 
 # --- Metadata ---
