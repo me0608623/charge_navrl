@@ -478,8 +478,9 @@ parser.add_argument("--lidar_no_noise", action="store_true", default=False)
 # - 選項：ideal(乾淨) / sigma(只 8.67mm σ) / bias(只 per-ring 系統偏差) /
 #   dropout(只 19.5% 丟點+mixed-pixel) / full(σ+bias+dropout, 部署/sim2real)。
 parser.add_argument("--vlp16_noise_mode", type=str, default=None,
-                    choices=["ideal", "sigma", "bias", "dropout", "full"],
-                    help="VLP-16 empirical-noise ablation preset (overrides fine-grained lidar_* params).")
+                    choices=["ideal", "sigma", "bias", "dropout", "full", "full_material"],
+                    help="VLP-16 empirical-noise ablation preset (overrides fine-grained lidar_* params). "
+                         "full_material = full + measured human dropout(d) on dynamic-obstacle rays.")
 # --no_domain_randomization
 # - 用意：關閉所有 domain randomization（物理參數、摩擦、質量等隨機化）。
 # - 正常範圍：布林旗標。

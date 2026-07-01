@@ -166,6 +166,7 @@ class ExperimentConfig:
     #   bias    → only measured per-ring systematic bias
     #   dropout → only measured hole (19.5%) + mixed-pixel (0.25%)
     #   full    → sigma + bias + dropout (deployment / sim-to-real)
+    #   full_material → full + measured HUMAN dropout(d) on dynamic-obstacle rays (Phase 2)
     vlp16_noise_mode: str | None = None
 
     # LiDAR Layer 3: Per-Episode DR ranges (reset-time sampling)

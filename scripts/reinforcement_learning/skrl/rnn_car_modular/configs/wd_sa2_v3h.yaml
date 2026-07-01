@@ -118,13 +118,13 @@ aux_seq_batch_size: 256
 aux_grad_clip: 0.5
 zero_preprocess_feature_for_rl: false
 
-# --- LiDAR (SA2 v3h: VLP-16 實測經驗雜訊 full，data-first 忠實注入) ---
-# vlp16_noise_mode=full 覆蓋所有 lidar_* 細項，以實測固定值注入：
-#   σ 8.67mm (固定，R²=0.078 不隨距離變) + per-ring 系統偏差 (mean~+12.9mm) + 19.5% 丟點 + 0.25% mixed-pixel。
-# 刻意「不帶」：舊 6cm L2 blanket (obs_noise 0.003，會淹掉真實 σ ~7×)、block dropout、per-episode DR。
-#   全部以實測為準 (source: vlp16_noise/isaac_lab_noise_params.py 2026-07-01)。
-# 想改「以實測值為中心的 DR (部署更 robust)」→ 移除本行、改回細項 lidar_*_dr 範圍。
-vlp16_noise_mode: full
+# --- LiDAR (SA2 v3h: VLP-16 實測雜訊 full_material，含 per-material 人材質) ---
+# vlp16_noise_mode=full_material = full (牆/靜態=white_wall: σ 8.67mm + per-ring bias + 19.5% dropout)
+#   + 對「打到動態障礙(人)的 ray」套實測 human dropout(d)=0.0135·d+0.196 + 高 mixed-pixel(0.178)、無 σ。
+#   動態判別 = obstacle 可見且 _obstacle_velocities 速度≠0；幾何法(命中點落在障礙圓內)。
+# ⚠️ human 絕對 dropout 是 provisional (場景級，待車端 ROI 回波率重校)；趨勢(越遠越漏)可用。
+#   啟動 log 會印 human-ray classifier frac 作一幀驗證。source: vlp16_noise/ 2026-07-01。
+vlp16_noise_mode: full_material
 lidar_no_noise: false
 
 # --- Sim-to-Real DR (延遲 DR 保留) ---

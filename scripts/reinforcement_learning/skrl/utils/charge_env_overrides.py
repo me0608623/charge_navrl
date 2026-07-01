@@ -557,7 +557,16 @@ def _find_lidar_obs_terms(env_cfg):
 _VLP16_SIGMA_FIXED_M = 0.008672     # measured range σ (point-to-plane residual std, ~8.67mm)
 _VLP16_HOLE_RATE = 0.194859         # measured dropout (low-reflectivity / intensity<thr, ~19.5%)
 _VLP16_DISTRACTOR_RATE = 0.002515   # measured mixed-pixel / edge-outlier rate
-_VLP16_NOISE_MODES = ("ideal", "sigma", "bias", "dropout", "full")
+
+# --- Per-material: HUMAN (soft target) on dynamic-obstacle rays. Measured 2026-07-01. ---
+# dropout rises with distance (1m .209 / 2m .223 / 3m .236) → linear dropout(d)=slope·d+intercept.
+# σ = null (measured 6.5cm is an analyze_gap fallback, NOT sensor precision — do NOT use).
+# ⚠ Absolute values are scene-level / PROVISIONAL, pending ROI return-rate re-measure; trend is usable.
+_VLP16_HUMAN_DROPOUT_SLOPE = 0.0135
+_VLP16_HUMAN_DROPOUT_INTERCEPT = 0.196
+_VLP16_HUMAN_MIXED_PIXEL = 0.178    # high vs white_wall (0.0025) but noisy → provisional
+
+_VLP16_NOISE_MODES = ("ideal", "sigma", "bias", "dropout", "full", "full_material")
 
 
 def _apply_vlp16_ablation_mode(env_cfg, mode: str):
@@ -572,9 +581,11 @@ def _apply_vlp16_ablation_mode(env_cfg, mode: str):
         raise ValueError(
             f"vlp16_noise_mode={mode!r} invalid; choose one of {_VLP16_NOISE_MODES}"
         )
-    on_sigma = mode in ("sigma", "full")
-    on_bias = mode in ("bias", "full")
-    on_drop = mode in ("dropout", "full")
+    # full_material = full (white_wall on all rays) + human noise on dynamic-obstacle rays
+    on_sigma = mode in ("sigma", "full", "full_material")
+    on_bias = mode in ("bias", "full", "full_material")
+    on_drop = mode in ("dropout", "full", "full_material")
+    human = mode == "full_material"
     for _gn, _tn, term in _find_lidar_obs_terms(env_cfg):
         p = term.params
         # random range σ (fixed, distance-independent) → soft slot; kill distance-scaled path
@@ -594,6 +605,12 @@ def _apply_vlp16_ablation_mode(env_cfg, mode: str):
                 p[k] = 0.0
         # measured model has no L2 per-bin blanket and no block dropout
         p["block_dropout_prob"] = 0.0
+        # per-material: human dropout(d) + mixed-pixel on rays hitting DYNAMIC obstacles (no σ)
+        p["human_dynamic_dropout"] = human
+        if human:
+            p["human_dropout_slope"] = _VLP16_HUMAN_DROPOUT_SLOPE
+            p["human_dropout_intercept"] = _VLP16_HUMAN_DROPOUT_INTERCEPT
+            p["human_mixed_pixel_rate"] = _VLP16_HUMAN_MIXED_PIXEL
         if hasattr(term, "noise"):
             term.noise = None
     print(
@@ -601,6 +618,7 @@ def _apply_vlp16_ablation_mode(env_cfg, mode: str):
         f"σ={'ON' if on_sigma else 'off'} "
         f"bias={'ON' if on_bias else 'off'} "
         f"dropout={'ON' if on_drop else 'off'} "
+        f"human_dyn={'ON' if human else 'off'} "
         f"(fixed measured values, no DR)"
     )
 

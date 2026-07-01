@@ -276,6 +276,57 @@ def _get_episode_noise_scale(
     return cache[key]  # [N]
 
 
+def _dynamic_human_ray_mask(
+    env,
+    hit_points_w: torch.Tensor,   # [N, R, 3] world-frame ray hits
+    valid: torch.Tensor,          # [N, R] bool
+    margin: float,
+    vel_eps: float,
+    max_obstacles: int = 10,
+) -> torch.Tensor:
+    """Mark rays whose world hit-point lies inside a visible, MOVING obstacle (=human material).
+
+    Dynamic (human) obstacle = visible (root z > 0) AND assigned speed > ``vel_eps``
+    (from ``env._obstacle_velocities``). Geometric in-circle test against each dynamic
+    obstacle's (x, y) centre + radius; no mesh-index-layout dependency. Missed rays hold
+    NaN hit points, so the ``<`` comparisons are False for them (and ``& valid`` re-guards).
+
+    Returns:
+        ``[N, R]`` bool mask of rays that hit a dynamic (human) obstacle.
+    """
+    N, R, _ = hit_points_w.shape
+    device = hit_points_w.device
+    human = torch.zeros(N, R, dtype=torch.bool, device=device)
+    hit_xy = hit_points_w[..., :2]  # [N, R, 2]
+
+    vels = getattr(env, "_obstacle_velocities", None)   # [N, max_obs, 2] or None
+    sizes = getattr(env, "_obstacle_sizes", None)
+
+    for i in range(max_obstacles):
+        name = f"obstacle_{i}"
+        if name not in env.scene.keys():
+            continue
+        pos_w = env.scene[name].data.root_pos_w          # [N, 3]
+        visible = pos_w[:, 2] > 0.0                      # [N] (z = -10 → hidden)
+        if vels is not None and i < vels.shape[1]:
+            is_dyn = torch.linalg.norm(vels[:, i, :], dim=-1) > vel_eps   # [N]
+        else:
+            is_dyn = torch.zeros(N, dtype=torch.bool, device=device)
+        active = visible & is_dyn                         # [N]
+        if not bool(active.any()):
+            continue
+        radius = 0.3
+        if sizes is not None:
+            try:
+                radius = float(sizes[i])
+            except (IndexError, TypeError):
+                pass
+        d = torch.linalg.norm(hit_xy - pos_w[:, None, :2], dim=-1)   # [N, R]
+        human |= (d < (radius + margin)) & active.unsqueeze(1)
+
+    return human & valid
+
+
 def wd_like_sweep_72(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
@@ -325,6 +376,16 @@ def wd_like_sweep_72(
     block_dropout_prob: float = 0.0,
     block_dropout_width_min: int = 3,
     block_dropout_width_max: int = 8,
+    # --- Per-material: human noise on DYNAMIC-obstacle rays (Phase 2, full_material) ---
+    # Rays whose world hit-point falls inside a visible, moving obstacle (velocity≠0) get
+    # measured human dropout(d) + higher mixed-pixel, and NO σ (human σ is null). Geometric
+    # classification (ray-hit inside obstacle circle) — no mesh-index-layout dependency.
+    human_dynamic_dropout: bool = False,
+    human_dropout_slope: float = 0.0135,      # dropout(d) = slope·d + intercept (measured 1m .209 / 3m .236)
+    human_dropout_intercept: float = 0.196,
+    human_mixed_pixel_rate: float = 0.178,    # human ghost/mixed-pixel (high but noisy; provisional)
+    human_obs_margin: float = 0.15,           # extra margin (m) added to obstacle radius for the in-circle test
+    human_vel_eps: float = 0.05,              # obstacle speed (m/s) above which it counts as dynamic (=human)
 ) -> torch.Tensor:
     """Build a WD-style 72-bin sweep from raw ray hits in the robot yaw frame.
 
@@ -383,6 +444,23 @@ def wd_like_sweep_72(
         torch.full_like(distances_2d, r_max),
     )
     distances_2d = torch.clamp(distances_2d, min=0.0, max=r_max)
+
+    # --- Per-material: classify rays hitting DYNAMIC obstacles (=human) ---
+    human_mask = None
+    if human_dynamic_dropout:
+        human_mask = _dynamic_human_ray_mask(
+            env, hit_points_w, valid, human_obs_margin, human_vel_eps,
+        )  # [N, R] bool
+        # One-time runtime sanity log (README "verify the mapping with one frame"):
+        # a nonzero human-ray fraction confirms the classifier fires on real dynamic obstacles.
+        if not getattr(env, "_vlp16_human_logged", False):
+            frac = human_mask.float().mean().item()
+            envs_with = (human_mask.any(dim=1)).float().mean().item()
+            print(
+                f"[SIM2REAL][full_material] human-ray classifier: "
+                f"frac={frac:.4f} of rays, envs-with-human={envs_with:.1%} (first call)"
+            )
+            env._vlp16_human_logged = True
 
     # --- L3 per-episode DR: resample noise scales at episode reset ---
     if displacement_std_per_meter_dr_min > 0 and displacement_std_per_meter_dr_max > displacement_std_per_meter_dr_min:
@@ -512,25 +590,53 @@ def wd_like_sweep_72(
             sigma_soft_val = torch.zeros_like(distances_2d)
 
         sigma = torch.sqrt(sigma_hard ** 2 + sigma_soft_val ** 2)
+        if human_mask is not None:  # human σ = null → no range jitter on human rays
+            sigma = torch.where(human_mask, torch.zeros_like(sigma), sigma)
         noise = torch.randn_like(distances_2d) * sigma
         distances_2d = torch.clamp(distances_2d + noise, min=0.0, max=r_max)
     elif has_legacy:
         # legacy fixed-σ fallback
         noise = torch.randn_like(distances_2d) * displacement_std
+        if human_mask is not None:
+            noise = torch.where(human_mask, torch.zeros_like(noise), noise)
         distances_2d = torch.clamp(distances_2d + noise, min=0.0, max=r_max)
 
-    if isinstance(active_hole_rate, torch.Tensor):
-        hole_mask = torch.rand_like(distances_2d) < active_hole_rate.unsqueeze(1)
-    elif active_hole_rate > 0:
-        hole_mask = torch.rand_like(distances_2d) < active_hole_rate
+    if human_mask is None:
+        # Uniform path (unchanged for ideal/sigma/bias/dropout/full)
+        if isinstance(active_hole_rate, torch.Tensor):
+            hole_mask = torch.rand_like(distances_2d) < active_hole_rate.unsqueeze(1)
+        elif active_hole_rate > 0:
+            hole_mask = torch.rand_like(distances_2d) < active_hole_rate
+        else:
+            hole_mask = None
+        if hole_mask is not None:
+            distances_2d = torch.where(hole_mask, r_max, distances_2d)
     else:
-        hole_mask = None
-
-    if hole_mask is not None:
+        # Per-ray dropout: white_wall base rate, human dropout(d)=slope·d+intercept on human rays
+        if isinstance(active_hole_rate, torch.Tensor):
+            p_hole = active_hole_rate.unsqueeze(1).expand_as(distances_2d).clone()
+        else:
+            p_hole = torch.full_like(distances_2d, float(active_hole_rate))
+        human_p = torch.clamp(
+            human_dropout_slope * distances_2d + human_dropout_intercept, 0.0, 1.0
+        )
+        p_hole = torch.where(human_mask, human_p, p_hole)
+        hole_mask = torch.rand_like(distances_2d) < p_hole
         distances_2d = torch.where(hole_mask, r_max, distances_2d)
 
-    if distractor_rate > 0:
-        distractor_mask = torch.rand_like(distances_2d) < distractor_rate
+    # --- Mixed-pixel / distractor (ghost): white_wall base, higher rate on human rays ---
+    has_ghost = distractor_rate > 0 or (human_mask is not None and human_mixed_pixel_rate > 0)
+    if has_ghost:
+        if human_mask is not None:
+            p_ghost = torch.full_like(distances_2d, float(distractor_rate))
+            p_ghost = torch.where(
+                human_mask,
+                torch.full_like(distances_2d, float(human_mixed_pixel_rate)),
+                p_ghost,
+            )
+            distractor_mask = torch.rand_like(distances_2d) < p_ghost
+        else:
+            distractor_mask = torch.rand_like(distances_2d) < distractor_rate
         min_r, max_r = distractor_range
         distractor_values = torch.rand_like(distances_2d) * (max_r - min_r) + min_r
         distances_2d = torch.where(distractor_mask, distractor_values, distances_2d)
