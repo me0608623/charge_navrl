@@ -407,8 +407,9 @@ class PolicyHead(nn.Module):
     但經過幾步訓練後差異消失。不影響學習行為。
     """
 
-    def __init__(self, input_dim: int = 91):
+    def __init__(self, input_dim: int = 91, privileged_dim: int = 0):
         super().__init__()
+        self._privileged_dim = privileged_dim
         self.net = nn.Sequential(
             nn.Linear(input_dim, 256),
             nn.ReLU(),
@@ -420,9 +421,24 @@ class PolicyHead(nn.Module):
             nn.ReLU(),
             nn.Linear(512, TOTAL_LOGITS),
         )
+        # Oracle-obstacle 殘差分支（--oracle_obstacles_to_policy 診斷用）:
+        # logits = net(rl_input) + priv_branch(privileged)。末層 init 0 →
+        # 起始輸出恆 0 → policy 與無 priv 的 checkpoint 完全相同（完美暖啟動），
+        # 之後才學會用障礙特權狀態。這是「感知 vs 策略」oracle 上限測試的注入點。
+        if privileged_dim > 0:
+            self.priv_branch = nn.Sequential(
+                nn.Linear(privileged_dim, 128),
+                nn.ReLU(),
+                nn.Linear(128, TOTAL_LOGITS),
+            )
+            nn.init.zeros_(self.priv_branch[-1].weight)
+            nn.init.zeros_(self.priv_branch[-1].bias)
 
-    def forward(self, rl_input: torch.Tensor) -> torch.Tensor:
-        return self.net(rl_input)  # [B, 38]
+    def forward(self, rl_input: torch.Tensor, privileged: torch.Tensor | None = None) -> torch.Tensor:
+        logits = self.net(rl_input)  # [B, 38]
+        if self._privileged_dim > 0 and privileged is not None:
+            logits = logits + self.priv_branch(privileged)  # 殘差；init 0 → 起始不改變 policy
+        return logits
 
 
 class ValueHead(nn.Module):

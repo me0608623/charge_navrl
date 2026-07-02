@@ -50,7 +50,17 @@ def _extract_obstacles(
     env, robot_pos_w: torch.Tensor, robot_quat_w: torch.Tensor,
     num_envs: int, device: torch.device,
 ) -> torch.Tensor:
-    """Extract 50D obstacle privileged obs (10 × 5D body-frame)."""
+    """Extract 50D obstacle privileged obs (10 × 5D body-frame).
+
+    Velocity source (2026-07-03 fix):
+    `env._obstacle_velocities` is only written by the mixed_parallel event path.
+    Under `obstacle_mode: rule_based`, BehaviorScheduler moves obstacles via
+    kinematic `write_root_pose_to_sim` and keeps velocities in its OWN buffer —
+    `env._obstacle_velocities` stays absent → the old fallback silently fed
+    speed=0 for every obstacle (killed the oracle test's velocity channel).
+    Fix mirrors the proven full_material approach: per-step position
+    finite-diff with a teleport guard (|Δ| > 0.5 m/step → treat as reset, v=0).
+    """
     from isaaclab.utils import math as math_utils
 
     _, _, robot_yaw = math_utils.euler_xyz_from_quat(robot_quat_w)
@@ -62,9 +72,31 @@ def _extract_obstacles(
     obstacle_sizes = getattr(env, "_obstacle_sizes", None)
     obstacle_velocities = getattr(env, "_obstacle_velocities", None)
 
+    # ── Finite-diff velocity fallback (rule_based mode) ──
+    # Collect current xy of all obstacle slots, diff against cached previous.
+    _dt = float(getattr(env, "step_dt", 0.2)) or 0.2
+    cur_xy = torch.zeros(num_envs, MAX_OBSTACLES, 2, device=device)
+    _slot_present = [False] * MAX_OBSTACLES
+    for i in range(MAX_OBSTACLES):
+        _name = f"obstacle_{i}"
+        if _name in env.scene.keys():
+            _slot_present[i] = True
+            cur_xy[:, i] = torch.nan_to_num(
+                env.scene[_name].data.root_pos_w[:, :2], nan=0.0)
+    prev_xy = getattr(env, "_privobs_prev_obs_xy", None)
+    if prev_xy is not None and prev_xy.shape == cur_xy.shape:
+        delta = cur_xy - prev_xy                          # [E, 10, 2]
+        step_dist = delta.norm(dim=-1)                    # [E, 10]
+        # teleport/reset guard: >0.5 m in one step is a respawn, not motion
+        moved_ok = (step_dist <= 0.5).unsqueeze(-1)
+        vel_fd = torch.where(moved_ok, delta / _dt, torch.zeros_like(delta))
+    else:
+        vel_fd = torch.zeros_like(cur_xy)
+    env._privobs_prev_obs_xy = cur_xy.detach().clone()
+
     for i in range(MAX_OBSTACLES):
         obs_name = f"obstacle_{i}"
-        if obs_name not in env.scene.keys():
+        if not _slot_present[i]:
             continue
 
         obstacle = env.scene[obs_name]
@@ -79,17 +111,18 @@ def _extract_obstacles(
         rel_x = cos_yaw * dx + sin_yaw * dy
         rel_y = -sin_yaw * dx + cos_yaw * dy
 
-        # Velocity
+        # Velocity: explicit buffer (mixed_parallel) → finite-diff (rule_based)
         if obstacle_velocities is not None and obstacle_velocities.shape[1] > i:
             vel_w = obstacle_velocities[:, i, :]  # [E, 2]
-            speed = torch.linalg.norm(vel_w, dim=1)
-            vel_yaw = torch.atan2(vel_w[:, 1], vel_w[:, 0])
-            rel_dir = vel_yaw - robot_yaw
         else:
-            speed = torch.zeros(num_envs, device=device)
-            obs_quat = obstacle.data.root_quat_w
-            _, _, obs_yaw = math_utils.euler_xyz_from_quat(obs_quat)
-            rel_dir = obs_yaw - robot_yaw
+            vel_w = vel_fd[:, i, :]               # [E, 2] finite-diff fallback
+        speed = torch.linalg.norm(vel_w, dim=1)
+        _has_motion = speed > 1e-3
+        vel_yaw = torch.atan2(vel_w[:, 1], vel_w[:, 0])
+        obs_quat = obstacle.data.root_quat_w
+        _, _, obs_yaw = math_utils.euler_xyz_from_quat(obs_quat)
+        # moving → direction of travel; static → facing (quat yaw)
+        rel_dir = torch.where(_has_motion, vel_yaw, obs_yaw) - robot_yaw
 
         rel_dir = torch.atan2(torch.sin(rel_dir), torch.cos(rel_dir))
 
@@ -105,5 +138,15 @@ def _extract_obstacles(
         result[:, i, 2] = torch.where(hidden, torch.zeros_like(rel_dir), rel_dir / torch.pi)
         result[:, i, 3] = torch.where(hidden, torch.zeros_like(speed), speed * _OBSTACLE_V_SCALE)
         result[:, i, 4] = torch.where(hidden, torch.zeros_like(speed), torch.full_like(speed, size_val * _OBSTACLE_SIZE_SCALE))
+
+    # ── Info-flow sanity log: prove the speed channel is alive (calls 2 & 100;
+    #    call 1 is always zero because finite-diff needs a previous frame) ──
+    _n = getattr(env, "_privobs_call_count", 0) + 1
+    env._privobs_call_count = _n
+    if _n in (2, 100):
+        _sp = result[:, :, 3]  # normalized speed channel
+        print(f"[PRIV][call {_n}] speed ch: mean={_sp.mean().item():.4f} "
+              f"max={_sp.max().item():.4f} nonzero_frac={(_sp > 1e-4).float().mean().item():.3f} "
+              f"(all-zero → 資訊流斷; source={'buffer' if obstacle_velocities is not None else 'finite-diff'})")
 
     return result.reshape(num_envs, MAX_OBSTACLES * 5)  # [E, 50]

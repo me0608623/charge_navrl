@@ -306,6 +306,14 @@ parser.add_argument("--hybrid_predict_to_policy", action="store_true", default=F
                     help="Hybrid: feed predict_head output (障礙動態預測) into the policy/value input "
                          "(rl_input += predict_dim). RNN 成為顯式 MOT,其輸出餵 RL,而非只當訓練鷹架. "
                          "predict_head 仍由 aux 監督(位移 label);policy 每步吃其輸出. 預設關=現有隱式架構.")
+# --oracle_obstacles_to_policy (oracle 上限測試:把【真值】障礙特權狀態 50D 餵進 policy)
+# 診斷「動態碰撞卡 20% = 感知問題 vs 策略問題」。PolicyHead 殘差 priv_branch(init 0)→
+# 暖啟動時 policy 與 baseline 相同,可 partial-load 舊 checkpoint。若動態碰撞大降=策略會用運動
+# 資訊、缺的只是感知;若仍 ~20%=策略/reward 問題。非部署配置(真值僅 sim 有),純診斷用。
+parser.add_argument("--oracle_obstacles_to_policy", action="store_true", default=False,
+                    help="Oracle diagnostic: feed TRUE privileged obstacle state (50D, from sim) into "
+                         "the policy via a zero-init residual branch. Tests whether the policy CAN use "
+                         "obstacle motion (perception gap) vs cannot (policy gap). Not deployable.")
 # --lidar_frame_stack (多幀 LiDAR:給 RNN 做 MOT 必需的連續幀;obs 尾端附 (K-1)×72 幀歷史)
 parser.add_argument("--lidar_frame_stack", type=int, default=1,
                     help="LiDAR frame stacking K. K=1=現狀(單幀). K>1: extractor Conv1d 吃 K 幀,"
@@ -2730,9 +2738,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "(PPO recompute 路徑未含 prediction 會造成維度不符);請擇一。")
         print(f"[INFO] Hybrid predict→policy: rl_input += predict_dim({_predict_dim}) → {rl_input_dim}D "
               f"(predict_head 輸出當 policy 顯式輸入;仍由 aux 監督)")
-    policy_head = PolicyHead(input_dim=rl_input_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
     _use_asymmetric_critic = getattr(args_cli, 'critic_profile', 'symmetric') == 'asymmetric'
     _priv_dim = PRIVILEGED_OBS_DIM if _use_asymmetric_critic else 0
+    _oracle_to_policy = getattr(args_cli, 'oracle_obstacles_to_policy', False)
+    _policy_priv_dim = PRIVILEGED_OBS_DIM if _oracle_to_policy else 0
+    policy_head = PolicyHead(input_dim=rl_input_dim, privileged_dim=_policy_priv_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
+    if _oracle_to_policy:
+        if not _use_asymmetric_critic:
+            raise ValueError("--oracle_obstacles_to_policy 需要 asymmetric critic "
+                             "(共用 privileged_obs 緩衝/recompute 管線)。請用 critic_profile=asymmetric。")
+        print(f"[ORACLE] obstacles→policy: PolicyHead 殘差 priv_branch dim={_policy_priv_dim} "
+              f"(zero-init → 暖啟動 identity; 診斷用, 非部署)")
     value_head = ValueHead(input_dim=rl_input_dim, privileged_dim=_priv_dim).to(device)
     if _use_asymmetric_critic:
         print(f"[INFO] Asymmetric critic: rl_input={rl_input_dim} + privileged={_priv_dim} = {rl_input_dim + _priv_dim}D")
@@ -3085,7 +3101,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO] preprocess_rnn: 跳過 shape 不符的 keys（重初始化）: {_pp_skipped}")
         if _pp_missing:
             print(f"[INFO] preprocess_rnn: 新初始化 params（checkpoint 缺）: {list(_pp_missing)}")
-        policy_head.load_state_dict(ckpt["policy_head"])
+        policy_head.load_state_dict(ckpt["policy_head"], strict=(not _oracle_to_policy))  # oracle: priv_branch 新建→strict=False
         _vh_strict = not _use_asymmetric_critic
         _vh_missing, _vh_unexpected = value_head.load_state_dict(ckpt["value_head"], strict=_vh_strict)
         if _vh_missing:
@@ -3383,9 +3399,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 rl_in = (torch.cat([p_obs, _rnn_for_rl, _pred_rl], dim=-1)  # hybrid: + 障礙動態預測(顯式 MOT 輸出)
                          if args_cli.hybrid_predict_to_policy
                          else torch.cat([p_obs, _rnn_for_rl], dim=-1))  # concat obs + preprocess_feat → RL input
-                logits = policy_head(rl_in)                       # [E, 38] policy logits（雙頭各 19）
-                _priv_obs = extract_privileged_obs(env.unwrapped) if _use_asymmetric_critic else None
-                value = value_head(rl_in, _priv_obs).squeeze(-1)  # [E] critic value
+                _priv_obs = extract_privileged_obs(env.unwrapped) if (_use_asymmetric_critic or _oracle_to_policy) else None
+                logits = policy_head(rl_in, _priv_obs if _oracle_to_policy else None)  # [E, 38] policy logits（雙頭各 19）
+                value = value_head(rl_in, _priv_obs if _use_asymmetric_critic else None).squeeze(-1)  # [E] critic value
                 actions, log_prob, _ = sample_action(logits)     # 採樣動作 + joint log_prob
                 goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)  # 目標診斷（不影響 reward）
 
@@ -3917,9 +3933,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _ri_mb = torch.cat([_pobs_mb, _rnnfeat_mb], dim=-1)        # [b, rl_input_dim]
                     else:
                         _ri_mb = flat_ri[mb]
-                    nl = policy_head(_ri_mb)
-                    nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
                     _priv_mb = flat_priv[mb] if flat_priv is not None else None
+                    nl = policy_head(_ri_mb, _priv_mb if _oracle_to_policy else None)
+                    nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
                     nv = value_head(_ri_mb, _priv_mb).squeeze(-1)
 
                     # Patch 3: approx KL (old_logprob - new_logprob)
@@ -4022,7 +4038,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                     # --- post-update policy diagnostics ---
                     with torch.no_grad():
-                        _post_nl = policy_head(flat_ri[mb])
+                        _post_nl = policy_head(flat_ri[mb], (flat_priv[mb] if (_oracle_to_policy and flat_priv is not None) else None))
                         _post_lp, _, _ = evaluate_actions(_post_nl, flat_act[mb])
                         _post_ratio = (_post_lp - flat_lp[mb]).exp()
                         post_kl_l.append((flat_lp[mb] - _post_lp).mean().item())
