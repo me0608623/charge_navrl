@@ -112,8 +112,12 @@ def _extract_obstacles(
         rel_y = -sin_yaw * dx + cos_yaw * dy
 
         # Velocity: explicit buffer (mixed_parallel) → finite-diff (rule_based)
+        # ⚠ rule_based 下 buffer 可能「存在但恆 0」(lazy-init 但無人寫入) →
+        #   不能只判 None，要逐格判「buffer 有動用 buffer、沒動用 finite-diff」。
         if obstacle_velocities is not None and obstacle_velocities.shape[1] > i:
-            vel_w = obstacle_velocities[:, i, :]  # [E, 2]
+            vel_buf = obstacle_velocities[:, i, :]                    # [E, 2]
+            _buf_has = vel_buf.norm(dim=1, keepdim=True) > 1e-3       # [E, 1]
+            vel_w = torch.where(_buf_has, vel_buf, vel_fd[:, i, :])
         else:
             vel_w = vel_fd[:, i, :]               # [E, 2] finite-diff fallback
         speed = torch.linalg.norm(vel_w, dim=1)
@@ -147,6 +151,6 @@ def _extract_obstacles(
         _sp = result[:, :, 3]  # normalized speed channel
         print(f"[PRIV][call {_n}] speed ch: mean={_sp.mean().item():.4f} "
               f"max={_sp.max().item():.4f} nonzero_frac={(_sp > 1e-4).float().mean().item():.3f} "
-              f"(all-zero → 資訊流斷; source={'buffer' if obstacle_velocities is not None else 'finite-diff'})")
+              f"(all-zero → 資訊流斷; per-slot buffer/finite-diff 混合 fallback)")
 
     return result.reshape(num_envs, MAX_OBSTACLES * 5)  # [E, 50]
