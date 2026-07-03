@@ -361,9 +361,22 @@ class BehaviorScheduler:
         return result
 
     def record_collision(self, env_idx: int, obs_idx: int) -> None:
-        """外部碰撞偵測後呼叫，紀錄哪種 behavior 造成碰���。"""
+        """外部碰撞偵測後呼叫，紀錄哪種 behavior 造成碰撞。"""
         btype = self.behavior_type[env_idx, obs_idx].item()
         self._collision_by_type[btype] += 1
+
+    def record_collisions(self, env_ids: torch.Tensor, obs_idx: int) -> None:
+        """向量化版 record_collision — 一批 env 同步撞上 slot obs_idx。
+
+        2026-07-03 修復: `_collision_by_type`/`behavior/collision_{name}` 自建立
+        以來沒有任何 caller(永遠全 0)。由 obstacle_collision_geometric 的逐 slot
+        hit 迴圈呼叫本方法後才真正累計。
+        """
+        if env_ids.numel() == 0 or obs_idx >= self.behavior_type.shape[1]:
+            return
+        btypes = self.behavior_type[env_ids, obs_idx].long().clamp_(min=0)
+        self._collision_by_type.scatter_add_(
+            0, btypes, torch.ones_like(btypes, dtype=self._collision_by_type.dtype))
 
     def update_stage(self, stage_config: dict) -> None:
         """Curriculum 升階時呼叫，更新 behavior_mix 和 overrides。"""

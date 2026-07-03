@@ -279,6 +279,17 @@ def obstacle_collision_geometric(
     has_difficulty = hasattr(env, "_env_difficulty")
     num_static_mixed = getattr(env, "_num_obstacles_static_mixed", 0)
 
+    # rule_based(BehaviorScheduler)模式: 用每-slot behavior_type 做精確歸因
+    # (2026-07-03: 修 behavior/collision_* 分項計數器沒 caller + rule_based 下
+    #  _env_difficulty 是 mixed_parallel 概念,歸因不精確 → 有 scheduler 就用它)
+    _sched = getattr(env, "_behavior_scheduler", None)
+    _btype_static = None
+    if _sched is not None:
+        try:
+            from ..events.behavior_scheduler import BEHAVIOR_STATIC as _btype_static
+        except ImportError:
+            _sched = None
+
     for i in range(max_obstacles):
         name = f"obstacle_{i}"
         if name not in env.scene.keys():
@@ -305,7 +316,15 @@ def obstacle_collision_geometric(
         overlap = overlap | hit
 
         # Attribute hit to static or dynamic per-env
-        if hit.any() and has_difficulty:
+        if hit.any() and _sched is not None and i < _sched.behavior_type.shape[1]:
+            # rule_based: 逐 slot behavior_type 精確歸因 + 分項計數(哪種行為造成碰撞)
+            hit_ids = hit.nonzero(as_tuple=False).squeeze(-1)
+            _sched.record_collisions(hit_ids, i)
+            _bt = _sched.behavior_type[hit_ids, i]
+            _is_static_b = (_bt == _btype_static)
+            static_overlap[hit_ids] = static_overlap[hit_ids] | _is_static_b
+            dynamic_overlap[hit_ids] = dynamic_overlap[hit_ids] | ~_is_static_b
+        elif hit.any() and has_difficulty:
             diff = env._env_difficulty  # [N]
             # difficulty 1 = all static, 2 = all dynamic
             # difficulty 3 (mixed): i < num_static_mixed → static
