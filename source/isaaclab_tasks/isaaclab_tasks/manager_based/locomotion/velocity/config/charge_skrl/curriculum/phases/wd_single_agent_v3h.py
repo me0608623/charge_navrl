@@ -50,11 +50,13 @@ def _patch_head_on(stage: dict) -> dict:
             mix["horizontal_crossing"] = round(mix["horizontal_crossing"] + excess, 6)
         elif "patrol" in mix:
             mix["patrol"] = round(mix["patrol"] + excess, 6)
-    # (b) goal_move 移除 (2026-07-03)
+    # (b) goal_move 修正 (2026-07-04 用戶更正): 目標【保持隨機移動】，只移除
+    #     「朝障礙物移動」(toward_obstacle, 僅 SA3 有,人工加難裝置)。
+    #     舊版(07-03)誤把全部歸零成靜止目標 — 已改回:速度/半徑/角速度保留原 stage 值,
+    #     只把 toward_obstacle → random_walk。SA4+ 本來就是 random_walk/patrol,不動。
     scene = s.get("scene")
-    if isinstance(scene, dict) and scene.get("goal_move_speed", 0.0) > 0.0:
-        scene["goal_move_speed"] = 0.0
-        scene["goal_move_angular_speed"] = 0.0
+    if isinstance(scene, dict) and scene.get("goal_move_behavior") == "toward_obstacle":
+        scene["goal_move_behavior"] = "random_walk"
     # (c) head_on 速度壓到 0.3-0.5 (2026-07-03)
     overrides = s.get("behavior", {}).get("speed_overrides")
     if isinstance(overrides, dict) and "head_on" in overrides:
