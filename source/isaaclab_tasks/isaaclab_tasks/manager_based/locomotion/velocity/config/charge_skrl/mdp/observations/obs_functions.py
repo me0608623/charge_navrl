@@ -321,13 +321,27 @@ def _dynamic_human_ray_mask(
                 pass
 
     # 2) Dynamic = moved this step (finite-diff), excluding reset teleports (> move_max)
-    prev = getattr(env, "_matnoise_prev_obs_xy", None)
-    if prev is not None and prev.shape == cur_xy.shape:
-        disp = torch.linalg.norm(cur_xy - prev, dim=-1)   # [N, max_obs]
-        is_dyn = (disp > move_eps) & (disp < move_max)
+    # Per-step memo (2026-07-03 fix, 審計1-D2): policy 與 critic 兩個 obs group 都掛
+    # wd_like_sweep_72 → 同一 sim 步呼叫兩次 → 第二次 Δ=0 → 該 group 的 human dropout
+    # 恆 no-op(且 sanity log 被第一 group 掩蓋)。同一步內重複呼叫直接回 memo、不動 cache。
+    _step_id = getattr(env, "common_step_counter", None)
+    if _step_id is not None and getattr(env, "_matnoise_fd_step", None) == _step_id:
+        _memo = getattr(env, "_matnoise_fd_isdyn", None)
+        if _memo is not None and _memo.shape == (N, max_obstacles):
+            is_dyn = _memo
+        else:
+            is_dyn = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
     else:
-        is_dyn = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
-    env._matnoise_prev_obs_xy = cur_xy.detach().clone()
+        prev = getattr(env, "_matnoise_prev_obs_xy", None)
+        if prev is not None and prev.shape == cur_xy.shape:
+            disp = torch.linalg.norm(cur_xy - prev, dim=-1)   # [N, max_obs]
+            is_dyn = (disp > move_eps) & (disp < move_max)
+        else:
+            is_dyn = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+        env._matnoise_prev_obs_xy = cur_xy.detach().clone()
+        if _step_id is not None:
+            env._matnoise_fd_step = _step_id
+            env._matnoise_fd_isdyn = is_dyn.detach().clone()
 
     # 3) Rays inside any visible+moving obstacle circle
     active = visible & is_dyn                        # [N, max_obs]
