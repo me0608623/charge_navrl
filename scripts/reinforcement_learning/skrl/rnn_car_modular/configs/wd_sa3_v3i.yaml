@@ -1,0 +1,161 @@
+# wd_sa3_v3h — SA3 v3h 部署主線 (head_on 小比例 + 密集動態 + VLP-16 per-material 實測雜訊)
+#
+# ★ 配方沿用 v3f_vaux: GRU + feat_norm + aux_epochs 8 + 可訓 readout + huber
+#   + aux_target_pos_scale 0.33 + predict_dim 7 (position-only)。
+# ★ curriculum v3h: SA3 起引入 head_on(直線迎面) 小比例(0.05) — 對症「晚反應撞動態」。
+# ★ LiDAR: vlp16_noise_mode=full_material (白牆實測 σ/bias/dropout + 動態障礙 ray 套 human dropout(d))。
+#
+# ⚠️ 相容性：resume【v3h lineage】SA2 checkpoint (GRU+feat_norm)。SA2 於 50% (step 210k) 平台盤整時
+#   提早切換 (SR 98.6% 已精通 stage 2)，故 resume checkpoint_210000 (非 420k)。
+# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 (obs 79D)。
+# ⚠️ SA3 是硬關: head_on 歷史上是 v3f SA4 卡 61% 的元兇。SR 從 98.6% 下滑屬正常, 重點盯 head_on 碰撞率。
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa3_v3h --headless \
+#     --feat_norm --aux_epochs 8 \
+#     --checkpoint logs/rnn_car/sa2_v3h_ne1024_s42/checkpoint_210000.pt \
+#     --run_name sa3_v3h_ne1024_s42
+
+name: wd_sa3_v3i
+description: "SA3 v3i: 牆+crossing+head_on(0.05慢) + 目標隨機移動(07-04修正) + full_material, aux_epochs 1 深記憶配方。From SA2_v3i 精通切換。"
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3h   # v3h: SA3-5 head_on 小比例(0.05)
+initial_stage: 3
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 420000
+seed: 42
+
+# --- RL optimizer (SA3 stage) ---
+lr: 0.0005
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005   # ★vaux: 可訓 readout
+aux_lr_fc_middle: 0.0005      # ★vaux: 可訓 readout
+aux_lr_fc_front: 0.0005       # ★vaux: 可訓 readout
+aux_lr_extractor: 0.0005      # reluFix: 解凍 extractor
+vf_coeff: 0.5
+gamma: 0.990                  # SA3: 長 horizon (vs SA2 0.984)
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 1.0
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- velocity-aux 修復配方 (★vaux 核心) ---
+rnn_type: GRU                 # ★vaux
+feat_norm: true               # ★vaux: 關鍵缺件
+aux_epochs: 1               # ★v3i: 8遍真兇已殺
+aux_loss_type: huber          # ★vaux
+aux_huber_delta: 1.0
+aux_target_pos_scale: 0.33    # ★vaux
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (SA3 stage: 0.005/0.02) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.005
+ent_coeff_angular: 0.02
+
+# --- v3f: 無 act_hist → dropout 無意義 ---
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (GRU64) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+
+# --- aux predict dim (★vaux: position-only 7D) ---
+predict_dim: 7
+aux_velocity_topk: 0
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.85
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA3 v3h: VLP-16 per-material 實測雜訊，延續 SA2) ---
+# vlp16_noise_mode=full_material: full (牆/靜態=white_wall σ 8.67mm + per-ring bias + 19.5% dropout)
+#   + 對「打到動態障礙(人)的 ray」套實測 human dropout(d)=0.0135·d+0.196 + mixed_pixel、σ=0。
+vlp16_noise_mode: full_material
+lidar_no_noise: false
+
+# --- Sim-to-Real DR (延遲 DR 保留) ---
+no_domain_randomization: false
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (關閉：sin 波兇手；馬達延遲保留)
+obs_delay_steps: [0, 0]
+# Heading stability (off)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (★v3h lineage SA2；提早切換 resume 210k) ---
+checkpoint: logs/rnn_car/sa2_v3i_ne1024_s42/checkpoint_30000.pt  # 實際以切換時最新 ckpt 由 CLI 覆寫
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa3, v3i, aux1, vaux, deploy_mainline, gru, feat_norm, huber, a2c, aux, asymmetric, gru64, rmin025, no_act_hist, obs79d, smoothness0, head_on_small, full_material, dynamic]
+notes: "SA3 v3h 部署主線: head_on 小比例 + 密集動態 + full_material per-material 實測雜訊. From SA2_v3h 提早切換 (210k, SR 98.6% 平台). obs 79D, curriculum v3h."
