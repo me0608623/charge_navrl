@@ -192,6 +192,28 @@ def _update_history_cache(
         new_mask, current_pos, current_pos)  # t1 always ← current
 
 
+def _finite_diff_obstacle_vel(env_unwrapped, all_pos_now: torch.Tensor) -> torch.Tensor:
+    """Per-slot 位置 finite-diff 速度 (rule_based 修復, 2026-07-03)。
+
+    `_obstacle_velocities` 只有 mixed_parallel 事件路徑在寫；rule_based 的
+    BehaviorScheduler 走 kinematic `write_root_pose_to_sim`,速度存私有 buffer
+    從不橋接 → 公共 buffer 恆 0 → velocity target / next(=t0+v·Δt) / dynamic
+    判別全部退化 (歷史 velocity-aux 負面結論的 zero-label 汙染源)。
+    修法同 privileged_obs.py: Δpos/dt + teleport guard (>0.5 m/step 視為 reset)。
+    每個 sim step 只能呼叫一次 (cache 依呼叫更新)。
+    """
+    dt = float(getattr(env_unwrapped, "step_dt", 0.2)) or 0.2
+    prev = getattr(env_unwrapped, "_wdaux_prev_obs_xy", None)
+    if prev is not None and prev.shape == all_pos_now.shape:
+        delta = all_pos_now - prev
+        ok = (delta.norm(dim=-1, keepdim=True) <= 0.5)
+        vel_fd = torch.where(ok, delta / dt, torch.zeros_like(delta))
+    else:
+        vel_fd = torch.zeros_like(all_pos_now)
+    env_unwrapped._wdaux_prev_obs_xy = all_pos_now.detach().clone()
+    return vel_fd
+
+
 def _build_velocity_targets(
     env_unwrapped,
     top_k: int,
@@ -200,6 +222,7 @@ def _build_velocity_targets(
     robot_pos_w: torch.Tensor,
     max_obstacles: int,
     device: torch.device,
+    all_vel_override: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build body-frame velocity targets for the nearest K dynamic obstacles.
 
@@ -223,7 +246,9 @@ def _build_velocity_targets(
         all_pos[:, i, 0] = pos_w[:, 0]
         all_pos[:, i, 1] = pos_w[:, 1]
 
-    if hasattr(env_unwrapped, "_obstacle_velocities"):
+    if all_vel_override is not None:
+        all_vel = all_vel_override  # 由 build_wd_preprocess_targets 傳入 (buffer+finite-diff 已合併)
+    elif hasattr(env_unwrapped, "_obstacle_velocities"):
         n_vel = min(env_unwrapped._obstacle_velocities.shape[1], max_obstacles)
         all_vel[:, :n_vel, :] = env_unwrapped._obstacle_velocities[:, :n_vel, :]
 
@@ -322,10 +347,15 @@ def build_wd_preprocess_targets(
         if has_radii:
             all_col_radius[:, i] = env_unwrapped._obstacle_radii[:, i]
 
-    # Velocity from cache（已在 apply_obstacle_actions 更新）
+    # Velocity: buffer(mixed_parallel 有寫) + per-slot finite-diff fallback(rule_based 修復 2026-07-03)
+    # rule_based 下 buffer 恆 0 → 舊版 next(=t0+v·Δt)≡t0、velocity target 全 0、
+    # dynamic 判別全 False (zero-label 汙染, 見 finding_zero_velocity_buffer_contamination)
     if hasattr(env_unwrapped, "_obstacle_velocities"):
         n_vel = min(env_unwrapped._obstacle_velocities.shape[1], max_obstacles)
         all_vel[:, :n_vel, :] = env_unwrapped._obstacle_velocities[:, :n_vel, :]
+    _vel_fd = _finite_diff_obstacle_vel(env_unwrapped, all_pos_now)
+    _buf_has = all_vel.norm(dim=-1, keepdim=True) > 1e-3
+    all_vel = torch.where(_buf_has, all_vel, _vel_fd)
     all_speed = torch.sqrt(all_vel[:, :, 0] ** 2 + all_vel[:, :, 1] ** 2)
 
     # ------------------------------------------------------------------
@@ -433,6 +463,7 @@ def build_wd_preprocess_targets(
             env_unwrapped, top_k_velocity,
             cos_yaw, sin_yaw, robot_pos_w,
             max_obstacles, device,
+            all_vel_override=all_vel,  # 已含 finite-diff 修復,避免重讀零 buffer/雙更新 cache
         )  # [E, top_k_velocity * 2]
         target = torch.cat([target, vel_targets], dim=-1)
 
