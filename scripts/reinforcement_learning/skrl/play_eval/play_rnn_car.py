@@ -316,6 +316,12 @@ parser.add_argument("--obs_near_goal_radius", type=float, default=OBS_NEAR_GOAL_
 # --- LiDAR 設定 ---
 parser.add_argument("--lidar_no_noise", action="store_true", default=LIDAR_NO_NOISE,
                     help="關閉 LiDAR 雜訊（distractor + Unoise）")
+# 2026-07-03 fix(審計5-A1): play 原本完全沒有此參數也不從 ckpt 繼承 → 以 full_material
+# 訓練的 policy 在「近乾淨 LiDAR」下評估(silent、偏樂觀)。預設 None=自動從 ckpt 繼承。
+parser.add_argument("--vlp16_noise_mode", type=str, default=None,
+                    choices=["ideal", "sigma", "bias", "dropout", "full", "full_material"],
+                    help="VLP-16 實測雜訊 preset。未指定時自動從 checkpoint 繼承(對齊訓練分佈)；"
+                         "要刻意乾淨評估請顯式傳 --vlp16_noise_mode ideal")
 parser.add_argument("--lidar_r_min", type=float, default=LIDAR_R_MIN,
                     help="LiDAR 最小量測距離（盲區）m。實機 VLP16 ≈ 0.9")
 parser.add_argument("--collision_dist", type=float, default=COLLISION_DIST,
@@ -2081,6 +2087,23 @@ def main():
         print("[PLAY] 自動啟用 --lidar_no_noise（從 checkpoint 讀取）")
         args_cli.lidar_no_noise = True
 
+    # 自動繼承 vlp16_noise_mode（2026-07-03 fix 審計5-A1：對齊訓練時的實測雜訊分佈，
+    # 否則 full_material 訓的 policy 會在近乾淨 LiDAR 下評估 → SR/CR 偏樂觀）
+    if getattr(args_cli, "vlp16_noise_mode", None) is None:
+        _saved_vnm = _ckpt_args.get("vlp16_noise_mode")
+        if _saved_vnm:
+            print(f"[PLAY] 自動設定 --vlp16_noise_mode={_saved_vnm}（從 checkpoint 讀取，對齊訓練雜訊）")
+            args_cli.vlp16_noise_mode = _saved_vnm
+
+    # 自動繼承 initial_stage（2026-07-03 fix 審計5-C3：play 預設 stage=1(最簡單)，
+    # 忘傳 --stage 會評到錯的難度 → 未顯式指定時用 ckpt 的訓練 stage）
+    if "--stage" not in sys.argv:
+        _saved_stage = _ckpt_args.get("initial_stage")
+        if _saved_stage and int(_saved_stage) != args_cli.stage:
+            print(f"[PLAY] 自動設定 --stage={_saved_stage}（從 checkpoint initial_stage 讀取；"
+                  f"要評別的難度請顯式傳 --stage）")
+            args_cli.stage = int(_saved_stage)
+
     # ================================================================
     # 3. 環境配置建立與覆寫
     # ================================================================
@@ -2427,26 +2450,42 @@ def main():
             _n_obs = _n_static_play + _n_dynamic_play
             # 動態 slot 使用用戶選擇的行為（而非硬編碼 patrol/random_walk）
             _dynamic_behavior = _effective_behavior  # e.g., "path_crossing", "patrol", etc.
-            if _n_obs > 0 and _n_static_play > 0:
-                _static_frac = _n_static_play / _n_obs
-                _dynamic_frac = 1.0 - _static_frac
-                _play_stage_config = {
-                    "behavior_mix": {
-                        "static": _static_frac,
-                        _dynamic_behavior: _dynamic_frac,
-                    },
-                    "obs_near_goal_count": args_cli.obs_near_goal_count,
-                    "obs_near_goal_radius": args_cli.obs_near_goal_radius,
-                }
-            else:
-                # num_static=0 → 全部使用用戶選擇的動態行為
-                _play_stage_config = {
-                    "behavior_mix": {
-                        _dynamic_behavior: 1.0,
-                    },
-                    "obs_near_goal_count": args_cli.obs_near_goal_count,
-                    "obs_near_goal_radius": args_cli.obs_near_goal_radius,
-                }
+            if _effective_behavior == "mixed":
+                # 2026-07-03 fix(審計5-C1): "mixed" 原本是空殼(字串直接塞進 mix→無效行為名)。
+                # 正解=用訓練 stage config 的 behavior_mix + speed_overrides(CR 才與訓練分佈可比)。
+                if stage_cfg is not None and isinstance(stage_cfg.get("behavior_mix"), dict):
+                    _play_stage_config = {
+                        "behavior_mix": dict(stage_cfg["behavior_mix"]),
+                        "speed_overrides": stage_cfg.get("speed_overrides", {}) or {},
+                        "obs_near_goal_count": args_cli.obs_near_goal_count,
+                        "obs_near_goal_radius": args_cli.obs_near_goal_radius,
+                    }
+                    print(f"[PLAY] mixed → 使用訓練 stage behavior_mix: {_play_stage_config['behavior_mix']}"
+                          f" + speed_overrides({len(_play_stage_config['speed_overrides'])} 項)")
+                else:
+                    print("[PLAY] ⚠ mixed 需要 stage config 的 behavior_mix，但取不到 → fallback patrol")
+                    _dynamic_behavior = "patrol"
+            if _effective_behavior != "mixed" or stage_cfg is None or not isinstance(stage_cfg.get("behavior_mix"), dict):
+                if _n_obs > 0 and _n_static_play > 0:
+                    _static_frac = _n_static_play / _n_obs
+                    _dynamic_frac = 1.0 - _static_frac
+                    _play_stage_config = {
+                        "behavior_mix": {
+                            "static": _static_frac,
+                            _dynamic_behavior: _dynamic_frac,
+                        },
+                        "obs_near_goal_count": args_cli.obs_near_goal_count,
+                        "obs_near_goal_radius": args_cli.obs_near_goal_radius,
+                    }
+                else:
+                    # num_static=0 → 全部使用用戶選擇的動態行為
+                    _play_stage_config = {
+                        "behavior_mix": {
+                            _dynamic_behavior: 1.0,
+                        },
+                        "obs_near_goal_count": args_cli.obs_near_goal_count,
+                        "obs_near_goal_radius": args_cli.obs_near_goal_radius,
+                    }
             # 從 event params 讀取 boundary 和 spawn_zones（T 走廊等非矩形場景）
             _obs_evt = getattr(env_cfg.events, "randomize_obstacles", None)
             _spawn_zones = None
