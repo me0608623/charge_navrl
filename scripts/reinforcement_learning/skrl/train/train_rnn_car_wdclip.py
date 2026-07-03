@@ -2667,6 +2667,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 # 多幀:把 (K-1) 幀歷史 LiDAR 附在 extractor 輸入尾端。重要路徑(rollout/recompute/aux)
                 #   傳真歷史;未傳則 fallback 複製當前幀(無運動)防 crash。
                 if lidar_hist is None:
+                    # 2026-07-03: fallback 從 silent 變 loud — 假歷史(複製當前幀=無運動資訊)
+                    # 曾讓 aux_epochs/CPC/rnn_rl_grad/use_ppo-aux 多條路徑靜默用假幀(審計 C1-C4)。
+                    if not getattr(_charge_features_for_rnn, "_fake_hist_warned", False):
+                        _charge_features_for_rnn._fake_hist_warned = True
+                        import traceback
+                        print("[WARN][frame_stack] _charge_features_for_rnn 未傳 lidar_hist → "
+                              "fallback 複製當前幀(無運動資訊)。呼叫點:")
+                        traceback.print_stack(limit=4)
                     _cur_lidar = _ext_in[:, LIDAR_START:LIDAR_END]
                     lidar_hist = _cur_lidar.repeat(1, args_cli.lidar_frame_stack - 1)
                 _ext_in = torch.cat([_ext_in, lidar_hist], dim=-1)
@@ -3511,8 +3519,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _rgdr_episode_reward += reward_flat.detach()
 
             # --- 5. Metrics：記錄本步指標 ---
+            # 2026-07-03 fix: rule_based(_obs_agent_active=False)下 obs_obs/obs_act 是 zeros
+            # placeholder → obstacle/mean_speed 等變「假數據恆0」；改傳 None = 缺席而非假值
             metrics.step(obs, reward, done, info,
-                         obs_obs=obs_obs, obs_actions=obs_act.reshape(num_envs, N_obs, 2),
+                         obs_obs=(obs_obs if _obs_agent_active else None),
+                         obs_actions=(obs_act.reshape(num_envs, N_obs, 2) if _obs_agent_active else None),
                          reward_breakdown=reward_breakdown,
                          goal_diagnostics=goal_diagnostics,
                          charge_actions=charge_action_diagnostics,
@@ -3612,7 +3623,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             _h0x = torch.zeros_like(_h0x)
                         _Bx, _Lx = _os.shape[0], _os.shape[1]
                         _of = obs_normalizer.normalize(_os.reshape(_Bx * _Lx, -1))
-                        _ff = _charge_features_for_rnn(_of)
+                        # 2026-07-03 fix(C3): 此迴圈原本沒建多幀歷史 → frame_stack>1 時
+                        # fallback 複製當前幀 → aux_epochs 的前 N-1 次更新全用假歷史(silent)。
+                        # 歷史 mf4 run2(aux_epochs 8 + frame_stack 4)因此 7/8 次更新被汙染。
+                        _lhx = None
+                        if args_cli.lidar_frame_stack > 1:
+                            _on_x = _of.reshape(_Bx, _Lx, -1)
+                            _ld_x = _on_x[..., LIDAR_START:LIDAR_END]
+                            _hfx = []
+                            for _jx in range(1, args_cli.lidar_frame_stack):
+                                _shx = torch.zeros_like(_ld_x)
+                                _shx[:, _jx:] = _ld_x[:, :-_jx]
+                                _hfx.append(_shx)
+                            _lhx = torch.cat(_hfx, dim=-1).reshape(_Bx * _Lx, -1)
+                        _ff = _charge_features_for_rnn(_of, lidar_hist=_lhx)
                         _fs = _ff.reshape(_Bx, _Lx, -1).permute(1, 0, 2).contiguous()  # [L,B,*] 已修 reshape
                         _, _ps, _ = preprocess_rnn(_fs, _h0x, training=True)
                         _te = _ts.permute(1, 0, 2)[_burn_in:]
@@ -3698,7 +3722,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     # 獨立 fresh forward(不重用 regression graph)。q=proj_q(rnn_out), k=proj_k(pos_target)。
                     # InfoNCE:常數 hidden 對所有樣本 sim 相同→無法對上對角正樣本→高 loss→逼 RNN 編碼。
                     if args_cli.aux_cpc and charge_opt_cpc is not None:
-                        _feat_cpc = _charge_features_for_rnn(obs_normed_aux)            # fresh extractor
+                        # 2026-07-03 fix(C4): 補傳 _lhist_aux(原漏傳→frame_stack>1 時假歷史)
+                        _feat_cpc = _charge_features_for_rnn(obs_normed_aux, lidar_hist=_lhist_aux)  # fresh extractor
                         _Lc, _Bc = L_seq, B_seq
                         # ★同 BUG FIX:_feat_cpc 是 [B*L] batch-major,要 reshape(B,L).permute→[L,B]
                         _fc_c = preprocess_rnn.fc_front(_feat_cpc).reshape(_Bc, _Lc, -1).permute(1, 0, 2).contiguous()
@@ -4440,7 +4465,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             stage = wd.get("curriculum/stage", 0)
             sr = wd.get("charge/goal_reach_rate", 0)
             cr = wd.get("charge/hit_probability", 0)
-            rwd = wd.get("charge/reward_mean", 0)
+            rwd = wd.get("reward/episode_mean", 0)  # 2026-07-03 fix: key 改名後 consumer 沒跟上(恆0)
             goal_v = wd.get("goal_diagnostics/velocity_to_goal_mean", 0)
             goal_d = wd.get("goal_diagnostics/distance_delta_mean", 0)
             goal_h = wd.get("goal_diagnostics/heading_error_abs_mean_deg", 0)
@@ -4505,7 +4530,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # --- rl/* = canonical RL metrics (single source of truth) ---
             log_data.update({
-                "rl/return_mean": wd.get("charge/reward_mean", 0),
+                "rl/return_mean": wd.get("reward/episode_mean", 0),  # 2026-07-03 fix: key 改名(恆0)
                 "rl/success_rate": wd.get("charge/goal_reach_rate", 0),
                 "rl/collision_rate": wd.get("charge/hit_probability", 0),
                 "rl/timeout_rate": _timeout_rate,

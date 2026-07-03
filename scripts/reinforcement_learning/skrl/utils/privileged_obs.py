@@ -83,16 +83,30 @@ def _extract_obstacles(
             _slot_present[i] = True
             cur_xy[:, i] = torch.nan_to_num(
                 env.scene[_name].data.root_pos_w[:, :2], nan=0.0)
-    prev_xy = getattr(env, "_privobs_prev_obs_xy", None)
-    if prev_xy is not None and prev_xy.shape == cur_xy.shape:
-        delta = cur_xy - prev_xy                          # [E, 10, 2]
-        step_dist = delta.norm(dim=-1)                    # [E, 10]
-        # teleport/reset guard: >0.5 m in one step is a respawn, not motion
-        moved_ok = (step_dist <= 0.5).unsqueeze(-1)
-        vel_fd = torch.where(moved_ok, delta / _dt, torch.zeros_like(delta))
+    # Per-step memo (2026-07-03 fix): bootstrap 在 rollout 結尾多 extract 一次(同一 sim 步)
+    # → cache 被更新成當前位置 → 下一 iteration 的 step 0 Δ=0 → 速度歸 0(每 rollout 1/RL 步汙染)。
+    # 同 wd_aux_targets 配方: 同一 common_step_counter 內重複呼叫直接回 memo、不動 cache。
+    _step_id = getattr(env, "common_step_counter", None)
+    if _step_id is not None and getattr(env, "_privobs_fd_step", None) == _step_id:
+        _memo = getattr(env, "_privobs_fd_vel", None)
+        if _memo is not None and _memo.shape == cur_xy.shape:
+            vel_fd = _memo
+        else:
+            vel_fd = torch.zeros_like(cur_xy)
     else:
-        vel_fd = torch.zeros_like(cur_xy)
-    env._privobs_prev_obs_xy = cur_xy.detach().clone()
+        prev_xy = getattr(env, "_privobs_prev_obs_xy", None)
+        if prev_xy is not None and prev_xy.shape == cur_xy.shape:
+            delta = cur_xy - prev_xy                          # [E, 10, 2]
+            step_dist = delta.norm(dim=-1)                    # [E, 10]
+            # teleport/reset guard: >0.5 m in one step is a respawn, not motion
+            moved_ok = (step_dist <= 0.5).unsqueeze(-1)
+            vel_fd = torch.where(moved_ok, delta / _dt, torch.zeros_like(delta))
+        else:
+            vel_fd = torch.zeros_like(cur_xy)
+        env._privobs_prev_obs_xy = cur_xy.detach().clone()
+        if _step_id is not None:
+            env._privobs_fd_step = _step_id
+            env._privobs_fd_vel = vel_fd.detach().clone()
 
     for i in range(MAX_OBSTACLES):
         obs_name = f"obstacle_{i}"

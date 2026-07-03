@@ -181,7 +181,9 @@ class MetricsCollector:
         if "log" in info:
             for key, val in info["log"].items():
                 if key.startswith("Curriculum/"):
-                    k = key.replace("Curriculum/", "")
+                    # 2026-07-03 fix: key 格式是 Curriculum/{term}/{leaf}，原本只剝前綴
+                    # → 存成 "{term}/stage" → 下游 .get("stage") 永遠 miss → stage/參數同步全失效
+                    k = key.split("/")[-1]
                     try:
                         self._curriculum_info[k] = val.item() if isinstance(val, torch.Tensor) else float(val)
                     except (ValueError, TypeError):

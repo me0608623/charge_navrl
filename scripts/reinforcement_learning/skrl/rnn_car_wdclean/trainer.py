@@ -1093,7 +1093,7 @@ def run(args_cli, headless_mode: bool):
                 stage = wd.get("curriculum/stage", 0)
                 sr = wd.get("charge/goal_reach_rate", 0)
                 cr = wd.get("charge/hit_probability", 0)
-                rwd = wd.get("charge/reward_mean", 0)
+                rwd = wd.get("reward/episode_mean", 0)  # 2026-07-03 fix: key 改名後 consumer 沒跟上(恆0)
                 goal_v = wd.get("goal_diagnostics/velocity_to_goal_mean", 0)
                 goal_d = wd.get("goal_diagnostics/distance_delta_mean", 0)
                 goal_h = wd.get("goal_diagnostics/heading_error_abs_mean_deg", 0)
@@ -1142,7 +1142,7 @@ def run(args_cli, headless_mode: bool):
                 log_data = {}
 
                 log_data.update({
-                    "rl/return_mean": wd.get("charge/reward_mean", 0),
+                    "rl/return_mean": wd.get("reward/episode_mean", 0),  # 2026-07-03 fix: key 改名(恆0)
                     "rl/success_rate": wd.get("charge/goal_reach_rate", 0),
                     "rl/collision_rate": wd.get("charge/hit_probability", 0),
                     "rl/timeout_rate": _timeout_rate,

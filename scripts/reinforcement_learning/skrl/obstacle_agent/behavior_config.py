@@ -255,7 +255,19 @@ class BehaviorConfig:
         for section_name, params in overrides.items():
             section = getattr(self, section_name, None)
             if section is None:
+                print(f"[BehaviorConfig] ⚠ stage override 指向不存在的 section '{section_name}' — 忽略")
                 continue
             for key, value in params.items():
+                # 2026-07-03 fix: occlusion 沒有單一 speed_range(分 front/back)，
+                # SA7/8 的 speed_overrides.occlusion.speed_range 曾被 hasattr 靜默丟棄
+                # (silent no-op)。語意映射: speed_range → back(target)=原範圍、
+                # front(blocker)=0.7×(維持「前慢後快」的遮擋結構)。
+                if section_name == "occlusion" and key == "speed_range" and not hasattr(section, key):
+                    section.back_speed_range = (value[0], value[1])
+                    section.front_speed_range = (round(value[0] * 0.7, 3), round(value[1] * 0.7, 3))
+                    continue
                 if hasattr(section, key):
                     setattr(section, key, value)
+                else:
+                    # 反 silent no-op: 打錯字/schema 不符的 override 必須看得見
+                    print(f"[BehaviorConfig] ⚠ override {section_name}.{key} 無此屬性 — 忽略 (檢查 stage config)")
