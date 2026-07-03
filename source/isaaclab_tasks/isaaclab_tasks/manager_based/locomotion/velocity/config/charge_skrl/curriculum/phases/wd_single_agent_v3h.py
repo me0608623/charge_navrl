@@ -27,12 +27,20 @@ from .wd_single_agent_v3e import STAGES as _V3E_STAGES
 
 # v3h:head_on 小比例(原 v3/v3e 在 SA3-5 是 0.20)
 HEAD_ON_SMALL_V3H = 0.05
+# v3h (2026-07-03 用戶決策, oracle 100k 裁決後):
+#   1. goal_move 全移除 — 「goal 主動移動(尤其 toward_obstacle 拖進障礙群)」是人工加難裝置,
+#      真實部署 goal 不會動;oracle 證實此類碰撞多屬物理不可避,移除以對齊真實場景。
+#   2. head_on 速度 (0.30,0.60)→(0.30,0.50) — 對齊真實行人衝撞速度,並把 closing speed
+#      上限從 1.6 降到 1.5 m/s,留出物理可反應窗(head_on 觸發距離推導 ~3m)。
+HEAD_ON_SPEED_V3H = (0.30, 0.50)
 
 
 def _patch_head_on(stage: dict) -> dict:
-    """deep-copy v3e stage 後,把 head_on 比例降到 HEAD_ON_SMALL_V3H;
-    多出的比例分給 horizontal_crossing(沒有則給 patrol),保持 mix 總和不變。
-    只動 head_on > 小比例 的 stage(SA3/4/5);其餘(SA1/2/6/7 無 head_on)原封不動。"""
+    """deep-copy v3e stage 後套 v3h 補丁:
+    (a) head_on 比例降到 HEAD_ON_SMALL_V3H(多出比例給 horizontal_crossing/patrol);
+    (b) goal_move 移除(goal_move_speed=0);
+    (c) head_on speed_range 壓到 HEAD_ON_SPEED_V3H。
+    無該欄位的 stage(SA1/2 等)原封不動。"""
     s = copy.deepcopy(stage)
     mix = s.get("behavior", {}).get("behavior_mix")
     if isinstance(mix, dict) and mix.get("head_on", 0.0) > HEAD_ON_SMALL_V3H:
@@ -42,6 +50,15 @@ def _patch_head_on(stage: dict) -> dict:
             mix["horizontal_crossing"] = round(mix["horizontal_crossing"] + excess, 6)
         elif "patrol" in mix:
             mix["patrol"] = round(mix["patrol"] + excess, 6)
+    # (b) goal_move 移除 (2026-07-03)
+    scene = s.get("scene")
+    if isinstance(scene, dict) and scene.get("goal_move_speed", 0.0) > 0.0:
+        scene["goal_move_speed"] = 0.0
+        scene["goal_move_angular_speed"] = 0.0
+    # (c) head_on 速度壓到 0.3-0.5 (2026-07-03)
+    overrides = s.get("behavior", {}).get("speed_overrides")
+    if isinstance(overrides, dict) and "head_on" in overrides:
+        overrides["head_on"]["speed_range"] = HEAD_ON_SPEED_V3H
     return s
 
 
