@@ -3399,6 +3399,22 @@ def main():
         print(f"  超時率:             {stats_timeout:4d} ({to:.1f}%)")
         print(f"  其他:               {stats_other:4d}")
         print(f"  平均步數/回合:      {avg_steps:.1f}")
+        # --- 碰撞 × 障礙行為分項 (2026-07-03: robot_state 逐 slot record_collisions 累計) ---
+        if _play_behavior_scheduler is not None:
+            try:
+                from obstacle_agent.behavior_config import BEHAVIOR_NAMES as _BNAMES
+                _cbt = _play_behavior_scheduler._collision_by_type
+                _bc = {name: int(_cbt[bid].item()) for bid, name in _BNAMES.items()
+                       if bid != 0 and _cbt[bid].item() > 0}
+                if _bc:
+                    _tot_bc = sum(_bc.values())
+                    print("  碰撞 × 障礙行為分項:")
+                    for name, cnt in sorted(_bc.items(), key=lambda x: -x[1]):
+                        print(f"    {name:22s} {cnt:4d} ({cnt/_tot_bc*100:.1f}%)")
+                else:
+                    print("  碰撞 × 障礙行為分項: 無障礙碰撞紀錄")
+            except Exception as _e:  # noqa: BLE001 — 分項統計失敗不影響摘要
+                print(f"  碰撞 × 障礙行為分項: 取得失敗 ({type(_e).__name__})")
     else:
         print("  未完成任何回合。")
     if args_cli.play_diag and diag_samples > 0:
