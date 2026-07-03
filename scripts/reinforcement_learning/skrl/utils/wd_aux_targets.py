@@ -202,6 +202,14 @@ def _finite_diff_obstacle_vel(env_unwrapped, all_pos_now: torch.Tensor) -> torch
     修法同 privileged_obs.py: Δpos/dt + teleport guard (>0.5 m/step 視為 reset)。
     每個 sim step 只能呼叫一次 (cache 依呼叫更新)。
     """
+    # Per-step memo: play/train 迴圈同一步可能多處呼叫 build_wd_preprocess_targets
+    # (probe 收集/oracle 收集/aux 診斷)。若每呼叫都更新 cache,第二次 Δpos=0 → 速度歸 0。
+    # 用 common_step_counter 判「同一步」→ 回傳上次算好的速度,不動 cache。
+    step_id = getattr(env_unwrapped, "common_step_counter", None)
+    if step_id is not None and getattr(env_unwrapped, "_wdaux_fd_step", None) == step_id:
+        memo = getattr(env_unwrapped, "_wdaux_fd_vel", None)
+        if memo is not None and memo.shape == all_pos_now.shape:
+            return memo
     dt = float(getattr(env_unwrapped, "step_dt", 0.2)) or 0.2
     prev = getattr(env_unwrapped, "_wdaux_prev_obs_xy", None)
     if prev is not None and prev.shape == all_pos_now.shape:
@@ -211,6 +219,9 @@ def _finite_diff_obstacle_vel(env_unwrapped, all_pos_now: torch.Tensor) -> torch
     else:
         vel_fd = torch.zeros_like(all_pos_now)
     env_unwrapped._wdaux_prev_obs_xy = all_pos_now.detach().clone()
+    if step_id is not None:
+        env_unwrapped._wdaux_fd_step = step_id
+        env_unwrapped._wdaux_fd_vel = vel_fd.detach().clone()
     return vel_fd
 
 
