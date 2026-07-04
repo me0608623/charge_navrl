@@ -1,0 +1,151 @@
+# wd_sa4_v3f_hofix — v3f 88.5 政策的畢業補強 fine-tune (+1.5 → 90, 2026-07-05)
+#
+# ★ 出發點: sa4_v3f/checkpoint_420000 = 全血緣最強 SA4 政策 (det: stage4 88.5 / stage3 93.0 /
+#   stage1,2 98.8 — 只差 stage4 的 1.5 分就全階段 ≥90)。
+# ★ 其 det 弱點 = head_on (stage4 碰撞 30% / stage3 44.6%) — 但它訓練時從沒見過 head_on。
+# ★ 本臂 = 配方完全不動 (vanilla RNN + aux1, 歷史零崩盤), 只換考場對齊部署:
+#   1. curriculum v3e → v3h (head_on 0.05 slow 0.3-0.5 + goal random_walk + 07-04 patch)
+#      → 讓政策首次「見過」head_on, 對症補其最大 det 弱點。
+#   2. LiDAR 換實測雜訊 full_material (E1 證 v3f 政策在此雜訊下 0 掉分, 訓練加入=sim2real 誠實免費)。
+#      舊 v3f 合成雜訊參數 (hole_rate/displacement/block) 全部移除避免疊加。
+# ⚠️ 原 420k ckpt 不動 (本臂存新 run dir)。fine-tune 預算 180k, 每 30k ckpt 供 det 驗收。
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa4_v3f_hofix --headless \
+#     --checkpoint logs/rnn_car/sa4_v3f_ne1024_s42/checkpoint_420000.pt \
+#     --run_name sa4_v3f_ne1024_s42_hofix
+
+name: wd_sa4_v3f_hofix
+description: "SA4 v3f hofix: 88.5 政策 fine-tune 補 head_on 弱點 (curriculum v3h + full_material), 配方不動 (vanilla RNN+aux1)。From sa4_v3f/checkpoint_420000。目標 stage4 det ≥90。"
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3h   # ★hofix: 對齊部署場景 (head_on 0.05 slow + goal random_walk)
+initial_stage: 4
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 180000            # ★hofix: fine-tune 預算
+seed: 42
+
+# --- RL optimizer (與 SA3 stage 一致) ---
+lr: 0.0005
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0005  # reluFix:解凍 extractor
+vf_coeff: 0.5
+gamma: 0.994
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 1.0
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.005
+ent_coeff_angular: 0.02
+
+# --- v3f: 無 act_hist → dropout 無意義 ---
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64, 維持 SA1_v3f) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.85
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (全噪聲 ON，50% 校準) ---
+lidar_no_noise: false
+vlp16_noise_mode: full_material   # ★hofix: 實測雜訊 (E1 證 0 掉分), 取代舊合成參數
+
+# --- Sim-to-Real DR (延遲 DR 保留：馬達延遲是治實車極限環藥方) ---
+no_domain_randomization: false
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (修好版：關閉，原 [0,1] 是 sin 波兇手)
+obs_delay_steps: [0, 0]  # 2026-06-20 obs_delay 誤植→關閉(原[0,1]害 policy 滿舵);馬達延遲 actuator_dr 保留
+# Heading stability (off)
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume ---
+checkpoint: logs/rnn_car/sa4_v3f_ne1024_s42/checkpoint_420000.pt  # ★hofix 出發點 (det 88.5)
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa4, v3f, hofix, a2c, aux, asymmetric, rnn64, velocity_aux, rmin025, no_act_hist, obs79d, smoothness0, obsdelay0, spatial_plan]
+notes: "SA4 v3f: stage 4 空間規劃 (goals 2/dynamic 5/goal movement/penalty -15). From SA3_v3f 修好版 cont/checkpoint_180000 (obs_delay 修好無 sin 波). obs 79D, curriculum v3e (penalty_smoothness=0). 延遲 DR: 馬達延遲保留 + 觀測延遲關閉."
