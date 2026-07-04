@@ -75,8 +75,8 @@ clip_eps: 0.2
 
 # --- Entropy (SA3 stage: 0.005/0.02) ---
 ent_coeff: 0.0
-ent_coeff_linear: 0.005
-ent_coeff_angular: 0.02
+ent_coeff_linear: 0.0075   # ★07-04 崩盤緩解: 0.005→0.0075 (48-52k VE斷崩,entropy 0.44 薄緩衝+連續 grad 5+ burst)
+ent_coeff_angular: 0.03    # ★07-04 崩盤緩解: 0.02→0.03 (預案第一級 ent floor;CLI 非零值優先於 curriculum sync)
 
 # --- v3f: 無 act_hist → dropout 無意義 ---
 act_hist_dropout: 0.0
