@@ -23,7 +23,7 @@ description: "SA4 v3i: 空間規劃 (dynamic 5) + full_material 實測雜訊 + v
 
 # --- Environment / curriculum ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
-curriculum_version: warp_drive_single_agent_v3h   # v3h: SA3-5 head_on 小比例(0.05)
+curriculum_version: warp_drive_single_agent_v3i   # ★v3i curriculum(07-05): v3h + actor cap 8→4 (抗 aux1 崩盤,場景完全同 v3h)
 initial_stage: 4
 fixed_stage: true
 scene_profile: warp_drive_single_agent_v3
@@ -84,7 +84,7 @@ act_hist_dropout: 0.0
 # --- WD-style gradient caps ---
 wd_update_clip: true
 wd_update_monitor_only: false
-wd_actor_update_clip: 8.0
+wd_actor_update_clip: 4.0   # ★07-05 第二次崩盤緩解: 8→4 (killer burst=norm 5-7;實際生效值來自 v3i curriculum sync)
 wd_critic_update_clip: 30.0
 wd_module_entropy_eps: 0.000000000001
 policy_loss_clamp: 20.0
