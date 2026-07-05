@@ -324,6 +324,10 @@ parser.add_argument("--penalty_speed_near_obs", type=float, default=-1.0,
                     help="Reactive clearance-gated speed penalty weight w. <0=用 curriculum 值(預設,不影響). "
                          ">=0=CLI 覆寫(SA4-reactive 用 0.8):近障礙[d_stop 0.45m,d_react 1.2m]區內罰 -(w/fps)·p²·v_fwd, "
                          "p=clip((d_react-d)/(d_react-d_stop),0,1). 對症動態障礙晚反應,不靠 RNN 預測.")
+# --penalty_hit (碰撞懲罰 CLI 覆寫; 0=用 curriculum 值(-5), !=0 時壓過, 例 -15 讓膨脹圈咬得痛)
+parser.add_argument("--penalty_hit", type=float, default=0.0,
+                    help="Collision penalty override. 0=curriculum (-5). e.g. -15: 讓 obs_collision_base 膨脹圈"
+                         "有足夠期望損失強迫繞行 (診斷: -5×32%%碰撞率≈-1.6 與繞路成本同級, policy 吃罰不繞).")
 # --gap_heading_weight (reactive 轉彎閃避:近障礙時獎勵 heading 朝最大可通行間隙,往側邊空隙轉)
 parser.add_argument("--gap_heading_weight", type=float, default=0.0,
                     help="Gap-heading reward weight (轉彎閃避 head-on). 0=off. >0: 障礙近(d_safe<2m)時找最大可通行"
@@ -3307,6 +3311,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         # Sync WD reward params from curriculum (per-phase) via reward module
         _spot_penalty_hit = metrics._curriculum_info.get("spot_penalty_hit", -5.0)
+        # ★07-05 CLI 覆寫(同 penalty_speed_near_obs 模式): !=0 時壓過 curriculum。
+        #   用途: deployv3 膨脹臂 penalty -5→-15 (期望損失 -5×32%≈-1.6 太便宜, policy 吃罰不繞)。
+        if getattr(args_cli, "penalty_hit", 0.0) != 0.0:
+            _spot_penalty_hit = args_cli.penalty_hit
+            metrics._curriculum_info["spot_penalty_hit"] = _spot_penalty_hit
         _spot_reward_get_goal = metrics._curriculum_info.get("spot_reward_get_goal", 40.0)
         _spot_cost_operate = metrics._curriculum_info.get("spot_cost_operate", 0.0)
         _spot_penalty_timeout = metrics._curriculum_info.get("spot_penalty_timeout", 0.0)
