@@ -745,12 +745,26 @@ def apply_arena_size(env_cfg, arena_size: float) -> None:
         ]
         init_evt.params["room_boundary"] = new_half
 
-    # 5. 目標命令：距離與牆界等比例縮放，並夾在可達上限內
+    # 5. 目標命令：距離與牆界等比例縮放，並夾在可達上限內。
+    #    ⚠️ 若使用者「明確」用 --goal_distance_min/max 指定距離，就尊重該值、不隨 arena
+    #    ratio 縮放（否則顯式 CLI 會被 arena 靜默蓋掉，例如 arena_size=12 → r=0.6 讓
+    #    設定的 5.0 變 3.0）。仍套用 reach_max 物理可達上限夾限以免目標落到牆外。
     gc = env_cfg.commands.goal_command
     dmin, dmax = gc.ranges.distance
     reach_max = max(1.0, new_half * 2 - 1.5)
-    gc.ranges.distance = (min(dmin * r, reach_max), min(dmax * r, reach_max))
+    _goal_dist_explicit = (
+        _cli_flag_provided(("--goal_distance_min",))
+        or _cli_flag_provided(("--goal_distance_max",))
+    )
+    _dist_scale = 1.0 if _goal_dist_explicit else r
+    gc.ranges.distance = (min(dmin * _dist_scale, reach_max), min(dmax * _dist_scale, reach_max))
     gc.wall_boundary = 9.5 * r
+    if _goal_dist_explicit:
+        print(
+            f"[PLAY] --goal_distance_* 為顯式指定 → arena 縮放不套用於目標距離 "
+            f"(保持 {gc.ranges.distance[0]:.1f}~{gc.ranges.distance[1]:.1f}m; "
+            f"注意 wall_boundary≈{9.5 * r:.1f}m 仍可能把過遠目標夾短)"
+        )
 
     print(
         f"[PLAY] Arena 縮放: {ARENA_REF_SIZE:.0f}×{ARENA_REF_SIZE:.0f}m → "
@@ -2270,6 +2284,11 @@ def main():
         print(f"[PLAY] 多幀 LiDAR: frame_stack={lidar_frame_stack} "
               f"(extractor Conv1d 吃 {lidar_frame_stack} 幀;rollout 維護歷史 buffer 餵 probe)")
     zero_preprocess = ckpt_args.get("zero_preprocess_feature_for_rl", False)  # RNN 特徵是否歸零
+    # ★07-06 消融開關: 環境變數 PLAY_ZERO_RNN_FEAT=1 → 推論時把 12D RNN 特徵歸零
+    #   (量測 RNN 通道對 policy 的因果貢獻, 不需重訓; det eval 前後對照即為貢獻分數)
+    if os.environ.get("PLAY_ZERO_RNN_FEAT", "0") == "1":
+        zero_preprocess = True
+        print("[PLAY] 消融: PLAY_ZERO_RNN_FEAT=1 → RNN 12D 特徵歸零 (量測記憶通道貢獻)")
     max_active_obstacles = int(ckpt_args.get("max_active_obstacles", 10))  # aux 用的最大障礙物數
     if zero_preprocess:
         print("[PLAY] --zero_preprocess_feature_for_rl 啟用: RL head 的 RNN 特徵被歸零")
