@@ -3463,14 +3463,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _lnorm = obs[:, 6:78]                                       # [E,72] norm[0,1]
                     _lm = torch.where(_lnorm < 0.02, torch.ones_like(_lnorm), _lnorm) * _LIDAR_MAX_DISTANCE_M  # hole→max(m)
                     _gactive = (_lm.min(dim=1).values < 2.0)                   # d_safe<2m 才啟用
-                    _passable = _lm > 0.9                                      # min_gap_width
-                    _pext = torch.cat([_passable, _passable], dim=1)           # [E,144] 環形
-                    _cs = _pext.float().cumsum(dim=1)
-                    _rb = (_cs * (~_pext).float()).cummax(dim=1).values
+                    # ★07-05 修正(用戶抓漏): gap 搜尋限前方半圓 ±90°(bins 18..54, bin36=正前)。
+                    #   全圓搜尋時,單一前方障礙的「最大弧段」= 繞車尾一大圈 → 中心=正後方
+                    #   → cos 梯度指向掉頭,病態。FGM 慣例=只在前進扇區找 gap;
+                    #   前方無 gap → 本項 0(減速罰接手)。窗內 cos∈[0,1] 恆非負。
+                    _fwd = _lm[:, 18:55]                                       # [E,37] −90°..+90°
+                    _passable = _fwd > 0.9                                     # 深度門檻(m)
+                    _cs = _passable.float().cumsum(dim=1)
+                    _rb = (_cs * (~_passable).float()).cummax(dim=1).values
                     _runl = _cs - _rb                                          # 連續可通行長度
                     _mrl, _mre = _runl.max(dim=1)
-                    _gci = (_mre.float() - _mrl.float() / 2).long() % 72       # gap 中心 bin
-                    _bin_ang = (_gci.float() * 5.0 - 180.0) * (math.pi / 180.0)  # bin36→0=正前方
+                    _gci = _mre.float() - _mrl.float() / 2 + 18.0              # gap 中心 bin(全域座標)
+                    _bin_ang = (_gci * 5.0 - 180.0) * (math.pi / 180.0)        # bin36→0=正前方
                     _gap_r = torch.cos(_bin_ang) * _gactive.float() * (_mrl > 0).float()
                     _gap_r = _gap_r * (obs[:, 1].abs() > 0.05).float()         # 速度門檻:靜止不給
                 _gap_term = (args_cli.gap_heading_weight * 0.2) * _gap_r       # ×dt(=1/rl_fps5) per-step dense
