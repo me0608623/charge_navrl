@@ -1703,6 +1703,9 @@ class MetricsCollector:
         # (only logged when at least one env is near an obstacle)
         self._action_speed_x_near_obs: list[float] = []
         self._lidar_near_obs_env_count: list[float] = []
+        # ★07-06 前錐減速指標(密集階段技能監控): 前方±30°錐(bin36±6) min<1.2m 時的前進速度
+        self._action_speed_x_front_blocked: list[float] = []
+        self._front_blocked_env_count: list[float] = []
 
         # --- Termination counters ---
         self._goal_reached = 0
@@ -1934,6 +1937,13 @@ class MetricsCollector:
                 v_near = v_x[near_mask].float().mean().item()
                 self._action_speed_x_near_obs.append(v_near)
                 self._lidar_near_obs_env_count.append(float(n_near))
+            # ★前錐減速: bin36=正前, ±6 bins=±30°; 門檻 0.12(norm)=1.2m 對齊 react d_react
+            front_min = lidar_clean[:, 30:43].min(dim=-1).values                     # [E]
+            front_blocked = (~torch.isinf(front_min)) & (front_min < 0.12)
+            n_fb = int(front_blocked.sum().item())
+            if n_fb > 0 and charge_actions is not None:
+                self._action_speed_x_front_blocked.append(v_x[front_blocked].float().mean().item())
+                self._front_blocked_env_count.append(float(n_fb))
 
             remaining = self.action_table_sample_size - len(self._action_speed_accel_rows)
             if remaining > 0:
@@ -2210,6 +2220,9 @@ class MetricsCollector:
         if self._action_speed_x_near_obs:
             m["charge/speed_x_near_obs_mean"] = float(np.mean(self._action_speed_x_near_obs))
             m["charge/near_obs_env_count_mean"] = float(np.mean(self._lidar_near_obs_env_count))
+        if self._action_speed_x_front_blocked:
+            m["charge/speed_fwd_front_blocked_mean"] = float(np.mean(self._action_speed_x_front_blocked))
+            m["charge/front_blocked_env_count_mean"] = float(np.mean(self._front_blocked_env_count))
 
         # --- All Isaac Lab reward terms (raw) ---
         for k, vals in self._reward_terms.items():
