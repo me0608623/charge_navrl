@@ -50,6 +50,7 @@ def compute_wd_charge_reward(
     penalty_speed_near_obs: float = 0.0,
     near_obs_dist_m: torch.Tensor | None = None,
     v_forward_m: torch.Tensor | None = None,
+    teardrop_gate: torch.Tensor | None = None,  # ★07-06 水滴稅: 預算 max_i(p(d_i)²·max(cosθ_i,0))∈[0,1]
     near_obs_d_react: float = 1.2,
     near_obs_d_stop: float = 0.45,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -173,20 +174,24 @@ def compute_wd_charge_reward(
     #   → 慢下來(v→0)即免罰(就算貼障礙),鼓勵「減速通過」而非凍結
     #   → dense(每步在區內都給)→ 直接塑造中段全速行為,換反應時間
     # 預設 w=0 → 不影響其他 stage(單變因,向後相容)。
+    # ★07-06 水滴稅 (teardrop): 若給 teardrop_gate 則用它 (per-bin p²·cosθ 取 max, 前伸側窄),
+    #   否則退回原 clearance-gated (全向 min 標量 p²)。兩者皆 ×v_fwd = 速度門控 (慢下免罰, 不凍結)。
     speed_near_obs_reward = torch.zeros(N, device=device)
-    if (
-        penalty_speed_near_obs > 0
-        and near_obs_dist_m is not None
-        and v_forward_m is not None
-    ):
-        d = near_obs_dist_m.to(device).float()
+    if penalty_speed_near_obs > 0 and v_forward_m is not None:
         v_fwd = v_forward_m.to(device).float().clamp(min=0.0)
-        denom = max(near_obs_d_react - near_obs_d_stop, 1e-3)
-        p = ((near_obs_d_react - d) / denom).clamp(0.0, 1.0)
-        speed_near_obs_reward = -(penalty_speed_near_obs / rl_fps) * p.pow(2) * v_fwd
-        alive = ~terminated_flat
-        speed_near_obs_reward = speed_near_obs_reward * alive.float()
-        reward += speed_near_obs_reward
+        if teardrop_gate is not None:
+            gate = teardrop_gate.to(device).float().clamp(0.0, 1.0)   # [E], 已含 p²·max(cosθ,0)
+        elif near_obs_dist_m is not None:
+            d = near_obs_dist_m.to(device).float()
+            denom = max(near_obs_d_react - near_obs_d_stop, 1e-3)
+            gate = ((near_obs_d_react - d) / denom).clamp(0.0, 1.0).pow(2)
+        else:
+            gate = None
+        if gate is not None:
+            speed_near_obs_reward = -(penalty_speed_near_obs / rl_fps) * gate * v_fwd
+            alive = ~terminated_flat
+            speed_near_obs_reward = speed_near_obs_reward * alive.float()
+            reward += speed_near_obs_reward
 
     # --- Timeout penalty (truncated but not terminated = episode 時間到但未碰撞/未到達目標) ---
     timeout_reward = torch.zeros(N, device=device)

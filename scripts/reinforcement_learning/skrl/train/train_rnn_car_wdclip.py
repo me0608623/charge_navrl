@@ -328,6 +328,13 @@ parser.add_argument("--penalty_speed_near_obs", type=float, default=-1.0,
 parser.add_argument("--penalty_hit", type=float, default=0.0,
                     help="Collision penalty override. 0=curriculum (-5). e.g. -15: 讓 obs_collision_base 膨脹圈"
                          "有足夠期望損失強迫繞行 (診斷: -5×32%%碰撞率≈-1.6 與繞路成本同級, policy 吃罰不繞).")
+# --near_obs_teardrop (水滴形速度稅: per-bin p(d)²·max(cosθ,0)·v_fwd 取max; 前伸側窄+速度門控)
+parser.add_argument("--near_obs_teardrop", action="store_true", default=False,
+                    help="水滴稅(07-06): react 減速罰改用 per-bin p²·max(cosθ,0) gate(前方伸遠側向收窄=水滴形) "
+                         "取代全向 min 標量。並排障礙可過+正對提早反應+慢下免罰(不凍結)。配 --penalty_speed_near_obs>0。")
+# --near_obs_d_react (水滴/react 反應區外緣, m; 表面距離, obs=/20 已修單位)
+parser.add_argument("--near_obs_d_react", type=float, default=2.0,
+                    help="減速反應區外緣(m表面距). 水滴稅預設 2.0=用戶要的 2m 提早反應。d_stop 固定 0.45。")
 # --gap_heading_weight (reactive 轉彎閃避:近障礙時獎勵 heading 朝最大可通行間隙,往側邊空隙轉)
 parser.add_argument("--gap_heading_weight", type=float, default=0.0,
                     help="Gap-heading reward weight (轉彎閃避 head-on). 0=off. >0: 障礙近(d_safe<2m)時找最大可通行"
@@ -1699,6 +1706,8 @@ class MetricsCollector:
         self._lidar_min_step: list[float] = []
         # step-mean number of near-zero rays per env (proxy for hole_rate effect)
         self._lidar_zero_count_step: list[float] = []
+        # ★07-06 護欄: LiDAR 飽和率 (obs=1.0 的 bin 佔比; obs=(d_surf)/r_max, =1 表 >r_max 無資訊)
+        self._lidar_sat_frac_step: list[float] = []
         # step-mean speed_x conditioned on min(lidar) < LIDAR_NEAR_THRESH
         # (only logged when at least one env is near an obstacle)
         self._action_speed_x_near_obs: list[float] = []
@@ -1915,6 +1924,8 @@ class MetricsCollector:
             # Hole counter (cheap, pre-mask) — proxy for hole_rate visible to policy
             zero_count_per_env = (lidar < HOLE_MASK_THRESH).float().sum(dim=-1)      # [E]
             self._lidar_zero_count_step.append(zero_count_per_env.mean().item())
+            # 飽和率: obs >= 0.999 的 bin 佔比 (健康血緣應遠 <0.5; 若 >0.7 = 視野被 clip 鍘)
+            self._lidar_sat_frac_step.append((lidar >= 0.999).float().mean().item())
             # Hole-masked min: replace hole/distractor rays with +inf so they lose the min vote
             lidar_clean = torch.where(
                 lidar < HOLE_MASK_THRESH,
@@ -1937,9 +1948,9 @@ class MetricsCollector:
                 v_near = v_x[near_mask].float().mean().item()
                 self._action_speed_x_near_obs.append(v_near)
                 self._lidar_near_obs_env_count.append(float(n_near))
-            # ★前錐減速: bin36=正前, ±6 bins=±30°; 門檻 0.12(norm)=1.2m 對齊 react d_react
+            # ★前錐減速: bin36=正前, ±6 bins=±30°; 門檻 0.10(norm)×20=2.0m (對齊水滴稅 d_react;07-06 修 obs=/20)
             front_min = lidar_clean[:, 30:43].min(dim=-1).values                     # [E]
-            front_blocked = (~torch.isinf(front_min)) & (front_min < 0.12)
+            front_blocked = (~torch.isinf(front_min)) & (front_min < 0.10)
             n_fb = int(front_blocked.sum().item())
             if n_fb > 0 and charge_actions is not None:
                 self._action_speed_x_front_blocked.append(v_x[front_blocked].float().mean().item())
@@ -2217,6 +2228,8 @@ class MetricsCollector:
         if self._lidar_min_step:
             m["charge/lidar_min_step_mean"] = float(np.mean(self._lidar_min_step))
             m["charge/lidar_zero_count_step_mean"] = float(np.mean(self._lidar_zero_count_step))
+        if self._lidar_sat_frac_step:
+            m["charge/lidar_saturated_frac"] = float(np.mean(self._lidar_sat_frac_step))
         if self._action_speed_x_near_obs:
             m["charge/speed_x_near_obs_mean"] = float(np.mean(self._action_speed_x_near_obs))
             m["charge/near_obs_env_count_mean"] = float(np.mean(self._lidar_near_obs_env_count))
@@ -2330,6 +2343,7 @@ class MetricsCollector:
             traj.clear()
         self._lidar_min_step.clear()
         self._lidar_zero_count_step.clear()
+        self._lidar_sat_frac_step.clear()
         self._action_speed_x_near_obs.clear()
         self._lidar_near_obs_env_count.clear()
         self._goal_reached = 0
@@ -3174,7 +3188,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _spot_penalty_speed_near_obs = 0.0  # v3f-react: clearance-gated 減速 (will update from curriculum)
     # LiDAR max range (m) for normalizing obs[6:78] back to meters in clearance-gated penalty.
     # Matches curriculum env config (charge_env_cfg_vlp16_curriculum.py: max_distance=8.0).
-    _LIDAR_MAX_DISTANCE_M = 8.0
+    _TEARDROP_COS = None           # ★07-06 水滴稅 max(cosθ,0) per-bin 權重快取 (首次用時建)
+    _LIDAR_MAX_DISTANCE_M = 20.0   # ★07-06 修正 8→20 對齊 wd_like_sweep_72 r_max (obs=(d_surf)/20)。
+    # 舊 8.0 = v2 時代 obs=/8 殭屍常數; v3 起 obs=/20 → react/gap/monitor 距離門檻全錯讀 2.5 倍
+    # (react d_react 1.2m 實際 3m 生效)。護欄: tools/test_obs_units.py 斷言此值 == r_max。
     _reward_module.update_params({
         "spot_penalty_hit": _spot_penalty_hit,
         "spot_reward_get_goal": _spot_reward_get_goal,
@@ -3445,7 +3462,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # v3: pass prev_actions via context for frame-to-frame smoothness penalty
             # v3f-react: pass per-env nearest-obstacle distance (m) + forward speed (m/s)
             #   for clearance-gated speed penalty. obs layout: [1]=v_x norm(/v_max=1.0 → m/s),
-            #   [6:78]=lidar norm[0,1] (×max_distance=8.0 → m). Hole-mask <0.02 like metrics.
+            #   [6:78]=lidar norm[0,1] (×max_distance=20.0 → m). Hole-mask <0.02 like metrics.
             _reward_ctx = {"prev_actions": _prev_actions}
             with torch.no_grad():
                 _lidar_norm = obs[:, 6:78]                                       # [E,72] norm[0,1]
@@ -3458,6 +3475,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 )
                 _reward_ctx["near_obs_dist_m"] = _dmin_norm * _LIDAR_MAX_DISTANCE_M  # [E] meters
                 _reward_ctx["v_forward_m"] = obs[:, 1]                           # [E] m/s (v_max=1.0)
+                # ★07-06 水滴稅 gate: per-bin p(d)²·max(cosθ,0) 取 max。前伸側窄(cos)+速度門控(reward端×v_fwd)。
+                #   啟用: --near_obs_teardrop; d_react/d_stop 由 curriculum/CLI(near_obs_d_react)。θ: bin36=正前。
+                if getattr(args_cli, "near_obs_teardrop", False):
+                    _d_m = _lidar_clean * _LIDAR_MAX_DISTANCE_M                  # [E,72] meters (inf=hole)
+                    _dr = float(getattr(args_cli, "near_obs_d_react", 2.0))
+                    _ds = 0.45
+                    _p = ((_dr - _d_m) / max(_dr - _ds, 1e-3)).clamp(0.0, 1.0)  # 越近越大, hole→0
+                    if _TEARDROP_COS is None:
+                        _bang = (torch.arange(72, device=obs.device).float() * 5.0 - 180.0) * (math.pi / 180.0)
+                        _TEARDROP_COS = torch.cos(_bang).clamp(min=0.0).unsqueeze(0)   # [1,72] max(cosθ,0), bin36=正前=1
+                    _threat = _p.pow(2) * _TEARDROP_COS                         # [E,72] 前伸側窄
+                    _reward_ctx["teardrop_gate"] = _threat.max(dim=-1).values.clamp(0.0, 1.0)  # [E]
             reward_flat, reward_breakdown = _reward_module.compute(
                 env.unwrapped, actions, terminated, truncated,
                 context=_reward_ctx,

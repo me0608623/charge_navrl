@@ -91,10 +91,12 @@ class WDSparseReward:
         prev_actions = None
         near_obs_dist_m = None
         v_forward_m = None
+        teardrop_gate = None
         if context is not None:
             prev_actions = context.get("prev_actions")
             near_obs_dist_m = context.get("near_obs_dist_m")
             v_forward_m = context.get("v_forward_m")
+            teardrop_gate = context.get("teardrop_gate")  # ★07-06 水滴稅
         return compute_wd_charge_reward(
             env_unwrapped=env_unwrapped,
             actions=actions,
@@ -111,6 +113,7 @@ class WDSparseReward:
             penalty_speed_near_obs=self.penalty_speed_near_obs,
             near_obs_dist_m=near_obs_dist_m,
             v_forward_m=v_forward_m,
+            teardrop_gate=teardrop_gate,
             near_obs_d_react=self.near_obs_d_react,
             near_obs_d_stop=self.near_obs_d_stop,
         )
