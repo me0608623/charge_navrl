@@ -338,6 +338,9 @@ parser.add_argument("--near_obs_d_react", type=float, default=2.0,
 # --near_obs_penalty_shape (距離因子形狀: sq後載/linear/log前載最強)
 parser.add_argument("--near_obs_penalty_shape", type=str, default="sq", choices=["sq", "linear", "log"],
                     help="水滴稅距離因子: sq=p²(後載,~1m才咬,舊) / linear=p / log=log(dr/d)(前載最強,2m 就實質罰,越近成長最陡)。")
+# --teardrop_min_stage (只在 curriculum stage >= N 施稅; 用戶建議, 完整課程血緣用: stage1-2 純導航 stage3+ 才施稅)
+parser.add_argument("--teardrop_min_stage", type=int, default=0,
+                    help="水滴稅只在 curriculum stage >= 此值時施加(此前 gate=0)。0=不用 stage 閘。完整課程建議 3(障礙變多後才教躲)。")
 # --teardrop_warmup_start/end (稅權重線性 ramp 的 iteration 區間; 防 from-scratch 早期凍結陷阱)
 parser.add_argument("--teardrop_warmup_start", type=int, default=0,
                     help="水滴稅 warmup 起始 iteration (此前 w=0)。0=無 warmup。防政策先學凍結。")
@@ -3504,6 +3507,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _TEARDROP_COS = torch.cos(_bang).clamp(min=0.0).unsqueeze(0)   # [1,72] max(cosθ,0), bin36=正前=1
                     _threat = _pf * _TEARDROP_COS                              # [E,72] 前伸側窄
                     _gate = _threat.max(dim=-1).values.clamp(0.0, 1.0)         # [E]
+                    # ★07-07 stage 稅閘(用戶建議): 只在 curriculum stage >= N 施稅。比 step-warmup 更符課程
+                    #   學習——stage1-2 純學導航、stage3+ 障礙變多才教躲。完整課程血緣用此(暖啟固定stage用 step-warmup)。
+                    _min_stage = int(getattr(args_cli, "teardrop_min_stage", 0))
+                    if _min_stage > 0 and _cur_stage < _min_stage:
+                        _gate = _gate * 0.0
                     # ★07-07 warmup: 前期 w=0 讓政策先學到達,避免 dense 稅在 from-scratch/暖啟早期
                     #   誘發凍結(先學「別往前=不繳稅」卡局部最優)。線性 ramp over [start, end] iter。
                     _wu_s = int(getattr(args_cli, "teardrop_warmup_start", 0))
