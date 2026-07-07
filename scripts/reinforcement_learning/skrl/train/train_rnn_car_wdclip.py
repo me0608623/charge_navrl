@@ -334,7 +334,10 @@ parser.add_argument("--near_obs_teardrop", action="store_true", default=False,
                          "取代全向 min 標量。並排障礙可過+正對提早反應+慢下免罰(不凍結)。配 --penalty_speed_near_obs>0。")
 # --near_obs_d_react (水滴/react 反應區外緣, m; 表面距離, obs=/20 已修單位)
 parser.add_argument("--near_obs_d_react", type=float, default=2.0,
-                    help="減速反應區外緣(m表面距). 水滴稅預設 2.0=用戶要的 2m 提早反應。d_stop 固定 0.45。")
+                    help="減速反應區外緣(m表面距). 水滴稅預設 2.0。要 2m 實質咬建議 d_react=3.0(讓2m落區內)。d_stop 0.45。")
+# --near_obs_penalty_shape (距離因子形狀: sq後載/linear/log前載最強)
+parser.add_argument("--near_obs_penalty_shape", type=str, default="sq", choices=["sq", "linear", "log"],
+                    help="水滴稅距離因子: sq=p²(後載,~1m才咬,舊) / linear=p / log=log(dr/d)(前載最強,2m 就實質罰,越近成長最陡)。")
 # --teardrop_warmup_start/end (稅權重線性 ramp 的 iteration 區間; 防 from-scratch 早期凍結陷阱)
 parser.add_argument("--teardrop_warmup_start", type=int, default=0,
                     help="水滴稅 warmup 起始 iteration (此前 w=0)。0=無 warmup。防政策先學凍結。")
@@ -3486,11 +3489,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _d_m = _lidar_clean * _LIDAR_MAX_DISTANCE_M                  # [E,72] meters (inf=hole)
                     _dr = float(getattr(args_cli, "near_obs_d_react", 2.0))
                     _ds = 0.45
-                    _p = ((_dr - _d_m) / max(_dr - _ds, 1e-3)).clamp(0.0, 1.0)  # 越近越大, hole→0
+                    _shape = getattr(args_cli, "near_obs_penalty_shape", "sq")
+                    # 距離因子: sq=p²(後載,舊) / linear=p / log=log(dr/d)(前載最強,2m 就實質咬)
+                    if _shape == "log":
+                        _dc = _d_m.clamp(min=_ds)                              # 夾 d_stop 防 log→∞
+                        _cap = math.log(_dr / _ds)
+                        _pf = (torch.log(_dr / _dc).clamp(min=0.0) / max(_cap, 1e-6))  # [0,1] 正規化
+                        _pf = torch.where(_d_m >= _dr, torch.zeros_like(_pf), _pf)     # 反應區外=0
+                    else:
+                        _p = ((_dr - _d_m) / max(_dr - _ds, 1e-3)).clamp(0.0, 1.0)
+                        _pf = _p if _shape == "linear" else _p.pow(2)
                     if _TEARDROP_COS is None:
                         _bang = (torch.arange(72, device=obs.device).float() * 5.0 - 180.0) * (math.pi / 180.0)
                         _TEARDROP_COS = torch.cos(_bang).clamp(min=0.0).unsqueeze(0)   # [1,72] max(cosθ,0), bin36=正前=1
-                    _threat = _p.pow(2) * _TEARDROP_COS                         # [E,72] 前伸側窄
+                    _threat = _pf * _TEARDROP_COS                              # [E,72] 前伸側窄
                     _gate = _threat.max(dim=-1).values.clamp(0.0, 1.0)         # [E]
                     # ★07-07 warmup: 前期 w=0 讓政策先學到達,避免 dense 稅在 from-scratch/暖啟早期
                     #   誘發凍結(先學「別往前=不繳稅」卡局部最優)。線性 ramp over [start, end] iter。
