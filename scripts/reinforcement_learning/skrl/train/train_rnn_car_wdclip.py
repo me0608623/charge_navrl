@@ -1726,6 +1726,16 @@ class MetricsCollector:
         # ★07-06 前錐減速指標(密集階段技能監控): 前方±30°錐(bin36±6) min<1.2m 時的前進速度
         self._action_speed_x_front_blocked: list[float] = []
         self._front_blocked_env_count: list[float] = []
+        # ★速度 vs 前方距離 曲線診斷: 前錐(±30°)最近障礙分段(m),各段平均前進速度
+        #   → 直接看 policy「離前方障礙多近、速度掉多少」= 幾米開始反應/減速。key=bin 上緣(m)。
+        self._front_dist_speed: dict[str, list[float]] = {
+            k: [] for k in ("0.5", "1.0", "1.5", "2.0", "2.5", "3.0")
+        }
+        # ★|ω| vs 前方距離: policy 靠轉向避障→提早反應藏在角速度(遠處就加大轉向、線速度不降)。
+        #   線速度曲線平≠沒反應;要看此 |ω| 曲線是否在遠距(2-3m)就抬高=轉向式提早避開。
+        self._front_dist_omega: dict[str, list[float]] = {
+            k: [] for k in ("0.5", "1.0", "1.5", "2.0", "2.5", "3.0")
+        }
 
         # --- Termination counters ---
         self._goal_reached = 0
@@ -1966,6 +1976,18 @@ class MetricsCollector:
             if n_fb > 0 and charge_actions is not None:
                 self._action_speed_x_front_blocked.append(v_x[front_blocked].float().mean().item())
                 self._front_blocked_env_count.append(float(n_fb))
+            # ★速度 vs 前方距離 曲線: 前錐最近障礙(m)分段,記各段平均前進速度(bin 上緣為 key)
+            #   _LIDAR_MAX_DISTANCE_M 為訓練函數域區域變數(此處不可及),obs=/20 故硬編 20.0。
+            if charge_actions is not None:
+                _front_m = front_min * 20.0
+                for _lo, _hi, _bk in (
+                    (0.0, 0.5, "0.5"), (0.5, 1.0, "1.0"), (1.0, 1.5, "1.5"),
+                    (1.5, 2.0, "2.0"), (2.0, 2.5, "2.5"), (2.5, 3.0, "3.0"),
+                ):
+                    _bm = (~torch.isinf(front_min)) & (_front_m >= _lo) & (_front_m < _hi)
+                    if int(_bm.sum().item()) > 0:
+                        self._front_dist_speed[_bk].append(v_x[_bm].float().mean().item())
+                        self._front_dist_omega[_bk].append(omega[_bm].abs().float().mean().item())
 
             remaining = self.action_table_sample_size - len(self._action_speed_accel_rows)
             if remaining > 0:
@@ -2247,6 +2269,13 @@ class MetricsCollector:
         if self._action_speed_x_front_blocked:
             m["charge/speed_fwd_front_blocked_mean"] = float(np.mean(self._action_speed_x_front_blocked))
             m["charge/front_blocked_env_count_mean"] = float(np.mean(self._front_blocked_env_count))
+        # ★速度 vs 前方距離 曲線 (每項=該距離段的平均前進速度;段內無樣本則不記錄)
+        for _bk, _bv in self._front_dist_speed.items():
+            if _bv:
+                m[f"charge/speed_vs_front_dist_{_bk}m"] = float(np.mean(_bv))
+        for _bk, _bo in self._front_dist_omega.items():  # ★|ω| vs 前距: 轉向式提早避障訊號
+            if _bo:
+                m[f"charge/omega_vs_front_dist_{_bk}m"] = float(np.mean(_bo))
 
         # --- All Isaac Lab reward terms (raw) ---
         for k, vals in self._reward_terms.items():
@@ -2357,6 +2386,10 @@ class MetricsCollector:
         self._lidar_sat_frac_step.clear()
         self._action_speed_x_near_obs.clear()
         self._lidar_near_obs_env_count.clear()
+        for _bv in self._front_dist_speed.values():  # ★速度vs前方距離曲線 per-rollout 清空(反映當前 policy)
+            _bv.clear()
+        for _bo in self._front_dist_omega.values():
+            _bo.clear()
         self._goal_reached = 0
         self._collision = 0
         self._wall_collision = 0
@@ -2547,21 +2580,39 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _obs_collision_base = args_cli.obs_collision_base   # 碰撞半徑基準值（m）
     _scene_bound_base = args_cli.scene_bound_base       # 活動邊界基準值（m）
 
+    # LV-DOT lineage 碰撞語義: 障礙「邊緣」離 LiDAR/車中心 < 0.5m 判碰撞 (對齊 r_min 盲區)。
+    #   → 碰撞中心距門檻 = 物理半徑 + 0.5。物理半徑隨機化 (尺寸 DR)，碰撞跟著變。
+    #   非 LV-DOT 血緣維持原語義 (_obstacle_radii = obs_collision_base ± rand)。
+    _LVDOT_MODE = os.environ.get("CHARGE_USE_LVDOT_OBS", "0") != "0"
+    _LVDOT_COLLISION_EDGE = 0.5   # 中心→障礙邊緣碰撞距 (= r_min 盲區，兩者對齊)
+    _LVDOT_PHYS_BASE = 0.3        # 障礙物理半徑基準 (尺寸隨機化中心)
+
     # 初始化所有 env 的 radii/bounds 為基準值（後續每次 episode reset 重新隨機化）
-    env.unwrapped._obstacle_radii = torch.full(
-        (num_envs, N_obs), _obs_collision_base, device=device)
+    env.unwrapped._obstacle_phys_radii = torch.full(
+        (num_envs, N_obs), _LVDOT_PHYS_BASE, device=device)   # per-env 物理半徑 (obs r 欄 + 碰撞用)
+    if _LVDOT_MODE:
+        env.unwrapped._obstacle_radii = env.unwrapped._obstacle_phys_radii + _LVDOT_COLLISION_EDGE
+    else:
+        env.unwrapped._obstacle_radii = torch.full(
+            (num_envs, N_obs), _obs_collision_base, device=device)
     env.unwrapped._scene_bounds = torch.full(
         (num_envs,), _scene_bound_base, device=device)
 
     def _randomize_obstacle_sizes(env_ids: torch.Tensor, rand_range: float):
-        """對指定 env_ids 重新隨機化障礙物碰撞半徑。
-        radius = base ± rand/2（對應 WD: agent_size = rand * obs_size_rand + bias - obs_size_rand/2）
+        """對指定 env_ids 重新隨機化障礙物尺寸/碰撞半徑。
+        LV-DOT: 隨機化物理半徑 (base±rand/2)，碰撞門檻 = 物理半徑 + 0.5 (中心→邊緣)。
+        非 LV-DOT: 直接隨機化碰撞距離 (WD: agent_size = rand·obs_size_rand + bias − obs_size_rand/2)。
         """
         if rand_range <= 0.0:
             return
         n = env_ids.shape[0]
         noise = (torch.rand(n, N_obs, device=device) - 0.5) * rand_range
-        env.unwrapped._obstacle_radii[env_ids] = (_obs_collision_base + noise).clamp(min=0.3)
+        if _LVDOT_MODE:
+            phys = (_LVDOT_PHYS_BASE + noise).clamp(min=0.15)
+            env.unwrapped._obstacle_phys_radii[env_ids] = phys
+            env.unwrapped._obstacle_radii[env_ids] = phys + _LVDOT_COLLISION_EDGE
+        else:
+            env.unwrapped._obstacle_radii[env_ids] = (_obs_collision_base + noise).clamp(min=0.3)
 
     def _randomize_scene_bounds(env_ids: torch.Tensor, rand_range: float):
         """對指定 env_ids 重新隨機化場景活動邊界。

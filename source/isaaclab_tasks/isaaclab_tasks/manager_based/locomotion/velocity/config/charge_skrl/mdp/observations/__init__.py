@@ -31,6 +31,8 @@ from .obs_functions import (
     wd_like_sweep_72,
     # obs state (60D) — v2 dynamic obstacle observation
     topk_obstacles_6d,
+    # LV-DOT 動態障礙 channel — 動態-only + 中度DR, 部署由 /vo_interface/tracked_obstacles 餵
+    dynamic_obstacles_lvdot,
     # goal-centric obstacle observation (phase0 使用)
     topk_obstacles_goal_centric,
     # legacy (保留但 v2 不使用)
@@ -63,6 +65,7 @@ __all__ = [
     "alive_flag",
     "charge_dies_at_birth_probability",
     "topk_obstacles_body_frame",
+    "dynamic_obstacles_lvdot",
     "robot_heading_normalized",
     "robot_position_local",
     "discrete_applied_action",

@@ -1,0 +1,148 @@
+# wd_sa2_lvdot — SA2 LV-DOT: resume SA1 ckpt → stage 2 (純 baseline, 無減速稅)
+#
+# ★ (2026-07-08) SA1 stage1 收斂 (SR 98.9%) → resume checkpoint_150000 進 stage 2。
+#   目的: 用新碼的「速度 vs 前方距離曲線」(charge/speed_vs_front_dist_*m) 看**無稅** baseline
+#   反應曲線 (policy 現在靠轉向避障、不減速)。stage 3 再加減速稅對照 → 乾淨看出稅的效果。
+#   penalty_speed_near_obs=0 (依用戶「稅留到 stage 3」計畫)。LiDAR/channel 維持 clean 隔離變因。
+#
+# ⚠️ resume SA1 109D ckpt (obs 佈局相同)。train/play 必須 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1。
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa2_lvdot --headless --run_name sa2_lvdot_ne1024_s42
+
+name: wd_sa2_lvdot
+description: "SA2 LV-DOT: resume SA1 ckpt_150000 → stage 2. 純 baseline 無減速稅. 看速度-前距曲線(無稅). Requires CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3e
+initial_stage: 2
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0002
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0005
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.5
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
+
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.3          # 尺寸隨機化 ON (物理半徑 0.3±0.15; 碰撞=phys+0.5)
+obs_collision_base: 0.9     # (LV-DOT mode 忽略; 碰撞=物理半徑+0.5)
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA2: 維持 clean 隔離「stage2 難度對反應曲線」變因; noise 留給 SA3+) ---
+lidar_no_noise: true
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+obs_delay_steps: [0, 0]
+heading_stability_weight: 0.0
+
+# --- LV-DOT obstacle channel DR (SA2: 仍 clean; env._lvdot_dr wiring 留 SA3) ---
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (SA2: resume SA1 stage1 收斂 ckpt) ---
+checkpoint: logs/rnn_car/sa1_lvdot_ne1024_s42/checkpoint_150000.pt
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa2, lvdot, a2c, aux, asymmetric, rnn64, obstacle_channel, resume_sa1, baseline_no_tax]
+notes: "SA2 LV-DOT: resume SA1 ckpt_150000 → stage 2. 純 baseline (penalty_speed_near_obs=0). 目的=速度-前距曲線 baseline (無稅版反應曲線). stage 3 再加稅對照."

@@ -30,6 +30,10 @@ import os
 # v3f: CHARGE_USE_ACT_HIST=0 → 移除 act_hist 4D obs term（含 action_error 速度落差），obs 79D。
 #      預設 "1"（保留 act_hist，相容 v3c/v3d/v3e）。延遲仍由 actuator DR 建模，policy 從 ego 實際車速隱式學補償。
 _USE_ACT_HIST = os.environ.get("CHARGE_USE_ACT_HIST", "1") != "0"
+# LV-DOT lineage: CHARGE_USE_LVDOT_OBS=1 → 加回 K=5 動態障礙 channel (30D)，obs 79→109D。
+# 部署由車端 LV-DOT→vo_interface (/vo_interface/tracked_obstacles) 餵。預設關（不影響 v3f/v3h）。
+_USE_LVDOT_OBS = os.environ.get("CHARGE_USE_LVDOT_OBS", "0") != "0"
+_LVDOT_TOP_K = int(os.environ.get("CHARGE_LVDOT_TOP_K", "5"))
 
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -68,6 +72,7 @@ from ..mdp.observations import (
 from ..mdp.observations.obs_functions import (
     wd_like_sweep_72,
     topk_obstacles_6d,
+    dynamic_obstacles_lvdot,  # LV-DOT 動態障礙 channel（部署由 /vo_interface/tracked_obstacles 餵）
     discrete_applied_action_history,  # v3c: action stacking
 )
 
@@ -417,7 +422,7 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.25,        # ★ VLP-16 實測：表面→人物中心 0.2m + LiDAR 半徑 0.0515m = 0.25m (v3)
+                "r_min": 0.5,         # ★ LV-DOT lineage: LiDAR 中心→障礙表面 <0.5m 判盲(對齊碰撞邊界)
                 "z_filter": 0.5,      # ★ 過濾地板/天花板/z=-10 鬼影
                 "displacement_std_per_meter": 0.0,   # σ(r)=k·r；SA2+ 由 YAML 覆蓋
                 "displacement_std": 0.0,             # legacy fixed-σ，不啟用
@@ -441,10 +446,28 @@ class ObservationsCfgVLP16:
             params={"stack_size": 2},
         )
 
+        # --- dynamic obstacle channel (K×6D, LV-DOT lineage) ---
+        # K 最近『動態』物 × [px,py,vx,vy,r,valid] body frame。
+        # 部署由車端 LV-DOT→vo_interface (/vo_interface/tracked_obstacles) 餵；訓練中度DR由 env._lvdot_dr 覆寫。
+        dynamic_obstacles = ObsTerm(
+            func=dynamic_obstacles_lvdot,
+            params={
+                "robot_cfg": SceneEntityCfg("robot"),
+                "top_k": _LVDOT_TOP_K,
+                "max_obstacles": 10,
+                "max_distance": 8.0,
+                "v_max": 1.5,
+                "wall_occlusion": True,
+                "dynamic_speed_threshold": 0.3,   # 對齊 LV-DOT dynamic_velocity_threshold=0.3
+            },
+        )
+
         def __post_init__(self):
             self.concatenate_terms = True
             if not _USE_ACT_HIST:  # v3f: 移除 act_hist → 79D
                 self.past_actions = None
+            if not _USE_LVDOT_OBS:  # 預設關；只有 LV-DOT lineage (CHARGE_USE_LVDOT_OBS=1) 才加此 channel
+                self.dynamic_obstacles = None
 
     @configclass
     class CriticCfg(ObsGroup):
@@ -488,7 +511,7 @@ class ObservationsCfgVLP16:
                 "num_bins": 72,
                 "r_max": 20.0,
                 "r_robot": ROBOT_BODY_RADIUS,
-                "r_min": 0.25,        # ★ VLP-16 實測：表面→人物中心 0.2m + LiDAR 半徑 0.0515m = 0.25m (v3)
+                "r_min": 0.5,         # ★ LV-DOT lineage: LiDAR 中心→障礙表面 <0.5m 判盲(對齊碰撞邊界)
                 "z_filter": 0.5,
                 "displacement_std_per_meter": 0.0,
                 "displacement_std": 0.0,
@@ -512,10 +535,28 @@ class ObservationsCfgVLP16:
             params={"stack_size": 2},
         )
 
+        # --- dynamic obstacle channel (K×6D, LV-DOT lineage) ---
+        # K 最近『動態』物 × [px,py,vx,vy,r,valid] body frame。
+        # 部署由車端 LV-DOT→vo_interface (/vo_interface/tracked_obstacles) 餵；訓練中度DR由 env._lvdot_dr 覆寫。
+        dynamic_obstacles = ObsTerm(
+            func=dynamic_obstacles_lvdot,
+            params={
+                "robot_cfg": SceneEntityCfg("robot"),
+                "top_k": _LVDOT_TOP_K,
+                "max_obstacles": 10,
+                "max_distance": 8.0,
+                "v_max": 1.5,
+                "wall_occlusion": True,
+                "dynamic_speed_threshold": 0.3,   # 對齊 LV-DOT dynamic_velocity_threshold=0.3
+            },
+        )
+
         def __post_init__(self):
             self.concatenate_terms = True
             if not _USE_ACT_HIST:  # v3f: 移除 act_hist → 79D
                 self.past_actions = None
+            if not _USE_LVDOT_OBS:  # 預設關；只有 LV-DOT lineage (CHARGE_USE_LVDOT_OBS=1) 才加此 channel
+                self.dynamic_obstacles = None
 
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()

@@ -1653,6 +1653,213 @@ def topk_obstacles_6d(
     return feat_6d.reshape(N, K * 6)  # [N, 60]
 
 
+def dynamic_obstacles_lvdot(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    top_k: int = 5,
+    max_obstacles: int = 10,
+    max_distance: float = 8.0,
+    v_max: float = 1.5,
+    wall_occlusion: bool = True,
+    dynamic_speed_threshold: float = 0.3,   # LV-DOT dynamic_velocity_threshold=0.3 m/s (實測 config)
+    fov_deg: float = 360.0,                 # 360 = 不 cull（LiDAR 全向）；camera 前向可縮
+    # ── 中度 DR（SA1 全 0；SA2+ 由 env._lvdot_dr 覆寫，仿 _apply_lidar_noise_config）──
+    pos_noise_std: float = 0.0,             # 位置高斯噪 σ (m)
+    vel_noise_std: float = 0.0,             # 速度高斯噪 σ (m/s)
+    dropout_prob: float = 0.0,              # per-slot 漏偵機率（valid→0）
+    false_neg_prob: float = 0.0,            # per-candidate 整幀漏偵機率
+) -> torch.Tensor:
+    """LV-DOT 動態障礙 channel — K 最近『動態』物 × [px,py,vx,vy,r,valid] body frame。
+
+    對齊車端管線 LV-DOT(onboard_detector) → vo_interface → /vo_interface/tracked_obstacles：
+      - **只報動態物**（LV-DOT dynamic_bboxes 只出 >0.2 m/s 移動物；靜態走 LiDAR）
+      - 含真速度（vo_interface CV-Kalman 平滑後絕對速度）
+      - body frame [縱向 px(+前), 橫向 py(+左), 相對 vx(-接近), 相對 vy(切入), 半徑 r, valid]
+
+    與 topk_obstacles_6d 差異（LV-DOT 保真）：
+      1. 候選池先過濾『動態』（abs_speed > dynamic_speed_threshold），靜態不佔 slot。
+      2. 中度 DR：位置/速度高斯噪 + per-slot dropout + FOV/range cull + false-negative。
+         SA1 全 clean；SA2+ 由 `env._lvdot_dr`（dict）覆寫，curriculum-gated。
+
+    Returns:
+        [num_envs, top_k * 6] 扁平化（預設 [N, 30]，K=5）。
+    """
+    # ── env-level DR 覆寫（curriculum 設定，仿 lidar noise config）──
+    _dr = getattr(env, "_lvdot_dr", None)
+    if isinstance(_dr, dict):
+        pos_noise_std = _dr.get("pos_noise_std", pos_noise_std)
+        vel_noise_std = _dr.get("vel_noise_std", vel_noise_std)
+        dropout_prob = _dr.get("dropout_prob", dropout_prob)
+        false_neg_prob = _dr.get("false_neg_prob", false_neg_prob)
+        max_distance = _dr.get("max_distance", max_distance)
+        fov_deg = _dr.get("fov_deg", fov_deg)
+
+    robot = env.scene[robot_cfg.name]
+    robot_pos_xy = robot.data.root_pos_w[:, :2]
+    robot_vel_xy = robot.data.root_lin_vel_w[:, :2]
+    N = robot_pos_xy.shape[0]
+    device = robot_pos_xy.device
+    K = top_k
+
+    quat = robot.data.root_quat_w
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    cos_yaw, sin_yaw = torch.cos(yaw), torch.sin(yaw)
+    env_origins = env.scene.env_origins[:, :2]
+
+    # ── 1. 收集所有障礙物 ──
+    all_pos = torch.zeros(N, max_obstacles, 2, device=device)
+    all_radius = torch.full((N, max_obstacles), 0.3, device=device)
+    all_valid = torch.zeros(N, max_obstacles, dtype=torch.bool, device=device)
+    num_found = 0
+    for i in range(max_obstacles):
+        obs_name = f"obstacle_{i}"
+        if obs_name not in env.scene.keys():
+            continue
+        obs_entity = env.scene[obs_name]
+        pos_w = obs_entity.data.root_pos_w
+        visible = pos_w[:, 2] > 0.0
+        all_pos[:, num_found, :] = torch.nan_to_num(pos_w[:, :2], nan=0.0)
+        all_valid[:, num_found] = visible & ~torch.isnan(pos_w[:, 0]) & ~torch.isnan(pos_w[:, 1])
+        # 速度改用 finite-diff (見迴圈後)：rule_based/BehaviorScheduler 的 kinematic 障礙
+        # 是 pose-write 驅動 → _obstacle_velocities / root_lin_vel_w 恆 ~0，讀了會讓動態過濾全滅。
+        # 半徑優先讀 per-env 物理半徑 (_obstacle_phys_radii，尺寸隨機化)，否則 fallback scalar sizes。
+        _phys = getattr(env, "_obstacle_phys_radii", None)
+        if _phys is not None:
+            try:
+                all_radius[:, num_found] = _phys[:, i]
+            except (IndexError, TypeError, RuntimeError):
+                pass
+        elif hasattr(env, "_obstacle_sizes") and env._obstacle_sizes is not None:
+            try:
+                all_radius[:, num_found] = env._obstacle_sizes[i]
+            except (IndexError, TypeError):
+                pass
+        num_found += 1
+
+    if num_found == 0:
+        return torch.zeros(N, K * 6, device=device)
+
+    pos = all_pos[:, :num_found, :]
+    radius = all_radius[:, :num_found]
+    valid = all_valid[:, :num_found]
+    F = num_found
+
+    # ── 1b. finite-diff 速度（kinematic 障礙 _obstacle_velocities≈0 → 自算）──
+    # 用自有 prev-pos cache（wd_like_sweep_72 的 _matnoise_prev_obs_xy 已被它更新成本步，
+    # 且 shape 不同）。step-memo 防 policy+critic 同步雙呼叫時第二次 Δ=0。
+    # teleport 排除：單步位移 > move_max 視為 reset 傳送 → vel=0。
+    _dt = float(getattr(env, "step_dt", 0.2))
+    _move_max = 2.0
+    _sid = getattr(env, "common_step_counter", None)
+    if _sid is not None and getattr(env, "_lvdot_fd_step", None) == _sid:
+        _vm = getattr(env, "_lvdot_fd_vel", None)
+        vel = _vm if (_vm is not None and _vm.shape == pos.shape) else torch.zeros_like(pos)
+    else:
+        _prev = getattr(env, "_lvdot_prev_obs_xy", None)
+        if _prev is not None and _prev.shape == pos.shape:
+            _disp = pos - _prev
+            _dn = torch.linalg.norm(_disp, dim=-1, keepdim=True)
+            vel = torch.where(_dn < _move_max, _disp / _dt, torch.zeros_like(_disp))
+        else:
+            vel = torch.zeros_like(pos)
+        env._lvdot_prev_obs_xy = pos.detach().clone()
+        if _sid is not None:
+            env._lvdot_fd_step = _sid
+            env._lvdot_fd_vel = vel.detach().clone()
+
+    # ── 2. 動態過濾（LV-DOT 只報移動物）──
+    abs_speed_cand = torch.sqrt(vel[:, :, 0] ** 2 + vel[:, :, 1] ** 2 + 1e-8)
+    valid = valid & (abs_speed_cand > dynamic_speed_threshold)
+
+    # ── 3. 牆壁 LOS 遮擋 ──
+    if wall_occlusion:
+        from ..wall_layout import check_los_perenv, get_combined_wall_data
+        robot_pos_local = robot_pos_xy - env_origins
+        pos_local = pos - env_origins.unsqueeze(1)
+        wall_c, wall_s, wall_mask = get_combined_wall_data(env)
+        los_visible = check_los_perenv(robot_pos_local, pos_local, wall_c, wall_s, wall_mask)
+        valid = valid & los_visible
+
+    # ── 4. 相對位置 + FOV cull ──
+    delta = pos - robot_pos_xy.unsqueeze(1)
+    dx, dy = delta[:, :, 0], delta[:, :, 1]
+    dist = torch.sqrt(dx ** 2 + dy ** 2 + 1e-8)
+    if fov_deg < 360.0:
+        bearing = torch.atan2(dy, dx) - yaw.unsqueeze(1)
+        bearing = torch.atan2(torch.sin(bearing), torch.cos(bearing))  # wrap [-π,π]
+        valid = valid & (bearing.abs() <= math.radians(fov_deg * 0.5))
+
+    # ── 5. false-negative（整候選漏偵）──
+    if false_neg_prob > 0.0:
+        valid = valid & (torch.rand(N, F, device=device) >= false_neg_prob)
+
+    dist_for_sort = dist.clone()
+    dist_for_sort[~valid] = 1e6
+    dist_for_sort[dist > max_distance] = 1e6
+
+    # ── 6. Top-K 最近 ──
+    if F >= K:
+        _, topk_idx = torch.topk(dist_for_sort, k=K, dim=1, largest=False)
+    else:
+        _, sort_idx = torch.sort(dist_for_sort, dim=1)
+        pad_idx = sort_idx[:, :1].expand(-1, K - F)
+        topk_idx = torch.cat([sort_idx, pad_idx], dim=1)
+
+    topk_dx = torch.gather(dx, 1, topk_idx)
+    topk_dy = torch.gather(dy, 1, topk_idx)
+    topk_vx = torch.gather(vel[:, :, 0], 1, topk_idx)
+    topk_vy = torch.gather(vel[:, :, 1], 1, topk_idx)
+    topk_r = torch.gather(radius, 1, topk_idx)
+    topk_valid = torch.gather(valid.long(), 1, topk_idx).bool()
+    if F < K:
+        topk_valid = topk_valid.clone()
+        topk_valid[:, F:] = False
+    topk_dist = torch.gather(dist_for_sort, 1, topk_idx)
+    topk_valid = topk_valid & (topk_dist < max_distance)
+
+    # ── 7. 中度 DR：位置/速度高斯噪（world 差值 & 絕對速度上加，隨後轉 body）──
+    if pos_noise_std > 0.0:
+        topk_dx = topk_dx + torch.randn_like(topk_dx) * pos_noise_std
+        topk_dy = topk_dy + torch.randn_like(topk_dy) * pos_noise_std
+    if vel_noise_std > 0.0:
+        topk_vx = topk_vx + torch.randn_like(topk_vx) * vel_noise_std
+        topk_vy = topk_vy + torch.randn_like(topk_vy) * vel_noise_std
+
+    # ── 8. 轉 body frame ──
+    cos_y, sin_y = cos_yaw.unsqueeze(1), sin_yaw.unsqueeze(1)
+    px_body = cos_y * topk_dx + sin_y * topk_dy
+    py_body = -sin_y * topk_dx + cos_y * topk_dy
+    rel_vx = topk_vx - robot_vel_xy[:, 0:1]
+    rel_vy = topk_vy - robot_vel_xy[:, 1:2]
+    vx_body = cos_y * rel_vx + sin_y * rel_vy
+    vy_body = -sin_y * rel_vx + cos_y * rel_vy
+
+    # ── 9. 歸一化 ──
+    px_norm = (px_body / max_distance).clamp(-1.0, 1.0)
+    py_norm = (py_body / max_distance).clamp(-1.0, 1.0)
+    vx_norm = (vx_body / v_max).clamp(-2.0, 2.0)
+    vy_norm = (vy_body / v_max).clamp(-2.0, 2.0)
+
+    # ── 10. per-slot dropout（漏偵：valid→0）──
+    obs_status = topk_valid.float()
+    if dropout_prob > 0.0:
+        keep = (torch.rand(N, K, device=device) >= dropout_prob).float()
+        obs_status = obs_status * keep
+
+    valid_mask = obs_status.bool()
+    zero = torch.zeros_like(px_norm)
+    px_norm = torch.where(valid_mask, px_norm, zero)
+    py_norm = torch.where(valid_mask, py_norm, zero)
+    vx_norm = torch.where(valid_mask, vx_norm, zero)
+    vy_norm = torch.where(valid_mask, vy_norm, zero)
+    topk_r = torch.where(valid_mask, topk_r, zero)
+
+    # ── 11. 組裝 [N, K, 6]: [px, py, vx, vy, r, valid] ──
+    features = torch.stack([px_norm, py_norm, vx_norm, vy_norm, topk_r, obs_status], dim=2)
+    return torch.nan_to_num(features.reshape(N, -1), nan=0.0)  # [N, K*6]
+
+
 # ====================================================================
 # 觀測函數五：機器人航向角（Global Frame 必要輸入）
 # ====================================================================
