@@ -499,6 +499,39 @@ class ValueHead(nn.Module):
         return self.net(h)  # [B, 1]
 
 
+class LVDOTEncoder(nn.Module):
+    """LV-DOT channel encoder: raw 30D → learned N-D 表徵。
+
+    動機 (2026-07-12): 梯度歸因證 policy 有讀 LV-DOT 速度欄(51% LiDAR)但行為冗餘
+    (ablation ΔSR≈0)。假設: raw concat 沒讓 policy 學到有意義的速度/位置表徵。
+    改用小型 learned encoder(2 層 MLP + LayerNorm),輸出同時餵 policy/value head。
+
+    架構: Linear(in→hidden) + LayerNorm + ReLU → Linear(hidden→out) + LayerNorm → ⊙ gate。
+    ★warm-start 漸進加入: 末端 LayerNorm 會把輸出重正規化成 ~unit scale,故「末層 zero-init」
+      無法讓輸出接近 0(LN 破壞)。改用 LayerScale gate(可學 per-dim 縮放,init 0):
+      output = LN(...) ⊙ gate, gate=0 → 初始輸出=0(對 policy 零影響=warm-start 相容),
+      RL 梯度先讓 gate 開啟,再細修 encoder 特徵(標準 LayerScale 漸進動態)。
+    """
+
+    def __init__(self, in_dim: int = 30, hidden_dim: int = 48, out_dim: int = 24,
+                 zero_init_out: bool = True):
+        super().__init__()
+        self.out_dim = out_dim
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+        # LayerScale gate: init 0 → 初始輸出≈0(漸進加入);與末端 LayerNorm 相容
+        _init = torch.zeros(out_dim) if zero_init_out else torch.ones(out_dim)
+        self.out_scale = nn.Parameter(_init)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x) * self.out_scale
+
+
 # ============================================================================
 # Obstacle Agent — 已遷移到 obstacle_agent/ 模組
 # ============================================================================

@@ -389,6 +389,16 @@ parser.add_argument("--early_turning_ttc_hi", type=float, default=3.8, help="Ter
 parser.add_argument("--weakened_decel_weight", type=float, default=0.0,
                     help="弱化版 predictive decel(最後手段). >0: 僅極危 TTC<1.2 且 v_closing>0.35 且本步減速 → +w·(1.2−TTC). "
                          "避免走走停停,只在來不及轉向時才獎勵減速. 建議 0.03~0.05. 0=off.")
+# --- LV-DOT channel encoder (2026-07-12): raw 30D → learned encoder,測速度使用性能否提升 ---
+parser.add_argument("--use_lvdot_encoder", action="store_true",
+                    help="LV-DOT 30D channel 不再 raw concat,先過小型 learned encoder(2層MLP+LayerNorm)→ "
+                         "encoded 餵 policy/value head。需 CHARGE_USE_LVDOT_OBS=1(obs≥109D)。預設 off=baseline raw concat。")
+parser.add_argument("--lvdot_encoder_dim", type=int, default=24,
+                    help="LV-DOT encoder 輸出維度(取代 raw 30D)。預設 24(資訊保留 vs 穩定性平衡點)。")
+parser.add_argument("--lvdot_encoder_hidden", type=int, default=48,
+                    help="LV-DOT encoder 隱藏層維度。預設 48。")
+parser.add_argument("--lvdot_encoder_wd", type=float, default=2e-5,
+                    help="LV-DOT encoder 權重衰減(正則化)。預設 2e-5。")
 # --aux_loss_type
 parser.add_argument("--aux_loss_type", type=str, default="log", choices=["log", "huber"],
                     help="Aux loss form for dims 0-5. log=WD original (grad ∝ 1/|e|, 鼓勵常數陷阱); "
@@ -745,6 +755,7 @@ from modular_rnn_models import (
     PreprocessRNN,
     PolicyHead,
     ValueHead,
+    LVDOTEncoder,
     RNNStateManager,
     ObstaclePolicyFC,
     ObstacleValueFC,
@@ -2963,16 +2974,43 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _priv_dim = PRIVILEGED_OBS_DIM if _use_asymmetric_critic else 0
     _oracle_to_policy = getattr(args_cli, 'oracle_obstacles_to_policy', False)
     _policy_priv_dim = PRIVILEGED_OBS_DIM if _oracle_to_policy else 0
-    policy_head = PolicyHead(input_dim=rl_input_dim, privileged_dim=_policy_priv_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
+    # --- LV-DOT channel encoder (2026-07-12): raw 30D → learned encoded → head ---
+    #   LVDOT 佔 rl_input[:, policy_obs_dim-30 : policy_obs_dim] (= obs[79:109] 的位置)。
+    #   啟用時 head 輸入維度 rl_input_dim - 30 + encoder_dim(buffer 仍存 raw,encode 在 head 前套用)。
+    _lvdot_enc_on = bool(args_cli.use_lvdot_encoder) and _LVDOT_MODE and policy_obs_dim >= 109
+    lvdot_encoder = None
+    _LVDOT_CH = 30  # K=5 × 6D
+    if _lvdot_enc_on:
+        lvdot_encoder = LVDOTEncoder(
+            in_dim=_LVDOT_CH, hidden_dim=args_cli.lvdot_encoder_hidden,
+            out_dim=args_cli.lvdot_encoder_dim, zero_init_out=True).to(device)
+        _head_input_dim = rl_input_dim - _LVDOT_CH + args_cli.lvdot_encoder_dim
+        print(f"[LVDOT-ENC] ★啟用 LV-DOT encoder: raw {_LVDOT_CH}D → {args_cli.lvdot_encoder_dim}D "
+              f"(hidden {args_cli.lvdot_encoder_hidden}, 末層 zero-init, wd={args_cli.lvdot_encoder_wd}). "
+              f"head 輸入 {rl_input_dim}→{_head_input_dim}D。")
+    else:
+        _head_input_dim = rl_input_dim
+
+    def _encode_rl_input(ri: torch.Tensor) -> torch.Tensor:
+        """把 rl_input 內的 raw LVDOT(30D)換成 encoder 輸出(encoder_dim);未啟用則原樣返回。"""
+        if not _lvdot_enc_on:
+            return ri
+        L = policy_obs_dim
+        base = ri[..., :L - _LVDOT_CH]
+        lvdot = ri[..., L - _LVDOT_CH:L]
+        rest = ri[..., L:]
+        return torch.cat([base, lvdot_encoder(lvdot), rest], dim=-1)
+
+    policy_head = PolicyHead(input_dim=_head_input_dim, privileged_dim=_policy_priv_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
     if _oracle_to_policy:
         if not _use_asymmetric_critic:
             raise ValueError("--oracle_obstacles_to_policy 需要 asymmetric critic "
                              "(共用 privileged_obs 緩衝/recompute 管線)。請用 critic_profile=asymmetric。")
         print(f"[ORACLE] obstacles→policy: PolicyHead 殘差 priv_branch dim={_policy_priv_dim} "
               f"(zero-init → 暖啟動 identity; 診斷用, 非部署)")
-    value_head = ValueHead(input_dim=rl_input_dim, privileged_dim=_priv_dim).to(device)
+    value_head = ValueHead(input_dim=_head_input_dim, privileged_dim=_priv_dim).to(device)
     if _use_asymmetric_critic:
-        print(f"[INFO] Asymmetric critic: rl_input={rl_input_dim} + privileged={_priv_dim} = {rl_input_dim + _priv_dim}D")
+        print(f"[INFO] Asymmetric critic: rl_input={_head_input_dim} + privileged={_priv_dim} = {_head_input_dim + _priv_dim}D")
     if args_cli.value_init_bias is not None:
         nn.init.constant_(value_head.net[-1].bias, args_cli.value_init_bias)
         print(f"[INFO] Value head final bias override: {args_cli.value_init_bias}")
@@ -3015,7 +3053,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     charge_params_actor = list(policy_head.parameters())                  # PolicyHead 的所有參數
     charge_params_critic = list(value_head.parameters())                  # ValueHead 的所有參數
     charge_params_rl = charge_params_actor + charge_params_critic
-    charge_opt_rl = torch.optim.Adam(charge_params_rl, lr=args_cli.lr, eps=1e-5)
+    if _lvdot_enc_on:
+        # encoder 與 head 同 lr(RL 梯度流過它),獨立 param group 開 weight_decay 正則化
+        charge_opt_rl = torch.optim.Adam([
+            {"params": charge_params_rl, "lr": args_cli.lr},
+            {"params": list(lvdot_encoder.parameters()), "lr": args_cli.lr,
+             "weight_decay": args_cli.lvdot_encoder_wd},
+        ], eps=1e-5)
+        print(f"[LVDOT-ENC] encoder 加入 RL optimizer (lr={args_cli.lr}, wd={args_cli.lvdot_encoder_wd})")
+    else:
+        charge_opt_rl = torch.optim.Adam(charge_params_rl, lr=args_cli.lr, eps=1e-5)
 
     # --- Aux optimizer: 細粒度 param groups，各自設 lr ---
     # 5 個 group（依「output → input」方向排列，解凍策略也由 output 端向 input 端逐步放開）：
@@ -3322,11 +3369,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             print(f"[INFO] preprocess_rnn: 跳過 shape 不符的 keys（重初始化）: {_pp_skipped}")
         if _pp_missing:
             print(f"[INFO] preprocess_rnn: 新初始化 params（checkpoint 缺）: {list(_pp_missing)}")
-        policy_head.load_state_dict(ckpt["policy_head"], strict=(not _oracle_to_policy))  # oracle: priv_branch 新建→strict=False
-        _vh_strict = not _use_asymmetric_critic
-        _vh_missing, _vh_unexpected = value_head.load_state_dict(ckpt["value_head"], strict=_vh_strict)
-        if _vh_missing:
-            print(f"[INFO] ValueHead: new params (cold start): {_vh_missing}")
+        if _lvdot_enc_on and "lvdot_encoder" not in ckpt:
+            # ★暖啟遷移: 從「無 encoder」checkpoint(如 SA2)起訓。head 第一層輸入維度改變
+            #   (加 encoder: 121→115),只重初始化第一層 + encoder(全新),深層照載(shape 相符)。
+            _ph_first = ("net.0.weight", "net.0.bias")   # PolicyHead 第一層
+            _ph_filtered = {k: v for k, v in ckpt["policy_head"].items() if k not in _ph_first}
+            _ph_m, _ph_u = policy_head.load_state_dict(_ph_filtered, strict=False)
+            print(f"[LVDOT-ENC] policy_head 暖啟遷移: 深層載入, 第一層(net.0)重初始化。new={list(_ph_m)}")
+            # ValueHead: asymmetric 第一層=rl_proj(input→128); symmetric=net.0(input→256)
+            _vh_first = ("rl_proj.weight", "rl_proj.bias") if _use_asymmetric_critic else ("net.0.weight", "net.0.bias")
+            _vh_filtered = {k: v for k, v in ckpt["value_head"].items() if k not in _vh_first}
+            _vh_m, _vh_u = value_head.load_state_dict(_vh_filtered, strict=False)
+            print(f"[LVDOT-ENC] value_head 暖啟遷移: 深層載入, 第一層({_vh_first[0].split('.')[0]})重初始化。new={list(_vh_m)}")
+            print("[LVDOT-ENC] lvdot_encoder 全新(末層 zero-init → 初始輸出≈0,漸進加入)")
+        elif _lvdot_enc_on:
+            # resume: checkpoint 已含 encoder → head 維度相符,正常載入 + 載 encoder
+            policy_head.load_state_dict(ckpt["policy_head"], strict=(not _oracle_to_policy))
+            value_head.load_state_dict(ckpt["value_head"], strict=(not _use_asymmetric_critic))
+            if lvdot_encoder is not None and "lvdot_encoder" in ckpt:
+                lvdot_encoder.load_state_dict(ckpt["lvdot_encoder"])
+                print("[LVDOT-ENC] resume: lvdot_encoder 已從 checkpoint 載入")
+        else:
+            policy_head.load_state_dict(ckpt["policy_head"], strict=(not _oracle_to_policy))  # oracle: priv_branch 新建→strict=False
+            _vh_strict = not _use_asymmetric_critic
+            _vh_missing, _vh_unexpected = value_head.load_state_dict(ckpt["value_head"], strict=_vh_strict)
+            if _vh_missing:
+                print(f"[INFO] ValueHead: new params (cold start): {_vh_missing}")
         if "obs_policy" in ckpt and obs_policy is not None:
             obs_policy.load_state_dict(ckpt["obs_policy"])
             obs_value.load_state_dict(ckpt["obs_value"])
@@ -3646,8 +3714,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                          if args_cli.hybrid_predict_to_policy
                          else torch.cat([p_obs, _rnn_for_rl], dim=-1))  # concat obs + preprocess_feat → RL input
                 _priv_obs = extract_privileged_obs(env.unwrapped) if (_use_asymmetric_critic or _oracle_to_policy) else None
-                logits = policy_head(rl_in, _priv_obs if _oracle_to_policy else None)  # [E, 38] policy logits（雙頭各 19）
-                value = value_head(rl_in, _priv_obs if _use_asymmetric_critic else None).squeeze(-1)  # [E] critic value
+                _rl_in_enc = _encode_rl_input(rl_in)
+                logits = policy_head(_rl_in_enc, _priv_obs if _oracle_to_policy else None)  # [E, 38] policy logits（雙頭各 19）
+                value = value_head(_rl_in_enc, _priv_obs if _use_asymmetric_critic else None).squeeze(-1)  # [E] critic value
                 actions, log_prob, _ = sample_action(logits)     # 採樣動作 + joint log_prob
                 goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)  # 目標診斷（不影響 reward）
 
@@ -4205,7 +4274,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             if args_cli.hybrid_predict_to_policy
                             else torch.cat([_p_obs_t, _rnn_feat_t], dim=-1))
                         _priv_t = charge_buf.privileged_obs[t] if _use_asymmetric_critic else None
-                        charge_buf.values[t] = value_head(charge_buf.rl_inputs[t], _priv_t).squeeze(-1)
+                        charge_buf.values[t] = value_head(_encode_rl_input(charge_buf.rl_inputs[t]), _priv_t).squeeze(-1)
                         # Handle episode resets: zero hidden for envs that were done at step t
                         _done_mask = charge_buf.dones[t].unsqueeze(0).unsqueeze(-1)  # [1,E,1]
                         _fresh_h = _fresh_h * (1.0 - _done_mask)
@@ -4227,7 +4296,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                          if args_cli.hybrid_predict_to_policy
                          else torch.cat([p_obs, _rnn_for_rl], dim=-1))
                 _priv_bootstrap = extract_privileged_obs(env.unwrapped) if _use_asymmetric_critic else None
-                last_value = value_head(rl_in, _priv_bootstrap).squeeze(-1)  # [E] bootstrap value V_{T+1}
+                last_value = value_head(_encode_rl_input(rl_in), _priv_bootstrap).squeeze(-1)  # [E] bootstrap value V_{T+1}
 
             # GAE 計算（使用 WD 固定 gamma=0.984 + gae_lambda）
             advantages, returns = compute_gae(
@@ -4356,9 +4425,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     else:
                         _ri_mb = flat_ri[mb]
                     _priv_mb = flat_priv[mb] if flat_priv is not None else None
-                    nl = policy_head(_ri_mb, _priv_mb if _oracle_to_policy else None)
+                    _ri_mb_enc = _encode_rl_input(_ri_mb)   # ★LV-DOT encoder(帶梯度,RL loss 流回 encoder)
+                    nl = policy_head(_ri_mb_enc, _priv_mb if _oracle_to_policy else None)
                     nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
-                    nv = value_head(_ri_mb, _priv_mb).squeeze(-1)
+                    nv = value_head(_ri_mb_enc, _priv_mb).squeeze(-1)
 
                     # Patch 3: approx KL (old_logprob - new_logprob)
                     with torch.no_grad():
@@ -4460,7 +4530,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                     # --- post-update policy diagnostics ---
                     with torch.no_grad():
-                        _post_nl = policy_head(flat_ri[mb], (flat_priv[mb] if (_oracle_to_policy and flat_priv is not None) else None))
+                        _post_nl = policy_head(_encode_rl_input(flat_ri[mb]), (flat_priv[mb] if (_oracle_to_policy and flat_priv is not None) else None))
                         _post_lp, _, _ = evaluate_actions(_post_nl, flat_act[mb])
                         _post_ratio = (_post_lp - flat_lp[mb]).exp()
                         post_kl_l.append((flat_lp[mb] - _post_lp).mean().item())
@@ -5088,6 +5158,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         data=action_rows,
                     )
 
+            # --- LV-DOT encoder metrics (2026-07-12): 監控 encoder 使用程度 ---
+            if _lvdot_enc_on and lvdot_encoder is not None:
+                with torch.no_grad():
+                    _gate = lvdot_encoder.out_scale.detach()
+                    log_data["lvdot/gate_abs_mean"] = float(_gate.abs().mean())   # gate 開啟程度(0=沒用,↑=用)
+                    log_data["lvdot/gate_abs_max"] = float(_gate.abs().max())
+                    _lv_raw = charge_buf.rl_inputs[:RL, :, policy_obs_dim - 30:policy_obs_dim].reshape(-1, 30)
+                    if _lv_raw.shape[0] > 0:
+                        _enc_out = lvdot_encoder(_lv_raw[:512])
+                        log_data["lvdot/encoder_output_norm"] = float(_enc_out.norm(dim=-1).mean())
+
             # --- DORAEMON metrics ---
             if _doraemon_ctrl is not None:
                 log_data.update(_doraemon_ctrl.to_wandb_dict())
@@ -5128,6 +5209,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             }
             if use_extractor:
                 _ckpt_dict["extractor"] = extractor.state_dict()  # Conv1d extractor（only in extractor_rnn mode）
+            if _lvdot_enc_on and lvdot_encoder is not None:
+                _ckpt_dict["lvdot_encoder"] = lvdot_encoder.state_dict()  # ★LV-DOT channel encoder
             if args_cli.feat_norm:
                 # ★部署關鍵:feat_norm 統計必須存進 checkpoint,否則 play/車端餵錯尺度特徵→hidden 錯亂
                 _ckpt_dict["feat_normalizer"] = {

@@ -460,7 +460,11 @@ def _autodetect_obs_layout_env(cli) -> None:
     hybrid = bool(a.get("hybrid_predict_to_policy", False))
 
     # rl_in = policy_obs_dim + preprocess_dim + (predict_dim if hybrid)
-    policy_obs_dim = rl_in - preprocess_dim - (predict_dim if hybrid else 0)
+    # ★LV-DOT encoder: 若 checkpoint 含 encoder,head 輸入是 encoded(30→enc_dim),
+    #   還原 raw policy_obs_dim 需 +（30 - enc_dim）。
+    _enc_dim_ck = int(a.get("lvdot_encoder_dim", 24)) if "lvdot_encoder" in ck else 0
+    policy_obs_dim = (rl_in - preprocess_dim - (predict_dim if hybrid else 0)
+                      + (30 - _enc_dim_ck if _enc_dim_ck else 0))
 
     # 7D state (state_mlp 輸入 7)= 訓練時 act_hist 已移除 → env 需 CHARGE_USE_ACT_HIST=0
     state_w = ck.get("extractor", {}).get("state_mlp.0.weight", None)
@@ -518,7 +522,7 @@ sys.path.insert(0, str(_skrl_root / "models"))         # skrl/models/（modular_
 sys.path.insert(0, str(_skrl_root / "utils"))          # skrl/utils/（charge_env_overrides.py, wd_aux_targets.py）
 
 from charge_env_overrides import apply_charge_env_overrides  # env_cfg 覆寫工具
-from modular_rnn_models import ACT_HIST_DIM, LIDAR_CONV_CH, STATE_DIM, LidarStateExtractor, PolicyHead, PreprocessRNN, RNNStateManager, ValueHead  # 模型元件
+from modular_rnn_models import ACT_HIST_DIM, LIDAR_CONV_CH, STATE_DIM, LidarStateExtractor, PolicyHead, PreprocessRNN, RNNStateManager, ValueHead, LVDOTEncoder  # 模型元件
 from wd_aux_targets import build_wd_preprocess_targets  # RNN aux 7D target 計算
 
 # 139D 觀測中，policy 使用的 79 維索引：
@@ -2578,21 +2582,36 @@ def main():
     _rl_in_dim = policy_obs_dim + preprocess_dim + (predict_dim if _hybrid else 0)  # hybrid:+障礙動態預測(顯式MOT輸出)
     if _hybrid:
         print(f"[PLAY] hybrid_predict_to_policy → rl_input={_rl_in_dim} (含 predict_dim {predict_dim})")
-    policy_head = PolicyHead(input_dim=_rl_in_dim).to(device)
+    # ★LV-DOT encoder: checkpoint 含 lvdot_encoder → head 輸入是 encoded(raw 30→enc_dim)
+    _LVDOT_ENC_ON = "lvdot_encoder" in ckpt
+    lvdot_encoder = None
+    if _LVDOT_ENC_ON:
+        _enc_dim = int(ckpt_args.get("lvdot_encoder_dim", 24))
+        _enc_hidden = int(ckpt_args.get("lvdot_encoder_hidden", 48))
+        lvdot_encoder = LVDOTEncoder(in_dim=30, hidden_dim=_enc_hidden, out_dim=_enc_dim).to(device)
+        _head_in_dim = _rl_in_dim - 30 + _enc_dim
+        print(f"[PLAY] ★LV-DOT encoder: raw 30→{_enc_dim}D (hidden {_enc_hidden}), head 輸入 {_rl_in_dim}→{_head_in_dim}D")
+    else:
+        _head_in_dim = _rl_in_dim
+    policy_head = PolicyHead(input_dim=_head_in_dim).to(device)
     # Asymmetric critic（v2）：ValueHead 多一條 50D privileged 通道
     # 雖然 play 不會真的呼叫 value forward，但 load_state_dict 必須 shape 對齊
     critic_profile = ckpt_args.get("critic_profile", "symmetric")
     privileged_dim = 50 if critic_profile == "asymmetric" else 0
-    value_head = ValueHead(input_dim=_rl_in_dim, privileged_dim=privileged_dim).to(device)
-    print(f"[PLAY] ValueHead: input={_rl_in_dim} privileged={privileged_dim} (profile={critic_profile})")
+    value_head = ValueHead(input_dim=_head_in_dim, privileged_dim=privileged_dim).to(device)
+    print(f"[PLAY] ValueHead: input={_head_in_dim} privileged={privileged_dim} (profile={critic_profile})")
 
     # 載入訓練權重
     if use_extractor:
         extractor.load_state_dict(ckpt["extractor"])
-        extractor.eval()
+        extractor.train(False)
     preprocess_rnn.load_state_dict(ckpt["preprocess_rnn"])
     policy_head.load_state_dict(ckpt["policy_head"])
     value_head.load_state_dict(ckpt["value_head"])
+    if _LVDOT_ENC_ON:
+        lvdot_encoder.load_state_dict(ckpt["lvdot_encoder"])
+        lvdot_encoder.train(False)
+        print("[PLAY] ✅ lvdot_encoder 已從 checkpoint 載入")
     preprocess_rnn.eval()
     # ★feat_norm:若 checkpoint 存了 feat_normalizer 統計,載入並凍結套用(部署正解;
     #   否則 play 端用 fresh running normalizer 近似——後者只在舊 ckpt 無此統計時 fallback)。
@@ -3194,6 +3213,12 @@ def main():
             rnn_for_rl = torch.zeros_like(rnn_feat) if zero_preprocess else rnn_feat
             rl_in = (torch.cat([p_obs, rnn_for_rl, aux_pred], dim=-1)  # hybrid:+障礙動態預測
                      if _hybrid else torch.cat([p_obs, rnn_for_rl], dim=-1))
+            # ★LV-DOT encoder: raw 30D → encoded 再進 head(與訓練端一致)
+            if _LVDOT_ENC_ON:
+                _L = policy_obs_dim
+                rl_in = torch.cat([rl_in[..., :_L - 30],
+                                   lvdot_encoder(rl_in[..., _L - 30:_L]),
+                                   rl_in[..., _L:]], dim=-1)
             logits = policy_head(rl_in)                        # Policy head 輸出 logits
             actions = sample_action(logits, args_cli.deterministic)  # 取樣或 argmax
 
@@ -3261,6 +3286,12 @@ def main():
                 _rf, _ax_g, _ = preprocess_rnn(_f, _hid_g, training=False)
                 _rl_g = (torch.cat([_p, _rf, _ax_g], dim=-1) if _hybrid
                          else torch.cat([_p, _rf], dim=-1))
+                # ★LV-DOT encoder: 梯度須流過 encoder(測「加 encoder 後 raw 速度敏感度是否↑」)
+                if _LVDOT_ENC_ON:
+                    _Lg = policy_obs_dim
+                    _rl_g = torch.cat([_rl_g[..., :_Lg - 30],
+                                       lvdot_encoder(_rl_g[..., _Lg - 30:_Lg]),
+                                       _rl_g[..., _Lg:]], dim=-1)
                 _lg_g = policy_head(_rl_g)
                 _S = torch.logsumexp(_lg_g, dim=-1).sum()
                 _S.backward()
