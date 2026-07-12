@@ -156,6 +156,40 @@ Grok 預測：**感知瓶頸佔比較大**（單幀 VLP-16 dense 易遮擋混疊
 
 ---
 
+## 5.6 靜態早避子實驗（Reward Shaping 受控驗證）
+
+**目的**：在高密度（SA3 起）測試**單一非-invariant reward term** 能否讓 policy 對靜態障礙**提早行動**，且不大幅傷 SR 或造成過度繞圈。
+
+**⚠️ 前提誠實框架（PBRS 兩難）**：07-06 三實驗（gap_heading / 膨脹 / frame_stack）已證改 reward **動不了**靜態避障風格（`d_safe` 不動；罰 −15 動了但 SR 掉到 88<90）。根因結構性：`γ折扣 + 貼身不扣分 → 貼身最短路 = 數學最優`。
+- 真 PBRS（`F = γΦ(s')−Φ(s)` 差分形式）= policy-invariant = **保證改不動**貼身（因貼身是真最優）。
+- 想改變風格 → **必須用非-invariant reward** → 必帶 SR 風險。**「安全又有效」互斥，沒有免費午餐。**
+- **唯一值得試的縫**：前例全在低密度（3-5 靜），「貼一顆最短路」是最優；在 **15 靜**貼一顆時旁邊還有 3 顆，貼身**可能不再最優** → 非-invariant early_gap **或許**咬得動。這是**賭高密度改變 reward 經濟學**的實驗，非安全牌，故配硬 kill gate。
+
+**方法論原則**：只加 1 個 term / 平滑 gate（無 cliff）/ efficiency anchor 防繞圈 / 硬 kill gate（非體感）。
+
+**Step 0（先做，成本最低）**：診斷 rmd `|ω|~0.68` 全時抖 = 結構性 bang-bang（obs_delay 類，[[finding_bangbang_degenerate_penalty0]]）還是 reward 缺激勵。**若結構性 → 任何 reward shaping 都白搭 → 先修結構**，省一整場空訓。
+
+**Step 1（單 term 實驗，SA3 高密度）**：
+```python
+# 平滑距離 gate（越遠越早對準，無 4m cliff）
+distance_gate = torch.sigmoid((min_static_dist - 3.0) / 1.8)
+early_gap_reward = gap_heading * distance_gate * 0.9        # 非-invariant,明知會改最優,這正是目的
+# efficiency anchor（防繞大圈）
+efficiency_anchor = v_fwd - 0.3 * torch.abs(omega)
+```
+- shaping 總和 / goal reward 控制 **0.3–0.6**。
+
+**驗收指標（硬 gate，deterministic rollout）**：`d_safe` 分佈（p5 / median）、淨路徑轉向 onset（路徑曲率明顯變化的距離，非 command `|ω|`）、總 SR + 路徑長度。
+
+**Kill Gate（硬性停止，滿足任一即回歸 curriculum+shield）**：
+- `d_safe` p5 無明顯改善（改善 < 0.15m），或
+- 淨路徑轉向 onset 沒提前，或
+- SR 下降 > 3pp 或路徑長度明顯增加。
+
+**Step 2（僅在通過時）**：**同時**滿足「ΔSR ≥ 0 且 onset 明顯提前 且 d_safe 有改善」→ 才加第 2 term（平滑版 clearance，同樣非-invariant + gated）。
+
+---
+
 ## 6. 成本與風險
 
 | 項目 | 估計 |
@@ -176,8 +210,9 @@ Grok 預測：**感知瓶頸佔比較大**（單幀 VLP-16 dense 易遮擋混疊
 3. shield 三層參數校準（部署密度 eval），含 ORCA(3b) 對照
 4. **ORCA baseline（H2 對照，Grok）**：pyrvo2 幾何速度避碰，量動態 CR vs reactive policy → 證「速度可用只是 RL 不學」
 5. **容量牆診斷（§5.5）**：刀0 per-beam grad-attr（零成本，Phase 0）→ 撞牆才做刀1/刀2
-6. det eval 報告（各階段畢業 + 部署密度驗收表 + 容量牆密度掃描曲線）
-7. 更新記憶：run↔wandb id lineage、部署配方
+6. **靜態早避子實驗（§5.6）**：Step 0 bang-bang 診斷 → Step 1 單 term（early_gap + efficiency anchor）→ kill gate 報告
+7. det eval 報告（各階段畢業 + 部署密度驗收表 + 容量牆密度掃描曲線）
+8. 更新記憶：run↔wandb id lineage、部署配方
 
 ---
 
@@ -188,3 +223,4 @@ Grok 預測：**感知瓶頸佔比較大**（單幀 VLP-16 dense 易遮擋混疊
 - **不改訓練 obs 維度**：LV-DOT 速度欄留著（避免連鎖改動），policy 不指望它，但 ORCA 部署層會用。
 - **不預先做架構升級**（方向 B）：先 §5.5 三刀診斷瓶頸來源（刀0 零成本先做），撞牆才針對性換 encoder/head，非盲換。
 - **不做結構化 layout**（方向 C）：除非確認真實場地有走道結構。
+- **靜態 reward shaping 只做「受控子實驗」**（§5.6）：非主力（主力=curriculum 密度）、單 term、帶硬 kill gate；kill gate 觸發即回歸 curriculum+shield，不無限加 term。
