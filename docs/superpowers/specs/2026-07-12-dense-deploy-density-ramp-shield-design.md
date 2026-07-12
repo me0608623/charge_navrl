@@ -174,7 +174,11 @@ Grok 預測：**感知瓶頸佔比較大**（單幀 VLP-16 dense 易遮擋混疊
 
 **方法論原則**：只加 1 個 term / 平滑 gate（無 cliff）/ efficiency anchor 防繞圈 / 硬 kill gate（非體感）。
 
-**Step 0（先做，成本最低）**：診斷 rmd `|ω|~0.68` 全時抖 = 結構性 bang-bang（obs_delay 類，[[finding_bangbang_degenerate_penalty0]]）還是 reward 缺激勵。**若結構性 → 任何 reward shaping 都白搭 → 先修結構**，省一整場空訓。
+**Step 0（先做，成本最低）★已執行 2026-07-12，結論：健康放行**：
+- 診斷 rmd/clean policy `|ω|` 全時抖是結構性 bang-bang 還是輕微 weave。
+- **結果**：空曠場 `|ω|`-絕對值 ~0.65 恆定（rmd 0.70 / clean sa5_v3f_react 0.65，actuator_dr 加劇），**但 signed 翻轉率 p95 僅 0.187 = 「輕微擺動」低端、非 sin 波病態**（工具校準 <0.15 乾淨/0.15-0.30 輕微/>0.30 病態）。與用戶 GUI「不明顯 bang-bang」一致。
+- **裁決**：bang-bang 已修（obs_delay=[0,0] 關，[[finding_bangbang_degenerate_penalty0]] 修法在），殘餘僅輕微 weave → **§5.6 不 blocked、deploy_dense 不帶病**。
+- ★**指標教訓**：`|ω|`-絕對值反應曲線是**爛的 onset 指標**（分不出持續轉 vs 交替 weave + 被 goal-seeking 混淆）。§5.6 量 onset **必用受控直線場景**（機器人左/goal 右/同 Y，goal 正前方消除 goal-seeking 彎）+ 淨路徑曲率或 signed 翻轉率，**不用 `|ω|`**。
 
 **Step 1（單 term 實驗，正式化 2026-07-12 用戶版）**：
 ```python
