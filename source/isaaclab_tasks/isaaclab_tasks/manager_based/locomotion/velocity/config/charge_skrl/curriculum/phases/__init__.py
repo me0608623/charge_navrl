@@ -13,6 +13,7 @@ from .wd_single_agent_v3d import CONFIG as _wd_sa_v3d
 from .wd_single_agent_v3e import CONFIG as _wd_sa_v3e
 from .wd_single_agent_v3e_vdec import CONFIG as _wd_sa_v3e_vdec
 from .wd_single_agent_v3e_vdec2 import CONFIG as _wd_sa_v3e_vdec2
+from .wd_single_agent_v3e_deploy_dense import CONFIG as _wd_sa_v3e_deploy_dense
 from .wd_single_agent_v3e_rmd import CONFIG as _wd_sa_v3e_rmd
 from .wd_single_agent_v3g import CONFIG as _wd_sa_v3g
 from .wd_single_agent_v3h import CONFIG as _wd_sa_v3h
@@ -32,6 +33,7 @@ PHASE_REGISTRY: dict[str, dict] = {
     "warp_drive_single_agent_v3e": _wd_sa_v3e,  # v3e: smoothness=0 (移除 sin 波元兇) + ent_ang floor=0.02
     "warp_drive_single_agent_v3e_vdec": _wd_sa_v3e_vdec,  # v3e_vdec: v3e + 速度決定性(head_on0.35+動態+2+速度×1.25,逼用LV-DOT速度,2026-07-10)
     "warp_drive_single_agent_v3e_vdec2": _wd_sa_v3e_vdec2,  # v3e_vdec2: vdec + 課程平滑5改(SA2重設計/head_on過渡/SA7-8速度還原/obs_near_goal統一,2026-07-11)
+    "warp_drive_single_agent_v3e_deploy_dense": _wd_sa_v3e_deploy_dense,  # deploy_dense: 高密度部署重訓(靜2→15/動0→6-8) + arena DR 骨架(2026-07-12)
     "warp_drive_single_agent_v3e_rmd": _wd_sa_v3e_rmd,  # v3e_rmd: reactive-must-die crossing主導(SA3+ hc0.30+pc0.30,head_on0.10微降,逼velocity預判,2026-07-12)
     "warp_drive_single_agent_v3g": _wd_sa_v3g,  # v3g: smoothness=0.003 (抗 bang-bang 塌縮) + ent_ang floor=0.02
     "warp_drive_single_agent_v3h": _wd_sa_v3h,  # v3h: v3e + 小比例 head_on(0.05) 從 SA3 (部署主線,2026-07-01)
