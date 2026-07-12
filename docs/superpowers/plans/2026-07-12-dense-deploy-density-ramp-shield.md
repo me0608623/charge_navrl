@@ -157,16 +157,21 @@ _ARENA_SHAPE = {"SA1_nav_bootstrap":"square","SA2_nav_static":"square","SA3_wall
 
 ```bash
 cd /home/aa/IsaacLab
+# ⚠️ PHASE_REGISTRY 走完整 package import 會觸發 isaaclab_tasks __init__ → 需 pxr(Isaac Sim)。
+# 兩種驗法:① 在 Isaac Sim 環境內跑(./isaaclab.sh -p) ② headless 直接 import 該 module(不觸發 package __init__)。
+# ★flatten 後的 CONFIG['stages'] 用 flat key num_obstacles_static/num_obstacles_dynamic(非 nested scene.*)。
 /home/aa/miniconda3/envs/env_isaaclab/bin/python -c "
-from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases import PHASE_REGISTRY
-cfg = PHASE_REGISTRY['warp_drive_single_agent_v3e_deploy_dense']
-st = cfg['stages']
+import sys; sys.path.insert(0,'source/isaaclab_tasks')
+from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases import wd_single_agent_v3e_deploy_dense as C
+st = C.CONFIG['stages']
 assert len(st)==8, f'stage 數 {len(st)}'
-static = [s['scene']['static_obstacles'] for s in st]
-dyn    = [s['scene'].get('dynamic_obstacles') for s in st]
+static = [s['num_obstacles_static'] for s in st]          # ★flat key
+dyn    = [s.get('num_obstacles_dynamic') for s in st]
+arena  = [s['scene'].get('arena_shape') for s in C.STAGES]  # nested STAGES 才有 arena_shape
 assert static==[2,4,6,8,10,12,14,15], static
 print('static ramp OK', static)
 print('dynamic ramp', dyn)
+print('arena_shape', arena)
 assert static[-1]+dyn[-1] <= 24, 'max_active cap 不足'
 print('cap check OK: SA8 total', static[-1]+dyn[-1])
 "
