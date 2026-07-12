@@ -128,43 +128,50 @@ git commit -m "diag(step0): rmd bang-bang 成因診斷結果(空曠場 |ω| 實�
 - Reference（照抄結構）：`.../phases/wd_single_agent_v3e_vdec2.py`
 
 **Interfaces:**
-- Produces: module-level `CURRICULUM = {"name": "warp_drive_single_agent_v3e_deploy_dense", "stages": [...]}`，8 stage，各 stage `scene.static_obstacles / dynamic_obstacles / arena` 依下表。
+- Produces: module-level `CONFIG = {..., "stages": [...]}`（**匯出名 = `CONFIG`，與 vdec2 一致，非 `CURRICULUM`**），8 stage，各 stage `scene` dict 含 `static_obstacles / dynamic_obstacles / dynamic_obstacles_min / arena_shape`。
+- 註冊：`phases/__init__.py` 的 `PHASE_REGISTRY` dict，key = `"warp_drive_single_agent_v3e_deploy_dense"`。
 
 - [ ] **Step 1: 寫 curriculum（在 vdec2 上改密度 ramp + arena DR）**
 
-依 spec §3.1 表（靜態 2,4,6,8,10,12,14,15；動態 0,0,1,2,3,4,6,(6-8)；arena SA1-3 正方、SA4 引入走廊、SA5+ 正方/走廊混合）。骨架照抄 `wd_single_agent_v3e_vdec2.py` 的 `_build_*_stages()` + `_flatten_phase` 模式，改 `_STATIC_RAMP` / 加 `_DYNAMIC_RAMP` / 加 `_ARENA_SHAPE`。
+依 spec §3.1 表（靜態 2,4,6,8,10,12,14,15；動態 0,0,1,2,3,4,6,(6-8)；arena SA1-3 正方、SA4 引入走廊、SA5+ 正方/走廊混合）。骨架照抄 `wd_single_agent_v3e_vdec2.py` 的 `_build_vdec2_stages()` + `_flatten_phase` + 檔尾 `CONFIG = {...}` 模式，改 `_STATIC_RAMP` / 加 `_DYNAMIC_RAMP` / 加 `_ARENA_SHAPE`。
 
+⚠️ **key 名用 vdec2 的完整 stage 名**（非 "SA1" 短名）：
 ```python
-_STATIC_RAMP = {"SA1":2,"SA2":4,"SA3":6,"SA4":8,"SA5":10,"SA6":12,"SA7":14,"SA8":15}
-_DYNAMIC_RAMP = {"SA1":0,"SA2":0,"SA3":1,"SA4":2,"SA5":3,"SA6":4,"SA7":6,"SA8":8}  # SA8 min6 max8
-_ARENA_SHAPE = {  # square only 早期 → corridor DR 後期
-  "SA1":"square","SA2":"square","SA3":"square",
-  "SA4":"mix","SA5":"mix","SA6":"mix","SA7":"mix","SA8":"mix"}
+# vdec2 實際 stage 名: SA1_nav_bootstrap, SA2_nav_static, SA3_walls_crossing,
+#   SA4_spatial_plan, SA5_endurance, SA6_dense_avoid, SA7_high_pressure, SA8_final
+_STATIC_RAMP = {"SA1_nav_bootstrap":2,"SA2_nav_static":4,"SA3_walls_crossing":6,
+  "SA4_spatial_plan":8,"SA5_endurance":10,"SA6_dense_avoid":12,"SA7_high_pressure":14,"SA8_final":15}
+_DYNAMIC_RAMP = {"SA1_nav_bootstrap":0,"SA2_nav_static":0,"SA3_walls_crossing":1,
+  "SA4_spatial_plan":2,"SA5_endurance":3,"SA6_dense_avoid":4,"SA7_high_pressure":6,"SA8_final":8}
+_DYNAMIC_MIN  = {"SA8_final":6}  # SA8 動態 min6 max8；其餘 min=max
+_ARENA_SHAPE = {"SA1_nav_bootstrap":"square","SA2_nav_static":"square","SA3_walls_crossing":"square",
+  "SA4_spatial_plan":"mix","SA5_endurance":"mix","SA6_dense_avoid":"mix","SA7_high_pressure":"mix","SA8_final":"mix"}
+# for name in _STATIC_RAMP: by_name[name]["scene"]["static_obstacles"]=..., ["dynamic_obstacles"]=..., ["arena_shape"]=...
 ```
-（實際 key 名對齊 vdec2 的 stage 名如 `SA3_walls_crossing`；照該檔命名。）
 
-- [ ] **Step 2: 註冊到 phases registry**
+- [ ] **Step 2: 註冊到 PHASE_REGISTRY**
 
-在 `__init__.py` 加 import + 加入 registry dict（照 vdec2 的註冊行）。
+`phases/__init__.py`：加 `from .wd_single_agent_v3e_deploy_dense import CONFIG as _wd_sa_v3e_deploy_dense`（照 line 15-16 vdec2/rmd 樣式）+ 在 `PHASE_REGISTRY` dict 加 `"warp_drive_single_agent_v3e_deploy_dense": _wd_sa_v3e_deploy_dense,`（照 line 34-35）。
 
 - [ ] **Step 3: 測 curriculum 載入 + 密度正確（失敗測先行）**
 
 ```bash
 cd /home/aa/IsaacLab
 /home/aa/miniconda3/envs/env_isaaclab/bin/python -c "
-from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases import wd_single_agent_v3e_deploy_dense as C
-st = C.CURRICULUM['stages']
+from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases import PHASE_REGISTRY
+cfg = PHASE_REGISTRY['warp_drive_single_agent_v3e_deploy_dense']
+st = cfg['stages']
 assert len(st)==8, f'stage 數 {len(st)}'
 static = [s['scene']['static_obstacles'] for s in st]
 dyn    = [s['scene'].get('dynamic_obstacles') for s in st]
 assert static==[2,4,6,8,10,12,14,15], static
 print('static ramp OK', static)
 print('dynamic ramp', dyn)
-assert static[-1]+8 <= 24, 'max_active cap 不足'
-print('cap check OK: SA8 max', static[-1]+8)
+assert static[-1]+dyn[-1] <= 24, 'max_active cap 不足'
+print('cap check OK: SA8 total', static[-1]+dyn[-1])
 "
 ```
-Expected: `static ramp OK [2, 4, 6, 8, 10, 12, 14, 15]` + cap check OK。若 KeyError/AssertionError → 修 curriculum。
+Expected: `static ramp OK [2, 4, 6, 8, 10, 12, 14, 15]` + `dynamic ramp [0, 0, 1, 2, 3, 4, 6, 8]` + cap check OK（SA8 total 23 ≤ 24）。若 KeyError/AssertionError → 修 curriculum。
 
 - [ ] **Step 4: Commit**
 
