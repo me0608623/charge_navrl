@@ -91,6 +91,31 @@ _GOAL_DIST = {
 }
 
 
+def _deploy_behavior_mix(n_static: int, n_dynamic: int) -> dict:
+    """★關鍵修正 (2026-07-12)：障礙靜止 vs 移動由 behavior_mix 決定，非 static/dynamic 計數。
+    behavior_scheduler.py:299 static_mask=(behavior_type==STATIC)；behavior_mix 分配 max_slots。
+    → 靜態密度 ramp 要真的靜止，必須讓 behavior_mix 的 "static" 比例 = 靜態計數佔比。
+
+    n_dynamic=0 → 全 static；否則 static 佔多數 + 動態餘量分給 pedestrian-like 行為
+    (crossing 為主 = 部署真實行人橫穿)。
+    """
+    total = n_static + n_dynamic
+    if total == 0:
+        return {"static": 1.0}
+    if n_dynamic == 0:
+        return {"static": 1.0}
+    sf = n_static / total
+    df = n_dynamic / total
+    return {
+        "static": sf,
+        "horizontal_crossing": df * 0.30,
+        "path_crossing": df * 0.25,
+        "patrol": df * 0.20,
+        "random_walk": df * 0.15,
+        "head_on": df * 0.10,
+    }
+
+
 def _build_deploy_dense_stages() -> list[dict]:
     """以 vdec2 STAGES 為基底，套入 deploy_dense 密度 ramp + arena DR。
 
@@ -122,6 +147,10 @@ def _build_deploy_dense_stages() -> list[dict]:
 
         # goal 距離範圍隨 arena 收斂（SA8 對齊部署）。
         sc["goal_distance"] = _GOAL_DIST[name]
+
+        # ★關鍵修正：behavior_mix 讓靜態比例真的靜止（vdec2 繼承的 mix 全移動，無 static 項）。
+        bh = by_name[name].setdefault("behavior", {})
+        bh["behavior_mix"] = _deploy_behavior_mix(_STATIC_RAMP[name], _DYNAMIC_RAMP[name])
 
     return stages
 
