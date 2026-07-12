@@ -176,24 +176,35 @@ Grok 預測：**感知瓶頸佔比較大**（單幀 VLP-16 dense 易遮擋混疊
 
 **Step 0（先做，成本最低）**：診斷 rmd `|ω|~0.68` 全時抖 = 結構性 bang-bang（obs_delay 類，[[finding_bangbang_degenerate_penalty0]]）還是 reward 缺激勵。**若結構性 → 任何 reward shaping 都白搭 → 先修結構**，省一整場空訓。
 
-**Step 1（單 term 實驗，SA3 高密度）**：
+**Step 1（單 term 實驗，正式化 2026-07-12 用戶版）**：
 ```python
-# 平滑距離 gate（越遠越早對準，無 4m cliff）
+# 平滑距離 gate（越遠越早對準，無 cliff）
 distance_gate = torch.sigmoid((min_static_dist - 3.0) / 1.8)
 early_gap_reward = gap_heading * distance_gate * 0.9        # 非-invariant,明知會改最優,這正是目的
 # efficiency anchor（防繞大圈）
-efficiency_anchor = v_fwd - 0.3 * torch.abs(omega)
+efficiency_anchor = forward_velocity - 0.3 * torch.abs(omega)
+# 總 reward
+reward = base_reward + early_gap_reward + efficiency_anchor * 0.5
 ```
+- **設定**：SA3 起（見範圍註）；SA2 clean ckpt 暖啟；24D encoder；Term A 0.04；LR 0.0001；seed 42；ne512/1024。
+- **A/B 對照**：同一切、僅差 `early_gap_reward` 有無（單變因）。
 - shaping 總和 / goal reward 控制 **0.3–0.6**。
 
-**驗收指標（硬 gate，deterministic rollout）**：`d_safe` 分佈（p5 / median）、淨路徑轉向 onset（路徑曲率明顯變化的距離，非 command `|ω|`）、總 SR + 路徑長度。
+**⚠️ 2 技術注意**（Claude 補）：
+1. **anchor 的轉向懲罰 vs early_gap 的轉向獎勵方向相反**：`efficiency_anchor` 的 `−0.3|ω|`（實效 `−0.15|ω|`）會壓轉向，early_gap 卻獎勵朝縫轉向 → 兩者拉扯。anchor 權重須**夠弱**只壓「多餘繞圈」、不壓「必要避障轉向」。若避障 onset 沒出現，先查是不是 anchor 壓過頭。
+2. **`forward_velocity` 恐與 base_reward 的 progress 項重複計**（[[feedback_reward_analysis_rigor]] 全 return 結構）→ 實作前先確認 base 是否已獎前進，避免雙重放大前進誘因。
+
+**驗收指標（硬 gate，deterministic rollout）**：`d_safe` 分佈（p5 / median）、淨路徑轉向 onset（路徑曲率明顯變化的距離，非 command `|ω|`）、總 SR + 平均路徑長度。
 
 **Kill Gate（硬性停止，滿足任一即回歸 curriculum+shield）**：
-- `d_safe` p5 無明顯改善（改善 < 0.15m），或
-- 淨路徑轉向 onset 沒提前，或
-- SR 下降 > 3pp 或路徑長度明顯增加。
+- `d_safe` p5 改善 < 0.15m，或
+- 淨路徑轉向 onset 沒提前（或反而更晚），或
+- 總 SR 下降 > 3pp，或
+- 平均路徑長度 > baseline **+8%**。
 
-**Step 2（僅在通過時）**：**同時**滿足「ΔSR ≥ 0 且 onset 明顯提前 且 d_safe 有改善」→ 才加第 2 term（平滑版 clearance，同樣非-invariant + gated）。
+**Step 2（僅在通過時）**：**同時**滿足「ΔSR ≥ 0 且 onset 明顯提前 且 d_safe p5 有改善」→ 才加第 2 term（平滑版 clearance，同樣非-invariant + gated）。
+
+**範圍註**：「SA3 高密度」需釐清是 ① 舊 lineage v3e_rmd SA3（5 靜 crossing，可用現成 SA2 ckpt 立刻跑）還是 ② 新 deploy_dense 的靜態密集階段（SA5+ 10-15 靜，才是真高密度，但需先建 curriculum + 訓到該階）。見 plan Phase 3 決策。
 
 ---
 
