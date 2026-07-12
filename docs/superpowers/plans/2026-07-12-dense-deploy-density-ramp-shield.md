@@ -185,45 +185,57 @@ git add source/.../curriculum/phases/wd_single_agent_v3e_deploy_dense.py source/
 git commit -m "feat(curriculum): deploy_dense 非線性密度 ramp(靜2→15/動0→6-8) + arena DR 骨架"
 ```
 
-### Task 1.2: arena 形狀 domain randomization（正方 + 走廊）
+### Task 1.2（已改範圍 2026-07-12：只做正方 12×12，走廊 DR 延後至 SA4 前）
+
+> **用戶決策**：先建正方版 + 開訓 SA1（SA1-3 本就純正方），走廊 DR 等真實尺寸量測後、SA4 前再補（Task 1.2b）。
+> **Recon 已定位**：arena 尺寸 = curriculum stage 的 `scene.boundary`（flatten 於 `wd_single_agent_v3.py:937` `scene.get("boundary", 8.5)`）。現行 stage 用 7.0–8.5（=14–17m）。**12×12 正方 → boundary=6.0**。走廊非對稱 boundary 基礎設施已存在（`walls.py:38` room_boundary 收 (float,float)、`wall_layout.py:415` T-corridor、`wd_sparse:79` (28,9)）——留給 Task 1.2b。
 
 **Files:**
-- Modify: `.../charge_skrl/mdp/events/walls.py` 或 arena/boundary 生成處（grep `arena_size`、`boundary`、`room_size`）
-- Modify: curriculum scene schema 讓 stage 可帶 `arena_shape: square|corridor|mix`
+- Modify: `.../curriculum/phases/wd_single_agent_v3e_deploy_dense.py`（在 `_build_deploy_dense_stages()` 迴圈加 `sc["boundary"]=6.0`）
 
 **Interfaces:**
-- Consumes: stage `scene.arena_shape`
-- Produces: 每 env reset 時依 shape 設 boundary — square=12×12、corridor=長20×寬7（暫定，config 可調 `corridor_len/corridor_width`）；`mix` = per-env 隨機二選一。
+- Consumes: 無新輸入（沿用 Task 1.1 的 stage 迴圈）
+- Produces: deploy_dense 8 stage 全部 `scene.boundary = 6.0`（12×12 正方）。`arena_shape` 已存在（Task 1.1 設），Task 1.2b 才消費它做走廊 DR；本 task **不消費 arena_shape**（"mix" 目前等同正方 fallback）。
 
-- [ ] **Step 1: 先確認現有 arena/boundary 生成點**
+- [ ] **Step 1: 在 stage 迴圈加 boundary=6.0**
+
+在 `wd_single_agent_v3e_deploy_dense.py` 的 `_build_deploy_dense_stages()` for-loop 內（設 static/dynamic/arena_shape 處）加一行 `sc["boundary"] = 6.0  # 12×12 正方 (半徑 6)`。
+
+- [ ] **Step 2: 驗證 flatten 後 boundary=6.0（headless）**
 
 ```bash
-grep -rn "arena_size\|_room_boundary\|boundary\|spawn_zones" source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/ | grep -iv "#" | head -20
+cd /home/aa/IsaacLab
+/home/aa/miniconda3/envs/env_isaaclab/bin/python -c "
+import sys; sys.path.insert(0,'source/isaaclab_tasks')
+from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.curriculum.phases import wd_single_agent_v3e_deploy_dense as C
+b=[s.get('boundary') for s in C.CONFIG['stages']]
+assert all(abs(x-6.0)<1e-9 for x in b), b
+print('boundary OK (12x12 正方):', b)
+"
 ```
-Expected: 找到 boundary/spawn 設定入口，判斷是否已支援非正方（tuple boundary）。記錄插入點。
+Expected: `boundary OK (12x12 正方): [6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0, 6.0]`。
 
-- [ ] **Step 2: 加 corridor + mix 支援（依 Step 1 找到的入口實作）**
-
-> ⚠️ 具體代碼待 Step 1 定位後填。原則：boundary 從純量 `arena_size` 擴成 `(len_x, len_y)`；`mix` 用 per-env mask 隨機指派。goal/obstacle spawn 需吃非正方 boundary。
-
-- [ ] **Step 3: 煙測 corridor 場能生成不崩**
+- [ ] **Step 3: SA1 煙測（Isaac Sim，場景生成不崩）**
 
 ```bash
-# 4 env × 10 步煙測 corridor stage(SA4)
 CHARGE_USE_ACT_HIST=0 PYTHONUNBUFFERED=1 timeout 300 ./isaaclab.sh -p scripts/reinforcement_learning/skrl/play_eval/play_rnn_car.py \
   --task Isaac-Navigation-Charge-VLP16-Curriculum-WD \
-  --checkpoint logs/rnn_car/sa3_rmd_enc24_ne1024_s42/checkpoint_60000.pt \
-  --curriculum_version warp_drive_single_agent_v3e_deploy_dense --stage 4 \
+  --checkpoint logs/rnn_car/sa5_v3f_react_ne1024_s42/checkpoint_60000.pt \
+  --curriculum_version warp_drive_single_agent_v3e_deploy_dense --stage 1 \
   --num_envs 4 --steps 10 --headless --feat_norm 2>&1 | tail -20
 ```
-Expected: 場景生成、無 NaN/crash、log 印出 corridor boundary。
+Expected: 場景生成、無 NaN/crash、boundary/room 約 ±6。（obs 維度不符可忽略，只驗場景生成。）
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add source/.../mdp/ source/.../curriculum/
-git commit -m "feat(arena): 走廊型長方 boundary + 正方/走廊 per-env DR(mix)"
+git add source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/curriculum/phases/wd_single_agent_v3e_deploy_dense.py
+git commit -m "feat(curriculum): deploy_dense boundary=6.0 (12×12 正方); 走廊 DR 延後 Task 1.2b"
 ```
+
+### Task 1.2b（延後：走廊 DR，SA4 前補）
+
+> 走廊真實尺寸量測後啟動。用既有非對稱 boundary 基礎設施（room_boundary tuple / T-corridor）把 `arena_shape="mix"` 接成 per-env 正方/走廊隨機。不在當前執行範圍。
 
 ### Task 1.3: 8 階段 config yaml
 
