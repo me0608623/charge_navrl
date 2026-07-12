@@ -547,6 +547,52 @@ def _scene_arg(cli_args, attr: str, default_value, flag_names: tuple[str, ...] |
     return getattr(cli_args, attr) if getattr(cli_args, attr) is not None else default_value
 
 
+def _mix_honoring_counts(stage_mix: dict, n_static: int, n_dynamic: int) -> dict:
+    """把 stage 的 behavior_mix 重新縮放，**嚴格對齊** CLI 指定的 靜態/動態 slot 數量。
+
+    問題：`--obstacle_behavior mixed` 原本直接照抄 stage_mix（例 v3e_rmd 是 crossing 主導），
+    12 slot 會被分成 11 動 + 1 靜，和使用者設定的 11 靜 + 1 動 相反。
+
+    修法：
+      - static slot 數 = n_static（精確）
+      - dynamic slot 數 = n_dynamic，依 stage 中各「移動行為」的相對比例分配（最大餘數法），
+        保留 mixed 的動態行為多樣性，但總動態數嚴格 = n_dynamic
+      - 回傳的 ratio = count / total；因 round(count/total × total)=count，
+        BehaviorScheduler._allocate_counts 會精確還原成整數 count。
+
+    Args:
+        stage_mix: 訓練 stage 的 behavior_mix（供動態行為的相對比例）
+        n_static:  CLI 指定的靜態障礙數
+        n_dynamic: CLI 指定的動態障礙數
+    回傳: 新的 behavior_mix dict（ratio = count/total），static 不放最後以確保精確還原。
+    """
+    total = max(1, int(n_static) + int(n_dynamic))
+    # 分離 static / inactive 與「移動行為」，只取原本比例 > 0 的移動行為
+    moving = {k: float(v) for k, v in (stage_mix or {}).items()
+              if k not in ("static", "inactive") and float(v) > 0.0}
+
+    counts: dict[str, int] = {}
+    if int(n_static) > 0:
+        counts["static"] = int(n_static)          # static 先插入 → 不會落在最後一個（保精確）
+
+    if int(n_dynamic) > 0:
+        if moving:
+            msum = sum(moving.values())
+            ideal = {k: int(n_dynamic) * v / msum for k, v in moving.items()}
+            base = {k: int(fv) for k, fv in ideal.items()}          # floor
+            deficit = int(n_dynamic) - sum(base.values())
+            # 最大餘數法：把剩餘 slot 補給小數部分最大的行為
+            for k in sorted(moving, key=lambda k: ideal[k] - base[k], reverse=True)[:deficit]:
+                base[k] += 1
+            for k, c in base.items():
+                if c > 0:
+                    counts[k] = c
+        else:
+            counts["patrol"] = int(n_dynamic)      # stage 無移動行為 → fallback patrol
+
+    return {k: c / total for k, c in counts.items() if c > 0}
+
+
 # ============================================================================
 # 場景參數覆寫函式 — 讓使用者調整所有場景元素
 # ============================================================================
@@ -2699,15 +2745,22 @@ def main():
             _dynamic_behavior = _effective_behavior  # e.g., "path_crossing", "patrol", etc.
             if _effective_behavior == "mixed":
                 # 2026-07-03 fix(審計5-C1): "mixed" 原本是空殼(字串直接塞進 mix→無效行為名)。
-                # 正解=用訓練 stage config 的 behavior_mix + speed_overrides(CR 才與訓練分佈可比)。
+                #   → 用訓練 stage config 的 behavior_mix + speed_overrides(動態行為多樣性)。
+                # 2026-07-12 fix: 原本直接照抄 stage_mix → 12 slot 變 11 動 + 1 靜，
+                #   與 CLI 的 num_static/num_dynamic 相反。改用 _mix_honoring_counts
+                #   嚴格對齊 CLI 靜/動數量，只把「動態那份」按 stage 移動行為比例分配。
                 if stage_cfg is not None and isinstance(stage_cfg.get("behavior_mix"), dict):
+                    _honored_mix = _mix_honoring_counts(
+                        stage_cfg["behavior_mix"], _n_static_play, _n_dynamic_play
+                    )
                     _play_stage_config = {
-                        "behavior_mix": dict(stage_cfg["behavior_mix"]),
+                        "behavior_mix": _honored_mix,
                         "speed_overrides": stage_cfg.get("speed_overrides", {}) or {},
                         "obs_near_goal_count": args_cli.obs_near_goal_count,
                         "obs_near_goal_radius": args_cli.obs_near_goal_radius,
                     }
-                    print(f"[PLAY] mixed → 使用訓練 stage behavior_mix: {_play_stage_config['behavior_mix']}"
+                    print(f"[PLAY] mixed → 嚴格對齊 CLI 數量 (static={_n_static_play}, dynamic={_n_dynamic_play})；"
+                          f"動態行為依 stage 比例分配: {_honored_mix}"
                           f" + speed_overrides({len(_play_stage_config['speed_overrides'])} 項)")
                 else:
                     print("[PLAY] ⚠ mixed 需要 stage config 的 behavior_mix，但取不到 → fallback patrol")
