@@ -1,0 +1,165 @@
+# wd_sa1_lvdot — SA1 LV-DOT: 加回顯式動態障礙 channel (30D)，obs 79→109D
+#
+# ★ 動機 (2026-07-07)：部署 policy「貼身才反應」根因 = v3f obs 79D 沒有障礙速度資訊
+#   (只有 LiDAR 距離)。RNN-as-MOT 從 LiDAR 自推運動已證死路 (velocity R²≈0)。
+#   車端 LV-DOT (onboard_detector→vo_interface→/vo_interface/tracked_obstacles) 直接給
+#   動態障礙 position+velocity → 繞過瓶頸 = 早結論的「Path A 顯式障礙 channel」。
+#
+# obs channel: K=5 最近『動態』物 × [px,py,vx,vy,r,valid] body frame，接在 obs[79:109]。
+#   直達 policy head (rl_input = 109 + preprocess 12 = 121D)，extractor 不動 (仍 96D)。
+#   訓練用 sim ground-truth 動態障礙 (finite-diff 真速度)；中度 DR SA1 clean → SA2+ 加噪。
+#
+# ⚠️ 從頭訓練。obs 佈局變 (79→109D)，不可 resume 任何 v3f/v3h ckpt。
+# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1（obs 維度由此二 env var 控制）。
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa1_lvdot --headless --run_name sa1_lvdot_ne1024_s42
+
+name: wd_sa3_lvdot_ttc
+description: "SA1 LV-DOT + TTC 速度稅: vanilla RNN(非GRU不崩)+ 109D LV-DOT channel + full_material. 獎勵用 TTC 稅(CLI --ttc_tax_weight,從channel vx,vy算v_closing→逼policy用速度預判提早避人,文獻背書NavRL/TTC-force). From scratch SA1. Requires CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 + CLI --ttc_tax_weight."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3e_vdec   # ★速度決定性: head_on0.35+動態+2+速度×1.25 逼用LV-DOT速度
+initial_stage: 3
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles (same as v3f) ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0001
+rnn_lr: 0.00025
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0005
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.3
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (同 v3f；floor 由 curriculum v3e 強制) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
+
+# --- act_hist dropout (act_hist 已由 CHARGE_USE_ACT_HIST=0 移除，此值無效) ---
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64, unchanged) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 13        # ★v3e_vdec 動態+2 後 stage 末 static+dynamic 可達 ~13
+obs_size_rand: 0.3          # ★ 尺寸隨機化 ON: 物理半徑 0.3 ± 0.15 → [0.15, 0.45]
+obs_collision_base: 0.9     # (LV-DOT mode 忽略此值; 碰撞 = 物理半徑 + 0.5 中心→邊緣)
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (★SA1 ttc: full_material 實測雜訊 sim-to-real 從頭訓) ---
+vlp16_noise_mode: full_material
+lidar_no_noise: false
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR (SA1: physics + disturbance + light actuator) ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (obs_delay 誤植→關閉；馬達延遲 actuator_dr 保留)
+obs_delay_steps: [0, 0]
+# Heading stability (SA1: off)
+heading_stability_weight: 0.0
+
+# --- LV-DOT obstacle channel DR (SA1: clean; SA2+ 由 curriculum 設 env._lvdot_dr 加噪) ---
+# ★中度 DR 規格 = 讀 LV-DOT 代碼/config 校準 (非拍腦袋), data-first:
+#   pos_noise_std=0.10m       (vo meas_noise_pos σz=0.10)
+#   vel_noise_std=0.30m/s     (Kalman P 速度收斂; σa=2.0, init std 2.0, ~0.5s 後殘差)
+#   dropout_prob~0.10         (sparse LiDAR at range/side; min_hits=3/max_misses=10 coasting)
+#   false_neg_prob~0.05       (newly-moving ~0.3-0.5s 才確認動態: min_disp_frames6+min_hits3@20Hz)
+#   dynamic_speed_threshold=0.3 (LV-DOT dynamic_velocity_threshold, 已設 obs 函數/PolicyCfg)
+#   min_radius=0.2, max_distance=8.0, fov_deg=360 (LiDAR 全向), lidar_min_range 0.9 近盲區
+#   ⚠ 真實 dropout/false_neg 率仍需車端實錄精修 (config R/Q 是調的值非量的值)。SA1 全 clean。
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (from scratch) ---
+checkpoint: logs/rnn_car/sa2_lvdot_ttc_vdec/checkpoint_30000.pt
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa1, lvdot, a2c, aux, asymmetric, rnn64, obstacle_channel, dynamic_obs, deploy_lvdot]
+notes: "SA1 LV-DOT: 加回 K=5 動態障礙 channel (30D, body frame [px,py,vx,vy,r,valid]) → obs 109D. 對症部署貼身才反應. 部署由車端 /vo_interface/tracked_obstacles 餵. From scratch (obs 佈局變). 中度DR SA1 clean→SA2+加噪."

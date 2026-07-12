@@ -11,6 +11,8 @@ from .wd_single_agent_v1 import CONFIG as _wd_sa_v1
 from .wd_single_agent_v3 import CONFIG as _wd_sa_v3
 from .wd_single_agent_v3d import CONFIG as _wd_sa_v3d
 from .wd_single_agent_v3e import CONFIG as _wd_sa_v3e
+from .wd_single_agent_v3e_vdec import CONFIG as _wd_sa_v3e_vdec
+from .wd_single_agent_v3e_vdec2 import CONFIG as _wd_sa_v3e_vdec2
 from .wd_single_agent_v3g import CONFIG as _wd_sa_v3g
 from .wd_single_agent_v3h import CONFIG as _wd_sa_v3h
 from .wd_single_agent_v3i import CONFIG as _wd_sa_v3i
@@ -27,6 +29,8 @@ PHASE_REGISTRY: dict[str, dict] = {
     "warp_drive_single_agent_v3": _wd_sa_v3,  # v3: r_min=0.25 + penalty_smoothness=0.005
     "warp_drive_single_agent_v3d": _wd_sa_v3d,  # v3d: smoothness=0.015 + ent_ang floor=0.02 (抗 sin 波抽動)
     "warp_drive_single_agent_v3e": _wd_sa_v3e,  # v3e: smoothness=0 (移除 sin 波元兇) + ent_ang floor=0.02
+    "warp_drive_single_agent_v3e_vdec": _wd_sa_v3e_vdec,  # v3e_vdec: v3e + 速度決定性(head_on0.35+動態+2+速度×1.25,逼用LV-DOT速度,2026-07-10)
+    "warp_drive_single_agent_v3e_vdec2": _wd_sa_v3e_vdec2,  # v3e_vdec2: vdec + 課程平滑5改(SA2重設計/head_on過渡/SA7-8速度還原/obs_near_goal統一,2026-07-11)
     "warp_drive_single_agent_v3g": _wd_sa_v3g,  # v3g: smoothness=0.003 (抗 bang-bang 塌縮) + ent_ang floor=0.02
     "warp_drive_single_agent_v3h": _wd_sa_v3h,  # v3h: v3e + 小比例 head_on(0.05) 從 SA3 (部署主線,2026-07-01)
     "warp_drive_single_agent_v3i": _wd_sa_v3i,  # v3i: v3h + actor cap 8→4 (aux1 深記憶配方抗崩盤,2026-07-05)

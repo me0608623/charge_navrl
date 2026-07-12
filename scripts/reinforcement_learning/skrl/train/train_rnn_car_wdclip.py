@@ -346,11 +346,49 @@ parser.add_argument("--teardrop_warmup_start", type=int, default=0,
                     help="水滴稅 warmup 起始 iteration (此前 w=0)。0=無 warmup。防政策先學凍結。")
 parser.add_argument("--teardrop_warmup_end", type=int, default=0,
                     help="水滴稅 warmup 結束 iteration (此後全額)。建議 from-scratch: start~150/end~350 (SR 建立後才施稅)。")
+# --ttc_tax_weight (★LV-DOT 密集場景: TTC 門檻稅, 從 channel obs[79:109] 算 per-obstacle
+#   碰撞剩餘時間 TTC=d/v_closing, <門檻扣分。closing speed 只有 channel 有→強逼 policy 用速度預判。
+#   需 CHARGE_USE_LVDOT_OBS=1 (obs>=109D); 0=off。penalty = w · gate · v_fwd (gate=max slot 危險度)。)
+parser.add_argument("--ttc_tax_weight", type=float, default=0.0,
+                    help="TTC 門檻稅權重 (LV-DOT 密集). >0: 從 channel 算 per-obstacle TTC=d/v_closing, "
+                         "<ttc_thresh 秒扣分 gate=(1-TTC/thresh),逐障礙取 max。penalty=w·gate·v_fwd。"
+                         "稅從 channel 速度算→policy 非用 channel 不可。需 CHARGE_USE_LVDOT_OBS=1。0=off。")
+parser.add_argument("--ttc_thresh", type=float, default=2.0,
+                    help="TTC 門檻(秒)。TTC<此值才扣分,越接近碰撞 gate 越大。預設 2.0s。")
+parser.add_argument("--ttc_warmup_start", type=int, default=0,
+                    help="TTC 稅 warmup 起始 iteration(此前 w=0)。0=無。防 from-scratch 早期凍結。")
+parser.add_argument("--ttc_warmup_end", type=int, default=0,
+                    help="TTC 稅 warmup 結束 iteration(此後全額)。建議 from-scratch start~150/end~350。")
 # --gap_heading_weight (reactive 轉彎閃避:近障礙時獎勵 heading 朝最大可通行間隙,往側邊空隙轉)
 parser.add_argument("--gap_heading_weight", type=float, default=0.0,
                     help="Gap-heading reward weight (轉彎閃避 head-on). 0=off. >0: 障礙近(d_safe<2m)時找最大可通行"
                          "弧段(>0.9m)中心角,獎勵 +(w·dt)·cos(gap_angle) → heading 朝 gap=往側邊空隙轉(reactive on "
                          "LiDAR,bin36=前,不靠速度預測). 配 --penalty_speed_near_obs 成完整 head-on dodge.")
+# ★ Term 1: Predictive Early Deceleration + Receding Penalty (07-11 逼 policy 用 LV-DOT 速度)
+#   核心對稱設計:同一距離下,障礙「逼近」vs「遠離」看 LiDAR 一樣,只有 channel 速度 vx,vy 能區分。
+#   (a) 逼近中(v_closing>0.1)且預測會很近 → 減速給正 reward;
+#   (b) 附近有遠離/靜止障礙(v_closing<0.05)但無逼近威脅時 → 減速扣分(沒必要卻減速)。
+#   → 要拿滿 reward 必須「只在該減速時減速」= 非讀 channel 速度不可,堵住「LiDAR 一律減速」逃生口。
+parser.add_argument("--predictive_decel_weight", type=float, default=0.0,
+                    help="Term1 (a) 預測性減速獎勵權重. >0: 障礙逼近(channel v_closing>0.1)且預測2s後距離<1.5m 時,"
+                         "若本步在減速→ +w·risk. risk=(1.5-pred_d)clamp. 需 CHARGE_USE_LVDOT_OBS=1(obs>=109D). 0=off.")
+parser.add_argument("--receding_penalty_weight", type=float, default=0.0,
+                    help="Term1 (b) 遠離時過度減速懲罰(escape-hatch fix). >0: 附近(d<2.5m)有遠離/靜止障礙且"
+                         "『無任何逼近威脅』時仍減速 → -w·decel. 逼 policy 用速度區分該不該減速,而非一律看距離減速. 0=off.")
+parser.add_argument("--predictive_pred_horizon", type=float, default=2.0,
+                    help="Term1 預測前瞻時間(秒),pred_d = d - v_closing·horizon. 預設 2.0s.")
+# ★ Term A: Speed-aware Turning Reward (07-11 Option A,ablation證policy靠轉向非減速→獎勵打steering維度).
+#   A1 方向正確性 + A2 提早轉向 + 弱化decel(最後手段). 逼 policy 用速度做「提早往對的方向轉」而非走走停停.
+parser.add_argument("--turning_direction_weight", type=float, default=0.0,
+                    help="Term A1 轉向方向正確性. >0: 障礙逼近(v_closing>0.08)時,若 omega 符號=cross(px·vy−py·vx)"
+                         "建議方向 → +w·strength(strength=v_closing/1.5 clamp). max over K=5. 需 obs>=109D. 0=off.")
+parser.add_argument("--early_turning_weight", type=float, default=0.0,
+                    help="Term A2 提早轉向時機. >0: 同方向且 TTC∈[lo,hi] → +w·time_factor((hi−TTC)/(hi−lo),越早越多). 0=off.")
+parser.add_argument("--early_turning_ttc_lo", type=float, default=1.6, help="Term A2 TTC 下限(秒). 預設 1.6.")
+parser.add_argument("--early_turning_ttc_hi", type=float, default=3.8, help="Term A2 TTC 上限(秒). 預設 3.8.")
+parser.add_argument("--weakened_decel_weight", type=float, default=0.0,
+                    help="弱化版 predictive decel(最後手段). >0: 僅極危 TTC<1.2 且 v_closing>0.35 且本步減速 → +w·(1.2−TTC). "
+                         "避免走走停停,只在來不及轉向時才獎勵減速. 建議 0.03~0.05. 0=off.")
 # --aux_loss_type
 parser.add_argument("--aux_loss_type", type=str, default="log", choices=["log", "huber"],
                     help="Aux loss form for dims 0-5. log=WD original (grad ∝ 1/|e|, 鼓勵常數陷阱); "
@@ -1736,6 +1774,17 @@ class MetricsCollector:
         self._front_dist_omega: dict[str, list[float]] = {
             k: [] for k in ("0.5", "1.0", "1.5", "2.0", "2.5", "3.0")
         }
+        # ★動態專屬反應曲線(LV-DOT channel, 按 closing speed 分組) — 前錐 LiDAR 曲線混了牆/靜態,
+        #   無法乾淨看「對快速接近的動態物是否提早反應」。改讀 LV-DOT slot0(最近動態物):
+        #   px=body 前向距離, vx=body 接近速度(-=接近)。分快接近(closing>0.4)/慢或遠離兩組。
+        #   驗證: 若 policy 用 LV-DOT 速度提早避,快接近組應在較遠距離(2-3m)就降速/抬|ω|
+        #   (vs 慢組)。stage3 加距離稅前後對比 = 稅有沒有教會「用速度提早避」的行為層鐵證。
+        #   需 CHARGE_USE_LVDOT_OBS=1(obs≥85D);無 channel 時整段跳過不記。
+        _dyn_bk = ("0.5", "1.0", "1.5", "2.0", "2.5", "3.0")
+        self._dyn_fast_speed: dict[str, list[float]] = {k: [] for k in _dyn_bk}
+        self._dyn_fast_omega: dict[str, list[float]] = {k: [] for k in _dyn_bk}
+        self._dyn_slow_speed: dict[str, list[float]] = {k: [] for k in _dyn_bk}
+        self._dyn_slow_omega: dict[str, list[float]] = {k: [] for k in _dyn_bk}
 
         # --- Termination counters ---
         self._goal_reached = 0
@@ -1861,6 +1910,14 @@ class MetricsCollector:
             self._ep_obs_hit_reward += reward_breakdown["obs_hit_reward"]
             self._ep_floor_reward += reward_breakdown["floor_reward"]
             self._ep_action_reward += reward_breakdown["action_reward"]
+            # ★shaping 項(rollout-loop 加的)→ 記入 _reward_terms → wandb reward/term/shaping_*,
+            #   供監控 policy 是否響應 Term1(predictive_decel 隨訓練上升=學會該減速時減速)。
+            for _sk in ("ttc_tax", "gap_heading", "predictive_decel", "receding_penalty",
+                        "turning_direction", "early_turning", "weakened_decel"):
+                _sv = reward_breakdown.get(_sk, None)
+                if _sv is not None:
+                    self._reward_terms.setdefault(f"shaping_{_sk}", []).append(
+                        float(_sv.mean().item()) if hasattr(_sv, "mean") else float(_sv))
 
         # --- Goal-directed diagnostics ---
         if goal_diagnostics is not None:
@@ -1988,6 +2045,33 @@ class MetricsCollector:
                     if int(_bm.sum().item()) > 0:
                         self._front_dist_speed[_bk].append(v_x[_bm].float().mean().item())
                         self._front_dist_omega[_bk].append(omega[_bm].abs().float().mean().item())
+
+            # ★動態專屬反應曲線: 讀 LV-DOT channel slot0(最近動態物)按 closing speed 分組。
+            #   channel 在 obs[79:109], slot0=obs[79:85]=[px,py,vx,vy,r,valid]
+            #   (已正規化: px/8, vx/1.5)。僅 CHARGE_USE_LVDOT_OBS=1(obs≥85D)時記錄。
+            if charge_actions is not None and obs is not None and obs.dim() >= 2 and obs.shape[-1] >= 85:
+                _ch0 = obs[..., 79:85].detach()               # [E,6] slot0(最近動態物)
+                _dpx = _ch0[:, 0] * 8.0                        # body 前向距離 m (+前)
+                _dpy = _ch0[:, 1] * 8.0                        # body 側向 m
+                _dvx = _ch0[:, 2] * 1.5                        # body 接近速度 m/s (-=接近)
+                _dvalid = _ch0[:, 5] > 0.5
+                _dfront = _dvalid & (_dpx > 0.0)              # 在前方的有效動態物
+                _closing = -_dvx                              # +=接近
+                _ddist = torch.sqrt(_dpx ** 2 + _dpy ** 2 + 1e-8)  # euclidean 距離
+                _fast = _dfront & (_closing > 0.4)           # 快接近(>0.4 m/s)
+                _slow = _dfront & (_closing <= 0.4)          # 慢/遠離
+                for _lo, _hi, _bk in (
+                    (0.0, 0.5, "0.5"), (0.5, 1.0, "1.0"), (1.0, 1.5, "1.5"),
+                    (1.5, 2.0, "2.0"), (2.0, 2.5, "2.5"), (2.5, 3.0, "3.0"),
+                ):
+                    _fm = _fast & (_ddist >= _lo) & (_ddist < _hi)
+                    if int(_fm.sum().item()) > 0:
+                        self._dyn_fast_speed[_bk].append(v_x[_fm].float().mean().item())
+                        self._dyn_fast_omega[_bk].append(omega[_fm].abs().float().mean().item())
+                    _sm = _slow & (_ddist >= _lo) & (_ddist < _hi)
+                    if int(_sm.sum().item()) > 0:
+                        self._dyn_slow_speed[_bk].append(v_x[_sm].float().mean().item())
+                        self._dyn_slow_omega[_bk].append(omega[_sm].abs().float().mean().item())
 
             remaining = self.action_table_sample_size - len(self._action_speed_accel_rows)
             if remaining > 0:
@@ -2276,6 +2360,20 @@ class MetricsCollector:
         for _bk, _bo in self._front_dist_omega.items():  # ★|ω| vs 前距: 轉向式提早避障訊號
             if _bo:
                 m[f"charge/omega_vs_front_dist_{_bk}m"] = float(np.mean(_bo))
+        # ★動態專屬反應曲線(按 closing speed): fast=快接近 / slow=慢或遠離。
+        #   比對「fast 是否在較遠距離就降速/抬|ω|」= policy 有沒有用 LV-DOT 速度提早避的鐵證。
+        for _bk, _bv in self._dyn_fast_speed.items():
+            if _bv:
+                m[f"charge/dyn_fast_speed_{_bk}m"] = float(np.mean(_bv))
+        for _bk, _bv in self._dyn_fast_omega.items():
+            if _bv:
+                m[f"charge/dyn_fast_omega_{_bk}m"] = float(np.mean(_bv))
+        for _bk, _bv in self._dyn_slow_speed.items():
+            if _bv:
+                m[f"charge/dyn_slow_speed_{_bk}m"] = float(np.mean(_bv))
+        for _bk, _bv in self._dyn_slow_omega.items():
+            if _bv:
+                m[f"charge/dyn_slow_omega_{_bk}m"] = float(np.mean(_bv))
 
         # --- All Isaac Lab reward terms (raw) ---
         for k, vals in self._reward_terms.items():
@@ -2390,6 +2488,10 @@ class MetricsCollector:
             _bv.clear()
         for _bo in self._front_dist_omega.values():
             _bo.clear()
+        for _dyn_d in (self._dyn_fast_speed, self._dyn_fast_omega,
+                       self._dyn_slow_speed, self._dyn_slow_omega):  # ★動態專屬曲線 per-rollout 清空
+            for _dyn_v in _dyn_d.values():
+                _dyn_v.clear()
         self._goal_reached = 0
         self._collision = 0
         self._wall_collision = 0
@@ -2487,8 +2589,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if not any(a.startswith("--scene_bound_base") for a in sys.argv):
             args_cli.scene_bound_base = max(2.0, _rs - 2.0)
 
+        # 4) ★修 spawn 縮放 (07-09): room_size 原本只縮牆/LiDAR/障礙,漏縮
+        #    「機器人 spawn 範圍(pose_range ±5)」+「目標放置邊界(wall_boundary 7.5-9.5)」
+        #    → 縮小 arena 時 spawn/goal 跑到新牆(±rs)外 → dies_at_birth(出生即撞死)。
+        #    修: robot pose_range ±(rs-2), goal wall_boundary ±(rs-1.5)(牆內安全邊距)。
+        _spawn_lim = max(1.5, _rs - 2.0)
+        _goal_bound = max(1.5, _rs - 1.5)
+        try:
+            _rb = env_cfg.events.reset_base.params["pose_range"]
+            _rb["x"] = (-_spawn_lim, _spawn_lim)
+            _rb["y"] = (-_spawn_lim, _spawn_lim)
+        except Exception as _e:
+            print(f"[WARN] room_size: 無法縮 robot pose_range: {_e}")
+        try:
+            env_cfg.commands.goal_command.wall_boundary = (_goal_bound, _goal_bound)
+        except Exception as _e:
+            print(f"[WARN] room_size: 無法縮 goal wall_boundary: {_e}")
+
         print(f"[INFO] room_size={_rs} → scene {_rs*2}×{_rs*2}m, "
-              f"boundary_walls at ±{_rs}, scene_bound_base={args_cli.scene_bound_base}")
+              f"boundary_walls at ±{_rs}, scene_bound_base={args_cli.scene_bound_base}, "
+              f"robot spawn ±{_spawn_lim:.1f}, goal_boundary ±{_goal_bound:.1f}")
 
     # --- Sim-to-Real DR：LiDAR 噪聲 + Physics/Disturbance/Actuator 域隨機化 ---
     # 統一由 charge_env_overrides 處理，YAML 設定經 ExperimentConfig → args_cli 傳入。
@@ -3323,6 +3443,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # --- Heading Stability：懲罰角速度符號翻轉（抗震盪）---
     _heading_stability_weight = getattr(args_cli, 'heading_stability_weight', 0.0)
     _prev_omega = torch.zeros(num_envs, device=device)
+    # ★ Term 1 (predictive decel): 追蹤前一步速度以偵測「本步是否減速」(_prev_speed - cur_speed > 0)
+    _prev_speed = torch.zeros(num_envs, device=device)
+    _pd_w_cfg = float(getattr(args_cli, "predictive_decel_weight", 0.0))
+    _rec_w_cfg = float(getattr(args_cli, "receding_penalty_weight", 0.0))
+    # ★ Term A (speed-aware turning) 權重快取 + prev_speed 是否需維護
+    _td_w_cfg = float(getattr(args_cli, "turning_direction_weight", 0.0))
+    _et_w_cfg = float(getattr(args_cli, "early_turning_weight", 0.0))
+    _wd_w_cfg = float(getattr(args_cli, "weakened_decel_weight", 0.0))
+    _track_prev_speed = (_pd_w_cfg > 0.0 or _rec_w_cfg > 0.0 or _wd_w_cfg > 0.0)  # decel 偵測需前一步速度
+    if _pd_w_cfg > 0.0 or _rec_w_cfg > 0.0:
+        print(f"[REWARD] ★Term1 predictive-decel w={_pd_w_cfg} + receding-penalty w={_rec_w_cfg} "
+              f"horizon={float(getattr(args_cli,'predictive_pred_horizon',2.0))}s "
+              f"(逼 policy 用 LV-DOT 速度區分該不該減速)")
+    if _td_w_cfg > 0.0 or _et_w_cfg > 0.0 or _wd_w_cfg > 0.0:
+        print(f"[REWARD] ★Term A speed-aware turning: A1 direction w={_td_w_cfg} + A2 early-turn w={_et_w_cfg} "
+              f"(TTC {float(getattr(args_cli,'early_turning_ttc_lo',1.6))}~{float(getattr(args_cli,'early_turning_ttc_hi',3.8))}s) "
+              f"+ weakened-decel w={_wd_w_cfg} (逼 policy 用速度提早往對的方向轉,非走走停停)")
     if _heading_stability_weight != 0:
         print(f"[REWARD] Heading stability: weight={_heading_stability_weight} "
               f"(penalize omega sign flips)")
@@ -3589,6 +3726,125 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 reward_breakdown["heading_stability"] = _heading_pen
                 _prev_omega = _curr_omega.clone()
 
+            # --- 2c. ★TTC 門檻稅 (LV-DOT 密集場景: 逼 policy 用 channel 速度預判) ---
+            # 從 channel obs[79:109] 逐障礙算碰撞剩餘時間 TTC=d/v_closing(<門檻扣分)。
+            # closing speed 只有 channel 有 → policy 要減稅非讀 channel 不可 = 逼出速度預判。
+            # channel slot k: obs[79+6k : 85+6k] = [px÷8, py÷8, vx÷1.5, vy÷1.5, r, valid]。
+            _ttc_w = float(getattr(args_cli, "ttc_tax_weight", 0.0))
+            if _ttc_w > 0.0 and obs.shape[-1] >= 109:
+                with torch.no_grad():
+                    _ttc_thresh = float(getattr(args_cli, "ttc_thresh", 2.0))
+                    _ch = obs[:, 79:109].view(obs.shape[0], 5, 6)     # [E,5,6] K=5 slots
+                    _px = _ch[:, :, 0] * 8.0                          # body 縱向 m (+前)
+                    _py = _ch[:, :, 1] * 8.0                          # body 橫向 m
+                    _vx = _ch[:, :, 2] * 1.5                          # body 相對速度 x m/s
+                    _vy = _ch[:, :, 3] * 1.5
+                    _valid = _ch[:, :, 5] > 0.5                       # [E,5]
+                    _d = torch.sqrt(_px * _px + _py * _py + 1e-6)     # [E,5] 徑向距離
+                    # 徑向接近速度 v_closing = -(px·vx+py·vy)/d ; >0=逼近
+                    _v_close = -(_px * _vx + _py * _vy) / _d          # [E,5]
+                    _approaching = _valid & (_v_close > 0.05)         # 有效且逼近中
+                    _ttc = _d / _v_close.clamp(min=0.05)              # [E,5] 碰撞剩餘時間 s
+                    # gate = (1 - TTC/thresh) clamp[0,1]; 只在逼近且 TTC<thresh
+                    _slot_gate = ((1.0 - _ttc / _ttc_thresh).clamp(0.0, 1.0)) * _approaching.float()
+                    _ttc_gate = _slot_gate.max(dim=1).values          # [E] 取最危障礙
+                    # warmup ramp (防 from-scratch 早期凍結)
+                    _tw_s = int(getattr(args_cli, "ttc_warmup_start", 0))
+                    _tw_e = int(getattr(args_cli, "ttc_warmup_end", 0))
+                    if _tw_e > _tw_s:
+                        _ttc_gate = _ttc_gate * min(1.0, max(0.0, (iteration - _tw_s) / (_tw_e - _tw_s)))
+                    _v_fwd = obs[:, 1].clamp(min=0.0)                 # 前進速度(逼近時越快罰越重)
+                    _ttc_pen = -_ttc_w * _ttc_gate * _v_fwd          # [E] 負獎勵(扣分)
+                reward_flat = reward_flat + _ttc_pen
+                reward_breakdown["ttc_tax"] = _ttc_pen
+
+            # --- 2d. ★Term 1: Predictive Early Deceleration + Receding Penalty ---
+            #   對稱設計逼 policy 用 LV-DOT 速度判斷「該不該減速」:同距離下逼近 vs 遠離看 LiDAR 一樣,
+            #   只有 channel vx,vy 能區分 → 堵住「LiDAR 一律減速」低智策略逃生口。
+            #   (a) 逼近(v_closing>0.1)且預測 horizon 秒後很近 → 本步減速給 +reward;
+            #   (b) 無逼近威脅但附近有遠離/靜止障礙,卻仍減速 → -penalty(過度保守)。
+            _pd_w = float(getattr(args_cli, "predictive_decel_weight", 0.0))
+            _rec_w = float(getattr(args_cli, "receding_penalty_weight", 0.0))
+            if (_pd_w > 0.0 or _rec_w > 0.0) and obs.shape[-1] >= 109:
+                with torch.no_grad():
+                    _ph = float(getattr(args_cli, "predictive_pred_horizon", 2.0))
+                    _pchn = obs[:, 79:109].view(obs.shape[0], 5, 6)        # [E,5,6]
+                    _ppx = _pchn[:, :, 0] * 8.0
+                    _ppy = _pchn[:, :, 1] * 8.0
+                    _pvx = _pchn[:, :, 2] * 1.5
+                    _pvy = _pchn[:, :, 3] * 1.5
+                    _pvalid = _pchn[:, :, 5] > 0.5
+                    _pdist = torch.sqrt(_ppx * _ppx + _ppy * _ppy + 1e-6)  # [E,5]
+                    _pvclose = -(_ppx * _pvx + _ppy * _pvy) / _pdist       # [E,5] >0=逼近
+                    _appr = _pvalid & (_pvclose > 0.1)                     # 逼近中
+                    _recede = _pvalid & (_pvclose < 0.05) & (_pdist < 2.5)  # 遠離/靜止且在附近
+                    # 本步減速量 (mirror _prev_omega pattern)
+                    _cur_spd = obs[:, 1]
+                    _decel = (_prev_speed - _cur_spd).clamp(min=0.0)       # [E] >0=減速量
+                    _is_decel = (_decel > 0.02).float()                    # [E] 有明顯減速
+                    # (a) 逼近預測風險 pred_d = d - v_closing·horizon (越小越危險)
+                    _pred_d = _pdist - _pvclose.clamp(min=0.0) * _ph       # [E,5]
+                    _appr_risk = ((1.5 - _pred_d).clamp(min=0.0)) * _appr.float()  # [E,5]
+                    _appr_risk_max = _appr_risk.max(dim=1).values          # [E]
+                    _has_appr = _appr.any(dim=1).float()                   # [E] 有逼近威脅
+                    _pd_reward = _pd_w * _appr_risk_max * _is_decel        # [E] (a) 正
+                    _rec_near = _recede.any(dim=1).float()                 # [E]
+                    _rec_pen = -_rec_w * _decel * _rec_near * (1.0 - _has_appr)  # [E] (b) 負
+                    _pd_term = _pd_reward + _rec_pen
+                reward_flat = reward_flat + _pd_term
+                reward_breakdown["predictive_decel"] = _pd_reward
+                reward_breakdown["receding_penalty"] = _rec_pen
+
+            # --- 2e. ★Term A: Speed-aware Turning Reward (07-11 Option A) ---
+            #   ablation 證 policy 靠轉向避障非減速 → 獎勵打 steering 維度才對症。全部 max over K=5 障礙。
+            #   A1 方向正確性:逼近時 omega 符號 = cross(px·vy−py·vx) 建議方向 → +w·strength(v_closing);
+            #   A2 提早轉向:同方向且 TTC∈[lo,hi] → +w·time_factor(越早給越多);
+            #   weakened decel:僅極危 TTC<1.2 且 v_closing>0.35 且減速才給(最後手段,免走走停停)。
+            if (_td_w_cfg > 0.0 or _et_w_cfg > 0.0 or _wd_w_cfg > 0.0) and obs.shape[-1] >= 109:
+                with torch.no_grad():
+                    _ach = obs[:, 79:109].view(obs.shape[0], 5, 6)         # [E,5,6]
+                    _apx = _ach[:, :, 0] * 8.0
+                    _apy = _ach[:, :, 1] * 8.0
+                    _avx = _ach[:, :, 2] * 1.5
+                    _avy = _ach[:, :, 3] * 1.5
+                    _aval = _ach[:, :, 5] > 0.5
+                    _adist = torch.sqrt(_apx * _apx + _apy * _apy + 1e-6)   # [E,5]
+                    _avclose = -(_apx * _avx + _apy * _avy) / _adist        # [E,5] >0=逼近
+                    _aappr = _aval & (_avclose > 0.08)                      # [E,5]
+                    # 建議轉向方向 = sign(cross=px·vy−py·vx);與當前 omega 符號比對
+                    _across = _apx * _avy - _apy * _avx                     # [E,5]
+                    # ★方向 = −sign(cross): body frame py=左+,omega>0=左轉。前障橫越 cross≈px·vy→sign(vy);
+                    #   障礙往左移(vy>0)應右轉(繞到其後方)=omega<0 → desired=−sign(cross)。(Codex審查修正:原+sign反了)
+                    _adesire = torch.where(_across > 0, -1.0, 1.0)          # [E,5]
+                    _aomega_sign = torch.sign(obs[:, 2]).unsqueeze(1)       # [E,1] omega=obs[2]
+                    _adir_ok = (_adesire == _aomega_sign) & _aappr         # [E,5] 方向對且逼近
+                    _attc = _adist / _avclose.clamp(min=0.05)              # [E,5] TTC
+                    # A1 方向正確性
+                    _astrength = (_avclose / 1.5).clamp(max=1.0)          # [E,5]
+                    _a1 = (_td_w_cfg * _astrength * _adir_ok.float()).max(dim=1).values          # [E]
+                    # A2 提早轉向 (TTC∈[lo,hi])
+                    _et_lo = float(getattr(args_cli, "early_turning_ttc_lo", 1.6))
+                    _et_hi = float(getattr(args_cli, "early_turning_ttc_hi", 3.8))
+                    _attc_ok = (_attc > _et_lo) & (_attc < _et_hi)
+                    # ★越早(TTC大)給越多: (TTC−lo)/(hi−lo)。TTC=hi→1(最早最多),TTC=lo→0。(Codex審查修正:原(hi−TTC)反了)
+                    _atf = ((_attc - _et_lo) / max(_et_hi - _et_lo, 1e-3)).clamp(0.0, 1.0)
+                    _a2 = (_et_w_cfg * _atf * (_adir_ok & _attc_ok).float()).max(dim=1).values   # [E]
+                    # weakened decel (最後手段)
+                    _adecel = (_prev_speed - obs[:, 1]).clamp(min=0.0)
+                    _ais_decel = (_adecel > 0.02).float()
+                    _adanger = _aappr & (_attc < 1.2) & (_avclose > 0.35)
+                    _awd_gate = ((1.2 - _attc).clamp(min=0.0) * _adanger.float()).max(dim=1).values
+                    _awd = _wd_w_cfg * _awd_gate * _ais_decel              # [E]
+                    _aterm = _a1 + _a2 + _awd
+                reward_flat = reward_flat + _aterm
+                reward_breakdown["turning_direction"] = _a1
+                reward_breakdown["early_turning"] = _a2
+                reward_breakdown["weakened_decel"] = _awd
+
+            # 更新 prev_speed(每步,供下一步偵測減速;done 時歸零見下方),與 _prev_omega 同步機制
+            if _track_prev_speed:
+                _prev_speed = obs[:, 1].clone()
+
             # --- Gap-heading reward (轉彎閃避 head-on:獎勵 heading 朝最大可通行間隙) ---
             # 障礙近(d_safe<2m)時,找 LiDAR 最大連續可通行弧段(>0.9m)中心角,獎勵 cos(gap_angle):
             #   gap 在前=+1 → policy 轉頭對準 gap = 往側邊空隙閃。obs[6:78] bin36=正前方(已驗 atan2 body frame)。
@@ -3695,6 +3951,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _delay_lo, _delay_hi + 1, (len(done_ids),), device=device)
                 # Heading stability：重置 prev_omega（新 episode 無歷史）
                 _prev_omega[done_ids] = 0.0
+                # ★Term 1：重置 prev_speed（新 episode 無速度歷史，避免跨場景假減速）
+                _prev_speed[done_ids] = 0.0
                 # RGDR：更新 per-env EMA episode return + 重置累積器
                 if _rgdr_enabled:
                     _rgdr_env_returns[done_ids] = (

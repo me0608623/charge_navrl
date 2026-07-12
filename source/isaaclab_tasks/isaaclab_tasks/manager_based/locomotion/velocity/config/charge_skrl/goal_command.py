@@ -290,6 +290,14 @@ class GoalCommand(CommandTerm):
         valid_boundary_x = wall_boundary_x - wall_safe_margin
         valid_boundary_y = wall_boundary_y - wall_safe_margin
 
+        # ★小 arena 修 (07-09): goal_distance 預設 (2,13)m 是 20×20 假設;小 arena(如
+        #   12×12,valid_boundary~3.5m)遠目標放不到 → 大量 resample fallback + trivial goal
+        #   污染訓練。把 d_max 夾到 arena 可達距離(~1.4×min valid_boundary,對角線係數)。
+        #   20×20 native(valid_boundary~7-9)不受影響(cap~10-13 >= 原 d_max)。
+        _reach_max = 1.4 * min(valid_boundary_x, valid_boundary_y)
+        if d_max > _reach_max:
+            d_max = max(d_min + 0.5, _reach_max)
+
         # 預計算障礙物 required_distances（不隨迴圈變化）
         if all_obstacles is not None and all_obstacle_radii is not None:
             obstacle_radii_expanded = all_obstacle_radii.unsqueeze(0).expand(num_envs, -1)

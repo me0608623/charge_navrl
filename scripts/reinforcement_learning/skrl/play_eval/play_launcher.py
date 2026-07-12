@@ -110,6 +110,8 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "bev_vis": ("BEV Visualization (--bev_vis)", "BEV 視覺化 (--bev_vis)"),
     "headless": ("Headless (--headless)", "無畫面 (--headless)"),
     "lidar_no_noise": ("LiDAR no noise", "LiDAR 無雜訊"),
+    "vlp16_noise_mode": ("VLP16 noise mode:", "VLP16 雜訊模式:"),
+    "vlp16_noise_hint": ("(auto=inherit from ckpt)", "(auto=沿用 ckpt 訓練雜訊)"),
     "lidar_r_min": ("LiDAR r_min (m):", "LiDAR 盲區 (m):"),
     "collision_dist": ("Collision dist (center-to-center, m):", "碰撞距離 (中心到中心, m):"),
     "max_angular_vel": ("Max ω (rad/s):", "角速度上限 ω (rad/s):"),
@@ -231,6 +233,10 @@ OBSTACLE_BEHAVIORS = [
 ]
 
 CAMERAS = ["top", "follow", "side"]
+
+# VLP16 實測雜訊消融預設；"auto" = 不送 flag，由 play_rnn_car.py 從 ckpt 繼承。
+# 具體 mode 對應 charge_env_overrides._apply_vlp16_ablation_mode。
+VLP16_NOISE_MODES = ["auto", "ideal", "sigma", "bias", "dropout", "full", "full_material"]
 
 
 _STAGES_FILE = (
@@ -559,6 +565,8 @@ class PlayLauncherApp:
             if val is not None and val > 0 and self._resolve_usd_scene_arg() is not None:
                 self.usd_scene_var.set(_usd_choices[0])  # 還原為程序化場景
                 self._usd_custom_path.set("")
+            # 場景尺寸變了 → 立即依「邊長 − 1」重新夾限目標距離
+            self._clamp_goal_distances()
             self._preview_cmd()
 
         self._arena_combo = ttk.Combobox(
@@ -762,6 +770,23 @@ class PlayLauncherApp:
                             variable=self.no_goal_movement_var),
             "no_goal_movement",
         ).grid(row=row, column=2, columnspan=2, sticky="w", padx=5)
+        row += 1
+
+        # VLP16 measured-noise ablation preset（含 full_material）。
+        # "auto" = 不送 flag → play_rnn_car.py 從 ckpt 自動繼承訓練雜訊。
+        # 選定具體 mode 時，_build_command 會改送 --vlp16_noise_mode 並抑制 --lidar_no_noise
+        # （overrides 中 vlp16_noise_mode 優先且 early-return，避免兩個 flag 語義衝突）。
+        self._reg(ttk.Label(f, text=self._t("vlp16_noise_mode")), "vlp16_noise_mode").grid(
+            row=row, column=0, sticky="w", padx=5
+        )
+        self.vlp16_noise_mode_var = tk.StringVar(value="full_material")
+        ttk.Combobox(f, textvariable=self.vlp16_noise_mode_var, values=VLP16_NOISE_MODES,
+                     width=14, state="readonly").grid(
+            row=row, column=1, sticky="w", padx=5
+        )
+        self._reg(ttk.Label(f, text=self._t("vlp16_noise_hint")), "vlp16_noise_hint").grid(
+            row=row, column=2, columnspan=2, sticky="w", padx=5
+        )
         row += 1
 
         # LiDAR r_min & Collision distance
@@ -1277,6 +1302,47 @@ class PlayLauncherApp:
             return custom
         return None
 
+    def _effective_arena_size(self) -> float | None:
+        """回傳目前生效的場景邊長 (m)。
+
+        - USD 場景：幾何自帶、尺寸未知 → None（不夾限目標距離）
+        - 數字 arena（如 12）：回該邊長
+        - 留空/預設：程序化預設場景 20×20 → 20.0（對應 play 的 ARENA_REF_SIZE）
+        """
+        if self._resolve_usd_scene_arg() is not None:
+            return None
+        raw = self.arena_size_var.get().strip()
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            val = None
+        if val is not None and val > 0:
+            return val
+        return 20.0
+
+    def _clamp_goal_distances(self) -> tuple[float, bool] | None:
+        """夾限目標距離：min/max 皆不可超過「場景邊長 − 1」，並維持 min ≤ max。
+
+        直接寫回 spinbox 變數，讓 GUI 反映修正值。
+        回傳 (cap, changed)；場景尺寸未知（USD）時回 None。
+        """
+        arena = self._effective_arena_size()
+        if arena is None:
+            return None
+        cap = max(1.0, arena - 1.0)
+        changed = False
+        if self.goal_dist_max_var.get() > cap:
+            self.goal_dist_max_var.set(cap)
+            changed = True
+        if self.goal_dist_min_var.get() > cap:
+            self.goal_dist_min_var.set(cap)
+            changed = True
+        # min 不可大於 max
+        if self.goal_dist_min_var.get() > self.goal_dist_max_var.get():
+            self.goal_dist_min_var.set(self.goal_dist_max_var.get())
+            changed = True
+        return (cap, changed)
+
     def _build_command(self) -> str:
         """Build the play command string with correct play_rnn_car.py args."""
         parts = [
@@ -1301,7 +1367,12 @@ class PlayLauncherApp:
             parts.append("--bev_vis")
             trail_len = self.trail_length_var.get() if self.bev_trail_var.get() else 0
             parts.append(f"--bev_trail_length {trail_len}")
-        if self.lidar_no_noise_var.get():
+        # VLP16 雜訊模式優先於 lidar_no_noise（overrides 中 vlp16_noise_mode early-return）。
+        # "auto" = 不送 flag → play 從 ckpt 繼承；選定具體 mode 時抑制 --lidar_no_noise 避免語義衝突。
+        _vnm = self.vlp16_noise_mode_var.get()
+        if _vnm and _vnm != "auto":
+            parts.append(f"--vlp16_noise_mode {_vnm}")
+        elif self.lidar_no_noise_var.get():
             parts.append("--lidar_no_noise")
         parts.append(f"--lidar_r_min {self.lidar_r_min_var.get()}")
         parts.append(f"--collision_dist {self.collision_dist_var.get()}")
@@ -1329,6 +1400,8 @@ class PlayLauncherApp:
         parts.append(f"--num_static_obs {self.static_obs_var.get()}")
         parts.append(f"--num_dynamic_obs {self.dynamic_obs_var.get()}")
         parts.append(f"--num_walls {self.walls_var.get()}")
+        # 目標距離夾限：min/max 皆不可超過「場景邊長 − 1」（USD 場景尺寸未知則不夾）
+        self._clamp_goal_distances()
         parts.append(f"--goal_distance_min {self.goal_dist_min_var.get()}")
         parts.append(f"--goal_distance_max {self.goal_dist_max_var.get()}")
         parts.append(f"--obstacle_speed {self.obs_speed_var.get()}")
@@ -1547,6 +1620,7 @@ class PlayLauncherApp:
         ("trail_length_var", "int"),
         ("headless_var", "bool"),
         ("lidar_no_noise_var", "bool"),
+        ("vlp16_noise_mode_var", "str"),
         ("no_goal_movement_var", "bool"),
         ("lidar_r_min_var", "float"),
         ("collision_dist_var", "float"),

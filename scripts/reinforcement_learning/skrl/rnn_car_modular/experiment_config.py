@@ -134,6 +134,10 @@ class ExperimentConfig:
     no_domain_randomization: bool = False
     reward_speed_v05: bool = False
     reward_mode: str = "current"
+    # react clearance-gated 減速稅 (距離稅). -1.0 = 不覆寫 curriculum(維持舊行為);
+    # >=0.0 = 覆寫 curriculum 的 spot_penalty_speed_near_obs. 對應 --penalty_speed_near_obs
+    # (CLI 仍可覆寫此 YAML 值). ★寫進 config 消除 CLI-only footgun(忘帶=稅靜默關閉).
+    penalty_speed_near_obs: float = -1.0
     action_table_sample_size: int = 0
     log_interval: int = 10
     save_interval: int = 100

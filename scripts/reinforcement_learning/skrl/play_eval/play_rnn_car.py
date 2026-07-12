@@ -348,6 +348,13 @@ parser.add_argument("--aux_debug", action="store_true", default=AUX_DEBUG,
                     help="印出 RNN aux 7D 預測 vs simulator ground truth")
 parser.add_argument("--aux_debug_interval", type=int, default=AUX_DEBUG_INTERVAL,
                     help="每 N 步印一次 aux debug")
+# ★反應曲線：複製訓練端 charge/speed_vs_front_dist_* 指標到 play 終端。
+# 前錐 ±30° LiDAR 3m 內最近距離分段，對應「指令前進速度 / |角速度|」，
+# 看 policy 是否隨障礙靠近而減速/轉向（避障反應）。預設開，--no_react_curve 關閉。
+parser.add_argument("--no_react_curve", action="store_true", default=False,
+                    help="關閉『前錐 LiDAR 距離 vs 速度/角速度』反應曲線終端輸出（預設開）")
+parser.add_argument("--react_curve_interval", type=int, default=1000,
+                    help="每 N 步印一次反應曲線（0=只在結束時印一次）")
 parser.add_argument("--probe_dump", type=str, default="",
                     help="表徵探測：每步收集 (12D preprocess_feat, 真實速度 6D, valid 3D) 存 npz，"
                          "供離線 probe 擬合判斷『12D 特徵是否裝得下速度資訊』")
@@ -413,6 +420,79 @@ args_cli.stage_parameter = STAGE_PARAMETER  # 只由檔案上方設定區控制�
 # 非 headless 模式需要啟用攝影機
 if not getattr(args_cli, "headless", False):
     args_cli.enable_cameras = True
+
+
+# ============================================================================
+# ★ LV-DOT / act_hist 自動偵測：從 checkpoint 反推 obs 佈局，於 env import 前設環境變數
+# ----------------------------------------------------------------------------
+# charge_env_cfg_vlp16.py 在「模組載入時」讀 CHARGE_USE_LVDOT_OBS / CHARGE_USE_ACT_HIST
+# 決定 obs 維度（79 base ±4 act_hist ±30 LV-DOT channel）。若使用者忘了帶這兩個 env var
+# 就播放 LV-DOT checkpoint，env 只給 83D、policy_head 卻要 121D(=109 obs +12 preprocess)，
+# 於 load_state_dict 時 size mismatch 崩潰。這裡先偷看 checkpoint 的 policy_head 形狀反推
+# 訓練時的 obs 佈局，並在 AppLauncher(=env import)之前補設 env var，讓 env 產生對齊的 obs。
+# 必須在此執行（AppLauncher 之前）；放進 main() 就太晚（env cfg 已 import 完）。
+def _autodetect_obs_layout_env(cli) -> None:
+    import torch as _torch  # torch import 不需要 sim app，可在 AppLauncher 前使用
+
+    ckpt_path = cli.checkpoint
+    if not ckpt_path:
+        # 對齊 find_latest_rnn_checkpoint()：抓 logs/rnn_car 下最新 checkpoint
+        cands = glob.glob("logs/rnn_car/*/checkpoint_*.pt")
+        if not cands:
+            return
+        ckpt_path = max(cands, key=os.path.getmtime)
+    if not os.path.exists(ckpt_path):
+        return
+
+    ck = _torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ph_w = ck.get("policy_head", {}).get("net.0.weight", None)
+    if ph_w is None:
+        return
+    rl_in = int(ph_w.shape[1])
+
+    a = ck.get("args", {})
+    a = a if isinstance(a, dict) else vars(a)
+    encoder_mode = a.get("charge_encoder_mode", "extractor_rnn")
+    if encoder_mode != "extractor_rnn":   # wd_exact_rnn 有固定 113D obs，與 LV-DOT channel 無關
+        return
+    preprocess_dim = int(a.get("preprocess_dim", 12))
+    predict_dim = int(a.get("predict_dim", 13))
+    hybrid = bool(a.get("hybrid_predict_to_policy", False))
+
+    # rl_in = policy_obs_dim + preprocess_dim + (predict_dim if hybrid)
+    policy_obs_dim = rl_in - preprocess_dim - (predict_dim if hybrid else 0)
+
+    # 7D state (state_mlp 輸入 7)= 訓練時 act_hist 已移除 → env 需 CHARGE_USE_ACT_HIST=0
+    state_w = ck.get("extractor", {}).get("state_mlp.0.weight", None)
+    state_7d = state_w is not None and int(state_w.shape[1]) == 7  # STATE_DIM(11) - ACT_HIST_DIM(4)
+    base_obs = 79 if state_7d else 83   # extractor_rnn base：ego4+goal2+lidar72+time1(+act_hist4)
+
+    # policy_obs 超過 base = 尾端多了 LV-DOT 動態障礙 channel(30D: K=5×[x,y,vx,vy,r,valid])
+    lvdot = policy_obs_dim >= base_obs + 30
+
+    def _set(name: str, val: str, why: str) -> None:
+        cur = os.environ.get(name)
+        if cur == val:
+            return
+        if cur is not None:
+            print(f"[PLAY] ⚠ {name}={cur} 與 checkpoint 不符（需 {val}，{why}）→ 覆寫為 {val}")
+        else:
+            print(f"[PLAY] 自動偵測 checkpoint {why} → 設 {name}={val}")
+        os.environ[name] = val
+
+    if lvdot:
+        # LV-DOT lineage：obs 109D，且必須 act_hist=0（訓練即如此配對）
+        _set("CHARGE_USE_ACT_HIST", "0", f"policy_obs={policy_obs_dim}D 含 LV-DOT 30D channel")
+        _set("CHARGE_USE_LVDOT_OBS", "1", f"policy_obs={policy_obs_dim}D 含 LV-DOT 30D channel")
+    elif state_7d:
+        # v3f/v3 等 7D-state（無 LV-DOT）：env 需移除 act_hist 才是 79D
+        _set("CHARGE_USE_ACT_HIST", "0", "7D state checkpoint（act_hist 已移除）")
+
+
+try:
+    _autodetect_obs_layout_env(args_cli)
+except Exception as _e:  # 偵測失敗不致命：維持原行為，讓後續流程照舊（必要時報錯）
+    print(f"[PLAY] ⚠ obs 佈局自動偵測略過（{type(_e).__name__}: {_e}）")
 
 # 啟動 Isaac Lab 應用程式（必須在所有 isaaclab import 之前）
 app_launcher = AppLauncher(args_cli)
@@ -879,6 +959,63 @@ def apply_usd_scene(env_cfg, usd_scene: str) -> str:
     return usd_path
 
 
+# 車體 USD (charge_skrl/charge.usd) 是從真車 URDF 匯出的，把 Omniverse 編輯器
+# 給 Camera prim 的相機 gizmo 也烤成了實體 Mesh：
+#   /World/envs/env_N/Robot/charger_rover_urdf5/velodyne/Camera/OmniverseKitViewportCameraMesh
+# 該 Mesh visibility=inherited、purpose=default，所以 play 時被當一般幾何渲染
+# ——就是「charge 後面那顆攝影機」。此函式在 spawn 後把它設為不可見，
+# 不改資產、不影響物理/LiDAR 觀測（純視覺清理）。
+_CAMERA_GIZMO_LEAF = "OmniverseKitViewportCameraMesh"
+
+
+def hide_robot_camera_gizmo(raw_env) -> int:
+    """把每個 env 車體 USD 內的相機 gizmo mesh 設為不可見，回傳隱藏的 prim 數。
+
+    在 env.reset()（robot 已 spawn + clone 到 stage）之後呼叫。
+    失敗時只印警告不中斷 play（純視覺清理，不該讓它擋下播放）。
+    """
+    try:
+        from pxr import UsdGeom
+        try:
+            from isaacsim.core.utils.stage import get_current_stage
+            stage = get_current_stage()
+        except Exception:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+    except Exception as exc:  # pragma: no cover — 環境未起 USD 時的保護
+        print(f"[PLAY] ⚠ 無法取得 USD stage，略過相機 gizmo 隱藏: {exc}")
+        return 0
+
+    if stage is None:
+        print("[PLAY] ⚠ USD stage 為 None，略過相機 gizmo 隱藏")
+        return 0
+
+    hidden = 0
+    # ────────────────────────────────────────────────────────────────
+    # TODO(你來寫，約 5-8 行)：遍歷 stage，隱藏相機 gizmo。
+    #
+    # 這裡有一個真正的語意抉擇，值得你決定：
+    #   (A) 只隱藏 gizmo 容器 `OmniverseKitViewportCameraMesh`（葉名 = _CAMERA_GIZMO_LEAF）
+    #       → 保留其父層真正的 `.../velodyne/Camera` prim，未來車端部署要接
+    #         RGB camera 時 Camera prim 還在。← 建議這個。
+    #   (B) 連整個 `.../velodyne/Camera` 分支都隱藏 → 視覺更乾淨但把功能性
+    #       Camera prim 也藏了。
+    #
+    # 實作提示：
+    #   for prim in stage.Traverse():
+    #       if prim.GetName() == _CAMERA_GIZMO_LEAF:   # (A) 用葉名比對，跨 env 通吃
+    #           UsdGeom.Imageable(prim).MakeInvisible()  # 設 visibility=invisible
+    #           hidden += 1
+    #   （MakeInvisible() 只改 visibility，不刪 prim，可隨時 MakeVisible() 還原。）
+    # ────────────────────────────────────────────────────────────────
+
+    if hidden:
+        print(f"[PLAY] 已隱藏 {hidden} 個相機 gizmo mesh ('{_CAMERA_GIZMO_LEAF}')")
+    else:
+        print(f"[PLAY] ⚠ 未找到相機 gizmo mesh ('{_CAMERA_GIZMO_LEAF}')，可能 USD 版本不同")
+    return hidden
+
+
 def sample_action(logits: torch.Tensor, deterministic: bool) -> torch.Tensor:
     """從 policy logits 取樣動作。MultiDiscrete([19, 19]) = 線性加速 × 角速度。
 
@@ -895,6 +1032,37 @@ def sample_action(logits: torch.Tensor, deterministic: bool) -> torch.Tensor:
         act_a = Categorical(logits=logits_a).sample()
         act_w = Categorical(logits=logits_w).sample()
     return torch.stack([act_a, act_w], dim=-1)  # [N, 2] 組合為雙動作
+
+
+# 反應曲線分箱：前錐最近障礙距離(m)上緣為 key（對齊訓練 charge/speed_vs_front_dist_*）。
+_REACT_BIN_EDGES = (
+    (0.0, 0.5, "0.5"), (0.5, 1.0, "1.0"), (1.0, 1.5, "1.5"),
+    (1.5, 2.0, "2.0"), (2.0, 2.5, "2.5"), (2.5, 3.0, "3.0"),
+)
+
+
+def print_react_curve(speed_bins: dict, omega_bins: dict, tag: str = "") -> None:
+    """印出『前錐 ±30° LiDAR 前方距離(m) → 指令前進速度 / |角速度|』反應曲線。
+
+    複製訓練端 charge/speed_vs_front_dist_{bin}m 與 charge/omega_vs_front_dist_{bin}m。
+    讀法：障礙越近（上排→下排），若 policy 有避障反應，v_x 應下降、|ω| 應上升。
+    """
+    import numpy as _np
+
+    if not any(speed_bins.get(k) for _, _, k in _REACT_BIN_EDGES):
+        return  # 尚無樣本（例如全程無障礙在 3m 內）
+    _suffix = f"  [{tag}]" if tag else ""
+    print(f"\n[反應曲線] 前錐±30° LiDAR 前方距離(m) → 指令速度/角速度{_suffix}")
+    for _lo, _hi, _k in _REACT_BIN_EDGES:
+        _sv = speed_bins.get(_k, [])
+        _ov = omega_bins.get(_k, [])
+        if _sv:
+            print(f"  [{_lo:.1f}, {_hi:.1f})m: "
+                  f"v_x={_np.mean(_sv):+.3f} m/s  "
+                  f"|ω|={_np.mean(_ov):.3f} rad/s  "
+                  f"(n={len(_sv)})")
+        else:
+            print(f"  [{_lo:.1f}, {_hi:.1f})m: (無樣本)")
 
 
 def find_latest_rnn_checkpoint() -> str | None:
@@ -2232,8 +2400,49 @@ def main():
 
     env = gym.make(args_cli.task, cfg=env_cfg)
     raw_env = env.unwrapped
+    # ★LV-DOT channel 存廢驗證: CHARGE_LVDOT_ZERO=1 → 用現有 DR dropout 機制把整條
+    #   動態障礙 channel(obs[79:109]) 清零(dropout_prob=1.0 → 所有 slot valid→0→全欄歸零)。
+    #   跑 det eval 對比 channel ON vs 歸零的部署 SR:若 SR 沒差=channel 部署行為層無貢獻→可省。
+    if os.environ.get("CHARGE_LVDOT_ZERO", "0") != "0":
+        raw_env._lvdot_dr = {"dropout_prob": 1.0}
+        print("[PLAY] ★CHARGE_LVDOT_ZERO=1 → LV-DOT channel 清零(dropout_prob=1.0),用於 channel 存廢對比 eval")
+    # ★CHARGE_LVDOT_VZERO=1 → 只歸零 channel 速度欄(vx,vy),保留位置(px,py):
+    #   隔離「速度」貢獻的因果驗收(vs CHARGE_LVDOT_ZERO 歸零整條=位置+速度)。
+    #   channel[79:109] K=5 slots × [px,py,vx,vy,r,valid],速度=slot offset 2,3。
+    _LVDOT_VZERO = os.environ.get("CHARGE_LVDOT_VZERO", "0") != "0"
+    _LVDOT_VZERO_COLS = [79 + i * 6 + 2 for i in range(5)] + [79 + i * 6 + 3 for i in range(5)]
+    if _LVDOT_VZERO:
+        print(f"[PLAY] ★CHARGE_LVDOT_VZERO=1 → 只歸零 LV-DOT 速度欄(vx,vy)cols={sorted(_LVDOT_VZERO_COLS)},保留位置。速度使用性因果驗收。")
+    # ★CHARGE_LVDOT_ZERO_ALL=1 → 歸零整個 LV-DOT channel obs[79:109](px,py,vx,vy,r,valid 全 0)。
+    #   與 VZERO 同一 obs-tensor 機制的對照:若整條歸零 SR 退化 = 位置(或 channel 整體)有被用;
+    #   若整條歸零 SR 也不變 = 整個 LV-DOT channel 對部署行為無貢獻(可全省)。
+    _LVDOT_ZERO_ALL = os.environ.get("CHARGE_LVDOT_ZERO_ALL", "0") != "0"
+    if _LVDOT_ZERO_ALL:
+        print("[PLAY] ★CHARGE_LVDOT_ZERO_ALL=1 → 歸零整個 LV-DOT channel obs[79:109](含位置)。channel 存廢因果驗收。")
+    # ★CHARGE_GRAD_ATTR=1 → 梯度歸因診斷: 量 policy logits 對各 obs 群組(LiDAR/LV-DOT位置/速度)的
+    #   per-dim 敏感度 |∂logsumexp(logits)/∂obs_normed|。用於分辨 H1(表徵不出)vs H2(有輸入沒動機用):
+    #   若 LVDOT 速度欄敏感度 ≈ 0(遠低於 LiDAR)= policy 學到權重≈0 忽略速度欄(H2 確認)。
+    _GRAD_ATTR = os.environ.get("CHARGE_GRAD_ATTR", "0") != "0"
+    _GA_STRIDE = int(os.environ.get("CHARGE_GRAD_ATTR_STRIDE", "5"))
+    _GA_SUM = None
+    _GA_CNT = 0
+    if _GRAD_ATTR:
+        print(f"[PLAY] ★CHARGE_GRAD_ATTR=1 → 梯度歸因診斷(每 {_GA_STRIDE} 步取樣),量 policy 對各 obs 群組敏感度")
     obs, _ = env.reset()
     device = raw_env.device
+
+    # ★CHARGE_TRAJ_LOG=<path.npz> → 逐步記錄 robot 世界位置 + goal + LV-DOT channel
+    #   (K=5 最近障礙的 body-frame 相對 [px,py,vx,vy,r,valid]) + 動作,存 .npz。
+    #   事後可回推「提早避開」:某障礙相對距離多遠時 robot 開始偏離 goal 直線/減速 = 反應距離。
+    _TRAJ_LOG_PATH = os.environ.get("CHARGE_TRAJ_LOG", "")
+    _traj_buf = [] if _TRAJ_LOG_PATH else None
+    if _TRAJ_LOG_PATH:
+        import numpy as np  # 確保主迴圈作用域可用(檔內其餘 np import 皆在他函式內)
+        print(f"[PLAY] ★CHARGE_TRAJ_LOG → 記錄 robot+障礙軌跡到 {_TRAJ_LOG_PATH}(env0,逐步,回推提早避開)")
+
+    # 車體 USD 內烤進來的相機 gizmo mesh 會被當實體渲染，spawn 後隱藏它（純視覺清理）
+    if not args_cli.headless:
+        hide_robot_camera_gizmo(raw_env)
 
     # LiDAR sanity test 模式：跑完測試即退出
     if args_cli.lidar_sanity:
@@ -2655,6 +2864,11 @@ def main():
     diag_action_angular_sum = 0.0       # 累積角度動作 index
     diag_samples = 0                    # 診斷樣本數
 
+    # --- 反應曲線累積（前錐 LiDAR 距離 vs 指令速度/角速度，複製訓練指標）---
+    _react_curve_on = not args_cli.no_react_curve
+    _react_speed_bins = {k: [] for _, _, k in _REACT_BIN_EDGES}
+    _react_omega_bins = {k: [] for _, _, k in _REACT_BIN_EDGES}
+
     # --- RVO2 (ORCA) Safety Filter 初始化 ---
     rvo2_filter = None
     if args_cli.use_rvo2_filter:
@@ -2926,6 +3140,15 @@ def main():
         with torch.inference_mode():
             # --- 觀測處理 → 模型推論 → 動作選擇 ---
             obs_tensor = policy_obs(obs)
+            # ★CHARGE_LVDOT_VZERO=1 → 只歸零 LV-DOT channel 的速度欄(vx,vy),保留位置(px,py)。
+            #   用於「速度是否被用」的因果反事實驗收:若歸零速度後提早避開行為/ SR 退化
+            #   = policy 真的用了速度(非位置代理)。channel[79:109] 每 slot=[px,py,vx,vy,r,valid]
+            #   (K=5),速度在 slot offset 2,3。需 obs≥109D。
+            if _LVDOT_VZERO and obs_tensor.shape[-1] >= 109:
+                obs_tensor[:, _LVDOT_VZERO_COLS] = 0.0
+            # ★CHARGE_LVDOT_ZERO_ALL=1 → 歸零整條 channel(位置+速度+r+valid),channel 存廢對照
+            if _LVDOT_ZERO_ALL and obs_tensor.shape[-1] >= 109:
+                obs_tensor[:, 79:109] = 0.0
             obs_normed = normalize(obs_tensor)               # 正規化觀測
             # LiDAR distance bias: 在 z-score 空間加偏移，讓 agent 覺得障礙物更遠
             if _lidar_bias_zscore is not None:
@@ -3024,6 +3247,49 @@ def main():
 
         _t_inference = time.time() - start
 
+        # --- 梯度歸因診斷 (CHARGE_GRAD_ATTR=1): 在 inference_mode 外重跑 forward 求 ∂logits/∂obs ---
+        if _GRAD_ATTR and obs_tensor.shape[-1] >= 109 and (step % _GA_STRIDE == 0):
+            # cudnn RNN backward 只能在 training mode → 關 cudnn 用 native RNN(可在 eval 下 backward)
+            with torch.enable_grad(), torch.backends.cudnn.flags(enabled=False):
+                # numpy round-trip 去除 inference-tensor 屬性; leaf = normalized obs(per-dim 可公平比較)
+                _xn = torch.tensor(obs_normed.detach().cpu().numpy(), device=device, requires_grad=True)
+                _p = charge_obs_for_rl(_xn)
+                _f = charge_features_for_rnn(_xn, _p)
+                if args_cli.feat_norm and _ckpt_feat_norm is not None:
+                    _f = ((_f - _fn_mean) / (_fn_var.sqrt() + 1e-8)).clamp(-5.0, 5.0)
+                _hid_g = torch.tensor(hidden.detach().cpu().numpy(), device=device)
+                _rf, _ax_g, _ = preprocess_rnn(_f, _hid_g, training=False)
+                _rl_g = (torch.cat([_p, _rf, _ax_g], dim=-1) if _hybrid
+                         else torch.cat([_p, _rf], dim=-1))
+                _lg_g = policy_head(_rl_g)
+                _S = torch.logsumexp(_lg_g, dim=-1).sum()
+                _S.backward()
+                _g = _xn.grad.abs().mean(dim=0)          # [D] per-dim 敏感度(normalized 空間)
+                if _GA_SUM is None:
+                    _GA_SUM = torch.zeros(_xn.shape[-1], device=device)
+                _GA_SUM = _GA_SUM + _g.detach()
+                _GA_CNT += 1
+        if _GRAD_ATTR and _GA_CNT > 0 and step >= args_cli.steps - 1:
+            _pd = (_GA_SUM / max(_GA_CNT, 1)).cpu()
+            _grp = lambda idxs: float(_pd[idxs].mean())
+            _lidar = _grp(list(range(6, 78)))
+            _pos = _grp([79, 80, 85, 86, 91, 92, 97, 98, 103, 104])
+            _vel = _grp([81, 82, 87, 88, 93, 94, 99, 100, 105, 106])
+            _ego = _grp([0, 1, 2, 3]); _goal = _grp([4, 5])
+            _rr = _grp([83, 89, 95, 101, 107]); _valid = _grp([84, 90, 96, 102, 108])
+            _ref = _lidar if _lidar > 1e-12 else 1.0
+            print("\n===== GRAD ATTRIBUTION (per-dim |∂logsumexp(logits)/∂obs_normed|) =====")
+            print(f"  samples={_GA_CNT}  normalized-space, per-dim 公平比較")
+            print(f"  ego(0:4)    = {_ego:.6f}   ({_ego/_ref*100:5.1f}% of LiDAR)")
+            print(f"  goal(4:6)   = {_goal:.6f}   ({_goal/_ref*100:5.1f}% of LiDAR)")
+            print(f"  LiDAR(6:78) = {_lidar:.6f}   [ref 100%]")
+            print(f"  LVDOT pos   = {_pos:.6f}   ({_pos/_ref*100:5.1f}% of LiDAR)")
+            print(f"  LVDOT vel   = {_vel:.6f}   ({_vel/_ref*100:5.1f}% of LiDAR)  ★關鍵")
+            print(f"  LVDOT r     = {_rr:.6f}   ({_rr/_ref*100:5.1f}% of LiDAR)")
+            print(f"  LVDOT valid = {_valid:.6f}   ({_valid/_ref*100:5.1f}% of LiDAR)")
+            print("  判讀: 速度欄 <~5% LiDAR = policy 忽略速度(H2 有輸入沒動機用)")
+            print("=====================================================================\n")
+
         # inference_mode 產生的 tensor 不允許 in-place 修改，
         # 但 per-env hidden reset 需要寫入，所以要 clone
         new_hidden = new_hidden.clone()
@@ -3084,6 +3350,29 @@ def main():
         _lidar_min_ep = _lidar_ep.min(dim=1).values * _LIDAR_DENORM
         episode_lidar_min_sum += _lidar_min_ep
         episode_lidar_min_min = torch.minimum(episode_lidar_min_min, _lidar_min_ep)
+
+        # --- 反應曲線：前錐 ±30° LiDAR 前方距離(m) vs 指令前進速度/|角速度| ---
+        # 完全對齊訓練端 charge/speed_vs_front_dist_*：bin36=正前，±6 bins=±30°(30:43)；
+        # HOLE_MASK_THRESH=0.02 遮住 hole/distractor ray；obs=/20 故 denorm ×20.0；
+        # 速度/角速度讀 action term 的 processed_actions（即實際下達的 v_x / ω，同訓練口徑）。
+        if _react_curve_on:
+            _pa = getattr(_action_term_ref, "processed_actions", None)
+            if _pa is not None and _pa.shape[0] == raw_env.num_envs:
+                _vx_cmd = _pa[:, 0].float()               # 指令前進速度 (m/s)
+                _omega_cmd = _pa[:, 1].float().abs()      # 指令 |角速度| (rad/s)
+                _front = _lidar_ep[:, 30:43]              # 前錐 (bin36 ±6)
+                _front_masked = torch.where(
+                    _front < 0.02, torch.full_like(_front, float("inf")), _front,
+                )
+                _front_min = _front_masked.min(dim=1).values      # [E] normalized
+                _front_m = _front_min * 20.0                      # 公尺
+                _valid = ~torch.isinf(_front_min)
+                for _rlo, _rhi, _rk in _REACT_BIN_EDGES:
+                    _rm = _valid & (_front_m >= _rlo) & (_front_m < _rhi)
+                    if int(_rm.sum().item()) > 0:
+                        _react_speed_bins[_rk].append(_vx_cmd[_rm].mean().item())
+                        _react_omega_bins[_rk].append(_omega_cmd[_rm].mean().item())
+
         episode_goal_dist_sum += torch.norm(_obs_flat_ep[:, 4:6], dim=1)
         if _play_behavior_scheduler is not None:
             _rp_ep = _robot_data.root_pos_w[:, :2]
@@ -3319,8 +3608,8 @@ def main():
                     })
                     # Per-episode velocity summary
                     print(
-                        f"  └─ 速度: avg={avg_speed:.3f} low(<0.1)={low_speed_steps}/{len(speeds)} "
-                        f"({low_speed_steps/max(len(speeds),1):.0%})"
+                        f"  └─ 速度: avg={avg_speed:.3f} low(<0.1)={low_speed_steps}/{n_steps_logged} "
+                        f"({low_speed_steps/max(n_steps_logged,1):.0%})"
                     )
                     _ep_step_log.clear()
                     _stuck_consec_low = 0  # 新 episode 重置 stuck counter
@@ -3385,8 +3674,30 @@ def main():
                 break
         _t_bev = time.time() - _t0_bev
 
+        # ★軌跡記錄(env0):step + robot世界xy + goal世界xy + 動作(lin,ang) + channel 30D
+        if _traj_buf is not None:
+            try:
+                _rw = raw_env.scene["robot"].data.root_pos_w[0, :2].detach().cpu().numpy()
+                try:
+                    _gw = raw_env.command_manager.get_command("goal_command")[0, :2].detach().cpu().numpy()
+                except Exception:
+                    _gw = _rw * 0.0
+                _ch = (obs_tensor[0, 79:109].detach().cpu().numpy()
+                       if obs_tensor.shape[-1] >= 109 else np.zeros(30, dtype=np.float32))
+                _act = actions[0].detach().cpu().numpy().astype(np.float32)
+                _traj_buf.append(np.concatenate(
+                    [[float(step)], _rw, _gw, _act, _ch]).astype(np.float32))
+            except Exception as _e:
+                if step == 0:
+                    print(f"[PLAY] ⚠軌跡記錄失敗(僅提示一次): {_e}")
+
         obs = next_obs  # 推進觀測
         step += 1
+
+        # --- 反應曲線定期輸出 ---
+        if (_react_curve_on and args_cli.react_curve_interval > 0
+                and step % args_cli.react_curve_interval == 0):
+            print_react_curve(_react_speed_bins, _react_omega_bins, tag=f"step {step}")
 
         # --- 效能摘要累積 & 定期印出 ---
         _t_total = time.time() - start
@@ -3421,6 +3732,16 @@ def main():
     # ================================================================
     # 11. Play 結束 — 印出統計摘要
     # ================================================================
+    # ★軌跡記錄存檔(回推提早避開用)
+    if _traj_buf:
+        import numpy as np
+        _arr = np.stack(_traj_buf)  # [T, 1+2+2+2+30=37]
+        _cols = ("step,robot_x,robot_y,goal_x,goal_y,act_lin,act_ang,"
+                 + ",".join(f"ch{i}" for i in range(30))
+                 + "  | channel 每 6 一組=[px/8,py/8,vx/1.5,vy/1.5,r,valid]×K5(body frame,需×8/×1.5 還原)")
+        np.savez_compressed(_TRAJ_LOG_PATH, data=_arr, cols=_cols)
+        print(f"[PLAY] ★軌跡已存 {_TRAJ_LOG_PATH}  shape={_arr.shape}  (欄位: step,robot_xy,goal_xy,act,channel30)")
+
     # --- probe_dump: 存收集到的 (12D 特徵, 真實速度, valid) ---
     if args_cli.probe_dump and _PROBE_X:
         import numpy as _np
@@ -3475,6 +3796,9 @@ def main():
                 print(f"  碰撞 × 障礙行為分項: 取得失敗 ({type(_e).__name__})")
     else:
         print("  未完成任何回合。")
+    # --- 反應曲線最終彙總（全程樣本平均）---
+    if _react_curve_on:
+        print_react_curve(_react_speed_bins, _react_omega_bins, tag="全程彙總")
     if args_cli.play_diag and diag_samples > 0:
         print("  導航診斷:")
         print(f"    航向誤差均值 (度):     {diag_heading_sum/diag_samples:.2f}")

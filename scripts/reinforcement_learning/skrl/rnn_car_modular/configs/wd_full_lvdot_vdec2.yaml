@@ -1,0 +1,171 @@
+# wd_full_lvdot_vdec2 — 完整課程 (SA1→SA8) LV-DOT + vdec2 平滑&密度課程
+#
+# ★ 目的 (2026-07-11)：跑完整 8 階段課程，用 vdec2 curriculum（vdec + 6 項改良：
+#   SA2 重設計 / head_on 平滑過渡 / SA7-8 速度還原 / obs_near_goal 統一 / 密度 ramp）。
+#   保留 LV-DOT 顯式動態障礙 channel (109D) + TTC 速度稅，對症部署「貼身才反應」。
+#
+# ★ 逐階段訓練工作流 (fixed_stage=true，符合既有 SA1→SA7 慣例)：
+#   - fixed_stage: true → 固定在 initial_stage，不自動晉級。每個 SA 階段一個 run，
+#     階段間 resume 上一階段 checkpoint（與 v3h/v3f 血緣相同做法）。
+#   - max_active_obstacles: 24 → 配合 vdec2 密度 ramp (SA8 靜13+動9=22)，避免硬 cap 靜默截斷。
+#   - timesteps: 270000 (≈900 iter) 每階段預算，同 SA1 baseline。
+#   - wd_actor_update_clip: 4.0 → vdec 速度決定性場景曾兩度 PPO 崩盤(trust-region 破裂)，
+#     用崩#2 修過的保守上限。★若仍在 head_on 密集階段崩盤，治本是加 KL early-stop(見 memory
+#     finding_ppo_crash_trust_region_breakdown)，非再砍稅。
+#
+# ⚠️ SA1 從頭訓練 (obs 109D)。不可 resume 任何 v3f/v3h/79D ckpt。
+# ⚠️ train/play 必須設 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1（obs 維度由此二 env var 控制）。
+# ⚠️ 密度 SA8=22 顆塞 14×14，跑前建議先煙測 (--num_envs 4 少量 steps) 確認無 dies_at_birth。
+#
+# 用法 (TTC 稅 / gap 由 CLI 帶，非 yaml；逐階段用 --initial_stage + --checkpoint 覆寫)：
+#   # SA1 (從頭):
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_full_lvdot_vdec2 --headless \
+#     --ttc_tax_weight 0.2 --ttc_thresh 2.5 --gap_heading_weight 1.0 \
+#     --run_name sa1_lvdot_vdec2_ne1024_s42
+#   # SA2+ (resume 上一階段 ckpt): 加 --initial_stage 2 --checkpoint <SA1 最終 ckpt>
+#     --run_name sa2_lvdot_vdec2_ne1024_s42
+
+name: wd_full_lvdot_vdec2
+description: "完整課程 SA1→SA8 LV-DOT + vdec2 (平滑5改 + 密度 ramp). fixed_stage=true 逐階段訓練(階段間 CLI --initial_stage + resume ckpt), max_active_obstacles=24 配合密度. 109D LV-DOT channel + TTC 速度稅(CLI). actor_clip 4.0 保守防崩. SA1 from scratch. Requires CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 + CLI --ttc_tax_weight 0.2 --ttc_thresh 2.5 --gap_heading_weight 1.0."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3e_vdec2   # ★vdec + 平滑5改 + 密度 ramp
+initial_stage: 1
+fixed_stage: true                                        # ★逐階段訓練: 固定階段, 階段間 CLI 覆寫 --initial_stage + resume
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles (same as v3f) ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget (完整課程需更大預算) ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000         # ★每階段預算 ≈900 iter (同 SA1 baseline; 逐階段訓練)
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0002
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0005
+vf_coeff: 0.5
+gamma: 0.984              # 早期 stage 值; 各 stage gamma 由 curriculum 覆寫 (SA1 0.984→SA8 0.998)
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.5
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (floor 由 curriculum v3e 各 stage 強制) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
+
+# --- act_hist dropout (act_hist 已由 CHARGE_USE_ACT_HIST=0 移除，此值無效) ---
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 4.0   # ★保守: vdec 速度決定性場景曾崩盤(trust-region 破裂), 用崩#2 修過的 4.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64, unchanged) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- Step 3: velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 24     # ★配合 vdec2 密度 ramp (SA8 靜13+動9=22); prim 上限 MAX_OBSTACLES=50 足夠
+obs_size_rand: 0.3          # 尺寸隨機化: 物理半徑 0.3 ± 0.15 → [0.15, 0.45]
+obs_collision_base: 0.9     # (LV-DOT mode 忽略此值; 碰撞 = 物理半徑 + 0.5 中心→邊緣)
+scene_bound_rand: 0.0
+scene_bound_base: 7.0       # 障礙 spawn/移動範圍 ±7 = 14×14 (密度以此面積計)
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (full_material 實測雜訊 sim-to-real 從頭訓) ---
+vlp16_noise_mode: full_material
+lidar_no_noise: false
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR (physics + disturbance + light actuator) ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (obs_delay 誤植→關閉；馬達延遲 actuator_dr 保留)
+obs_delay_steps: [0, 0]
+# Heading stability (off)
+heading_stability_weight: 0.0
+
+# --- LV-DOT obstacle channel DR (SA1 clean; SA2+ 由 curriculum 設 env._lvdot_dr 加噪) ---
+# ★中度 DR 規格 = 讀 LV-DOT 代碼/config 校準 (非拍腦袋), data-first:
+#   pos_noise_std=0.10m / vel_noise_std=0.30m/s / dropout~0.10 / false_neg~0.05
+#   dynamic_speed_threshold=0.3 / min_radius=0.2 / max_distance=8.0 / fov=360 / lidar_min_range 0.9
+#   ⚠ 真實 dropout/false_neg 率仍需車端實錄精修。SA1 全 clean。
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (from scratch) ---
+checkpoint: null
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, full_curriculum, lvdot, vdec2, a2c, aux, asymmetric, rnn64, obstacle_channel, dynamic_obs, dense, deploy_lvdot]
+notes: "完整課程 SA1→SA8 (fixed_stage=true 逐階段訓練, 階段間 --initial_stage + resume ckpt). vdec2 curriculum: vdec + 平滑5改(SA2重設計/head_on過渡/SA7-8速度還原/obs_near_goal統一) + 密度 ramp(靜態 2→13, SA8 總22顆≈11/100㎡近dense目標). 109D LV-DOT channel + TTC稅. actor_clip4.0保守防崩. 面積校準14×14=196㎡. max_active_obstacles=24. run_name 慣例 sa{N}_lvdot_vdec2_ne1024_s42."

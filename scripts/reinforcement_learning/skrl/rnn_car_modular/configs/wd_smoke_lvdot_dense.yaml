@@ -1,24 +1,26 @@
-# wd_sa2_lvdot — SA2 LV-DOT: resume SA1 ckpt → stage 2 (純 baseline, 無減速稅)
+# wd_smoke_lvdot_dense — 階段1+2 煙測: 12×12 + 20障礙 + TTC稅 (LV-DOT 密集重訓前驗證)
 #
-# ★ (2026-07-08) SA1 stage1 收斂 (SR 98.9%) → resume checkpoint_150000 進 stage 2。
-#   目的: 用新碼的「速度 vs 前方距離曲線」(charge/speed_vs_front_dist_*m) 看**無稅** baseline
-#   反應曲線 (policy 現在靠轉向避障、不減速)。stage 3 再加減速稅對照 → 乾淨看出稅的效果。
-#   penalty_speed_near_obs=0 (依用戶「稅留到 stage 3」計畫)。LiDAR/channel 維持 clean 隔離變因。
+# ★ (2026-07-09) 用戶選(c)先煙測:驗「20障礙場景 + TTC門檻稅」端到端跑得動,再決定正式課程。
+#   goal_first_v2 stage 12 "ultimate" = 10靜+10動 = 20障礙(10動態);room_size 6 = 12×12m。
+#   煙測目標(非訓練):①20障礙真的spawn(log障礙=10S+10D)②obs=109D channel填滿密集障礙
+#   ③TTC稅算得出(reward_breakdown['ttc_tax'] 非NaN,逼近時 gate>0)④訓練loop不crash。
 #
-# ⚠️ resume SA1 109D ckpt (obs 佈局相同)。train/play 必須 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1。
-#
-# 用法:
+# 用法(★TTC稅+room_size 走 CLI):
 #   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 \
 #   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
-#     --experiment_config wd_sa2_lvdot --headless --run_name sa2_lvdot_ne1024_s42
+#     --experiment_config wd_smoke_lvdot_dense --headless --run_name smoke_lvdot_dense \
+#     --room_size 6 --ttc_tax_weight 0.5 --ttc_thresh 2.0
+#
+# ⚠煙測用:resume SA3 ckpt_180000(有動作,看得出TTC gate);goal_first_v2 與 lvdot scene 相容性
+#   正是煙測要驗的(若crash=curriculum家族不相容,改option b擴v3e)。timesteps 小(6k=20iter)。
 
-name: wd_sa2_lvdot
-description: "SA2 LV-DOT: resume SA1 ckpt_150000 → stage 2. 純 baseline 無減速稅. 看速度-前距曲線(無稅). Requires CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1."
+name: wd_smoke_lvdot_dense
+description: "SMOKE: 12×12+20障礙+TTC稅 端到端煙測(goal_first_v2 stage12). Requires CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 + CLI --room_size 6 --ttc_tax_weight 0.5."
 
-# --- Environment / curriculum ---
+# --- Environment / curriculum (★goal_first_v2 stage12=20障礙) ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
-curriculum_version: warp_drive_single_agent_v3e
-initial_stage: 2
+curriculum_version: goal_first_v2
+initial_stage: 12
 fixed_stage: true
 scene_profile: warp_drive_single_agent_v3
 obstacle_mode: rule_based
@@ -30,10 +32,10 @@ aux_profile: wd_7d_geometry
 encoder_profile: extractor_rnn
 critic_profile: asymmetric
 
-# --- Training budget ---
-num_envs: 1024
+# --- Training budget (★煙測小 budget) ---
+num_envs: 256
 rollout_length: 300
-timesteps: 270000
+timesteps: 6000
 seed: 42
 
 # --- RL optimizer ---
@@ -59,11 +61,10 @@ ppo_epochs: 1
 mini_batches: 1
 clip_eps: 0.2
 
-# --- Entropy (★07-08 regression 修正: SA2 需峰值探索,對齊過往能跑的 v3f/v3h SA2=0.03/0.05;
-#   原誤用 SA1 的 0.02/0.04→熵崩退化。過往排程: SA1=0.02/0.04, SA2=0.03/0.05, SA3+=0.005/0.02) ---
+# --- Entropy ---
 ent_coeff: 0.0
-ent_coeff_linear: 0.03
-ent_coeff_angular: 0.05
+ent_coeff_linear: 0.005
+ent_coeff_angular: 0.02
 
 act_hist_dropout: 0.0
 
@@ -88,18 +89,18 @@ rnn_type: RNN
 predict_dim: 13
 aux_velocity_topk: 3
 
-# --- Obstacle / scene controls ---
+# --- Obstacle / scene controls (★20障礙 + 12×12) ---
 obs_lr: 0.0003
 obs_ent_coeff: 0.1
 obs_speed_limit: 0.8
 train_goal_rate: 3
 obs_reward_mode: zero
-max_active_obstacles: 10
-obs_size_rand: 0.3          # 尺寸隨機化 ON (物理半徑 0.3±0.15; 碰撞=phys+0.5)
-obs_collision_base: 0.9     # (LV-DOT mode 忽略; 碰撞=物理半徑+0.5)
+max_active_obstacles: 20        # ★放行到 20 (預設10不夠)
+obs_size_rand: 0.3
+obs_collision_base: 0.9
 scene_bound_rand: 0.0
-scene_bound_base: 7.0
-room_size: null
+scene_bound_base: 5.0           # 配 room_size 6 (12×12) 縮小
+room_size: 6.0                  # ★12×12m (2×room_size)
 
 # --- Aux / RNN training ---
 aux_seq_len: 15
@@ -108,7 +109,7 @@ aux_seq_batch_size: 256
 aux_grad_clip: 0.5
 zero_preprocess_feature_for_rl: false
 
-# --- LiDAR (SA2: 維持 clean 隔離「stage2 難度對反應曲線」變因; noise 留給 SA3+) ---
+# --- LiDAR (煙測 clean) ---
 lidar_no_noise: true
 lidar_distance_bias: true
 lidar_distance_bias_k_dr: [-0.005, 0.005]
@@ -131,19 +132,17 @@ actuator_motor_lag: 0.5
 obs_delay_steps: [0, 0]
 heading_stability_weight: 0.0
 
-# --- LV-DOT obstacle channel DR (SA2: 仍 clean; env._lvdot_dr wiring 留 SA3) ---
-
 # --- Runtime / logging ---
 reward_speed_v05: false
 reward_mode: current
 action_table_sample_size: 0
-log_interval: 10
-save_interval: 100
+log_interval: 5
+save_interval: 1000
 
-# --- Checkpoint / resume (SA2: resume SA1 stage1 收斂 ckpt) ---
-checkpoint: logs/rnn_car/sa1_lvdot_ne1024_s42/checkpoint_150000.pt
+# --- Checkpoint / resume (煙測 resume SA3 有動作看得出 TTC gate) ---
+checkpoint: logs/rnn_car/sa3_lvdot_ne1024_s42/checkpoint_180000.pt
 no_resume_optimizer: true
 
 # --- Metadata ---
-tags: [wd, sa2, lvdot, a2c, aux, asymmetric, rnn64, obstacle_channel, resume_sa1, baseline_no_tax]
-notes: "SA2 LV-DOT: resume SA1 ckpt_150000 → stage 2. 純 baseline (penalty_speed_near_obs=0). 目的=速度-前距曲線 baseline (無稅版反應曲線). stage 3 再加稅對照."
+tags: [wd, smoke, lvdot, dense, ttc, 20obstacles, 12x12]
+notes: "SMOKE 煙測: 12×12(room_size6)+20障礙(goal_first_v2 stage12)+TTC稅(CLI). 驗端到端跑得動+channel填+TTC算. 非訓練. resume SA3 ckpt_180000."

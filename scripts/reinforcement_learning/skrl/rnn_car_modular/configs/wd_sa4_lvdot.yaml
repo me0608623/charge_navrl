@@ -1,0 +1,160 @@
+# wd_sa4_lvdot — SA4 LV-DOT: resume SA3 定版(ckpt_60000) → stage 4 + 距離稅 0.8 + ★開 LiDAR 雜訊
+#
+# ★ (2026-07-09) 承接 SA3 lvdot 定版:det play 已驗 ckpt_60000 部署可靠(SR 78.5%/超時0%/
+#   3m 起轉向繞=真提早繞開)。SA4 = 推進 stage 難度(5goals/3靜+3動/1-5牆) + ★開 LiDAR 雜訊
+#   (sim-to-real 進階;SA3 是 clean 以隔離「距離稅」變因,noise 依原規劃留到 SA4+)。
+#   保留:距離稅 0.8(react clearance-gated 減速)+ LV-DOT channel(109D)+ native density。
+#
+# ★距離稅在 YAML 欄位 penalty_speed_near_obs: 0.8。★雜訊:lidar_no_noise=false(開)。
+#
+# ⚠ resume SA3 109D ckpt。train/play 必須 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1。
+#
+# 啟動指令:
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa4_lvdot --headless --run_name sa4_lvdot_ne1024_s42
+#
+# 驗收: det play(play_rnn_car.py --deterministic --stage 4)看 SR/超時 + 逐距離行為表
+#        (提早繞開是否在 stage4 更密+有雜訊下仍成立)。
+
+name: wd_sa4_lvdot
+description: "SA4 LV-DOT: resume SA3 定版(ckpt_60000) → stage 4 + 距離稅 0.8 + ★full_material 實測雜訊 (sim-to-real). native density. Requires CHARGE_USE_ACT_HIST=0 CHARGE_USE_LVDOT_OBS=1."
+
+# --- Environment / curriculum (stage 進 4, 承 SA3 lvdot) ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3e
+initial_stage: 4
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0002
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0005
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.5
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (★SA3-5 退火 0.005/0.02, 依血淚 CHECKLIST; policy 已適應, 降熵讓其收斂 exploit) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.005
+ent_coeff_angular: 0.02
+
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls (與 SA2 同) ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 10
+obs_size_rand: 0.3          # 尺寸隨機化 ON (物理半徑 0.3±0.15; 碰撞=phys+0.5)
+obs_collision_base: 0.9     # (LV-DOT mode 忽略; 碰撞=物理半徑+0.5)
+scene_bound_rand: 0.0
+scene_bound_base: 7.0
+room_size: null
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (★SA4: full_material 實測 VLP-16 雜訊 sim-to-real; 部署導向提早避開版該用實測) ---
+# vlp16_noise_mode=full_material = full (白牆實測 σ 8.67mm + per-ring bias + 19.5% dropout)
+#   + 動態障礙 ray 套實測 human dropout(d)(越遠漏點越多,人材質真實樣態)。
+# ★動態障礙=人,提早避開要學「人在遠處回波稀疏」→ 必用 full_material 而非通用均勻 dropout。
+vlp16_noise_mode: full_material
+lidar_no_noise: false
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR (與 SA2 同) ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+obs_delay_steps: [0, 0]
+heading_stability_weight: 0.0
+
+# --- LV-DOT obstacle channel DR (SA3: 仍 clean; env._lvdot_dr wiring 留 SA4) ---
+
+# --- ★距離稅 (react clearance-gated 減速稅; 寫進 YAML 消除 CLI footgun) ---
+penalty_speed_near_obs: 0.8   # 畢業政策 sa5_v3f_react 破線的 proven 值; 覆寫 curriculum
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (★SA3 定版: det play SR 78.5%/超時0%/3m起轉向繞 部署可靠) ---
+checkpoint: logs/rnn_car/sa3_lvdot_ne1024_s42_cont/checkpoint_60000.pt
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa4, lvdot, a2c, aux, asymmetric, rnn64, obstacle_channel, resume_sa3, distance_tax, react, lidar_noise]
+notes: "SA4 LV-DOT: resume SA3 定版 ckpt_60000 → stage 4 + 距離稅 0.8 + ★開 LiDAR 雜訊(sim-to-real 進階). native density. ent 0.005/0.02 (SA3-5 退火). SA3 det play 已證部署可靠(SR78.5%/超時0%/3m起轉向繞)."
