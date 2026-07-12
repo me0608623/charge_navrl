@@ -118,7 +118,7 @@ LIDAR_R_MIN      = 0.1     # LiDAR 最小量測距離 m（盲區）
 COLLISION_DIST   = 0.45    # 碰撞判定距離 m（= body_radius 0.35 + buffer 0.10）
 
 # --- 診斷工具 ---
-AUX_DEBUG        = True   # True=印出 RNN aux 7D 預測 vs 真實值
+AUX_DEBUG        = False  # 預設關；需要看 RNN aux 7D 預測 vs 真實值時才加 --aux_debug
 AUX_DEBUG_INTERVAL = 25    # 每 N 步印一次 aux debug
 PLAY_DIAG        = False   # True=累積航向/速度/距離導航診斷
 DIAGNOSTIC       = False   # True=LiDAR 可觀察性診斷
@@ -1086,8 +1086,9 @@ def sample_action(logits: torch.Tensor, deterministic: bool) -> torch.Tensor:
 
 # 反應曲線分箱：前錐最近障礙距離(m)上緣為 key（對齊訓練 charge/speed_vs_front_dist_*）。
 _REACT_BIN_EDGES = (
-    (0.0, 0.5, "0.5"), (0.5, 1.0, "1.0"), (1.0, 1.5, "1.5"),
-    (1.5, 2.0, "2.0"), (2.0, 2.5, "2.5"), (2.5, 3.0, "3.0"),
+    (0.00, 0.25, "0.25"), (0.25, 0.50, "0.50"), (0.50, 0.75, "0.75"), (0.75, 1.00, "1.00"),
+    (1.00, 1.25, "1.25"), (1.25, 1.50, "1.50"), (1.50, 1.75, "1.75"), (1.75, 2.00, "2.00"),
+    (2.00, 2.25, "2.25"), (2.25, 2.50, "2.50"), (2.50, 2.75, "2.75"), (2.75, 3.00, "3.00"),
 )
 
 
@@ -1113,6 +1114,47 @@ def print_react_curve(speed_bins: dict, omega_bins: dict, tag: str = "") -> None
                   f"(n={len(_sv)})")
         else:
             print(f"  [{_lo:.1f}, {_hi:.1f})m: (無樣本)")
+
+
+def print_cumulative_stats(stats_goal: int, stats_wall: int, stats_obs: int,
+                           stats_timeout: int, stats_total: int,
+                           scheduler=None, tag: str = "") -> None:
+    """印出**累積** SR / CR / TO + 牆壁碰撞率 + 靜態/動態個別障礙碰撞率。
+
+    - SR/CR/TO/牆壁/障礙：以「已完成回合數」正規化（stats_total）。
+    - 靜/動拆分來源：BehaviorScheduler._collision_by_type（obstacle_collision_geometric
+      在碰撞當步、reset 前逐 slot 記錄，全程累計，play 不清零）。
+      BEHAVIOR_STATIC=1；動態=2..9。事件計數 → 同時給「% of episodes」與「% of 障礙碰撞」。
+    """
+    if stats_total <= 0:
+        print(f"\n[累積統計]{'  ['+tag+']' if tag else ''}  尚無完成回合")
+        return
+    sr = stats_goal / stats_total * 100
+    cr = (stats_wall + stats_obs) / stats_total * 100
+    to = stats_timeout / stats_total * 100
+    _suffix = f"  [{tag}]" if tag else ""
+    print(f"\n[累積統計 n={stats_total}]{_suffix}  "
+          f"SR={sr:.1f}%  CR={cr:.1f}%  TO={to:.1f}%")
+    print(f"  牆壁碰撞率:   {stats_wall:4d} ({stats_wall/stats_total*100:.1f}%)")
+    print(f"  障礙碰撞率:   {stats_obs:4d} ({stats_obs/stats_total*100:.1f}%)")
+    # 靜/動障礙拆分
+    if scheduler is not None and hasattr(scheduler, "_collision_by_type"):
+        try:
+            from obstacle_agent.behavior_config import BEHAVIOR_STATIC
+            _cbt = scheduler._collision_by_type
+            _c_static = int(_cbt[BEHAVIOR_STATIC].item())
+            _c_dyn = int(_cbt[BEHAVIOR_STATIC + 1:].sum().item())   # id 2..9 = 動態
+            _c_evt = _c_static + _c_dyn
+            _sp = (f", {_c_static/_c_evt*100:.0f}% of 障礙碰撞") if _c_evt else ""
+            _dp = (f", {_c_dyn/_c_evt*100:.0f}% of 障礙碰撞") if _c_evt else ""
+            print(f"    ├─ 靜態障礙碰撞: {_c_static:4d} "
+                  f"({_c_static/stats_total*100:.1f}% of episodes{_sp})")
+            print(f"    └─ 動態障礙碰撞: {_c_dyn:4d} "
+                  f"({_c_dyn/stats_total*100:.1f}% of episodes{_dp})")
+        except Exception as _e:  # noqa: BLE001 — 拆分失敗不影響主統計
+            print(f"    靜/動拆分取得失敗 ({type(_e).__name__})")
+    else:
+        print("    (無 BehaviorScheduler → 障礙全為靜態，無法拆動態)")
 
 
 def find_latest_rnn_checkpoint() -> str | None:
@@ -3778,10 +3820,12 @@ def main():
         obs = next_obs  # 推進觀測
         step += 1
 
-        # --- 反應曲線定期輸出 ---
+        # --- 反應曲線 + 累積統計 定期輸出 ---
         if (_react_curve_on and args_cli.react_curve_interval > 0
                 and step % args_cli.react_curve_interval == 0):
             print_react_curve(_react_speed_bins, _react_omega_bins, tag=f"step {step}")
+            print_cumulative_stats(stats_goal, stats_wall, stats_obs, stats_timeout,
+                                   stats_total, _play_behavior_scheduler, tag=f"step {step}")
 
         # --- 效能摘要累積 & 定期印出 ---
         _t_total = time.time() - start
@@ -3858,6 +3902,20 @@ def main():
         print(f"  成功率 (到達目標):   {stats_goal:4d} ({sr:.1f}%)")
         print(f"  碰撞率 (撞牆):      {stats_wall:4d} ({stats_wall/stats_total*100:.1f}%)")
         print(f"  碰撞率 (撞障礙物):  {stats_obs:4d} ({stats_obs/stats_total*100:.1f}%)")
+        # 靜態 vs 動態 障礙碰撞拆分（BehaviorScheduler._collision_by_type 逐 slot 全程累計）
+        if _play_behavior_scheduler is not None and hasattr(_play_behavior_scheduler, "_collision_by_type"):
+            try:
+                from obstacle_agent.behavior_config import BEHAVIOR_STATIC as _BSTAT
+                _cbt2 = _play_behavior_scheduler._collision_by_type
+                _cs = int(_cbt2[_BSTAT].item())
+                _cd = int(_cbt2[_BSTAT + 1:].sum().item())        # id 2..9 = 動態
+                _ce = _cs + _cd
+                print(f"    ├─ 撞靜態障礙:   {_cs:4d} ({_cs/stats_total*100:.1f}% of ep"
+                      + (f", {_cs/_ce*100:.0f}% of 障礙碰撞" if _ce else "") + ")")
+                print(f"    └─ 撞動態障礙:   {_cd:4d} ({_cd/stats_total*100:.1f}% of ep"
+                      + (f", {_cd/_ce*100:.0f}% of 障礙碰撞" if _ce else "") + ")")
+            except Exception as _e2:  # noqa: BLE001
+                print(f"    靜/動障礙拆分: 取得失敗 ({type(_e2).__name__})")
         print(f"  碰撞率 (總計):      {stats_wall+stats_obs:4d} ({cr:.1f}%)")
         print(f"  超時率:             {stats_timeout:4d} ({to:.1f}%)")
         print(f"  其他:               {stats_other:4d}")
