@@ -1,6 +1,6 @@
-# wd_sa1_deploy_dense — SA1 deploy_dense: 高密度部署重訓，乾淨 79D v3f 血緣
+# wd_sa1_deploy_dense — SA1 deploy_dense: 高密度部署重訓(漸進縮小場景 20×20→12×12)，乾淨 79D v3f 血緣
 #
-# ★ 方向 A (2026-07-12)：dense-mixed 部署 (12×12 正方, 15 靜 + 6-8 動)。
+# ★ 方向 A (2026-07-12)：dense-mixed 部署 (12×12 正方, 15 靜 + 6-8 動)。★漸進縮小:arena 20×20→12×12(room 10→6),密度靠count↑+area↓雙升。
 #   靜態靠 curriculum 密度非線性 ramp (deploy_dense: 靜 2→15 / 動 0→8)，
 #   動態靠部署端 shield (ORCA/減速閘) 補尾。policy = 乾淨 79D LiDAR-only，
 #   LV-DOT 不進 obs (velocity 無用+position 冗餘已證)，只餵部署 shield。
@@ -8,7 +8,7 @@
 #
 # ★ 與 wd_sa1_v3f 差異：
 #   - curriculum_version → warp_drive_single_agent_v3e_deploy_dense (密度 ramp + boundary=6.0)
-#   - room_size → 6.0 (12×12m 正方部署 arena；auto-adjust scene_bound_base + wall boundary)
+#   - room_size → 10.0 (SA1 起點 20×20m;漸縮至 SA8 的 6.0=12×12 部署;auto-adjust scene_bound/wall/goal)
 #   - max_active_obstacles → 24 (SA8 最多 15+8=23，留邊際)
 #   - 其餘全同 v3f (obs 79D / wd_sparse / actuator_dr on / obs_delay [0,0] / RNN64)
 #
@@ -24,11 +24,11 @@
 #     --run_name sa1_deploy_dense_ne1024_s42
 
 name: wd_sa1_deploy_dense
-description: "SA1 deploy_dense: 高密度部署重訓(12×12 正方,靜2→動0). 乾淨 79D v3f 血緣(LiDAR-only,LV-DOT不進obs). curriculum deploy_dense(密度ramp+boundary6). room_size=6(12×12). From scratch. Requires CHARGE_USE_ACT_HIST=0."
+description: "SA1 deploy_dense: 高密度部署重訓起手(漸進縮小場景,SA1=20×20/2靜0動). 乾淨 79D v3f 血緣(LiDAR-only,LV-DOT不進obs). curriculum deploy_dense(密度ramp+arena漸縮 room10→6). room_size=10(20×20). From scratch. Requires CHARGE_USE_ACT_HIST=0."
 
 # --- Environment / curriculum ---
 task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
-curriculum_version: warp_drive_single_agent_v3e_deploy_dense   # 密度非線性 ramp(靜2→15/動0→8) + boundary=6.0
+curriculum_version: warp_drive_single_agent_v3e_deploy_dense   # 密度ramp(靜2→15/動0→8) + arena漸縮(room10→6)
 initial_stage: 1
 fixed_stage: true
 scene_profile: warp_drive_single_agent_v3
@@ -109,8 +109,8 @@ max_active_obstacles: 24   # ★deploy_dense: SA8 最多 15+8=23，留邊際(v3f
 obs_size_rand: 0.0
 obs_collision_base: 0.9
 scene_bound_rand: 0.0
-scene_bound_base: 7.0      # room_size=6.0 會 auto-adjust 此值
-room_size: 6.0             # ★12×12m 正方部署 arena (v3f 原 null=20×20)
+scene_bound_base: 8.0      # =room_size-2 (障礙spawn範圍)
+room_size: 10.0            # ★SA1 漸進縮小起點 20×20m (room 10→6 SA1→SA8)
 
 # --- Aux / RNN training ---
 aux_seq_len: 15
@@ -155,5 +155,5 @@ checkpoint: null
 no_resume_optimizer: true
 
 # --- Metadata ---
-tags: [wd, sa1, deploy_dense, a2c, aux, asymmetric, rnn64, obs79d, rmin025, smoothness0, room12x12, lidar_only, dense_deploy]
-notes: "SA1 deploy_dense: 高密度部署重訓起手(12×12 正方,SA1=2靜0動). 乾淨 79D v3f 血緣,LV-DOT 不進 obs(只餵部署 shield). curriculum deploy_dense 密度 ramp. 驗收: det SR≥90 才畢業進 SA2."
+tags: [wd, sa1, deploy_dense, a2c, aux, asymmetric, rnn64, obs79d, rmin025, smoothness0, room20to12_shrink, lidar_only, dense_deploy]
+notes: "SA1 deploy_dense: 高密度部署重訓起手(漸進縮小,SA1=20×20,2靜0動). 乾淨 79D v3f 血緣,LV-DOT 不進 obs(只餵部署 shield). curriculum deploy_dense 密度 ramp. 驗收: det SR≥90 才畢業進 SA2."

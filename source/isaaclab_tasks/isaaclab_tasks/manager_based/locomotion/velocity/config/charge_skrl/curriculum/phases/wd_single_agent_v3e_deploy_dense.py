@@ -57,7 +57,7 @@ _DYNAMIC_MIN = {
 }
 
 # arena 形狀 DR 骨架（SA4+ 引入 mix = 正方/走廊 per-env 隨機）
-# ⚠ 值 "square"/"mix" 是佔位字串，boundary 生成邏輯由 Task 1.2 實作
+# ⚠ 值 "square"/"mix" 是佔位字串，走廊 boundary 生成由 Task 1.2b 延後實作
 _ARENA_SHAPE = {
     "SA1_nav_bootstrap":  "square",
     "SA2_nav_static":     "square",
@@ -67,6 +67,27 @@ _ARENA_SHAPE = {
     "SA6_dense_avoid":    "mix",
     "SA7_high_pressure":  "mix",
     "SA8_final":          "mix",
+}
+
+# ★漸進式縮小場景 (2026-07-12)：arena 20×20 → 12×12 漸縮，密度靠 count↑ + area↓ 雙升。
+# ⚠ room_size 是 launch-time config 欄（非 curriculum），下表僅供對應 config 建置參考。
+#   每 stage config 設 room_size；train_rnn_car_wdclip.py 據此 auto-scale 牆/spawn/goal/_room_boundary。
+#   SA1=10(20×20) SA2=9 SA3=8.5 SA4=8 SA5=7.5 SA6=7 SA7=6.5 SA8=6(12×12 部署)。
+_ROOM_SIZE_REF = {  # 供 config room_size 對照（此檔不使用，僅文件化）
+    "SA1_nav_bootstrap": 10.0, "SA2_nav_static": 9.0, "SA3_walls_crossing": 8.5,
+    "SA4_spatial_plan": 8.0, "SA5_endurance": 7.5, "SA6_dense_avoid": 7.0,
+    "SA7_high_pressure": 6.5, "SA8_final": 6.0,
+}
+
+# 障礙物 spawn boundary（= room_size − 2，障礙生成在外牆內）。隨 arena 漸縮。
+_BOUNDARY = {name: rs - 2.0 for name, rs in _ROOM_SIZE_REF.items()}
+
+# goal 距離範圍（隨 arena 縮小上限收斂；SA8 對齊部署 7-9m 附近）。
+_GOAL_DIST = {
+    "SA1_nav_bootstrap": (2.0, 9.0), "SA2_nav_static": (2.0, 9.0),
+    "SA3_walls_crossing": (3.0, 9.0), "SA4_spatial_plan": (3.0, 9.0),
+    "SA5_endurance": (3.0, 9.0), "SA6_dense_avoid": (3.0, 9.0),
+    "SA7_high_pressure": (4.0, 9.0), "SA8_final": (5.0, 9.0),
 }
 
 
@@ -95,9 +116,12 @@ def _build_deploy_dense_stages() -> list[dict]:
         # arena_shape：佔位鍵（走廊 DR 消費由 Task 1.2b 延後實作，目前 "mix" 等同正方 fallback）
         sc["arena_shape"] = _ARENA_SHAPE[name]
 
-        # arena 尺寸：12×12 正方 → boundary 半徑 6.0（覆寫 vdec2/v3 的 7.0-8.5）
-        # 部署場景校準；走廊型非對稱 boundary 由 Task 1.2b 補
-        sc["boundary"] = 6.0
+        # ★漸進縮小：障礙 spawn boundary 隨 arena 漸縮（= room_size−2）。
+        # 實際外牆由 config room_size 控制（見 _ROOM_SIZE_REF）；此為障礙生成範圍。
+        sc["boundary"] = _BOUNDARY[name]
+
+        # goal 距離範圍隨 arena 收斂（SA8 對齊部署）。
+        sc["goal_distance"] = _GOAL_DIST[name]
 
     return stages
 
