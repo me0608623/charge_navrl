@@ -32,7 +32,7 @@
 ### Task 0.1: 檢查 rmd 訓練 config 的 obs_delay 設定
 
 **Files:**
-- Read: `scripts/reinforcement_learning/skrl/train/rnn_car_modular/configs/wd_sa3_rmd_enc24.yaml`
+- Read: `scripts/reinforcement_learning/skrl/rnn_car_modular/configs/wd_sa3_rmd_enc24.yaml`
 - Read: 其 base config 鏈（grep `obs_delay`）
 
 - [ ] **Step 1: 查 obs_delay_steps 是否啟用**
@@ -40,7 +40,7 @@
 Run:
 ```bash
 cd /home/aa/IsaacLab
-grep -rn "obs_delay\|actuator_dr\|delay_steps" scripts/reinforcement_learning/skrl/train/rnn_car_modular/configs/wd_sa3_rmd_enc24.yaml
+grep -rn "obs_delay\|actuator_dr\|delay_steps" scripts/reinforcement_learning/skrl/rnn_car_modular/configs/wd_sa3_rmd_enc24.yaml
 # 追 base config
 grep -rn "obs_delay_steps\|obs_delay" source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/ | grep -iv "def \|#" | head
 ```
@@ -216,7 +216,7 @@ git commit -m "feat(arena): 走廊型長方 boundary + 正方/走廊 per-env DR(
 ### Task 1.3: 8 階段 config yaml
 
 **Files:**
-- Create: `scripts/reinforcement_learning/skrl/train/rnn_car_modular/configs/wd_sa{1..8}_deploy_dense.yaml`
+- Create: `scripts/reinforcement_learning/skrl/rnn_car_modular/configs/wd_sa{1..8}_deploy_dense.yaml`
 - Reference: `configs/wd_sa3_rmd_enc24.yaml`
 
 - [ ] **Step 1: 寫 SA1 config（其餘照改 stage/resume）**
@@ -227,7 +227,7 @@ git commit -m "feat(arena): 走廊型長方 boundary + 正方/走廊 per-env DR(
 
 ```bash
 /home/aa/miniconda3/envs/env_isaaclab/bin/python -c "
-import yaml; c=yaml.safe_load(open('scripts/reinforcement_learning/skrl/train/rnn_car_modular/configs/wd_sa1_deploy_dense.yaml'))
+import yaml; c=yaml.safe_load(open('scripts/reinforcement_learning/skrl/rnn_car_modular/configs/wd_sa1_deploy_dense.yaml'))
 assert c['curriculum_version']=='warp_drive_single_agent_v3e_deploy_dense'
 assert c.get('max_active_obstacles',0)>=24
 print('SA1 config OK')"
@@ -237,7 +237,7 @@ Expected: `SA1 config OK`。
 - [ ] **Step 3: Commit**
 
 ```bash
-git add scripts/reinforcement_learning/skrl/train/rnn_car_modular/configs/wd_sa*_deploy_dense.yaml
+git add scripts/reinforcement_learning/skrl/rnn_car_modular/configs/wd_sa*_deploy_dense.yaml
 git commit -m "feat(config): deploy_dense SA1-8 yaml(cap24 + KL early-stop)"
 ```
 
