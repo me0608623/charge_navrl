@@ -92,8 +92,12 @@ def _build_deploy_dense_stages() -> list[dict]:
         # 動態下限：有明確指定則用，否則等於上限（固定值）
         sc["dynamic_obstacles_min"] = _DYNAMIC_MIN.get(name, _DYNAMIC_RAMP[name])
 
-        # arena_shape：佔位鍵（boundary 生成由 Task 1.2 消費）
+        # arena_shape：佔位鍵（走廊 DR 消費由 Task 1.2b 延後實作，目前 "mix" 等同正方 fallback）
         sc["arena_shape"] = _ARENA_SHAPE[name]
+
+        # arena 尺寸：12×12 正方 → boundary 半徑 6.0（覆寫 vdec2/v3 的 7.0-8.5）
+        # 部署場景校準；走廊型非對稱 boundary 由 Task 1.2b 補
+        sc["boundary"] = 6.0
 
     return stages
 
