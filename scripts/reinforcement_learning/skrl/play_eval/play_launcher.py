@@ -182,6 +182,7 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "copy_clipboard": ("Copy to Clipboard", "複製到剪貼簿"),
     "launch_play": ("  LAUNCH PLAY  ", "  開始播放  "),
     "kill_play": ("Kill All Play", "清除所有 Play"),
+    "stop_play": ("⏹ Stop & Summary", "⏹ 停止並統計"),
     "save_settings": ("Save Settings", "儲存設定"),
 
     # Save/Load dialogs
@@ -196,6 +197,13 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "kill_confirm": ("Kill all play_rnn_car processes?", "清除所有 play_rnn_car 進程？"),
     "kill_done": ("Killed {n} process(es).", "已清除 {n} 個進程。"),
     "kill_none": ("No play processes found.", "沒有找到 play 進程。"),
+    "stop_title": ("Stop Simulation", "停止模擬"),
+    "stop_done": (
+        "Sent stop signal to {n} process(es).\nThe sim will finish the current step, "
+        "then print the summary (SR/CR/TO + static/dynamic/wall collisions) in the terminal.",
+        "已送停止訊號給 {n} 個進程。\n模擬會跑完當步後結束，並在終端機印出統計摘要"
+        "（SR/CR/TO + 靜態/動態/牆壁碰撞 機率與次數）。",
+    ),
     "launch_title": ("Launch Play", "開始播放"),
     "launch_confirm": ("Launch play?", "確定開始播放？"),
     "launched_title": ("Launched", "已開始"),
@@ -836,7 +844,7 @@ class PlayLauncherApp:
         )
         row += 1
 
-        self.aux_debug_var = tk.BooleanVar(value=True)
+        self.aux_debug_var = tk.BooleanVar(value=False)  # 預設不勾：不加 --aux_debug（要看 RNN aux 才勾）
         self._reg(
             ttk.Checkbutton(f, text=self._t("aux_debug"),
                             variable=self.aux_debug_var),
@@ -1120,6 +1128,11 @@ class PlayLauncherApp:
             ttk.Button(btn_frame, text=self._t("launch_play"),
                        command=self._launch),
             "launch_play",
+        ).pack(side="left", padx=10)
+        self._reg(
+            ttk.Button(btn_frame, text=self._t("stop_play"),
+                       command=self._stop_play),
+            "stop_play",
         ).pack(side="left", padx=10)
         self._reg(
             ttk.Button(btn_frame, text=self._t("kill_play"),
@@ -1522,6 +1535,43 @@ class PlayLauncherApp:
             messagebox.showerror(
                 self._t("error_title"), f"{self._t('error_launch')}\n{e}"
             )
+
+    def _stop_play(self):
+        """優雅停止模擬：送 SIGINT 給 play 行程 → 跑完當步後退出並在終端機
+        印出 PLAY 統計摘要 (SR/CR/TO + 靜態/動態/牆壁碰撞 機率與次數)。
+
+        與「Kill All Play」的差別：Kill=SIGTERM/SIGKILL 硬殺(不出摘要)；
+        Stop=SIGINT 讓 play_rnn_car.py 的 _on_stop_signal 優雅收尾。
+        """
+        import signal
+
+        try:
+            out = subprocess.check_output(
+                ["pgrep", "-f", "play_rnn_car"], text=True,
+            ).strip()
+            pids = [int(p) for p in out.splitlines() if p.strip()]
+        except subprocess.CalledProcessError:
+            pids = []
+
+        my_pid = os.getpid()
+        pids = [p for p in pids if p != my_pid]
+
+        if not pids:
+            messagebox.showinfo(self._t("stop_title"), self._t("kill_none"))
+            return
+
+        n = 0
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGINT)   # 優雅停止（非硬殺）
+                n += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        messagebox.showinfo(
+            self._t("stop_title"),
+            self._t("stop_done").format(n=n),
+        )
 
     def _kill_play(self):
         """Kill all play_rnn_car related processes."""

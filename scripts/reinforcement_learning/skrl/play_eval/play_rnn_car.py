@@ -3247,8 +3247,24 @@ def main():
     _jit_steps = torch.zeros(raw_env.num_envs, device=raw_env.device)
     _jit_omega_list = []  # 每步 |ω_actual| [N]
 
+    # --- 優雅停止：SIGINT（launcher「停止模擬」按鈕 / 終端機 Ctrl+C）設 flag，
+    #     讓迴圈跑完當步後正常退出 → 走到結尾「PLAY 統計摘要」(SR/CR/TO + 靜/動/牆碰撞)。
+    #     覆寫預設 SIGINT handler（原本丟 KeyboardInterrupt 會崩潰）→ 改優雅收尾。
+    #     SIGTERM 不攔，留給 launcher「Kill All Play」硬殺（職責分離）。
+    import signal as _signal
+    _stop_flag = {"stop": False}
+    def _on_stop_signal(_signum, _frame):
+        if not _stop_flag["stop"]:
+            _stop_flag["stop"] = True
+            print("\n[PLAY] ⏹ 收到停止訊號 (SIGINT) → 完成本步後結束模擬並整理統計摘要…",
+                  flush=True)
+    try:
+        _signal.signal(_signal.SIGINT, _on_stop_signal)
+    except (ValueError, OSError):
+        pass  # 非主執行緒等情況 → 保留預設行為
+
     step = 0
-    while simulation_app.is_running() and step < args_cli.steps:
+    while simulation_app.is_running() and step < args_cli.steps and not _stop_flag["stop"]:
         start = time.time()
 
         with torch.inference_mode():
