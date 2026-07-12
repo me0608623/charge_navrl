@@ -9,7 +9,11 @@
 
 ## 1. 問題陳述
 
-**部署目標場景**：12×12m arena，**15 顆靜態障礙 + ≥4 顆動態障礙（人）**，機器人需近對角穿越（goal 距離 ~7–9m）。這是本專案最難的 dense-mixed 場景。
+**部署目標場景**（2026-07-12 用戶拍板）：
+- **障礙密度**：**15 顆靜態 + 6–8 顆動態（人）** = 最多 **23 顆/場**。
+- **arena 形狀**：**兩種都要** — ① 正方 12×12m ② 走廊型長方（長軸導航，尺寸待量測，暫定 ~20×7m）。
+- **goal**：近對角穿越，距離 **7–9m**（用戶確認保留，不縮短）。
+- 這是本專案**最難**的 dense-mixed 場景。⚠️ SA8 總障礙 23 顆**正踩在 v27 容量牆（22 顆 SR 61.6%）上**，純 policy 天花板風險高（見 §5 誠實天花板）。
 
 **現況**：現行部署候選 policy（`rmd`/`sa3_rmd_enc24`，curriculum `v3e_vdec`）只在 **3–5 靜 + 5 動** 的低密度訓練。實測在部署密度下崩潰：
 
@@ -47,24 +51,26 @@
 
 **非線性 ramp**（Grok 建議 2026-07-12：前段線性打底、後段密集切分，方便觀察容量牆 knee）：
 
-| 階段 | 靜態 | 動態 | arena | 說明 |
+| 階段 | 靜態 | 動態 | arena 形狀 | 說明 |
 |---|---|---|---|---|
-| SA1 | 2 | 0 | 12×12 | nav bootstrap（線性段） |
-| SA2 | 4 | 0 | 12×12 | 純靜態打底 |
-| SA3 | 6 | 1 | 12×12 | 加少量動態 |
-| SA4 | 8 | 2 | 12×12 | 線性段結束 |
-| SA5 | 10 | 3 | 12×12 | **密集段起**（後段每階 +2） |
-| SA6 | 12 | 3 | 12×12 | dense static |
-| SA7 | 14 | 4 | 12×12 | high pressure |
-| SA8 | **15** | **4** | 12×12 | **部署密度** |
-| （掃描） | 17,19 | 4 | 12×12 | 訓完後 SA8 policy 容量牆密度掃描（§5.5，不訓） |
+| SA1 | 2 | 0 | 正方 | nav bootstrap（線性段） |
+| SA2 | 4 | 0 | 正方 | 純靜態打底 |
+| SA3 | 6 | 1 | 正方 | 加少量動態 |
+| SA4 | 8 | 2 | 正方 + **走廊(引入)** | 線性段結束、開始 arena 形狀 DR |
+| SA5 | 10 | 3 | 正方/走廊 混合 | **密集段起** |
+| SA6 | 12 | 4 | 正方/走廊 混合 | dense static |
+| SA7 | 14 | 6 | 正方/走廊 混合 | high pressure |
+| SA8 | **15** | **6–8** | 正方/走廊 混合 | **部署密度（總 21–23 顆）** |
+| （掃描） | 15 | 8,10 | 正方/走廊 | 訓完後 SA8 policy 容量牆密度掃描（§5.5，不訓） |
 
-- **前段 SA1-4 線性**（2,4,6,8）打底基本穿縫；**後段 SA5-8 每階 +2**（10,12,14,15）密集觀察容量牆起點。
-- **與 vdec2 差異**：arena 14×14→12×12；靜態尾端 13→15；後段非線性加密；動態 ramp 到部署密度（≥4）。
+- **靜態 ramp**：前段 SA1-4 線性（2,4,6,8）打底穿縫；後段 SA5-8 每階 +2（10,12,14,15）。
+- **動態 ramp**：0,0,1,2,3,4,6,**(6–8)** —— SA8 動態隨機 6–8（`min_dynamic=6, max_dynamic=8`）。
+- **arena 形狀 DR**（新）：SA1-3 純正方打底基本導航 → SA4 引入走廊型長方 → SA5+ 每 episode 隨機正方/走廊（domain randomization，讓 policy 泛化兩種幾何）。⚠️ 走廊尺寸**待量測真實場地**（暫定 ~20×7m），需 config 支援非正方 boundary + spawn_zones。
+- **與 vdec2 差異**：arena 14×14→12×12 正方 + 走廊 DR；靜態尾端 13→15；動態 ramp 到 6–8；後段非線性加密。
 - **動態行為**：沿用 rmd 的 crossing/head_on 混合（練 reactive 反應到當前位置）。
-- **LV-DOT channel**：K=5，位置欄**保留**（reactive 反應需要當前位置），速度欄雖證沒用但不動（避免改 obs 維度連鎖）。
-- **config 硬約束**：`max_active_obstacles ≥ 24`（SA8 19 顆 + 邊際），否則 `train_rnn_car_wdclip.py` N_obs 硬 cap 靜默截斷。
-- **goal 距離校準**：需驗證 12×12 + 15 靜下 goal 7-9m 可行放置（eval log 曾見 `Goal resample fallback` → 可能需放寬 near-goal 或縮 goal 距離）。
+- **LV-DOT channel**：K=5，位置欄**保留**（reactive 反應需當前位置），速度欄雖證沒用但不動。⚠️ **6–8 動態 > K=5** → 最近 5 顆進 channel、其餘 1–3 顆只在 LiDAR（reactive 仍看得到，但無顯式 channel）。
+- **config 硬約束**：`max_active_obstacles ≥ 24`（SA8 最多 15+8=23 + 邊際 1），否則 `train_rnn_car_wdclip.py` N_obs 硬 cap 靜默截斷。prim 上限 MAX_OBSTACLES=50 足夠。
+- **goal**：保留 7–9m 近對角。⚠️ 12×12 + 15 靜下曾見 `Goal resample fallback`（近飽和）→ Phase 0 需驗證可行放置率；若 <90% 成功放置則放寬 near-goal count/radius（**不縮 goal 距離**，用戶已確認保留）。
 
 ### 3.2 動態塊——部署 shield 三層階梯
 
@@ -96,7 +102,7 @@ Shield 參數（`d_slow`、`d_stop`、`slew_max`、FGM/ORCA 觸發閾值）需�
 ## 4. 訓練管線
 
 ```
-SA1(2靜0動) → SA2(4靜0動) → SA3(6靜1動) → … → SA8(15靜4動)  ← 密度依 §3.1 非線性 ramp 表
+SA1(2靜0動) → SA2(4靜0動) → SA3(6靜1動) → … → SA8(15靜6–8動)  ← 密度+arena形狀依 §3.1 表
 每階段:①訓到收斂 ②det eval SR≥90 才畢業 ③resume 進下一階
 命名:sa{N}_deploy_dense_ne1024_s42  (依 run_name 規範)
 固定:seed / vf_coeff / grad clip / rollout / lr / entropy floor
@@ -110,23 +116,24 @@ SA1(2靜0動) → SA2(4靜0動) → SA3(6靜1動) → … → SA8(15靜4動)  �
 
 ## 5. 驗收
 
-**部署密度 det eval**（12×12 + 15 靜 + 4 動）：
+**部署密度 det eval**（正方 12×12 + 走廊，各 15 靜 + 6–8 動；兩形狀分開報）：
 
 | 指標 | 目標 | 理由 |
 |---|---|---|
 | 撞靜態 CR | **<5%** | 靜態可訓練,應壓得下 |
 | 撞動態 CR（policy only） | 量測基線 | reactive 地板 |
 | 撞動態 CR（+shield） | **<10–15%** | shield 接尾 |
-| 總 SR（policy only） | 55–70%（估） | 容量牆現實 |
-| 總 SR（policy + shield） | **80%+** | 堪用部署門檻 |
+| 總 SR（policy only） | 45–65%（估，↓） | 23 顆踩 v27 容量牆 |
+| 總 SR（policy + shield） | **75–80%+** | 堪用部署門檻 |
 | `freeze_ratio`（+shield） | **不得暴增** | 減速閘 deadlock 警訊（Grok） |
+| 正方 vs 走廊 SR 差 | 分開報，不平均 | 走廊窄可能更難/更易，需分辨 |
 
 **12×12 資訊論下限判準**（Grok 定量化）：SA8 15靜訓到收斂後 —
 - **SR ≥ 70%** → 沒到硬限，繼續（shield + 微調可堪用）
 - **SR < 40% 且怎麼訓都不升** → 接近資訊論硬限，須降場景難度或重新談部署幾何
 - 40–70% → 灰區，靠 shield/ORCA 補到 80%+
 
-**⚠️ 誠實天花板**：純 policy 在 15靜+4動 **不可能 SR 100%**（容量牆物理現實）。A 的價值 = 靜態碰撞壓近 0（可訓練）+ shield 接動態尾巴 → 合力「堪用部署」。若純 policy 卡 60%、shield 後也上不去 → 才考慮方向 B（架構升級），但**先做 A 量出真實天花板 + §5.5 診斷瓶頸來源**，不盲賭架構。
+**⚠️ 誠實天花板（動態 6-8 後更嚴峻）**：SA8 總障礙 **21–23 顆正踩在 v27 已測容量牆（22 顆 → SR 61.6%，含 HEIGHT attention）**上。純 policy 在此密度 **SR 大機率落 45–65%**，不是訓練不夠、是架構容量牆。A 的價值 = 靜態碰撞壓近 0（可訓練）+ shield 接動態尾巴 → 合力拉到 75–80% 堪用。**若純 policy 卡 <60% 且 shield 後也上不去 → 這是本 spec 早已預告的情境**：走 §5.5 三刀診斷瓶頸來源 → 針對性方向 B（大機率是感知 encoder），不盲賭。**先做 A 量出真實天花板**再決定 B 怎麼做。
 
 ---
 
@@ -197,9 +204,10 @@ efficiency_anchor = v_fwd - 0.3 * torch.abs(omega)
 | 訓練時間 | SA1→SA8 從頭，~2–4 天 |
 | 風險① | 高密度階段(SA6-8) trust-region 崩 → KL early-stop 修法 |
 | 風險② | SA8 15靜撞容量牆 SR 上不去 → §5.5 三刀診斷瓶頸 → 針對性轉 B |
-| 風險③ | goal 放置飽和(12×12+15靜) → 校準 goal 距離/near-goal |
+| 風險③ | goal 放置飽和(12×12+15靜) → Phase 0 驗放置率、放寬 near-goal（不縮 goal 距離） |
+| 風險④ | 走廊型 arena 非正方 boundary/spawn_zones 支援 + 尺寸待量測 |
 | 現成 | vdec2 骨架、shield 三層代碼、密度旋鈕、det eval、CHARGE_GRAD_ATTR hook、車端 pyrvo2 |
-| 新建 | deploy_dense curriculum + config + shield/ORCA 校準 + 診斷刀0-2 |
+| 新建 | deploy_dense curriculum（非線性 ramp + arena 形狀 DR）+ config + shield/ORCA 校準 + 診斷刀0-2 |
 
 ---
 
