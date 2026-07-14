@@ -567,6 +567,12 @@ class BehaviorScheduler:
         radius = self.obs_near_goal_radius
         min_near_dist = 0.8  # 不要太貼 goal 中心
 
+        # ★2026-07-13：obs_near_goal_count 語義 = 「每 env 隨機 0~count 顆」(非固定 count)。
+        #   原本每 env 固定放 count 顆 → 每 episode 全是最難 case → policy 崩塌(無簡單 episode 撐訊號)。
+        #   改成 per-env randint(0, count) → 混合難度(0/1/2)：簡單 episode 維持 SR/獎勵訊號、
+        #   難 episode 逐漸學會 → policy 學得起來、不崩塌。訓練/eval 分布一致(det eval 同樣隨機)。
+        per_env_count = torch.randint(0, n_place + 1, (K,), device=self.device)  # [K] 每 env 0~count
+
         # 取得 goal 位置並轉成 local frame（相對 env origin）
         try:
             goal_cmd = env.command_manager.get_command("goal_command")
@@ -580,9 +586,11 @@ class BehaviorScheduler:
         for slot_idx in range(self.max_obstacles):
             if placed >= n_place:
                 break
-            # 只覆寫 active slot
+            # 只覆寫 active slot，且此 env 的隨機顆數 > 已放數 (per-env 隨機 0~count)
             active = self.behavior_type[env_ids, slot_idx] != BEHAVIOR_INACTIVE
-            if not active.any():
+            place_mask = active & (per_env_count > placed)
+            if not place_mask.any():
+                placed += 1
                 continue
 
             # 環形隨機：角度 uniform，距離 uniform in [min_near_dist, radius]
@@ -592,9 +600,9 @@ class BehaviorScheduler:
             new_x = (goal_xy[:, 0] + dist * torch.cos(angle)).clamp(-self.boundary, self.boundary)
             new_y = (goal_xy[:, 1] + dist * torch.sin(angle)).clamp(-self.boundary, self.boundary)
 
-            # 只覆寫 active 的 env
-            self.positions[env_ids[active], slot_idx, 0] = new_x[active]
-            self.positions[env_ids[active], slot_idx, 1] = new_y[active]
+            # 只覆寫「該放且 active」的 env
+            self.positions[env_ids[place_mask], slot_idx, 0] = new_x[place_mask]
+            self.positions[env_ids[place_mask], slot_idx, 1] = new_y[place_mask]
             placed += 1
 
     def _place_narrow_gap_pairs(self, env_ids: Tensor, env: ManagerBasedRLEnv) -> None:

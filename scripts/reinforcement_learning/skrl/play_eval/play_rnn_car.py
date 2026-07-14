@@ -2982,6 +2982,13 @@ def main():
     _react_curve_on = not args_cli.no_react_curve
     _react_speed_bins = {k: [] for _, _, k in _REACT_BIN_EDGES}
     _react_omega_bins = {k: [] for _, _, k in _REACT_BIN_EDGES}
+    _react_omega_ahead = {k: [] for _, _, k in _REACT_BIN_EDGES}  # ★目標正前方子集(list of (|ω|,n))
+    # --- 軌跡曲率量測 (CHARGE_TRAJ_DUMP=1): position-based 避障起始距離,避開 bang-bang |ω| 混淆 ---
+    #   記錄 robot local pos + 前錐 LiDAR 障礙距離(front_m) 每步 → 分析淨路徑曲率 vs 障礙距離。
+    _TRAJ_DUMP = os.environ.get("CHARGE_TRAJ_DUMP", "0") != "0"
+    _traj_robot, _traj_front = [], []
+    if _TRAJ_DUMP:
+        print("[PLAY] ★CHARGE_TRAJ_DUMP=1 → 記錄 robot local pos + 前錐障礙距離 每步 → /tmp/traj_dump.npz")
 
     # --- RVO2 (ORCA) Safety Filter 初始化 ---
     rvo2_filter = None
@@ -3509,11 +3516,25 @@ def main():
                 _front_min = _front_masked.min(dim=1).values      # [E] normalized
                 _front_m = _front_min * 20.0                      # 公尺
                 _valid = ~torch.isinf(_front_min)
+                # ★軌跡曲率 dump: robot local pos + 前錐障礙距離(inf→99) 每步(不依賴 scheduler)
+                if _TRAJ_DUMP:
+                    _rob_l = (raw_env.scene["robot"].data.root_pos_w[:, :2]
+                              - raw_env.scene.env_origins[:, :2])
+                    _fm_dump = torch.where(_valid, _front_m, torch.full_like(_front_m, 99.0))
+                    _traj_robot.append(_rob_l.detach().cpu().numpy().copy())
+                    _traj_front.append(_fm_dump.detach().cpu().numpy().copy())
+                # ★goal-正前方過濾: 目標方位角<GOAL_AHEAD_DEG=該直行(ω baseline≈0),隔離避障 ω
+                _goal_xy = _obs_flat_ep[:, 4:6]                    # [E,2] robot frame goal (x_fwd,y_left)
+                _goal_brg = torch.atan2(_goal_xy[:, 1], _goal_xy[:, 0]).abs()  # [E] rad
+                _ahead = _goal_brg < (float(os.environ.get("CHARGE_GOAL_AHEAD_DEG", "15")) * 3.14159 / 180.0)
                 for _rlo, _rhi, _rk in _REACT_BIN_EDGES:
                     _rm = _valid & (_front_m >= _rlo) & (_front_m < _rhi)
                     if int(_rm.sum().item()) > 0:
                         _react_speed_bins[_rk].append(_vx_cmd[_rm].mean().item())
                         _react_omega_bins[_rk].append(_omega_cmd[_rm].mean().item())
+                    _rma = _rm & _ahead                            # 目標正前方 子集
+                    if int(_rma.sum().item()) > 0:
+                        _react_omega_ahead[_rk].append((_omega_cmd[_rma].mean().item(), int(_rma.sum().item())))
 
         episode_goal_dist_sum += torch.norm(_obs_flat_ep[:, 4:6], dim=1)
         if _play_behavior_scheduler is not None:
@@ -3954,9 +3975,29 @@ def main():
                 print(f"  碰撞 × 障礙行為分項: 取得失敗 ({type(_e).__name__})")
     else:
         print("  未完成任何回合。")
+    # --- 軌跡曲率量測 dump ---
+    if _TRAJ_DUMP and len(_traj_robot) > 0:
+        import numpy as _np_traj
+        _np_traj.savez("/tmp/traj_dump.npz",
+                       robot=_np_traj.stack(_traj_robot),   # [T,E,2] robot local pos
+                       front=_np_traj.stack(_traj_front))   # [T,E] 前錐障礙距離(m; 99=無)
+        print(f"[PLAY] ★軌跡 dump: /tmp/traj_dump.npz (T={len(_traj_robot)} steps, E envs)")
     # --- 反應曲線最終彙總（全程樣本平均）---
     if _react_curve_on:
         print_react_curve(_react_speed_bins, _react_omega_bins, tag="全程彙總")
+        # ★goal-正前方過濾反應曲線: 目標正前方(該直行)時 |ω| vs 前錐障礙距離 = 避障 onset
+        _deg = os.environ.get("CHARGE_GOAL_AHEAD_DEG", "15")
+        print(f"\n[反應曲線·目標正前方<{_deg}°] 前錐 LiDAR 距離(m) → |ω|(rad/s)  [直行時避靜態障礙,baseline應≈0]")
+        for _rlo, _rhi, _rk in _REACT_BIN_EDGES:
+            _lst = _react_omega_ahead[_rk]
+            if _lst:
+                _tot_n = sum(n for _, n in _lst)
+                _wsum = sum(v * n for v, n in _lst)
+                _mo = _wsum / max(_tot_n, 1)
+                _bar = "█" * int(_mo / 0.03)
+                print(f"  [{_rlo:.1f}, {_rhi:.1f})m: |ω|={_mo:+.3f} rad/s  (n={_tot_n})  {_bar}")
+            else:
+                print(f"  [{_rlo:.1f}, {_rhi:.1f})m: (無目標正前方樣本)")
     if args_cli.play_diag and diag_samples > 0:
         print("  導航診斷:")
         print(f"    航向誤差均值 (度):     {diag_heading_sum/diag_samples:.2f}")

@@ -1,0 +1,159 @@
+# wd_sa1_deploy_dense — SA1 deploy_dense: 高密度部署重訓(漸進縮小場景 20×20→12×12)，乾淨 79D v3f 血緣
+#
+# ★ 方向 A (2026-07-12)：dense-mixed 部署 (12×12 正方, 15 靜 + 6-8 動)。★漸進縮小:arena 20×20→12×12(room 10→6),密度靠count↑+area↓雙升。
+#   靜態靠 curriculum 密度非線性 ramp (deploy_dense: 靜 2→15 / 動 0→8)，
+#   動態靠部署端 shield (ORCA/減速閘) 補尾。policy = 乾淨 79D LiDAR-only，
+#   LV-DOT 不進 obs (velocity 無用+position 冗餘已證)，只餵部署 shield。
+#   基於 wd_sa1_v3f (已證畢業血緣 sa5_v3f_react 各階 SR≥90)。
+#
+# ★ 與 wd_sa1_v3f 差異：
+#   - curriculum_version → warp_drive_single_agent_v3e_deploy_dense (密度 ramp + boundary=6.0)
+#   - room_size → 10.0 (SA1 起點 20×20m;漸縮至 SA8 的 6.0=12×12 部署;auto-adjust scene_bound/wall/goal)
+#   - max_active_obstacles → 24 (SA8 最多 15+8=23，留邊際)
+#   - 其餘全同 v3f (obs 79D / wd_sparse / actuator_dr on / obs_delay [0,0] / RNN64)
+#
+# ⚠️ Step 0 診斷 (2026-07-12)：bang-bang 已修 (obs_delay=[0,0])，殘餘僅輕微 weave
+#   (signed flip p95=0.187)，非病態。deploy_dense 沿用同 setup 不帶病。
+# ⚠️ KL early-stop (target_kl 0.015) 高密度階段 (SA6-8) 才需，SA1 低密度無崩險。
+# ⚠️ 從頭訓練 (from scratch)。Requires CHARGE_USE_ACT_HIST=0。
+#
+# 用法:
+#   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 \
+#   ./isaaclab.sh -p scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py \
+#     --experiment_config wd_sa1_deploy_dense --headless --feat_norm \
+#     --run_name sa1_deploy_dense_ne1024_s42
+
+name: wd_sa2_deploy_dense
+description: "SA2 deploy_dense: 高密度部署重訓(漸進縮小,SA2=18×18/4靜0動,resume SA1畢業ckpt). 乾淨79D v3f血緣(LiDAR-only). curriculum deploy_dense room9. From SA1 checkpoint_90000(det99%畢業). Requires CHARGE_USE_ACT_HIST=0."
+
+# --- Environment / curriculum ---
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_single_agent_v3e_deploy_dense   # 密度ramp(靜2→15/動0→8) + arena漸縮(room10→6)
+initial_stage: 2
+fixed_stage: true
+scene_profile: warp_drive_single_agent_v3
+obstacle_mode: rule_based
+
+# --- Profiles (乾淨，同 v3f) ---
+reward_profile: wd_sparse
+algorithm: a2c
+aux_profile: wd_7d_geometry
+encoder_profile: extractor_rnn
+critic_profile: asymmetric
+
+# --- Training budget ---
+num_envs: 1024
+rollout_length: 300
+timesteps: 270000
+seed: 42
+
+# --- RL optimizer ---
+lr: 0.0002
+rnn_lr: 0.0005
+aux_lr: 0.0
+aux_lr_predict_head: 0.0005
+aux_lr_fc_middle: 0.0005
+aux_lr_fc_front: 0.0005
+aux_lr_extractor: 0.0005
+vf_coeff: 0.5
+gamma: 0.984
+gae_lambda: 0.95
+normalize_return: true
+adv_norm_mode: mean_only
+value_init_bias: 0.0
+max_grad_norm: 0.5
+tbptt_len: 0
+lr_decay: 0.0
+
+# --- PPO specific ---
+ppo_epochs: 1
+mini_batches: 1
+clip_eps: 0.2
+
+# --- Entropy (floor 由 curriculum 強制 ent_ang 0.02) ---
+ent_coeff: 0.0
+ent_coeff_linear: 0.02
+ent_coeff_angular: 0.04
+
+# --- act_hist dropout (v3f: 無 act_hist) ---
+act_hist_dropout: 0.0
+
+# --- WD-style gradient caps ---
+wd_update_clip: true
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 20.0
+vf_term_clamp: 8.0
+
+# --- Model / encoder (RNN64) ---
+charge_encoder_mode: extractor_rnn
+hidden_dim: 64
+preprocess_dim: 12
+fc_dim: 64
+wd_middle_dim: 48
+rnn_type: RNN
+
+# --- velocity aux 13D ---
+predict_dim: 13
+aux_velocity_topk: 3
+
+# --- Obstacle / scene controls ---
+obs_lr: 0.0003
+obs_ent_coeff: 0.1
+obs_speed_limit: 0.8
+train_goal_rate: 3
+obs_reward_mode: zero
+max_active_obstacles: 24   # ★deploy_dense: SA8 最多 15+8=23，留邊際(v3f 原 10)
+obs_size_rand: 0.0
+obs_collision_base: 0.9
+scene_bound_rand: 0.0
+scene_bound_base: 7.0      # =room_size-2 (障礙spawn範圍)
+room_size: 9.0            # ★SA1 漸進縮小起點 20×20m (room 10→6 SA1→SA8)
+
+# --- Aux / RNN training ---
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 256
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# --- LiDAR (SA1: clean noise OFF, bias + per_ring ON) ---
+lidar_no_noise: true
+lidar_distance_bias: true
+lidar_distance_bias_k_dr: [-0.005, 0.005]
+lidar_distance_bias_b_dr: [-0.012, 0.012]
+lidar_per_ring_bias: true
+no_domain_randomization: false
+
+# --- Sim-to-Real DR (SA1: physics + disturbance + light actuator) ---
+physics_mass_dr: [0.85, 1.15]
+physics_friction_dr: [0.7, 1.3]
+physics_com_offset: 0.05
+disturbance_wind_force: [0.0, 3.0]
+disturbance_push_force: [5.0, 20.0]
+disturbance_push_ratio: 0.10
+enable_actuator_dr: true
+actuator_delay_range: [0, 1]
+actuator_velocity_scale: [0.97, 1.03]
+actuator_motor_lag: 0.5
+
+# Observation latency DR (obs_delay 關閉，馬達延遲 actuator_dr 保留)
+obs_delay_steps: [0, 0]
+heading_stability_weight: 0.0
+
+# --- Runtime / logging ---
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+
+# --- Checkpoint / resume (from scratch) ---
+checkpoint: 'logs/rnn_car/sa1_deploy_dense_ne1024_s42/checkpoint_90000.pt'
+no_resume_optimizer: true
+
+# --- Metadata ---
+tags: [wd, sa1, deploy_dense, a2c, aux, asymmetric, rnn64, obs79d, rmin025, smoothness0, room20to12_shrink, lidar_only, dense_deploy]
+notes: "SA1 deploy_dense: 高密度部署重訓起手(漸進縮小,SA1=20×20,2靜0動). 乾淨 79D v3f 血緣,LV-DOT 不進 obs(只餵部署 shield). curriculum deploy_dense 密度 ramp. 驗收: det SR≥90 才畢業進 SA2."

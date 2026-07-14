@@ -42,7 +42,7 @@ _STATIC_RAMP = {
 _DYNAMIC_RAMP = {
     "SA1_nav_bootstrap":   0,
     "SA2_nav_static":      0,
-    "SA3_walls_crossing":  1,
+    "SA3_walls_crossing":  1,   # ★恢復動態(診斷完:隨機obs_near_goal已治好崩塌,動態非唯一兇手),真SA3=1動crossing
     "SA4_spatial_plan":    2,
     "SA5_endurance":       3,
     "SA6_dense_avoid":     4,
@@ -81,6 +81,15 @@ _ROOM_SIZE_REF = {  # 供 config room_size 對照（此檔不使用，僅文件�
 
 # 障礙物 spawn boundary（= room_size − 2，障礙生成在外牆內）。隨 arena 漸縮。
 _BOUNDARY = {name: rs - 2.0 for name, rs in _ROOM_SIZE_REF.items()}
+
+# ★實驗 A (2026-07-13)：SA3 trainer LR 覆寫。
+# tzq(SA3 lr=5e-4 繼承 v3) value-led 二次崩(0.80→0.31);診斷=5e-4×harder SA3 場景(mean_only raw
+# advantage 大)→actor 步子過大→漂移。SA1 用 2e-4 全程穩=有前例安全值。單變因:只鎖 SA3 lr 2e-4,
+# 其餘全同 tzq(dynamic=1/隨機obs_near_goal/ent0.08/adv_norm mean_only)。若二次崩消失=坐實訓練規則(LR)。
+_TRAINER_LR_OVERRIDE = {
+    "SA3_walls_crossing": 2e-4,  # 5e-4→2e-4(=SA1穩定值,別sync放大步子);單變因證治好value-led崩
+    "SA4_spatial_plan":   2e-4,  # 沿用:SA4 curriculum本來5e-4同崩險(harder場景大adv),鎖2e-4防步子過大
+}
 
 # goal 距離範圍（隨 arena 縮小上限收斂；SA8 對齊部署 7-9m 附近）。
 _GOAL_DIST = {
@@ -151,6 +160,10 @@ def _build_deploy_dense_stages() -> list[dict]:
         # ★關鍵修正：behavior_mix 讓靜態比例真的靜止（vdec2 繼承的 mix 全移動，無 static 項）。
         bh = by_name[name].setdefault("behavior", {})
         bh["behavior_mix"] = _deploy_behavior_mix(_STATIC_RAMP[name], _DYNAMIC_RAMP[name])
+
+        # ★實驗 A：SA3 trainer LR 覆寫 5e-4→2e-4（防 phase sync 放大步子；單變因診斷）。
+        if name in _TRAINER_LR_OVERRIDE:
+            by_name[name].setdefault("trainer", {})["lr"] = _TRAINER_LR_OVERRIDE[name]
 
     return stages
 

@@ -26,6 +26,11 @@
 - Internal maze walls: 6 segments (reduced from 10)
 - Mixed parallel: 50% empty / 30% static / 20% dynamic
 
+## Active / Open (2026-07-13) — SA3 deploy_dense 崩塌
+- [finding_sa3_deploy_dense_value_led_collapse_20260713.md](finding_sa3_deploy_dense_value_led_collapse_20260713.md) — **必讀**：tzq22v0w 二次崩（value-led）、①不通過、②暫停；主嫌 mean_only+A2C+進場 LR 非網路結構；Obsidian 全文見 vault `bug/2026-07-13_sa3_deploy_dense_二次崩塌_actor_critic訓練規則.md`
+- 下一刀建議：單變因 `adv_norm=full` 或鎖 LR 2e-4；**勿**先加 `penalty_speed_near_obs` 查崩因
+- 早避靜態 flag（②，底座穩後才用）：`--penalty_speed_near_obs 0.2`
+
 ## Verified Correct (不需重查)
 - [rnn_reset_on_done_verified.md](rnn_reset_on_done_verified.md) — RNN hidden state 在 episode reset 正確歸零，不跨場景污染（含 obstacle/aux cache + TBPTT 邊界）
 

@@ -125,6 +125,11 @@ parser.add_argument("--gae_lambda", type=float, default=0.95)
 # - 正常範圍：0.1～0.3（常見 0.2）。
 # - 更改影響：太大容易不穩（更新過猛）；太小學得慢（被 clip 住）。
 parser.add_argument("--clip_eps", type=float, default=0.2)
+# --target_kl (2026-07-14 fix#2): KL early-stop。approx_kl > 1.5×target_kl 時停止本 iteration 剩餘 minibatch 更新,
+#   防單次/多次更新 policy 跑太遠(a2c 高變異 advantage 下 overshoot)。0=關閉。配 mini_batches>1 才有意義。
+parser.add_argument("--target_kl", type=float, default=0.0,
+                    help="KL early-stop target. Stop remaining minibatch updates when approx_kl > 1.5*target_kl. "
+                         "0=off. Needs mini_batches>1. Recommend 0.015.")
 # --vf_coeff
 # - 用意：value loss 權重（critic 對 joint loss 的貢獻比例）。
 # - 正常範圍：0.1～1.0 常見，但此專案用 0.025（偏小）代表偏向 policy 更新、critic 只做輔助。
@@ -140,6 +145,17 @@ parser.add_argument("--normalize_return", "--normalize_returns", dest="normalize
                     help="Normalize critic value targets per rollout before value MSE. "
                          "This keeps vf_coeff unchanged but tests whether raw return scale "
                          "is driving critic loss/gradient spikes.")
+# --popart (2026-07-14): 修 critic/actor 尺度不一致 bug。
+# 問題:normalize_return 把 critic target 正規化成 std≈1,但 GAE 用 critic 原始輸出跟 raw reward
+#   (get_goal=40級)算 delta=r+γV−V → critic baseline 小 10-20× = 壞 baseline(見 finding_critic_actor_scale_mismatch)。
+# PopArt 正解:critic 輸出留正規化空間(訓練穩定),但用 running(EMA)統計把它**反正規化**再餵 GAE
+#   (raw-reward 尺度一致=正確 baseline),value target 用同 running 統計正規化。--popart 開時取代 normalize_return。
+parser.add_argument("--popart", action="store_true", default=False,
+                    help="PopArt: critic outputs normalized values (stable training) but denormalize "
+                         "via running EMA return stats before GAE (raw-reward scale baseline). "
+                         "Fixes critic/actor scale mismatch that normalize_return causes. Overrides normalize_return.")
+parser.add_argument("--popart_beta", type=float, default=0.99,
+                    help="PopArt running-stat EMA decay (slow=stable). 0.99 default.")
 # --adv_norm_mode
 # - 用意：控制 advantage normalization 方式，影響 actor gradient 量級。
 # - mean_only：A = A - mean（SA4 預設，raw std≈11，actor gradient 大）
@@ -955,7 +971,8 @@ class ChargeRolloutBuffer:
         self.log_probs = torch.zeros(num_steps, num_envs, device=device)   # [T,E] joint log prob
         self.rewards = torch.zeros(num_steps, num_envs, device=device)     # [T,E] WD sparse reward
         self.values = torch.zeros(num_steps, num_envs, device=device)      # [T,E] critic prediction
-        self.dones = torch.zeros(num_steps, num_envs, device=device)       # [T,E] episode end flag
+        self.dones = torch.zeros(num_steps, num_envs, device=device)       # [T,E] episode end (term|trunc, aux/reset 用)
+        self.terminateds = torch.zeros(num_steps, num_envs, device=device) # ★fix#1: 真terminal(撞/到達),GAE bootstrap 用(truncation 不砍)
         # Aux/RNN 訓練所需欄位
         self.raw_obs = torch.zeros(num_steps, num_envs, obs_dim, device=device)       # [T,E,139] 原始觀測
         self.hiddens = torch.zeros(num_steps, num_envs, hidden_dim, device=device)    # [T,E,H] RNN hidden
@@ -967,7 +984,7 @@ class ChargeRolloutBuffer:
         self.ptr = 0  # 下一個寫入步數的 pointer
 
     def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden,
-            aux_target=None, privileged=None):
+            aux_target=None, privileged=None, terminated=None):
         """儲存一個 rollout step 的所有資料。每次 env.step() 後呼叫。"""
         i = self.ptr
         self.rl_inputs[i] = rl_input
@@ -976,6 +993,8 @@ class ChargeRolloutBuffer:
         self.rewards[i] = reward
         self.values[i] = value
         self.dones[i] = done
+        # ★fix#1: 真terminal(撞/到達)存 terminateds;未傳則退回=done(舊行為,truncation 仍當 terminal)
+        self.terminateds[i] = terminated if terminated is not None else done
         self.raw_obs[i] = raw_ob
         self.hiddens[i] = hidden.squeeze(0)  # 去掉 RNN 的 [1, E, H] 前導維度
         if aux_target is not None:
@@ -1527,24 +1546,34 @@ def compute_wd_charge_reward(
 # 注意：compute_gae 和 sample_action / evaluate_actions 都是 Charge policy 用的。
 # Obstacle policy 使用更通用的 ppo_update_continuous（continuous action）。
 
-def compute_gae(rewards, values, dones, last_value, gamma, gae_lambda):
+def compute_gae(rewards, values, dones, last_value, gamma, gae_lambda, terminateds=None):
     """計算 Generalized Advantage Estimation (GAE)。
 
-    使用反向遍歷（t = T-1 → 0）計算每步 advantage：
-      delta[t] = r[t] + gamma * V[t+1] * (1 - done[t]) - V[t]
-      A[t] = delta[t] + gamma * lambda * (1 - done[t]) * A[t+1]
-    Returns:
-      advantages: [T, E] 的 advantage 估計
-      returns:    [T, E] 的 value target（advantages + values）
+    ★fix#1 truncation bootstrap 正確處理:
+      - dones = episode 邊界(terminal|truncation) → 控 GAE 遞迴重置(episode 結束不跨界傳播)。
+      - terminateds = 真 terminal(撞/到達) → 控 delta 是否砍 bootstrap。
+      - truncation(timeout,dones=1 但 terminateds=0):不砍 bootstrap,用 V(s_t) 自身近似 V(s_final)
+        (因狀態價值還在,只是時間到);但 GAE 遞迴仍重置(下一步是新 episode)。
+      - terminateds=None → 退回舊行為(dones 全當 terminal;有 truncation-bootstrap bug,保留供對照)。
     """
     T = rewards.shape[0]
     advantages = torch.zeros_like(rewards)
     last_gae = 0.0
     for t in reversed(range(T)):
         next_value = last_value if t == T - 1 else values[t + 1]
-        next_non_terminal = 1.0 - dones[t]  # done=1 時截斷 bootstrap
-        delta = rewards[t] + gamma * next_value * next_non_terminal - values[t]
-        last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
+        if terminateds is not None:
+            term_t = terminateds[t]                                   # 1=真terminal
+            trunc_t = torch.clamp(dones[t] - term_t, 0.0, 1.0)        # 1=truncation only
+            # delta bootstrap:terminal→砍(next=0);truncation→用 V(s_t) 自身;normal→next_value
+            _delta_next = torch.where(trunc_t.bool(), values[t], next_value)
+            delta = rewards[t] + gamma * _delta_next * (1.0 - term_t) - values[t]
+            # GAE 遞迴:episode 邊界(term 或 trunc)都重置 last_gae
+            _recur_cont = 1.0 - dones[t]
+        else:
+            _non_terminal = 1.0 - dones[t]  # 舊行為:done=1 砍 bootstrap+遞迴
+            delta = rewards[t] + gamma * next_value * _non_terminal - values[t]
+            _recur_cont = _non_terminal
+        last_gae = delta + gamma * gae_lambda * _recur_cont * last_gae
         advantages[t] = last_gae
     return advantages, advantages + values  # (A, V_target)
 
@@ -3207,6 +3236,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _current_wd_actor_update_clip = args_cli.wd_actor_update_clip
     _current_wd_critic_update_clip = args_cli.wd_critic_update_clip
 
+    # --- PopArt: running EMA return statistics (first two moments) for critic scale consistency ---
+    # critic 輸出正規化空間(訓練穩定),用這些統計反正規化再餵 GAE(raw-reward 尺度=正確 baseline)。
+    _popart_m1 = 0.0    # EMA of E[return]
+    _popart_m2 = 1.0    # EMA of E[return^2]  (init → mean 0 / std 1)
+    _popart_initialized = False  # ★fix#5a: 首rollout直接用其returns矩init(跳過EMA從0/1慢warmup的transient)
+    if args_cli.popart:
+        print(f"[POPART] enabled (beta={args_cli.popart_beta}): critic 輸出反正規化餵 GAE, "
+              f"修 critic/actor 尺度不一致。overrides normalize_return.")
+
     def _set_optimizer_group_lr(group, lr: float):
         group["lr"] = lr
         group["initial_lr"] = lr
@@ -3722,7 +3760,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # --- 2. Env step ---
             next_obs, reward, terminated, truncated, info = env.step(actions.float())
-            done = (terminated.squeeze(-1) | truncated.squeeze(-1)).float()  # [E] 0/1 episode 結束旗標
+            done = (terminated.squeeze(-1) | truncated.squeeze(-1)).float()  # [E] episode 結束(term|trunc, reset/stats/aux 用)
+            _terminated_flat = terminated.squeeze(-1).float()                # ★fix#1: 真terminal(撞/到達),GAE bootstrap 用
             env_reward_flat = reward.squeeze(-1)  # Isaac Lab env reward（dense，只用於 logging）
             charge_action_diagnostics = compute_charge_action_diagnostics(env.unwrapped, actions)  # 物理動作診斷
 
@@ -3974,7 +4013,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     top_k_velocity=_aux_vel_topk,
                     pos_scale=args_cli.aux_target_pos_scale)  # [E, predict_dim]
             charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
-                           aux_target=wd_aux_tgt, privileged=_priv_obs)
+                           aux_target=wd_aux_tgt, privileged=_priv_obs, terminated=_terminated_flat)
             if obs_buf is not None:
                 obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
 
@@ -4299,16 +4338,45 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 last_value = value_head(_encode_rl_input(rl_in), _priv_bootstrap).squeeze(-1)  # [E] bootstrap value V_{T+1}
 
             # GAE 計算（使用 WD 固定 gamma=0.984 + gae_lambda）
-            advantages, returns = compute_gae(
-                charge_buf.rewards, charge_buf.values, charge_buf.dones,
-                last_value, current_gamma, args_cli.gae_lambda)
-            if args_cli.normalize_return:
-                # --normalize_return：只對 critic target 做歸一化（actor advantages 路徑不變）
-                # 目的：隔離「critic target scale 是否造成 gradient spike」這個問題，
-                # 同時不改變 actor 的學習信號。
-                value_targets = (returns - returns.mean()) / (returns.std() + 1e-8)
+            if args_cli.popart:
+                # ★PopArt: critic 輸出在正規化空間(std≈1)。反正規化(×std+mean)成 raw-reward 尺度再餵 GAE,
+                #   讓 delta=r+γV−V 的 V 與 raw reward 同尺度=正確 baseline(修尺度不一致 bug)。
+                _pa_std = math.sqrt(max(_popart_m2 - _popart_m1 ** 2, 1e-4))
+                _pa_mean = _popart_m1
+                _values_denorm = charge_buf.values * _pa_std + _pa_mean
+                _last_value_denorm = last_value * _pa_std + _pa_mean
+                advantages, returns = compute_gae(
+                    charge_buf.rewards, _values_denorm, charge_buf.dones,
+                    _last_value_denorm, current_gamma, args_cli.gae_lambda,
+                    terminateds=charge_buf.terminateds)  # ★fix#1
+                # 更新 running EMA 統計(前二階矩) from raw returns
+                _b = args_cli.popart_beta
+                _rm1 = returns.mean().item()
+                _rm2 = (returns ** 2).mean().item()
+                if not _popart_initialized:
+                    # ★fix#5a: 首rollout直接init(跳過從0/1慢warmup;denorm 從iter2就對raw尺度)
+                    _popart_m1, _popart_m2 = _rm1, _rm2
+                    _popart_initialized = True
+                else:
+                    _popart_m1 = _b * _popart_m1 + (1.0 - _b) * _rm1
+                    _popart_m2 = _b * _popart_m2 + (1.0 - _b) * _rm2
+                # critic target 用更新後 running 統計正規化(critic 續在正規化空間學=訓練穩定)
+                _pa_std_new = math.sqrt(max(_popart_m2 - _popart_m1 ** 2, 1e-4))
+                value_targets = (returns - _popart_m1) / (_pa_std_new + 1e-8)
+                if iteration % args_cli.log_interval == 0:
+                    print(f"[POPART] iter={iteration} ret_mean={_popart_m1:.2f} ret_std={_pa_std_new:.2f} "
+                          f"(critic 反正規化尺度已對齊 raw reward)")
             else:
-                value_targets = returns  # 不歸一化：使用 raw GAE returns 作為 critic target
+                advantages, returns = compute_gae(
+                    charge_buf.rewards, charge_buf.values, charge_buf.dones,
+                    last_value, current_gamma, args_cli.gae_lambda,
+                    terminateds=charge_buf.terminateds)  # ★fix#1
+                if args_cli.normalize_return:
+                    # --normalize_return：只對 critic target 做歸一化（actor advantages 路徑不變）
+                    # ⚠️此路有 critic/actor 尺度不一致 bug(見 --popart);保留供對照。
+                    value_targets = (returns - returns.mean()) / (returns.std() + 1e-8)
+                else:
+                    value_targets = returns  # 不歸一化：使用 raw GAE returns 作為 critic target
             _raw_adv_std = advantages.std().item()  # 歸一化前的 advantage std（用於診斷）
             _adv_mean = advantages.mean()
             if args_cli.adv_norm_mode == "full":
