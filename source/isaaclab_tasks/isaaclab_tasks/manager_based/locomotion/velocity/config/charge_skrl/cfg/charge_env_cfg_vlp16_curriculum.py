@@ -100,6 +100,7 @@ from ..mdp.events.reset import reset_root_state_random_safe
 from ..mdp.events.walls import init_perenv_walls, randomize_walls
 from ..domain_randomization import apply_domain_randomization
 from ..mdp.events.state import set_obstacle_metadata
+from ..mdp.events import corridor_crossing as _corridor_crossing_mod
 
 # 課程
 from ..curriculum.goal_obstacle_curriculum import goal_obstacle_curriculum
@@ -349,6 +350,24 @@ class EventCfgVLP16Curriculum:
     )
 
     reset_obstacles = None  # 由 randomize_obstacles 處理
+
+    # Corridor-crossing injector: runs AFTER reset_base so it can override the
+    # random robot/goal poses for the selected fraction of envs.
+    # fraction=0.0 = baseline (no injection) — byte-for-byte identical to baseline.
+    # Curriculum phases can override fraction per stage (e.g. 0.12 for SA4+).
+    corridor_crossing = EventTerm(
+        func=_corridor_crossing_mod.setup_corridor_crossing,
+        mode="reset",
+        params={
+            "fraction": 0.0,          # 0.0 = baseline (no injection); curriculum overrides per stage
+            "half_width": 2.0,
+            "corridor_half_len": 3.0,
+            "crossing_ahead": 2.4,
+            "ped_speed": 0.65,
+            "ped_slot": 0,
+            "wall_z": 1.5,
+        },
+    )
 
     domain_randomization = EventTerm(
         func=apply_domain_randomization,
