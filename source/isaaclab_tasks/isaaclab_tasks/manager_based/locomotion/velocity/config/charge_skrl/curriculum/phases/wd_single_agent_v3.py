@@ -988,6 +988,9 @@ def _flatten_phase(phase: dict) -> dict:
         "obs_size_rand": scene.get("obs_size_rand"),
         "scene_bound_rand": scene.get("scene_bound_rand"),
 
+        # corridor-crossing injector fraction（e2e curriculum 專用，非 e2e phase 不含此 key）
+        "corridor_crossing_fraction": scene.get("corridor_crossing_fraction"),
+
         # reward manager 權重表
         "reward_weights": reward.get("reward_weights"),
 

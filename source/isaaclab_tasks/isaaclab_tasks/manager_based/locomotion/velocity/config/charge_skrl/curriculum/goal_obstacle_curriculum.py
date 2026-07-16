@@ -1901,6 +1901,20 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
     except Exception:
         pass
 
+    # --- Corridor-crossing injector fraction ---
+    # e2e curriculum 專用：依階段設定 corridor_crossing event 的 fraction param。
+    # Guard: 若 cfg 不含此 key 或 env 沒有 corridor_crossing event，靜默跳過，
+    # 確保非 e2e curriculum 不受影響。
+    corridor_frac = cfg.get("corridor_crossing_fraction")
+    if corridor_frac is not None:
+        try:
+            evt = env.event_manager
+            ec = evt.get_term_cfg("corridor_crossing")
+            ec.params["fraction"] = float(corridor_frac)
+            evt.set_term_cfg("corridor_crossing", ec)
+        except Exception:
+            pass
+
     env.cfg.episode_length_s = cfg["episode_length_s"]
     env._target_discount_factor = cfg["gamma"]
 
