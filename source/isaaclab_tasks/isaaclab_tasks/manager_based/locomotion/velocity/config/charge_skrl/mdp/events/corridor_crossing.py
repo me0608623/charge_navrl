@@ -42,7 +42,7 @@ _WALL_MESH_LEN = {0: 4.0, 1: 3.0}
 def setup_corridor_crossing(
     env,
     env_ids,
-    fraction: float = 0.12,
+    fraction: float = 0.0,
     half_width: float = 2.0,
     corridor_half_len: float = 3.0,
     crossing_ahead: float = 2.4,
@@ -102,10 +102,19 @@ def setup_corridor_crossing(
     # Disable all other internal wall slots for corridor envs.
     # Use explicit per-slot indexing to avoid the advanced-index copy trap
     # (env._maze_wall_mask[sel][:, slot] writes to a temporary copy).
+    # Also hide the physical mesh to HIDDEN_Z so there is no PhysX ghost wall.
+    HIDDEN_Z = -10.0
     num_slots = env._maze_wall_mask.shape[1]
     other_slots = [s for s in range(num_slots) if s not in _WALL_SLOTS]
     for slot in other_slots:
         env._maze_wall_mask[sel, slot] = False
+        wall = env.scene[f"wall_internal_{slot}"]
+        hide_pose = torch.zeros(sel.shape[0], 7, device=env.device)
+        hide_pose[:, 0] = origins[:, 0]
+        hide_pose[:, 1] = origins[:, 1]
+        hide_pose[:, 2] = HIDDEN_Z
+        hide_pose[:, 3] = 1.0
+        wall.write_root_pose_to_sim(hide_pose, env_ids=sel)
 
     # -------------------------------------------------------------------------
     # 2. Robot at corridor mouth, facing +y (yaw=+90 deg)

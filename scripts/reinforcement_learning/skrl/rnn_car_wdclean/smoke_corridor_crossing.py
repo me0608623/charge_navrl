@@ -51,10 +51,9 @@ sched = u._behavior_scheduler
 assert sched is not None, "SMOKE FAIL: _behavior_scheduler is None (obstacle_mode may not be rule_based)"
 
 import sys, os  # noqa: E401, E402
-_skrl_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../obstacle_agent"))
-_skrl_parent = os.path.dirname(_skrl_dir)
-if _skrl_parent not in sys.path:
-    sys.path.insert(0, _skrl_parent)
+_skrl_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _skrl_dir not in sys.path:
+    sys.path.insert(0, _skrl_dir)
 from obstacle_agent.behavior_config import BEHAVIOR_HORIZONTAL_CROSSING  # noqa: E402
 
 assert (sched.behavior_type[:, 0] == BEHAVIOR_HORIZONTAL_CROSSING).all(), (
