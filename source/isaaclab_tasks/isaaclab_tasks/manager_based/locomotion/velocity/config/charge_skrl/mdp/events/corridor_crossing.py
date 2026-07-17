@@ -34,6 +34,10 @@ from . import corridor_crossing_geometry as g
 # Slot 0 length=4.0m, slot 1 length=3.0m — match the cuboid sizes at scene init.
 _WALL_SLOTS = (0, 1)
 _WALL_MESH_LEN = {0: 4.0, 1: 3.0}
+# Distance in from each wall centre to spawn the pedestrian, so it starts inside
+# the free corridor clear of the 0.3 m _wall_bounce pin-zone (wall is 1.0 m wide,
+# inner face at half_width-0.5; 1.0 m in leaves 0.5 m of clearance).
+_WALL_CLEARANCE = 1.0
 
 
 def setup_corridor_crossing(
@@ -157,13 +161,20 @@ def setup_corridor_crossing(
 
         # Local Y in front of robot: robot is at -corridor_half_len, so add crossing_ahead.
         cross_y = -corridor_half_len + crossing_ahead
+        # Pedestrian must START INSIDE the free corridor, not on the wall.
+        # Walls are 1.0 m wide centred at x=+/-half_width (inner face at
+        # half_width-0.5); _wall_bounce pins any obstacle within 0.3 m of a wall,
+        # cancelling every crossing step. Start 1.0 m in from the wall centre so
+        # the ped clears that buffer and can actually traverse -x_start -> +x
+        # across the robot's path at x=0.
+        ped_start_x = -(half_width - _WALL_CLEARANCE)
         sched.behavior_type[sel, ped_slot] = BEHAVIOR_HORIZONTAL_CROSSING
-        sched.positions[sel, ped_slot, 0] = -half_width
+        sched.positions[sel, ped_slot, 0] = ped_start_x
         sched.positions[sel, ped_slot, 1] = cross_y
         sched.hc_velocity[sel, ped_slot, 0] = ped_speed
         sched.hc_velocity[sel, ped_slot, 1] = 0.0
         sched.hc_cross_y[sel, ped_slot] = cross_y
-        sched.hc_spawn_pos[sel, ped_slot, 0] = -half_width
+        sched.hc_spawn_pos[sel, ped_slot, 0] = ped_start_x
         sched.hc_spawn_pos[sel, ped_slot, 1] = cross_y
         sched.hc_cooldown[sel, ped_slot] = 0
 
@@ -174,6 +185,11 @@ def setup_corridor_crossing(
     if not getattr(env, "_corridor_crossing_geom_dumped", False):
         env._corridor_crossing_geom_dumped = True
         e = int(sel[0].item())
+        # Track this env's pedestrian so the move event can log its per-step
+        # x trajectory (proves it actually crosses -x -> +x over time).
+        env._corridor_track_env = e
+        env._corridor_track_slot = ped_slot
+        env._corridor_track_steps = 0
         o = env.scene.env_origins[e, :2]
         wc0 = env._maze_wall_centers[e, 0].tolist()
         wc1 = env._maze_wall_centers[e, 1].tolist()
@@ -190,6 +206,7 @@ def setup_corridor_crossing(
             print(
                 f"[CORRIDOR-GEOM] ped slot{ped_slot}: pos_local={_s.positions[e, ped_slot].tolist()} "
                 f"vel={_s.hc_velocity[e, ped_slot].tolist()} "
-                f"| expect pos≈[-{half_width},{-corridor_half_len + crossing_ahead}] vel≈[+{ped_speed},0]",
+                f"| expect pos≈[{-(half_width - _WALL_CLEARANCE)},{-corridor_half_len + crossing_ahead}] "
+                f"vel≈[+{ped_speed},0] (starts inside corridor, not on wall)",
                 flush=True,
             )

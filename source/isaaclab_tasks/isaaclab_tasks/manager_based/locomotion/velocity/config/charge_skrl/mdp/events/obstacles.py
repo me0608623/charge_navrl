@@ -696,6 +696,23 @@ def move_obstacles_vectorized(
     # Guard: rule-based behavior scheduler active → 由 scheduler.step() 控制移動
     if getattr(env, '_behavior_scheduler', None) is not None:
         env._behavior_scheduler.step(env, dt=move_dt)
+        # [CORRIDOR-TRAJ] one-time audit: log the tracked corridor pedestrian's
+        # per-step local x so it can be seen crossing -half_width -> +x over time.
+        _t = getattr(env, "_corridor_track_env", None)
+        if _t is not None and getattr(env, "_corridor_track_steps", 0) < 20:
+            _sl = env._corridor_track_slot
+            _sc = env._behavior_scheduler
+            _p = _sc.positions[_t, _sl]
+            _bt = int(_sc.behavior_type[_t, _sl].item())
+            _hv = _sc.hc_velocity[_t, _sl].tolist()
+            _cd = int(_sc.hc_cooldown[_t, _sl].item()) if hasattr(_sc, "hc_cooldown") else -1
+            env._corridor_track_steps += 1
+            print(
+                f"[CORRIDOR-TRAJ] step{env._corridor_track_steps:02d} env{_t} "
+                f"ped_local_x={_p[0].item():+.3f} y={_p[1].item():+.3f} "
+                f"| behavior_type={_bt} hc_vel={_hv} cooldown={_cd}",
+                flush=True,
+            )
         return
 
     if env_ids is None:
