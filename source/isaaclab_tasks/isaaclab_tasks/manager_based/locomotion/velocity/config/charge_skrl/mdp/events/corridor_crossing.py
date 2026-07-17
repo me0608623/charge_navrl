@@ -166,3 +166,30 @@ def setup_corridor_crossing(
         sched.hc_spawn_pos[sel, ped_slot, 0] = -half_width
         sched.hc_spawn_pos[sel, ped_slot, 1] = cross_y
         sched.hc_cooldown[sel, ped_slot] = 0
+
+    # First-fire GEOMETRY dump (once per process) — read back the direct-written
+    # tensors for the first corridor env so the placed scene can be numerically
+    # checked against intent (walls x=+/-half_width along y; goal (0,+len);
+    # ped start (-half_width, -len+ahead) moving +x). These are local coords.
+    if not getattr(env, "_corridor_crossing_geom_dumped", False):
+        env._corridor_crossing_geom_dumped = True
+        e = int(sel[0].item())
+        o = env.scene.env_origins[e, :2]
+        wc0 = env._maze_wall_centers[e, 0].tolist()
+        wc1 = env._maze_wall_centers[e, 1].tolist()
+        mask = env._maze_wall_mask[e].tolist()
+        goal_local = (env.command_manager.get_term("goal_command").goal_pos_w[e, :2] - o).tolist()
+        print(
+            f"[CORRIDOR-GEOM] env{e}: wall0_local={wc0} wall1_local={wc1} "
+            f"mask={mask} | goal_local={goal_local} | expect wall0≈[-{half_width},0] "
+            f"wall1≈[+{half_width},0] goal≈[0,+{corridor_half_len}]",
+            flush=True,
+        )
+        _s = getattr(env.unwrapped, "_behavior_scheduler", None)
+        if _s is not None:
+            print(
+                f"[CORRIDOR-GEOM] ped slot{ped_slot}: pos_local={_s.positions[e, ped_slot].tolist()} "
+                f"vel={_s.hc_velocity[e, ped_slot].tolist()} "
+                f"| expect pos≈[-{half_width},{-corridor_half_len + crossing_ahead}] vel≈[+{ped_speed},0]",
+                flush=True,
+            )
