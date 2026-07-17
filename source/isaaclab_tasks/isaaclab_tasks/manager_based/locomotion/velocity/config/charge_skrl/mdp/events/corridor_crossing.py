@@ -140,8 +140,11 @@ def setup_corridor_crossing(
     # -------------------------------------------------------------------------
     # 3. Goal at corridor end (+y)
     # -------------------------------------------------------------------------
-    goal_cmd = env.command_manager.get_command("goal_command")
-    goal_cmd.goal_pos_w[sel] = g.goal_corridor_pos(origins, corridor_half_len)
+    # get_term() returns the GoalCommand term object (has goal_pos_w);
+    # get_command() would return just the command tensor (no goal_pos_w).
+    # Matches near_wall_crossing_eval.py:238 and dynamic_goal.py:165.
+    goal_term = env.command_manager.get_term("goal_command")
+    goal_term.goal_pos_w[sel] = g.goal_corridor_pos(origins, corridor_half_len)
 
     # -------------------------------------------------------------------------
     # 4. One pedestrian slot: native horizontal_crossing, left → right
