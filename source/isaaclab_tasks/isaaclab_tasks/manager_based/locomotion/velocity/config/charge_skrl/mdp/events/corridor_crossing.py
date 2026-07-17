@@ -77,6 +77,18 @@ def setup_corridor_crossing(
     if sel.numel() == 0:
         return
 
+    # First-fire diagnostic (once per process) so a training log confirms the
+    # injector actually ran — corridor is auditable without a separate probe.
+    if not getattr(env, "_corridor_crossing_logged", False):
+        env._corridor_crossing_logged = True
+        print(
+            f"[CORRIDOR] injector FIRED: fraction={fraction} half_width={half_width} "
+            f"corridor_half_len={corridor_half_len} ped_slot={ped_slot} "
+            f"| {sel.numel()}/{env_ids.numel()} envs got corridor scene "
+            f"(walls slots {_WALL_SLOTS} + ped crossing +x)",
+            flush=True,
+        )
+
     origins = env.scene.env_origins[sel]  # [K, 3] world
 
     # -------------------------------------------------------------------------
