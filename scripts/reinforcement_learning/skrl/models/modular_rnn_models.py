@@ -186,6 +186,41 @@ class LidarStateExtractor(nn.Module):
         return torch.cat([lidar, state], dim=-1)              # [B, 96]
 
 
+def adapt_lidar_frame_stack_state_dict(
+    extractor: LidarStateExtractor,
+    checkpoint_state: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], tuple[int, int] | None]:
+    """Expand a checkpoint's LiDAR input channels while preserving its K-frame output."""
+    model_state = extractor.state_dict()
+    mismatched = [
+        key for key, value in checkpoint_state.items()
+        if key in model_state and value.shape != model_state[key].shape
+    ]
+    if not mismatched:
+        return dict(checkpoint_state), None
+
+    conv_key = "lidar_conv.0.weight"
+    if mismatched != [conv_key]:
+        shapes = {key: (tuple(checkpoint_state[key].shape), tuple(model_state[key].shape)) for key in mismatched}
+        raise RuntimeError(f"unsupported extractor checkpoint shape mismatch: {shapes}")
+    source = checkpoint_state[conv_key]
+    target = model_state[conv_key]
+    if (
+        source.ndim != 3
+        or target.ndim != 3
+        or source.shape[0] != target.shape[0]
+        or source.shape[2] != target.shape[2]
+        or source.shape[1] >= target.shape[1]
+    ):
+        raise RuntimeError(f"cannot expand LiDAR frame stack from {tuple(source.shape)} to {tuple(target.shape)}")
+
+    expanded = torch.zeros_like(target)
+    expanded[:, : source.shape[1], :] = source.to(device=target.device, dtype=target.dtype)
+    migrated = dict(checkpoint_state)
+    migrated[conv_key] = expanded
+    return migrated, (source.shape[1], target.shape[1])
+
+
 # ============================================================================
 # Preprocess RNN Module (WD: vanilla RNN, not GRU)
 # ============================================================================

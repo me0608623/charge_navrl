@@ -197,6 +197,17 @@ parser.add_argument("--obstacle_behavior", type=str, default=OBSTACLE_BEHAVIOR,
                     help="覆寫障礙物行為模式（需要 BehaviorScheduler）。"
                          "head_on=直線迎面（測 reactive+gap 轉彎閃避）；"
                          "mixed=使用 stage config 的 behavior_mix 比例")
+parser.add_argument("--near_wall_crossing_eval", action="store_true", default=False,
+                    help="啟用 deterministic 近牆橫越陷阱場景（D 驗收；不改 reward）")
+parser.add_argument("--near_wall_crossing_direction", type=str, default="mirrored",
+                    choices=["mirrored", "right_to_left", "left_to_right"],
+                    help="行人橫越方向；mirrored 會依 env/episode 固定鏡像")
+parser.add_argument("--near_wall_crossing_output", type=str, default="",
+                    help="D 驗收逐回合 JSON 輸出路徑")
+parser.add_argument("--near_wall_crossing_probe_output", type=str, default="",
+                    help="保存 policy 實際 K 幀 LiDAR 與 crossing/wall labels 的 NPZ；自動解耦牆側與橫越方向")
+parser.add_argument("--near_wall_crossing_probe_stationary", action="store_true", default=False,
+                    help="observability probe 專用：固定車體，消除 policy 軌跡與 crossing label 的位置捷徑")
 
 # --- Reward 模式（消融實驗用） ---
 parser.add_argument("--reward_mode", type=str, default="current",
@@ -312,6 +323,10 @@ parser.add_argument("--obs_near_goal_count", type=int, default=OBS_NEAR_GOAL_COU
                     help="在 goal 附近強制生成的障礙物數量（0=關閉）")
 parser.add_argument("--obs_near_goal_radius", type=float, default=OBS_NEAR_GOAL_RADIUS,
                     help="goal 附近多少米範圍內生成障礙物")
+parser.add_argument("--path_blocker_count", type=int, default=0,
+                    help="在 robot→goal 直線上強制放置的靜態擋路障礙數（0=關閉）")
+parser.add_argument("--path_blocker_distance", type=float, default=1.8,
+                    help="第一個擋路障礙距 robot 中心的距離（m）")
 
 # --- LiDAR 設定 ---
 parser.add_argument("--lidar_no_noise", action="store_true", default=LIDAR_NO_NOISE,
@@ -458,13 +473,30 @@ def _autodetect_obs_layout_env(cli) -> None:
     preprocess_dim = int(a.get("preprocess_dim", 12))
     predict_dim = int(a.get("predict_dim", 13))
     hybrid = bool(a.get("hybrid_predict_to_policy", False))
+    end_to_end_frame_stack = bool(a.get("end_to_end_frame_stack", False))
 
-    # rl_in = policy_obs_dim + preprocess_dim + (predict_dim if hybrid)
-    # ★LV-DOT encoder: 若 checkpoint 含 encoder,head 輸入是 encoded(30→enc_dim),
-    #   還原 raw policy_obs_dim 需 +（30 - enc_dim）。
-    _enc_dim_ck = int(a.get("lvdot_encoder_dim", 24)) if "lvdot_encoder" in ck else 0
-    policy_obs_dim = (rl_in - preprocess_dim - (predict_dim if hybrid else 0)
-                      + (30 - _enc_dim_ck if _enc_dim_ck else 0))
+    if end_to_end_frame_stack:
+        # E2E checkpoints bypass the 12D RNN feature. Infer the extractor
+        # output from its two normalized branches (64D LiDAR + 32D state)
+        # before deciding whether the raw observation contains LV-DOT.
+        extractor_state = ck.get("extractor", {})
+        lidar_ln = extractor_state.get("lidar_ln.weight", None)
+        state_ln = extractor_state.get("state_ln.weight", None)
+        if lidar_ln is None or state_ln is None:
+            raise ValueError("E2E checkpoint is missing extractor LayerNorm weights")
+        extractor_dim = int(lidar_ln.numel() + state_ln.numel())
+        policy_obs_dim = rl_in - extractor_dim
+        print(
+            f"[PLAY] E2E checkpoint layout: head={rl_in} - CNN={extractor_dim} "
+            f"-> policy_obs={policy_obs_dim}D"
+        )
+    else:
+        # rl_in = policy_obs_dim + preprocess_dim + (predict_dim if hybrid)
+        # ★LV-DOT encoder: 若 checkpoint 含 encoder,head 輸入是 encoded(30→enc_dim),
+        #   還原 raw policy_obs_dim 需 +（30 - enc_dim）。
+        _enc_dim_ck = int(a.get("lvdot_encoder_dim", 24)) if "lvdot_encoder" in ck else 0
+        policy_obs_dim = (rl_in - preprocess_dim - (predict_dim if hybrid else 0)
+                          + (30 - _enc_dim_ck if _enc_dim_ck else 0))
 
     # 7D state (state_mlp 輸入 7)= 訓練時 act_hist 已移除 → env 需 CHARGE_USE_ACT_HIST=0
     state_w = ck.get("extractor", {}).get("state_mlp.0.weight", None)
@@ -2398,6 +2430,14 @@ def main():
     # 套用場景參數：stage_parameter=True 時保留 stage 預設，只有明確 CLI 才覆寫；False 時用手動設定區/CLI。
     scene_final = configure_play_scene(env_cfg, stage_cfg, args_cli)
 
+    if args_cli.near_wall_crossing_eval:
+        from near_wall_crossing_eval import configure_near_wall_crossing_env
+        configure_near_wall_crossing_env(env_cfg, scene_final, args_cli)
+        print(
+            "[PLAY] D deterministic near-wall crossing: robot=(0,0,0), goal=(+6,0), "
+            "pedestrian crosses at x=2.4m, wall on destination side"
+        )
+
     # Arena 等比例縮放（程式化場景；與 USD 互斥）
     if getattr(args_cli, "arena_size", None) is not None:
         if args_cli.usd_scene:
@@ -2581,6 +2621,7 @@ def main():
     rnn_type = ckpt_args.get("rnn_type", "RNN")                 # RNN 類型（RNN/GRU/LSTM）
     encoder_mode = ckpt_args.get("charge_encoder_mode", "extractor_rnn")  # 編碼器模式
     lidar_frame_stack = int(ckpt_args.get("lidar_frame_stack", 1))  # 多幀 LiDAR (run2=4);從 ckpt args 自動偵測
+    end_to_end_frame_stack = bool(ckpt_args.get("end_to_end_frame_stack", False))
     if lidar_frame_stack > 1:
         print(f"[PLAY] 多幀 LiDAR: frame_stack={lidar_frame_stack} "
               f"(extractor Conv1d 吃 {lidar_frame_stack} 幀;rollout 維護歷史 buffer 餵 probe)")
@@ -2623,6 +2664,10 @@ def main():
     #   extractor_rnn: 用 LidarStateExtractor 提取 96D 特徵餵給 RNN
     wd_exact_mode = (encoder_mode == "wd_exact_rnn")
     use_extractor = (encoder_mode == "extractor_rnn")
+    if end_to_end_frame_stack and (not use_extractor or lidar_frame_stack < 2):
+        raise ValueError(
+            "end_to_end_frame_stack checkpoint requires extractor_rnn and lidar_frame_stack >= 2"
+        )
     policy_obs_dim = 113 if wd_exact_mode else len(POLICY_OBS_INDICES)
     # wd_middle_dim: 控制 fc_middle 是 2 層（None/0）還是 3 層（>0，含中間 layer）
     # baseline: extractor_rnn 模式 = None → 2 層直接 input→preprocess_dim
@@ -2667,7 +2712,17 @@ def main():
     ).to(device)
     print(f"[PLAY] PreprocessRNN: input={rnn_input_dim} fc={fc_dim} hidden={hidden_dim} middle={middle_dim} preprocess={preprocess_dim} predict={predict_dim} rnn={rnn_type}")
     _hybrid = bool(ckpt_args.get("hybrid_predict_to_policy", False))
-    _rl_in_dim = policy_obs_dim + preprocess_dim + (predict_dim if _hybrid else 0)  # hybrid:+障礙動態預測(顯式MOT輸出)
+    if end_to_end_frame_stack:
+        # Clean E2E PPO bypasses the auxiliary RNN. The policy/value heads consume
+        # the deployable observation plus the CNN feature so RL gradients train
+        # the LiDAR encoder directly (79 + 96 = 175 for the current checkpoint).
+        _rl_in_dim = policy_obs_dim + extractor.output_dim
+        print(
+            f"[PLAY] E2E frame-stack inference: policy_obs={policy_obs_dim} + "
+            f"CNN={extractor.output_dim} -> rl_input={_rl_in_dim} (RNN bypassed)"
+        )
+    else:
+        _rl_in_dim = policy_obs_dim + preprocess_dim + (predict_dim if _hybrid else 0)  # hybrid:+障礙動態預測(顯式MOT輸出)
     if _hybrid:
         print(f"[PLAY] hybrid_predict_to_policy → rl_input={_rl_in_dim} (含 predict_dim {predict_dim})")
     # ★LV-DOT encoder: checkpoint 含 lvdot_encoder → head 輸入是 encoded(raw 30→enc_dim)
@@ -2912,6 +2967,25 @@ def main():
     # 8. Play 迴圈前置變數
     # ================================================================
     step_dt = env.step_dt if hasattr(env, "step_dt") else raw_env.step_dt
+    _near_wall_controller = None
+    if args_cli.near_wall_crossing_eval:
+        from near_wall_crossing_eval import NearWallCrossingController
+        _near_wall_controller = NearWallCrossingController(
+            raw_env=raw_env,
+            scheduler=_play_behavior_scheduler,
+            step_dt=step_dt,
+            direction=args_cli.near_wall_crossing_direction,
+            output_path=args_cli.near_wall_crossing_output,
+            probe_output_path=args_cli.near_wall_crossing_probe_output,
+        )
+        _near_wall_controller.reset()
+        # env.reset() 的 observation 已在覆寫場景前算完；立即重算，避免第一幀看見舊隨機場景。
+        obs = raw_env.observation_manager.compute()
+        _play_goal_mover = None
+        print(
+            "[D-EVAL] 場景已固定；desired turn: right→left crossing => ω<0，"
+            "left→right crossing => ω>0"
+        )
     episode_reward = torch.zeros(raw_env.num_envs, device=device)     # 累積回合獎勵
     episode_step = torch.zeros(raw_env.num_envs, dtype=torch.long, device=device)  # 回合步數
     episode_speed_sum = torch.zeros(raw_env.num_envs, device=device)   # 累積線速度 |v|（算平均）
@@ -2989,6 +3063,13 @@ def main():
     _traj_robot, _traj_front = [], []
     if _TRAJ_DUMP:
         print("[PLAY] ★CHARGE_TRAJ_DUMP=1 → 記錄 robot local pos + 前錐障礙距離 每步 → /tmp/traj_dump.npz")
+    # --- 完整 72-beam LiDAR dump (CHARGE_LIDAR_DUMP=<path.npz>) : swept-arc reward counterfactual audit 用 ---
+    #   收 policy LiDAR 還原後的 sensor-to-hit range(m) + 實際下達 (v,ω)，供離線掃描假想動作。
+    _LIDAR_DUMP_PATH = os.environ.get("CHARGE_LIDAR_DUMP", "")
+    _lidar_dump_frames, _lidar_dump_va = [], []
+    _lidar_dump_goal, _lidar_dump_pose = [], []   # ★方向性分析:goal(robot frame x_fwd,y_left) + robot local (x,y,yaw)
+    if _LIDAR_DUMP_PATH:
+        print(f"[PLAY] ★CHARGE_LIDAR_DUMP → 記錄 72-beam sensor range(m) + 帶符號(v,ω) + goal + pose 每步 → {_LIDAR_DUMP_PATH}")
 
     # --- RVO2 (ORCA) Safety Filter 初始化 ---
     rvo2_filter = None
@@ -3113,6 +3194,7 @@ def main():
                                       device=obs_normed.device)
                 _ext_in = torch.cat([obs_normed, _lh], dim=-1)
                 _cur = obs_normed[:, 6:78]                          # 當前 normed lidar
+                charge_features_for_rnn._last_lidar_stack = torch.cat([_cur, _lh], dim=-1)
                 charge_features_for_rnn._lh = torch.cat([_cur, _lh[:, :-72]], dim=-1)  # prepend,drop oldest
                 return extractor(_ext_in)
             return extractor(obs_normed)
@@ -3218,7 +3300,52 @@ def main():
             print(f"[PLAY] obs_near_goal: {count} 個障礙物強制放置在 goal {min_dist:.1f}~{radius:.1f}m 範圍內")
 
     # 初始 reset 後立即放置
-    place_obstacles_near_goal()
+    if _near_wall_controller is None:
+        place_obstacles_near_goal()
+
+    def place_path_blockers(env_ids_to_place=None):
+        """把靜態障礙放在 robot→goal 線段上，用於可解的提前避障驗收。"""
+        count = max(0, int(args_cli.path_blocker_count))
+        if count == 0:
+            return
+
+        if env_ids_to_place is None:
+            env_ids_to_place = torch.arange(raw_env.num_envs, device=device)
+        elif not isinstance(env_ids_to_place, torch.Tensor):
+            env_ids_to_place = torch.tensor(env_ids_to_place, device=device, dtype=torch.long)
+        if len(env_ids_to_place) == 0:
+            return
+
+        try:
+            robot_xy = raw_env.scene["robot"].data.root_pos_w[env_ids_to_place, :2]
+            goal_xy = raw_env.command_manager.get_command("goal_command")[env_ids_to_place, :2]
+        except (AttributeError, KeyError, IndexError):
+            return
+
+        goal_vec = goal_xy - robot_xy
+        goal_dist = torch.linalg.vector_norm(goal_vec, dim=1, keepdim=True).clamp_min(1e-6)
+        direction = goal_vec / goal_dist
+        zero_vel = torch.zeros(len(env_ids_to_place), 6, device=device)
+
+        for i in range(count):
+            try:
+                obstacle = raw_env.scene[f"obstacle_{i}"]
+            except KeyError:
+                break
+            distance = float(args_cli.path_blocker_distance) + 0.8 * i
+            pose = torch.zeros(len(env_ids_to_place), 7, device=device)
+            pose[:, :2] = robot_xy + direction * distance
+            pose[:, 2] = 0.9
+            pose[:, 3] = 1.0  # quaternion w
+            obstacle.write_root_pose_to_sim(pose, env_ids=env_ids_to_place)
+            obstacle.write_root_velocity_to_sim(zero_vel, env_ids=env_ids_to_place)
+
+        if not hasattr(place_path_blockers, "_printed"):
+            place_path_blockers._printed = True
+            print(f"[PLAY] path_blocker: {count} 個靜態障礙放在 robot→goal 線上，"
+                  f"第一個距車 {args_cli.path_blocker_distance:.2f}m")
+
+    place_path_blockers()
 
     # ================================================================
     # 10. 主 Play 迴圈
@@ -3299,6 +3426,11 @@ def main():
                           f"delta={_after_min - _before_min:.3f}")
             p_obs = charge_obs_for_rl(obs_normed)             # 取出 policy 觀測切片
             features = charge_features_for_rnn(obs_normed, p_obs)  # RNN 輸入特徵
+            if _near_wall_controller is not None and args_cli.near_wall_crossing_probe_output:
+                _probe_stack = getattr(charge_features_for_rnn, "_last_lidar_stack", None)
+                if _probe_stack is None:
+                    raise RuntimeError("crossing probe requires a multi-frame LiDAR checkpoint")
+                _near_wall_controller.record_probe(_probe_stack)
             # ★feat_norm:extractor 輸出 per-dim 正規化(須與訓練端一致)。
             #   _fn_frozen(從 checkpoint 載入)→ 直接套用訓練統計(部署正解);
             #   否則 fresh running stat 近似(舊 ckpt fallback)。
@@ -3324,13 +3456,24 @@ def main():
                     _fn_mean = charge_features_for_rnn._fn_mean; _fn_var = charge_features_for_rnn._fn_var
                 features = ((features - _fn_mean) / (_fn_var.sqrt() + 1e-8)).clamp(-5.0, 5.0)
             hidden = rnn_state.get()                          # 取得目前 RNN 隱藏狀態
-            rnn_feat, aux_pred, new_hidden = preprocess_rnn(  # RNN 前向傳播
-                features, hidden, training=(args_cli.aux_debug or _hybrid)  # hybrid 需 prediction 餵 policy
-            )
-            # zero_preprocess 模式：RNN 特徵歸零，policy 只靠當前觀測決策
-            rnn_for_rl = torch.zeros_like(rnn_feat) if zero_preprocess else rnn_feat
-            rl_in = (torch.cat([p_obs, rnn_for_rl, aux_pred], dim=-1)  # hybrid:+障礙動態預測
-                     if _hybrid else torch.cat([p_obs, rnn_for_rl], dim=-1))
+            if end_to_end_frame_stack:
+                # Exact training-time information flow: the policy sees current
+                # normalized obs and the four-frame CNN feature, not RNN output.
+                rnn_feat = torch.zeros(
+                    features.shape[0], preprocess_dim,
+                    dtype=features.dtype, device=features.device,
+                )
+                aux_pred = None
+                new_hidden = hidden
+                rl_in = torch.cat([p_obs, features], dim=-1)
+            else:
+                rnn_feat, aux_pred, new_hidden = preprocess_rnn(  # RNN 前向傳播
+                    features, hidden, training=(args_cli.aux_debug or _hybrid)  # hybrid 需 prediction 餵 policy
+                )
+                # zero_preprocess 模式：RNN 特徵歸零，policy 只靠當前觀測決策
+                rnn_for_rl = torch.zeros_like(rnn_feat) if zero_preprocess else rnn_feat
+                rl_in = (torch.cat([p_obs, rnn_for_rl, aux_pred], dim=-1)  # hybrid:+障礙動態預測
+                         if _hybrid else torch.cat([p_obs, rnn_for_rl], dim=-1))
             # ★LV-DOT encoder: raw 30D → encoded 再進 head(與訓練端一致)
             if _LVDOT_ENC_ON:
                 _L = policy_obs_dim
@@ -3339,6 +3482,11 @@ def main():
                                    rl_in[..., _L:]], dim=-1)
             logits = policy_head(rl_in)                        # Policy head 輸出 logits
             actions = sample_action(logits, args_cli.deterministic)  # 取樣或 argmax
+            if args_cli.near_wall_crossing_probe_stationary:
+                if not args_cli.near_wall_crossing_probe_output:
+                    raise ValueError("--near_wall_crossing_probe_stationary requires probe output")
+                actions[:, 0] = 9  # zero acceleration; initial velocity is reset to zero
+                actions[:, 1] = 9  # zero angular velocity
 
             # --- play_diag: 累積導航對齊診斷 ---
             if args_cli.play_diag:
@@ -3400,10 +3548,13 @@ def main():
                 _f = charge_features_for_rnn(_xn, _p)
                 if args_cli.feat_norm and _ckpt_feat_norm is not None:
                     _f = ((_f - _fn_mean) / (_fn_var.sqrt() + 1e-8)).clamp(-5.0, 5.0)
-                _hid_g = torch.tensor(hidden.detach().cpu().numpy(), device=device)
-                _rf, _ax_g, _ = preprocess_rnn(_f, _hid_g, training=False)
-                _rl_g = (torch.cat([_p, _rf, _ax_g], dim=-1) if _hybrid
-                         else torch.cat([_p, _rf], dim=-1))
+                if end_to_end_frame_stack:
+                    _rl_g = torch.cat([_p, _f], dim=-1)
+                else:
+                    _hid_g = torch.tensor(hidden.detach().cpu().numpy(), device=device)
+                    _rf, _ax_g, _ = preprocess_rnn(_f, _hid_g, training=False)
+                    _rl_g = (torch.cat([_p, _rf, _ax_g], dim=-1) if _hybrid
+                             else torch.cat([_p, _rf], dim=-1))
                 # ★LV-DOT encoder: 梯度須流過 encoder(測「加 encoder 後 raw 速度敏感度是否↑」)
                 if _LVDOT_ENC_ON:
                     _Lg = policy_obs_dim
@@ -3445,9 +3596,12 @@ def main():
 
         # --- 環境步進 ---
         _t0_env = time.time()
+        if _near_wall_controller is not None:
+            # 先推進行人，再讓 physics/observation manager 計算這一步，避免一幀位置延遲。
+            _near_wall_controller.advance()
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
         # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
-        if _play_behavior_scheduler is not None:
+        if _play_behavior_scheduler is not None and _near_wall_controller is None:
             if int(episode_step[0].item()) > 3:
                 _play_behavior_scheduler.step(raw_env, dt=step_dt)
         # Goal movement 每步移動 goal（與訓練一致）
@@ -3523,6 +3677,20 @@ def main():
                     _fm_dump = torch.where(_valid, _front_m, torch.full_like(_front_m, 99.0))
                     _traj_robot.append(_rob_l.detach().cpu().numpy().copy())
                     _traj_front.append(_fm_dump.detach().cpu().numpy().copy())
+                if _LIDAR_DUMP_PATH:
+                    # obs=(sensor_range-body_radius)/r_max；audit 幾何需要原始 sensor range。
+                    _lidar_sensor_m = _lidar_ep * 20.0 + 0.35
+                    _lidar_dump_frames.append(_lidar_sensor_m.detach().cpu().numpy().copy())
+                    _lidar_dump_va.append(_pa[:, :2].detach().cpu().numpy().copy())   # 帶符號 (v, ω)
+                    # ★方向性分析: goal(robot frame) + robot local pose(x,y,yaw) 供 sign-agreement/軌跡/onset
+                    _rob_lp = (raw_env.scene["robot"].data.root_pos_w[:, :2]
+                               - raw_env.scene.env_origins[:, :2])
+                    _q = raw_env.scene["robot"].data.root_quat_w            # [E,4] wxyz
+                    _yaw = torch.atan2(2.0 * (_q[:, 0] * _q[:, 3] + _q[:, 1] * _q[:, 2]),
+                                       1.0 - 2.0 * (_q[:, 2] ** 2 + _q[:, 3] ** 2))
+                    _lidar_dump_goal.append(_obs_flat_ep[:, 4:6].detach().cpu().numpy().copy())
+                    _lidar_dump_pose.append(
+                        torch.stack([_rob_lp[:, 0], _rob_lp[:, 1], _yaw], dim=1).detach().cpu().numpy().copy())
                 # ★goal-正前方過濾: 目標方位角<GOAL_AHEAD_DEG=該直行(ω baseline≈0),隔離避障 ω
                 _goal_xy = _obs_flat_ep[:, 4:6]                    # [E,2] robot frame goal (x_fwd,y_left)
                 _goal_brg = torch.atan2(_goal_xy[:, 1], _goal_xy[:, 0]).abs()  # [E] rad
@@ -3550,6 +3718,8 @@ def main():
         _omega_idx = actions[:, 1].float()                          # policy 角速度 index [0,18]
         _omega_target = ((_omega_idx - 9.0) / 9.0) * _max_ang_vel  # ω_target = ratio × ω_max
         _omega_actual_cmd = _action_term_ref._current_omega         # post-clamp ω_actual
+        if _near_wall_controller is not None:
+            _near_wall_controller.record_step(_vx_body, _omega_actual_cmd, done=done)
         # --- jitter_eval: 角度 ratio 正負號翻轉率（episode 內，done 時歸零）---
         if args_cli.jitter_eval:
             _ratio_ang = (_omega_idx - 9.0) / 9.0                    # [-1,1]，0 = 直行
@@ -3670,6 +3840,22 @@ def main():
             terminated_flat = terminated.squeeze(-1) if terminated.ndim > 1 else terminated
             truncated_flat = truncated.squeeze(-1) if truncated.ndim > 1 else truncated
             cause = detect_termination_cause(raw_env, terminated_flat, truncated_flat)
+            if _near_wall_controller is not None:
+                for _d_row in _near_wall_controller.finish_episodes(done_ids, cause):
+                    print(
+                        "[D-EVAL] "
+                        f"env={_d_row['env_id']} {_d_row['crossing']} "
+                        f"first={'OK' if _d_row['first_turn_correct'] else 'WRONG'} "
+                        f"same_sign={_d_row['max_same_sign_omega_s']:.1f}s "
+                        f"same_yaw={_d_row['max_same_sign_yaw_deg']:.0f}deg "
+                        f"360={'Y' if _d_row['spin_360'] else 'N'} "
+                        f"spin={_d_row['max_low_v_high_omega_s']:.1f}s "
+                        f"yaw_abs={_d_row['absolute_yaw_deg']:.0f}deg "
+                        f"wall={_d_row['min_wall_clearance_m']:.2f}m "
+                        f"obs={_d_row['min_obstacle_clearance_m']:.2f}m "
+                        f"contact=W{int(_d_row['wall_contact'])}/O{int(_d_row['obstacle_contact'])} "
+                        f"cause={_d_row['termination_cause']}"
+                    )
 
             # 批次 GPU→CPU sync：把所有 done env 需要的 scalar 一次性 stack 後
             # .tolist()，取代原本每 env 12+ 次 .item() 個別 sync（12N 次 → 1 次）。
@@ -3812,6 +3998,16 @@ def main():
             # 不可再次呼叫，否則會在 robot 已 spawn 後覆寫 obstacle 位置導致重疊
             if _play_behavior_scheduler is None:
                 place_obstacles_near_goal(done_ids)
+            place_path_blockers(done_ids)
+            if _near_wall_controller is not None:
+                _near_wall_controller.reset(done_ids)
+                # Auto-reset observation was computed before deterministic placement.
+                _fresh_obs = raw_env.observation_manager.compute()
+                if isinstance(next_obs, dict):
+                    for _obs_key, _obs_value in _fresh_obs.items():
+                        next_obs[_obs_key][done_ids] = _obs_value[done_ids]
+                else:
+                    next_obs[done_ids] = _fresh_obs[done_ids]
 
         # --- 每 200 步印出進度摘要 ---
         if step % 200 == 0:
@@ -3982,6 +4178,32 @@ def main():
                        robot=_np_traj.stack(_traj_robot),   # [T,E,2] robot local pos
                        front=_np_traj.stack(_traj_front))   # [T,E] 前錐障礙距離(m; 99=無)
         print(f"[PLAY] ★軌跡 dump: /tmp/traj_dump.npz (T={len(_traj_robot)} steps, E envs)")
+    if _LIDAR_DUMP_PATH and len(_lidar_dump_frames) > 0:
+        import numpy as _np_ld
+        _ldTE = _np_ld.stack(_lidar_dump_frames)                   # [T,E,72] meters
+        _vaTE = _np_ld.stack(_lidar_dump_va)                       # [T,E,2] 帶符號(v,ω)
+        _T, _E = _ldTE.shape[0], _ldTE.shape[1]
+        _ld = _ldTE.reshape(-1, 72)                                # [T*E,72] audit 相容(展平)
+        _va = _vaTE.reshape(-1, 2)                                 # [T*E,2]
+        _dump_kw = dict(
+            lidar_m=_ld,
+            va=_va,
+            lidar_semantics=_np_ld.asarray("sensor_range_m"),
+            body_radius=_np_ld.asarray(0.35, dtype=_np_ld.float32),
+            max_range=_np_ld.asarray(20.0, dtype=_np_ld.float32),
+            T=_np_ld.asarray(_T), E=_np_ld.asarray(_E),            # ★時間×env 結構(重建 [T,E,...])
+        )
+        if len(_lidar_dump_goal) > 0:                              # ★方向性分析欄位
+            _dump_kw["goal_te"] = _np_ld.stack(_lidar_dump_goal)   # [T,E,2] robot-frame goal
+            _dump_kw["pose_te"] = _np_ld.stack(_lidar_dump_pose)   # [T,E,3] local (x,y,yaw)
+        _np_ld.savez_compressed(_LIDAR_DUMP_PATH, **_dump_kw)
+        print(f"[PLAY] ★LiDAR dump: {_LIDAR_DUMP_PATH} (T={_T}×E={_E}={_ld.shape[0]} frames × 72 beam; +goal/pose)")
+    if _near_wall_controller is not None:
+        _near_wall_controller.write_report()
+        if args_cli.near_wall_crossing_output:
+            print(f"[D-EVAL] JSON report: {args_cli.near_wall_crossing_output}")
+        if args_cli.near_wall_crossing_probe_output:
+            print(f"[D-EVAL] observability probe: {args_cli.near_wall_crossing_probe_output}")
     # --- 反應曲線最終彙總（全程樣本平均）---
     if _react_curve_on:
         print_react_curve(_react_speed_bins, _react_omega_bins, tag="全程彙總")

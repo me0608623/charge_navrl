@@ -130,6 +130,8 @@ parser.add_argument("--clip_eps", type=float, default=0.2)
 parser.add_argument("--target_kl", type=float, default=0.0,
                     help="KL early-stop target. Stop remaining minibatch updates when approx_kl > 1.5*target_kl. "
                          "0=off. Needs mini_batches>1. Recommend 0.015.")
+parser.add_argument("--value_clip_eps", type=float, default=0.0,
+                    help="PPO clipped value-loss epsilon. 0 disables value clipping; standard baseline uses 0.2.")
 # --vf_coeff
 # - 用意：value loss 權重（critic 對 joint loss 的貢獻比例）。
 # - 正常範圍：0.1～1.0 常見，但此專案用 0.025（偏小）代表偏向 policy 更新、critic 只做輔助。
@@ -335,6 +337,9 @@ parser.add_argument("--lidar_frame_stack", type=int, default=1,
                     help="LiDAR frame stacking K. K=1=現狀(單幀). K>1: extractor Conv1d 吃 K 幀,"
                          "rollout 維護滾動歷史 buffer 並把前 (K-1) 幀附在 obs 尾端,讓 Conv1d 在原始 LiDAR "
                          "層算跨幀運動(類光流). ⚠ 改 extractor 形狀→與舊 checkpoint 不相容,從頭訓.")
+parser.add_argument("--end_to_end_frame_stack", action="store_true", default=False,
+                    help="Feed frame-stacked LiDAR features directly to policy/value and recompute them "
+                         "inside PPO minibatches so RL gradients update the encoder.")
 # --penalty_speed_near_obs (reactive:clearance-gated 減速懲罰;覆寫 curriculum,可在任何 stage 套用)
 parser.add_argument("--penalty_speed_near_obs", type=float, default=-1.0,
                     help="Reactive clearance-gated speed penalty weight w. <0=用 curriculum 值(預設,不影響). "
@@ -362,6 +367,17 @@ parser.add_argument("--teardrop_warmup_start", type=int, default=0,
                     help="水滴稅 warmup 起始 iteration (此前 w=0)。0=無 warmup。防政策先學凍結。")
 parser.add_argument("--teardrop_warmup_end", type=int, default=0,
                     help="水滴稅 warmup 結束 iteration (此後全額)。建議 from-scratch: start~150/end~350 (SR 建立後才施稅)。")
+# --- r_arc: action-conditioned swept-arc「預測軌跡安全度」reward (2026-07-14 用戶提案) ---
+#   拿 policy 看到的 72-beam LiDAR + 實際 (v,ω) 預測未來弧軌，算最小間距 c_arc，
+#   penalty=-w·[max(0,c_safe-c_arc)/c_safe]²。給「直走撞/左轉撞/右轉清」的方向性梯度(教往哪邊避)。
+#   與 teardrop/global 距離稅不同：非距離稅背景稅，只在「此動作會撞」時扣。修正單位後 audit PASS(方向性 46.3%/全撞 0.8%)。
+parser.add_argument("--use_arc_reward", action="store_true", default=False,
+                    help="啟用 swept-arc r_arc（action-conditioned 預測碰撞成本）。預設關=對現有 run 零影響。")
+parser.add_argument("--arc_w", type=float, default=0.08, help="r_arc 權重（危險一步量級 -0.05~-0.10）")
+parser.add_argument("--arc_c_safe", type=float, default=0.5, help="車體邊緣安全間距門檻(m)，c_arc<此才開始扣")
+parser.add_argument("--arc_cap", type=float, default=0.10, help="r_arc 單步 penalty 上限(絕對值)")
+parser.add_argument("--arc_horizon", type=float, default=2.7, help="軌跡預測秒數(v≈0.75→2m/0.75≈2.67s)")
+parser.add_argument("--arc_body_radius", type=float, default=0.35, help="車體半徑(m)")
 # --ttc_tax_weight (★LV-DOT 密集場景: TTC 門檻稅, 從 channel obs[79:109] 算 per-obstacle
 #   碰撞剩餘時間 TTC=d/v_closing, <門檻扣分。closing speed 只有 channel 有→強逼 policy 用速度預判。
 #   需 CHARGE_USE_LVDOT_OBS=1 (obs>=109D); 0=off。penalty = w · gate · v_fwd (gate=max slot 危險度)。)
@@ -700,8 +716,30 @@ parser.add_argument("--aux_seq_batch_size", type=int, default=256,
 
 # --- Modular Profiles (Phase 0: metadata only, does not change behavior) ---
 parser.add_argument("--reward_profile", type=str, default="wd_sparse",
-                    choices=["wd_sparse", "navrl_dense", "hybrid_progress", "ttc_risk"],
+                    choices=["wd_sparse", "clean_progress", "navrl_dense_v8", "hybrid_progress", "ttc_risk"],
                     help="Reward module profile. Phase 0: only wd_sparse executes.")
+parser.add_argument("--anti_spin_weight", type=float, default=0.0,
+                    help="A-only: max per-step penalty for sustained near-hazard high-omega low-progress drift")
+parser.add_argument("--anti_spin_hazard_distance", type=float, default=1.5)
+parser.add_argument("--anti_spin_omega_threshold", type=float, default=0.8)
+parser.add_argument("--anti_spin_progress_threshold", type=float, default=0.02)
+parser.add_argument("--anti_spin_grace_steps", type=int, default=5,
+                    help="Consecutive candidate steps allowed before A starts penalizing (5 steps=1s)")
+parser.add_argument("--anti_spin_ramp_steps", type=int, default=5,
+                    help="Steps from zero to full A penalty after grace")
+parser.add_argument("--anti_spin_yaw_grace_deg", type=float, default=180.0,
+                    help="A-only: same-sign yaw allowed before penalty starts")
+parser.add_argument("--anti_spin_yaw_ramp_deg", type=float, default=180.0,
+                    help="A-only: additional same-sign yaw from zero to full penalty")
+parser.add_argument("--anti_spin_dt", type=float, default=0.2,
+                    help="Control timestep used to integrate same-sign yaw")
+parser.add_argument("--future_occupancy_weight", type=float, default=0.0,
+                    help="Max per-step penalty for action-conditioned dynamic future occupancy risk")
+parser.add_argument("--future_occupancy_horizon_s", type=float, default=1.5)
+parser.add_argument("--future_occupancy_samples", type=int, default=8)
+parser.add_argument("--future_occupancy_safe_distance_m", type=float, default=1.0)
+parser.add_argument("--future_occupancy_near_distance_m", type=float, default=3.0)
+parser.add_argument("--future_occupancy_move_threshold_mps", type=float, default=0.1)
 parser.add_argument("--scene_profile", type=str, default=None,
                     help="Scene/curriculum profile. Default: inferred from --curriculum_version.")
 parser.add_argument("--algorithm_profile", type=str, default=None,
@@ -764,10 +802,12 @@ _skrl_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_skrl_root))          # skrl/ root
 sys.path.insert(0, str(_skrl_root / "models"))  # skrl/models/
 sys.path.insert(0, str(_skrl_root / "utils"))   # skrl/utils/
+from rnn_car_wdclean import swept_arc  # ★r_arc: action-conditioned swept-arc 碰撞預測 reward（--use_arc_reward 閘）
 
 # Charge 側網路模組（從 modular_rnn_models.py 匯入）
 from modular_rnn_models import (
     LidarStateExtractor,
+    adapt_lidar_frame_stack_state_dict,
     PreprocessRNN,
     PolicyHead,
     ValueHead,
@@ -827,7 +867,24 @@ print(f"[PROFILES] reward={_trainer_profiles.reward_profile} "
 
 # --- Create reward module from profile (Phase 2: runtime dispatch) ---
 from rnn_car_modular.rewards.factory import create_reward_module
-_reward_module = create_reward_module(_trainer_profiles.reward_profile)
+_reward_module = create_reward_module(
+    _trainer_profiles.reward_profile,
+    anti_spin_weight=args_cli.anti_spin_weight,
+    anti_spin_hazard_distance=args_cli.anti_spin_hazard_distance,
+    anti_spin_omega_threshold=args_cli.anti_spin_omega_threshold,
+    anti_spin_progress_threshold=args_cli.anti_spin_progress_threshold,
+    anti_spin_grace_steps=args_cli.anti_spin_grace_steps,
+    anti_spin_ramp_steps=args_cli.anti_spin_ramp_steps,
+    anti_spin_yaw_grace_deg=args_cli.anti_spin_yaw_grace_deg,
+    anti_spin_yaw_ramp_deg=args_cli.anti_spin_yaw_ramp_deg,
+    anti_spin_dt=args_cli.anti_spin_dt,
+    future_occupancy_weight=args_cli.future_occupancy_weight,
+    future_occupancy_horizon_s=args_cli.future_occupancy_horizon_s,
+    future_occupancy_samples=args_cli.future_occupancy_samples,
+    future_occupancy_safe_distance_m=args_cli.future_occupancy_safe_distance_m,
+    future_occupancy_near_distance_m=args_cli.future_occupancy_near_distance_m,
+    future_occupancy_move_threshold_mps=args_cli.future_occupancy_move_threshold_mps,
+)
 print(f"[REWARD] module={_reward_module.name} (runtime dispatch active)")
 
 print("[INFO] Multi-Agent Modular RNN Training v5 — WD-Principle (A2CK + vanilla RNN)")
@@ -961,7 +1018,8 @@ class RunningNormalizer:
 
 class ChargeRolloutBuffer:
     def __init__(self, num_steps, num_envs, rl_input_dim, obs_dim, hidden_dim, device,
-                 privileged_dim: int = 0, predict_dim: int = 7):
+                 privileged_dim: int = 0, predict_dim: int = 7,
+                 encoder_input_dim: int = 0):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.device = device
@@ -977,6 +1035,13 @@ class ChargeRolloutBuffer:
         self.raw_obs = torch.zeros(num_steps, num_envs, obs_dim, device=device)       # [T,E,139] 原始觀測
         self.hiddens = torch.zeros(num_steps, num_envs, hidden_dim, device=device)    # [T,E,H] RNN hidden
         self.aux_targets = torch.zeros(num_steps, num_envs, predict_dim, device=device)
+        self._encoder_input_dim = encoder_input_dim
+        if encoder_input_dim > 0:
+            # Exact normalized frame stack seen during rollout. PPO recomputes
+            # the encoder from this tensor so policy loss reaches the CNN.
+            self.encoder_inputs = torch.zeros(
+                num_steps, num_envs, encoder_input_dim, device=device
+            )
         # Asymmetric critic privileged obs
         self._privileged_dim = privileged_dim
         if privileged_dim > 0:
@@ -984,7 +1049,7 @@ class ChargeRolloutBuffer:
         self.ptr = 0  # 下一個寫入步數的 pointer
 
     def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden,
-            aux_target=None, privileged=None, terminated=None):
+            aux_target=None, privileged=None, terminated=None, encoder_input=None):
         """儲存一個 rollout step 的所有資料。每次 env.step() 後呼叫。"""
         i = self.ptr
         self.rl_inputs[i] = rl_input
@@ -1001,6 +1066,8 @@ class ChargeRolloutBuffer:
             self.aux_targets[i] = aux_target
         if privileged is not None and self._privileged_dim > 0:
             self.privileged_obs[i] = privileged
+        if encoder_input is not None and self._encoder_input_dim > 0:
+            self.encoder_inputs[i] = encoder_input
         self.ptr += 1
 
     def reset(self):
@@ -1953,7 +2020,10 @@ class MetricsCollector:
             # ★shaping 項(rollout-loop 加的)→ 記入 _reward_terms → wandb reward/term/shaping_*,
             #   供監控 policy 是否響應 Term1(predictive_decel 隨訓練上升=學會該減速時減速)。
             for _sk in ("ttc_tax", "gap_heading", "predictive_decel", "receding_penalty",
-                        "turning_direction", "early_turning", "weakened_decel"):
+                        "turning_direction", "early_turning", "weakened_decel", "anti_spin",
+                        "anti_spin_active", "anti_spin_run_steps", "anti_spin_same_sign_yaw_deg",
+                        "future_occupancy", "future_occupancy_active", "future_occupancy_risk",
+                        "future_occupancy_min_distance_m"):
                 _sv = reward_breakdown.get(_sk, None)
                 if _sv is not None:
                     self._reward_terms.setdefault(f"shaping_{_sk}", []).append(
@@ -2585,6 +2655,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs  # 覆蓋 YAML 裡的 num_envs
 
+    if getattr(args_cli, "end_to_end_frame_stack", False):
+        # 1024 envs instantiate many hidden obstacle assets. The PhysX default
+        # (2**21) reports missed broad-phase interactions, which can corrupt
+        # collision labels even at SA1. 2**23 covers the observed 6.0M peak.
+        env_cfg.sim.physx.gpu_found_lost_pairs_capacity = max(
+            env_cfg.sim.physx.gpu_found_lost_pairs_capacity, 2**23
+        )
+        print("[E2E-PPO] PhysX gpu_found_lost_pairs_capacity=8388608")
+
     # --room_size: 覆蓋場景物理邊界（外牆位置 + LiDAR boundary 查詢）
     if args_cli.room_size is not None:
         _rs = args_cli.room_size
@@ -2815,6 +2894,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _policy_obs_idx = torch.tensor(POLICY_OBS_INDICES, dtype=torch.long, device=device)
     wd_exact_mode = (args_cli.charge_encoder_mode == "wd_exact_rnn")   # 是否使用 WD 精確模式
     use_extractor = (args_cli.charge_encoder_mode == "extractor_rnn")  # 是否使用 Conv1d extractor
+    _e2e_frame_stack = bool(getattr(args_cli, "end_to_end_frame_stack", False))
+    if _e2e_frame_stack:
+        if not use_extractor:
+            raise ValueError("--end_to_end_frame_stack requires charge_encoder_mode=extractor_rnn")
+        if args_cli.lidar_frame_stack < 2:
+            raise ValueError("--end_to_end_frame_stack requires --lidar_frame_stack >= 2")
+        if args_cli.use_a2c:
+            raise ValueError("--end_to_end_frame_stack requires PPO, not A2C")
+        if not args_cli.disable_aux_training:
+            raise ValueError("--end_to_end_frame_stack requires aux_profile=none")
+        if getattr(args_cli, "critic_profile", "symmetric") != "symmetric":
+            raise ValueError("The clean end-to-end baseline requires a symmetric critic")
+        if getattr(args_cli, "feat_norm", False):
+            raise ValueError("The clean end-to-end baseline uses extractor LayerNorm; disable --feat_norm")
+        print(f"[E2E-PPO] enabled: {args_cli.lidar_frame_stack}-frame LiDAR CNN receives policy/value gradients")
 
     if wd_exact_mode:
         _wd_overrides = []
@@ -2912,11 +3006,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             return _wd_like_obs(obs_normed)
         return _select_79d(obs_normed)
 
+    def _build_extractor_input(
+        obs_normed: torch.Tensor,
+        lidar_hist: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Build the exact normalized current+history tensor consumed by the CNN."""
+        ext_in = _select_79d(obs_normed)
+        if args_cli.lidar_frame_stack <= 1:
+            return ext_in
+        if lidar_hist is None:
+            cur_lidar = ext_in[:, LIDAR_START:LIDAR_END]
+            lidar_hist = cur_lidar.repeat(1, args_cli.lidar_frame_stack - 1)
+        return torch.cat([ext_in, lidar_hist], dim=-1)
+
     def _charge_features_for_rnn(obs_normed: torch.Tensor, update_norm: bool = False,
                                  lidar_hist: torch.Tensor = None) -> torch.Tensor:
         if use_extractor:
-            _ext_in = _select_79d(obs_normed)
-            if args_cli.lidar_frame_stack > 1:
+            if args_cli.lidar_frame_stack > 1 and lidar_hist is None:
                 # 多幀:把 (K-1) 幀歷史 LiDAR 附在 extractor 輸入尾端。重要路徑(rollout/recompute/aux)
                 #   傳真歷史;未傳則 fallback 複製當前幀(無運動)防 crash。
                 if lidar_hist is None:
@@ -2928,9 +3034,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         print("[WARN][frame_stack] _charge_features_for_rnn 未傳 lidar_hist → "
                               "fallback 複製當前幀(無運動資訊)。呼叫點:")
                         traceback.print_stack(limit=4)
-                    _cur_lidar = _ext_in[:, LIDAR_START:LIDAR_END]
-                    lidar_hist = _cur_lidar.repeat(1, args_cli.lidar_frame_stack - 1)
-                _ext_in = torch.cat([_ext_in, lidar_hist], dim=-1)
+            _ext_in = _build_extractor_input(obs_normed, lidar_hist)
             _f = extractor(_ext_in)
         elif wd_exact_mode:
             _f = _wd_like_obs(obs_normed)
@@ -2965,7 +3069,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.lidar_frame_stack > 1:
             print(f"[INFO] 多幀 LiDAR: frame_stack={args_cli.lidar_frame_stack} "
                   f"(extractor Conv1d 吃 {args_cli.lidar_frame_stack} 幀;obs 尾端附 "
-                  f"{(args_cli.lidar_frame_stack-1)*72}D 歷史;⚠ 與舊 ckpt 不相容,從頭訓)")
+                  f"{(args_cli.lidar_frame_stack-1)*72}D 歷史;載入較少幀 ckpt 時會保守遷移第一層)")
         if not _use_act_hist:
             print("[v3f] CHARGE_USE_ACT_HIST=0 → act_hist 移除，obs 79D / state 7D（含 action_error 速度落差移除）")
         elif _act_hist_dropout > 0.0:
@@ -2991,7 +3095,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     ).to(device)
     # Hybrid: 把 predict_head 輸出的障礙動態預測接進 policy 輸入(RNN 當顯式 MOT,輸出餵 RL)
     _hybrid_pred_dim = _predict_dim if args_cli.hybrid_predict_to_policy else 0
-    rl_input_dim = policy_obs_dim + args_cli.preprocess_dim + _hybrid_pred_dim  # concat(obs, preprocess_feat[, prediction])
+    if _e2e_frame_stack:
+        rl_input_dim = policy_obs_dim + extractor.output_dim
+    else:
+        rl_input_dim = policy_obs_dim + args_cli.preprocess_dim + _hybrid_pred_dim  # concat(obs, preprocess_feat[, prediction])
     if args_cli.hybrid_predict_to_policy:
         if getattr(args_cli, "rnn_rl_grad", False):
             raise NotImplementedError(
@@ -3080,6 +3187,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # IsaacLab 版本直接把 RL optimizer 限縮到只包含 policy/value head 的 params，
     # 確保 RL loss.backward() 絕對不更新 preprocess_rnn 或 extractor。
     charge_params_actor = list(policy_head.parameters())                  # PolicyHead 的所有參數
+    if _e2e_frame_stack:
+        # Shared CNN baseline: both policy and value losses flow through this
+        # encoder in one optimizer. It is classified with actor params only for
+        # existing diagnostics, avoiding duplicate optimizer parameters.
+        charge_params_actor += list(extractor.parameters())
     charge_params_critic = list(value_head.parameters())                  # ValueHead 的所有參數
     charge_params_rl = charge_params_actor + charge_params_critic
     if _lvdot_enc_on:
@@ -3167,13 +3279,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     for pg in charge_opt_aux.param_groups:
         pg["initial_lr"] = pg["lr"]
 
-    total_charge_params = sum(p.numel() for p in charge_params_rl + charge_params_aux)
+    total_charge_params = sum(p.numel() for p in (
+        charge_params_rl if _e2e_frame_stack else charge_params_rl + charge_params_aux
+    ))
     _n_aux_groups = len(_aux_param_groups)
     print(f"[INFO] Encoder mode: {args_cli.charge_encoder_mode}")
     print(f"[INFO]   fc_front input dim: {rnn_input_dim}")
     print(f"[INFO]   Using extractor: {use_extractor}")
-    print(f"[INFO] Charge: {policy_obs_dim}D + {args_cli.rnn_type} {args_cli.preprocess_dim}D = {rl_input_dim}D, {total_charge_params:,} params")
-    print(f"[INFO] RL optimizer: policy_head+value_head lr={args_cli.lr}")
+    if _e2e_frame_stack:
+        print(f"[INFO] Charge E2E: {policy_obs_dim}D state/current LiDAR + {extractor.output_dim}D "
+              f"frame-stack CNN = {rl_input_dim}D, {total_charge_params:,} trainable params")
+        print(f"[INFO] RL optimizer: extractor+policy_head+value_head lr={args_cli.lr}")
+    else:
+        print(f"[INFO] Charge: {policy_obs_dim}D + {args_cli.rnn_type} {args_cli.preprocess_dim}D = "
+              f"{rl_input_dim}D, {total_charge_params:,} params")
+        print(f"[INFO] RL optimizer: policy_head+value_head lr={args_cli.lr}")
     print(f"[INFO] Grad clip: rl={args_cli.max_grad_norm}, aux={args_cli.aux_grad_clip if args_cli.aux_grad_clip is not None else args_cli.max_grad_norm}")
     print(f"[INFO] Aux optimizer ({_n_aux_groups} groups):")
     print(f"  rnn_cell:     lr={args_cli.rnn_lr}")
@@ -3225,7 +3345,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         f"actor_grad_cap={args_cli.wd_actor_update_clip} critic_grad_cap={args_cli.wd_critic_update_clip}"
     )
     if args_cli.disable_aux_training:
-        print("[INFO] Aux/RNN training DISABLED: pure-RL resume; preprocess_rnn/extractor weights frozen")
+        if _e2e_frame_stack:
+            print("[INFO] Aux/RNN disabled: RNN is unused; frame-stack extractor is trained by PPO")
+        else:
+            print("[INFO] Aux/RNN training DISABLED: preprocess_rnn/extractor weights frozen")
 
     # --- Runtime-syncable trainer params (phase/task config may override these safely) ---
     _current_rl_lr = args_cli.lr
@@ -3307,8 +3430,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
 
     # --- Buffers ---
-    charge_buf = ChargeRolloutBuffer(RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device,
-                                      privileged_dim=_priv_dim, predict_dim=_predict_dim)
+    _encoder_input_dim = (
+        policy_obs_dim + (_K_stack - 1) * _LL if _e2e_frame_stack else 0
+    )
+    charge_buf = ChargeRolloutBuffer(
+        RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device,
+        privileged_dim=_priv_dim, predict_dim=_predict_dim,
+        encoder_input_dim=_encoder_input_dim,
+    )
     obs_buf = ObstacleRolloutBuffer(RL, num_envs, N_obs, OBS_POLICY_OBS_DIM, 2, device) if _obstacle_mode == "learned" else None
 
     # --- Metrics ---
@@ -3385,7 +3514,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.checkpoint:
         ckpt = torch.load(args_cli.checkpoint, map_location=device, weights_only=False)
         if use_extractor and "extractor" in ckpt:
-            extractor.load_state_dict(ckpt["extractor"])
+            _extractor_state, _stack_migration = adapt_lidar_frame_stack_state_dict(
+                extractor, ckpt["extractor"]
+            )
+            extractor.load_state_dict(_extractor_state)
+            if _stack_migration is not None:
+                print(
+                    f"[E2E-PPO] LiDAR frame-stack warm migration: "
+                    f"K={_stack_migration[0]} -> K={_stack_migration[1]}; "
+                    "old Conv1d channels copied, added history channels zero-initialized"
+                )
         # preprocess_rnn: 若 predict_head shape 不符（predict_dim 改變，例 13→7 position-only），
         # 載入 shape 相符的部分（RNN/fc_front/fc_middle），predict_head 留新初始化。
         _pp_ckpt = ckpt["preprocess_rnn"]
@@ -3502,11 +3640,34 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _ent_coeff_linear = args_cli.ent_coeff
         _ent_coeff_angular = args_cli.ent_coeff
 
-    print(
-        f"[INFO] Warp Drive reward: "
-        f"penalty_hit={_spot_penalty_hit}, get_goal={_spot_reward_get_goal}, "
-        f"cost_operate={_spot_cost_operate}"
-    )
+    if _reward_module.name == "clean_progress":
+        print("[INFO] clean_progress reward: progress=1.0 step=-0.01 "
+              "smooth=(-0.01 dv,-0.005 dw) goal=+10 collision=-15 timeout=-5")
+        if args_cli.anti_spin_weight > 0.0:
+            print(
+                f"[REWARD] A anti-spin: max=-{args_cli.anti_spin_weight:.3f}/step "
+                f"hazard<{args_cli.anti_spin_hazard_distance:.2f}m "
+                f"|omega|>{args_cli.anti_spin_omega_threshold:.2f} "
+                f"progress<={args_cli.anti_spin_progress_threshold:.3f} "
+                f"same-sign-yaw>{args_cli.anti_spin_yaw_grace_deg:.0f}deg "
+                f"yaw-ramp={args_cli.anti_spin_yaw_ramp_deg:.0f}deg "
+                f"grace={args_cli.anti_spin_grace_steps} ramp={args_cli.anti_spin_ramp_steps} steps"
+            )
+        if args_cli.future_occupancy_weight > 0.0:
+            print(
+                f"[REWARD] future occupancy: max=-{args_cli.future_occupancy_weight:.3f}/step "
+                f"horizon={args_cli.future_occupancy_horizon_s:.2f}s "
+                f"samples={args_cli.future_occupancy_samples} "
+                f"safe<{args_cli.future_occupancy_safe_distance_m:.2f}m "
+                f"near<{args_cli.future_occupancy_near_distance_m:.2f}m "
+                f"moving>{args_cli.future_occupancy_move_threshold_mps:.2f}m/s"
+            )
+    else:
+        print(
+            f"[INFO] Warp Drive reward: "
+            f"penalty_hit={_spot_penalty_hit}, get_goal={_spot_reward_get_goal}, "
+            f"cost_operate={_spot_cost_operate}"
+        )
     print(
         f"[INFO] Warp Drive entropy (A2CK per-head): "
         f"linear={_ent_coeff_linear:.3f}, angular={_ent_coeff_angular:.3f} "
@@ -3595,14 +3756,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _rgdr_warmup = 10  # 前 N 個 iteration 不啟用（讓 EMA 穩定）
         print(f"[RGDR] Enabled: weight clamp={_rgdr_clamp}, EMA α={_rgdr_alpha}")
 
+    # ★r_arc: 取一次 action term（含實際套用的 processed_actions=(v_x, ω)，紅線②）
+    _arc_action_term = None
+    if getattr(args_cli, "use_arc_reward", False):
+        _arc_terms = getattr(env.unwrapped.action_manager, "_terms", {})
+        _arc_action_term = next((t for t in _arc_terms.values() if hasattr(t, "processed_actions")), None)
+        if _arc_action_term is None:
+            print("[r_arc] ⚠ 找不到有 processed_actions 的 action term，r_arc 停用")
+        else:
+            print(f"[r_arc] ✅ 啟用 swept-arc reward: w={args_cli.arc_w} c_safe={args_cli.arc_c_safe} "
+                  f"cap={args_cli.arc_cap} horizon={args_cli.arc_horizon}s body_r={args_cli.arc_body_radius}")
+    # ★r_arc: per-env 每集累積 arc penalty（跨 iteration 持續、done 時記錄並歸零）
+    _ep_arc_accum = torch.zeros(num_envs, device=device)
+
     for iteration in range(num_iterations):
         iter_start = time.time()
         charge_buf.reset()         # 重置 Charge rollout buffer（ptr=0）
-        if _lidar_hist is not None:
+        if _lidar_hist is not None and not _e2e_frame_stack:
             _lidar_hist.zero_()    # 多幀:rollout 起始 LiDAR 歷史歸零(對齊 recompute 從零起,三路一致)
         if obs_buf is not None:
             obs_buf.reset()        # 重置 Obstacle rollout buffer
         metrics.reset()            # 清空 MetricsCollector（完成 episode 統計）
+        _arc_stat_sum, _arc_stat_fire, _arc_stat_n = 0.0, 0.0, 0  # ★r_arc per-iter step 統計
+        _arc_ep_sum, _arc_ep_n = 0.0, 0  # ★r_arc per-iter 完成 episode 的累積 penalty 統計
 
         # === Determine who trains this iteration（Warp Drive 交替訓練）===
         # WD: 每 train_goal_rate(=3) 次 iteration 中，1 次訓練 obstacle，其餘訓練 charge
@@ -3693,7 +3869,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         metrics._obs_speed_limit = _obs_speed_limit  # sync for speed metric
 
         # Sync safe trainer hyperparameters from phase/task registry
-        _sync_phase_trainer_params(metrics._curriculum_info, stage_changed=_stage_changed)
+        if not _e2e_frame_stack:
+            _sync_phase_trainer_params(metrics._curriculum_info, stage_changed=_stage_changed)
 
         # === DORAEMON：檢查是否擴展 DR 範圍 ===
         if _doraemon_ctrl is not None and not _doraemon_ctrl.fully_expanded:
@@ -3736,27 +3913,71 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             with torch.no_grad():
                 obs_normalizer.update(policy_obs)   # 更新 running stats（用 policy 看到的觀測）
                 obs_normed = obs_normalizer.normalize(policy_obs)  # 標準化觀測
+                _encoder_input = (
+                    _build_extractor_input(obs_normed, _lidar_hist)
+                    if _e2e_frame_stack else None
+                )
                 features = _charge_features_for_rnn(obs_normed, update_norm=True, lidar_hist=_lidar_hist)  # 多幀:帶歷史
                 if _lidar_hist is not None:
                     # prepend 當前 normed lidar、drop oldest → 供下一步用([t, t-1, ...])
                     _cur_lidar = _select_79d(obs_normed)[:, LIDAR_START:LIDAR_END]
                     _lidar_hist = torch.cat([_cur_lidar, _lidar_hist[:, :-_LL]], dim=-1)
                 hidden = rnn_state.get()                          # 取得當前 hidden state [1, E, H]
-                rnn_feat, _pred_rl, new_hidden = preprocess_rnn(
-                    features, hidden, training=args_cli.hybrid_predict_to_policy)  # hybrid 時順便算 prediction
                 p_obs = _charge_obs_for_rl(obs_normed)    # 取得 RL head 的觀測部分（79D 或 113D）
-                # Ablation: zero out RNN feature for RL（aux path 照常訓練，只是 RL 看不到）
-                _rnn_for_rl = (torch.zeros_like(rnn_feat)
-                               if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
-                rl_in = (torch.cat([p_obs, _rnn_for_rl, _pred_rl], dim=-1)  # hybrid: + 障礙動態預測(顯式 MOT 輸出)
-                         if args_cli.hybrid_predict_to_policy
-                         else torch.cat([p_obs, _rnn_for_rl], dim=-1))  # concat obs + preprocess_feat → RL input
+                if _e2e_frame_stack:
+                    new_hidden = hidden
+                    rl_in = torch.cat([p_obs, features], dim=-1)
+                else:
+                    rnn_feat, _pred_rl, new_hidden = preprocess_rnn(
+                        features, hidden, training=args_cli.hybrid_predict_to_policy)  # hybrid 時順便算 prediction
+                    # Ablation: zero out RNN feature for RL（aux path 照常訓練，只是 RL 看不到）
+                    _rnn_for_rl = (torch.zeros_like(rnn_feat)
+                                   if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
+                    rl_in = (torch.cat([p_obs, _rnn_for_rl, _pred_rl], dim=-1)
+                             if args_cli.hybrid_predict_to_policy
+                             else torch.cat([p_obs, _rnn_for_rl], dim=-1))
                 _priv_obs = extract_privileged_obs(env.unwrapped) if (_use_asymmetric_critic or _oracle_to_policy) else None
                 _rl_in_enc = _encode_rl_input(rl_in)
                 logits = policy_head(_rl_in_enc, _priv_obs if _oracle_to_policy else None)  # [E, 38] policy logits（雙頭各 19）
                 value = value_head(_rl_in_enc, _priv_obs if _use_asymmetric_critic else None).squeeze(-1)  # [E] critic value
                 actions, log_prob, _ = sample_action(logits)     # 採樣動作 + joint log_prob
                 goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)  # 目標診斷（不影響 reward）
+
+            # Capture dynamic obstacle state before env.step so future occupancy
+            # compares the selected action against the same state seen by policy.
+            _future_occupancy_ctx = {}
+            if args_cli.future_occupancy_weight > 0.0:
+                with torch.no_grad():
+                    _scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
+                    if _scheduler is None:
+                        raise RuntimeError("future occupancy reward requires rule_based BehaviorScheduler")
+                    _robot_data_future = env.unwrapped.scene["robot"].data
+                    _robot_local_xy = (
+                        _robot_data_future.root_pos_w[:, :2] - env.unwrapped.scene.env_origins[:, :2]
+                    )
+                    _delta_world = _scheduler.positions[:, :, :2] - _robot_local_xy[:, None, :]
+                    _velocity_world = _scheduler.velocities[:, :, :2]
+                    _q_future = _robot_data_future.root_quat_w
+                    _yaw_future = torch.atan2(
+                        2.0 * (_q_future[:, 0] * _q_future[:, 3] + _q_future[:, 1] * _q_future[:, 2]),
+                        1.0 - 2.0 * (_q_future[:, 2].square() + _q_future[:, 3].square()),
+                    )
+                    _cos_future = torch.cos(_yaw_future)[:, None]
+                    _sin_future = torch.sin(_yaw_future)[:, None]
+                    _future_occupancy_ctx["dynamic_obstacle_positions_body_m"] = torch.stack(
+                        [
+                            _cos_future * _delta_world[:, :, 0] + _sin_future * _delta_world[:, :, 1],
+                            -_sin_future * _delta_world[:, :, 0] + _cos_future * _delta_world[:, :, 1],
+                        ],
+                        dim=-1,
+                    )
+                    _future_occupancy_ctx["dynamic_obstacle_velocities_body_mps"] = torch.stack(
+                        [
+                            _cos_future * _velocity_world[:, :, 0] + _sin_future * _velocity_world[:, :, 1],
+                            -_sin_future * _velocity_world[:, :, 0] + _cos_future * _velocity_world[:, :, 1],
+                        ],
+                        dim=-1,
+                    )
 
             # --- 2. Env step ---
             next_obs, reward, terminated, truncated, info = env.step(actions.float())
@@ -3770,7 +3991,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # v3f-react: pass per-env nearest-obstacle distance (m) + forward speed (m/s)
             #   for clearance-gated speed penalty. obs layout: [1]=v_x norm(/v_max=1.0 → m/s),
             #   [6:78]=lidar norm[0,1] (×max_distance=20.0 → m). Hole-mask <0.02 like metrics.
-            _reward_ctx = {"prev_actions": _prev_actions}
+            _reward_ctx = {
+                "prev_actions": _prev_actions,
+                "obs": obs,
+                "next_obs": next_obs,
+            }
+            if charge_action_diagnostics is not None:
+                _reward_ctx["v_forward_actual_m"] = charge_action_diagnostics["v_x"]
+                _reward_ctx["omega_actual_rad_s"] = charge_action_diagnostics["omega"]
+            _reward_ctx.update(_future_occupancy_ctx)
             with torch.no_grad():
                 _lidar_norm = obs[:, 6:78]                                       # [E,72] norm[0,1]
                 _lidar_clean = torch.where(
@@ -3822,6 +4051,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             )
             # Update prev_actions for next step (clone to detach from autograd graph)
             _prev_actions = actions.detach().clone()
+
+            # --- 2c. r_arc: action-conditioned swept-arc 預測軌跡安全度（教「往哪邊避」，非背景距離稅）---
+            #   紅線①只用 policy 看到的 72-beam LiDAR；紅線②用實際套用 (v_x,ω)=processed_actions。
+            if _arc_action_term is not None:
+                with torch.no_grad():
+                    # Policy obs 是車身淨空：(sensor_range - body_radius) / r_max。
+                    # Arc 幾何從車體中心算到 hit point，故先還原 sensor range；body radius 會在 arc_clearance 扣一次。
+                    _lidar_m_arc = swept_arc.policy_lidar_to_sensor_range(
+                        obs[:, 6:78],
+                        max_range=_LIDAR_MAX_DISTANCE_M,
+                        body_radius=args_cli.arc_body_radius,
+                    )
+                    _pa_arc = _arc_action_term.processed_actions                # [E,2] 實際 (v_x, ω)
+                    _c_arc = swept_arc.arc_clearance(
+                        _lidar_m_arc, _pa_arc[:, 0].float(), _pa_arc[:, 1].float(),
+                        horizon=args_cli.arc_horizon, body_radius=args_cli.arc_body_radius,
+                        max_range=_LIDAR_MAX_DISTANCE_M)
+                    _r_arc = swept_arc.r_arc_from_clearance(
+                        _c_arc, c_safe=args_cli.arc_c_safe, w_arc=args_cli.arc_w, cap=args_cli.arc_cap)
+                reward_flat = reward_flat + _r_arc
+                _ep_arc_accum = _ep_arc_accum + _r_arc     # 每集累積(done 時記錄歸零)
+                _arc_stat_sum += float(_r_arc.mean().item())
+                _arc_stat_fire += float((_r_arc < -1e-6).float().mean().item())  # arc_active_fraction
+                _arc_stat_n += 1
 
             # --- 2b. Heading stability：懲罰角速度符號翻轉（抗震盪）---
             # obs layout: [0]=accel [1]=speed [2]=omega ...
@@ -4007,13 +4260,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs_done = done.unsqueeze(-1).expand(-1, N_obs).reshape(-1)
 
             # --- 4. Store transitions（儲存本步資料到 rollout buffer）---
-            with torch.no_grad():
-                wd_aux_tgt = build_wd_preprocess_targets(
-                    env.unwrapped, N_obs, device,
-                    top_k_velocity=_aux_vel_topk,
-                    pos_scale=args_cli.aux_target_pos_scale)  # [E, predict_dim]
+            wd_aux_tgt = None
+            if not _e2e_frame_stack:
+                with torch.no_grad():
+                    wd_aux_tgt = build_wd_preprocess_targets(
+                        env.unwrapped, N_obs, device,
+                        top_k_velocity=_aux_vel_topk,
+                        pos_scale=args_cli.aux_target_pos_scale)  # [E, predict_dim]
             charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
-                           aux_target=wd_aux_tgt, privileged=_priv_obs, terminated=_terminated_flat)
+                           aux_target=wd_aux_tgt, privileged=_priv_obs, terminated=_terminated_flat,
+                           encoder_input=_encoder_input)
             if obs_buf is not None:
                 obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
 
@@ -4024,7 +4280,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # --- 5. Metrics：記錄本步指標 ---
             # 2026-07-03 fix: rule_based(_obs_agent_active=False)下 obs_obs/obs_act 是 zeros
             # placeholder → obstacle/mean_speed 等變「假數據恆0」；改傳 None = 缺席而非假值
-            metrics.step(obs, reward, done, info,
+            metrics.step(obs, reward_flat, done, info,
                          obs_obs=(obs_obs if _obs_agent_active else None),
                          obs_actions=(obs_act.reshape(num_envs, N_obs, 2) if _obs_agent_active else None),
                          reward_breakdown=reward_breakdown,
@@ -4038,6 +4294,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             if done_mask.any():
                 done_ids = done_mask.nonzero(as_tuple=False).reshape(-1)
                 rnn_state.reset(done_ids)  # episode 結束的 env 重置 hidden state 為 0
+                if _arc_action_term is not None:  # ★r_arc: 記錄完成 episode 的累積 penalty 並歸零
+                    _arc_ep_sum += float(_ep_arc_accum[done_ids].sum().item())
+                    _arc_ep_n += int(done_ids.numel())
+                    _ep_arc_accum[done_ids] = 0.0
                 if _lidar_hist is not None:
                     _lidar_hist[done_ids] = 0.0   # 多幀:同步 reset LiDAR 歷史(新 episode 從零)
                 # 重置障礙物速度 cache（避免舊 episode 的速度污染新 episode）
@@ -4061,6 +4321,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _prev_omega[done_ids] = 0.0
                 # ★Term 1：重置 prev_speed（新 episode 無速度歷史，避免跨場景假減速）
                 _prev_speed[done_ids] = 0.0
+                if _reward_module.name == "clean_progress" and _prev_actions is not None:
+                    # A reset starts from zero command; do not couple the next
+                    # episode's smoothness cost to the previous terminal action.
+                    _prev_actions[done_ids] = 9
                 # RGDR：更新 per-env EMA episode return + 重置累積器
                 if _rgdr_enabled:
                     _rgdr_env_returns[done_ids] = (
@@ -4326,14 +4590,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs_normed = obs_normalizer.normalize(obs)
                 features = _charge_features_for_rnn(obs_normed, lidar_hist=_lidar_hist)  # 多幀:用 rollout 末尾歷史
                 hidden = rnn_state.get()
-                rnn_feat, _pred_bt, _ = preprocess_rnn(
-                    features, hidden, training=args_cli.hybrid_predict_to_policy)
                 p_obs = _charge_obs_for_rl(obs_normed)
-                _rnn_for_rl = (torch.zeros_like(rnn_feat)
-                               if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
-                rl_in = (torch.cat([p_obs, _rnn_for_rl, _pred_bt], dim=-1)
-                         if args_cli.hybrid_predict_to_policy
-                         else torch.cat([p_obs, _rnn_for_rl], dim=-1))
+                if _e2e_frame_stack:
+                    rl_in = torch.cat([p_obs, features], dim=-1)
+                else:
+                    rnn_feat, _pred_bt, _ = preprocess_rnn(
+                        features, hidden, training=args_cli.hybrid_predict_to_policy)
+                    _rnn_for_rl = (torch.zeros_like(rnn_feat)
+                                   if args_cli.zero_preprocess_feature_for_rl else rnn_feat)
+                    rl_in = (torch.cat([p_obs, _rnn_for_rl, _pred_bt], dim=-1)
+                             if args_cli.hybrid_predict_to_policy
+                             else torch.cat([p_obs, _rnn_for_rl], dim=-1))
                 _priv_bootstrap = extract_privileged_obs(env.unwrapped) if _use_asymmetric_critic else None
                 last_value = value_head(_encode_rl_input(rl_in), _priv_bootstrap).squeeze(-1)  # [E] bootstrap value V_{T+1}
 
@@ -4402,6 +4669,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                           f"std={_env_weight.std():.3f}")
 
             policy_head.train(); value_head.train()
+            if _e2e_frame_stack:
+                extractor.train()
             # extractor/preprocess_rnn 維持 eval()：RL 只訓練 RL heads，不更新 aux module
             # WD 等價做法：concat_input = rl_in_.detach()（custom_trainer.py line 573）
             # IsaacLab 版本：rl_in 在 torch.no_grad() 下計算，效果相同（無梯度流到 RNN/extractor）
@@ -4412,7 +4681,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flat_adv = advantages.reshape(-1)
             flat_ret_raw = returns.reshape(-1)
             flat_value_target = value_targets.reshape(-1)
+            flat_old_value = charge_buf.values[:RL].reshape(-1)
             flat_priv = charge_buf.privileged_obs[:RL].reshape(-1, _priv_dim) if _use_asymmetric_critic else None
+            flat_encoder_input = (
+                charge_buf.encoder_inputs[:RL].reshape(-1, _encoder_input_dim)
+                if _e2e_frame_stack else None
+            )
 
             # --rnn_rl_grad: 準備在 minibatch 內重算 preprocess_feat(過 RNN,帶梯度)所需的
             # raw_obs 與 input hidden(rollout 當步存的)。讓 RL 梯度可流進 RNN。
@@ -4456,6 +4730,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             approx_kl_l, ent_lin_l, ent_ang_l = [], [], []  # Patch 3: kl + per-head entropy
             ppo_clip_frac_l, ppo_ratio_l = [], []  # Patch 3: PPO-only metrics
             wd_actor_grad_l, wd_critic_grad_l = [], []
+            encoder_grad_l = []
             wd_actor_update_l, wd_critic_update_l = [], []
             wd_actor_delta_l, wd_critic_delta_l = [], []
             wd_actor_clip_l, wd_critic_clip_l = [], []
@@ -4470,6 +4745,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             post_kl_l, post_ratio_mean_l, post_ratio_std_l = [], [], []
             post_ratio_min_l, post_ratio_max_l = [], []
             post_ratio_outside_20_l, post_ratio_outside_50_l = [], []
+            _kl_early_stop = False
+            _ppo_update_count = 0
             for _ in range(n_epochs):
                 if args_cli.use_a2c:
                     # A2C: full batch, single pass (WD: A2CK mode)
@@ -4480,9 +4757,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                for s in range(0, batch_size, mini_batch_size)]
 
                 for (mb,) in batches:
+                    if _e2e_frame_stack:
+                        _enc_mb = flat_encoder_input[mb]
+                        _feat_mb = extractor(_enc_mb)
+                        _pobs_mb = _enc_mb[:, :policy_obs_dim]
+                        _ri_mb = torch.cat([_pobs_mb, _feat_mb], dim=-1)
                     # --rnn_rl_grad: 重算 preprocess_feat(過 RNN,帶梯度),取代 cached flat_ri[mb]，
                     # 讓 RL loss 的梯度經 policy/value head 流回 RNN。
-                    if args_cli.rnn_rl_grad:
+                    elif args_cli.rnn_rl_grad:
                         with torch.no_grad():
                             _normed_mb = obs_normalizer.normalize(flat_raw_rr[mb])
                         _feat_mb = _charge_features_for_rnn(_normed_mb)            # extractor(凍結,grad 不 step)
@@ -4498,16 +4780,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
                     nv = value_head(_ri_mb_enc, _priv_mb).squeeze(-1)
 
-                    # Patch 3: approx KL (old_logprob - new_logprob)
+                    _log_ratio = nlp - flat_lp[mb]
+                    # Non-negative PPO approximate KL: E[(ratio-1)-log(ratio)].
                     with torch.no_grad():
-                        _approx_kl = (flat_lp[mb] - nlp).mean().item()
+                        _approx_kl = ((_log_ratio.exp() - 1.0) - _log_ratio).mean().item()
+                    if (args_cli.target_kl > 0.0 and _ppo_update_count > 0
+                            and _approx_kl > 1.5 * args_cli.target_kl):
+                        _kl_early_stop = True
+                        break
 
                     # PPO clipped surrogate（A2C/PPO 共用）：
                     # ratio = π_new(a|s) / π_old(a|s)
                     # loss = -min(ratio*A, clip(ratio, 1±ε)*A)
                     # A2C 模式：single-epoch full-batch + clipping 防護
                     # PPO 模式：multi-epoch mini-batch + clipping
-                    ratio = (nlp - flat_lp[mb]).exp()
+                    ratio = _log_ratio.exp()
                     s1 = ratio * flat_adv[mb]
                     s2 = torch.clamp(ratio, 1 - args_cli.clip_eps, 1 + args_cli.clip_eps) * flat_adv[mb]
                     pl = -torch.min(s1, s2).mean()
@@ -4516,7 +4803,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         ppo_clip_frac_l.append(_clip_frac)
                         ppo_ratio_l.append(ratio.mean().item())
 
-                    vl = F.mse_loss(nv, flat_value_target[mb])  # critic MSE loss
+                    _value_error = (nv - flat_value_target[mb]).pow(2)
+                    if args_cli.value_clip_eps > 0.0:
+                        _value_clipped = flat_old_value[mb] + (
+                            nv - flat_old_value[mb]
+                        ).clamp(-args_cli.value_clip_eps, args_cli.value_clip_eps)
+                        _value_error_clipped = (_value_clipped - flat_value_target[mb]).pow(2)
+                        vl = torch.maximum(_value_error, _value_error_clipped).mean()
+                    else:
+                        vl = _value_error.mean()
                     vl_raw = vl.item()  # Patch 1: 記錄 clamp 前的原始 vf_loss（用於診斷）
 
                     # WD A2CK: per-head entropy（線性/角速度分別用不同的 entropy coeff）
@@ -4556,6 +4851,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     # 但可以反映 actor/critic 更新壓力是否失衡。
                     actor_grad = _grad_l2_norm(charge_params_actor)   # actor 梯度 L2 norm
                     critic_grad = _grad_l2_norm(charge_params_critic)  # critic 梯度 L2 norm
+                    encoder_grad_l.append(
+                        _grad_l2_norm(extractor.parameters()) if _e2e_frame_stack else 0.0
+                    )
                     actor_update_est = _current_rl_lr * actor_grad    # 估計 actor 更新量
                     critic_update_est = _current_rl_lr * critic_grad  # 估計 critic 更新量
 
@@ -4589,6 +4887,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _critic_grad_post = _grad_l2_norm(charge_params_critic)
 
                     charge_opt_rl.step()
+                    _ppo_update_count += 1
                     if charge_opt_rnn_rl is not None:
                         # RNN 走 RL 梯度:clip 後 step(防 spike)
                         _rnn_rl_gn = nn.utils.clip_grad_norm_(
@@ -4598,7 +4897,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
                     # --- post-update policy diagnostics ---
                     with torch.no_grad():
-                        _post_nl = policy_head(_encode_rl_input(flat_ri[mb]), (flat_priv[mb] if (_oracle_to_policy and flat_priv is not None) else None))
+                        if _e2e_frame_stack:
+                            _post_feat = extractor(flat_encoder_input[mb])
+                            _post_ri = torch.cat(
+                                [flat_encoder_input[mb][:, :policy_obs_dim], _post_feat], dim=-1
+                            )
+                        else:
+                            _post_ri = flat_ri[mb]
+                        _post_nl = policy_head(_encode_rl_input(_post_ri), (flat_priv[mb] if (_oracle_to_policy and flat_priv is not None) else None))
                         _post_lp, _, _ = evaluate_actions(_post_nl, flat_act[mb])
                         _post_ratio = (_post_lp - flat_lp[mb]).exp()
                         post_kl_l.append((flat_lp[mb] - _post_lp).mean().item())
@@ -4654,12 +4960,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     wd_actor_update_ratio_l.append(actor_delta / (_actor_pnorm + 1e-12))
                     wd_critic_update_ratio_l.append(critic_delta / (_critic_pnorm + 1e-12))
 
+                if _kl_early_stop:
+                    break
+
             charge_ppo_loss = np.mean(ppo_l)
             charge_vf_loss = np.mean(vf_l)
             charge_entropy = np.mean(ent_l)
             wd_update_monitor = {
                 # --- WD update diagnostics split by module for WandB grouping ---
                 "wd_update_actor/grad_norm": float(np.mean(wd_actor_grad_l)) if wd_actor_grad_l else 0.0,
+                "rl_encoder/grad_norm_pre_clip": float(np.mean(encoder_grad_l)) if encoder_grad_l else 0.0,
                 "wd_update_actor/update_est": float(np.mean(wd_actor_update_l)) if wd_actor_update_l else 0.0,
                 "wd_update_actor/param_delta_norm": float(np.mean(wd_actor_delta_l)) if wd_actor_delta_l else 0.0,
                 "wd_update_actor/clip_fraction": float(np.mean(wd_actor_clip_l)) if wd_actor_clip_l else 0.0,
@@ -4687,6 +4997,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "rl/vf_clamp_triggered": float(np.mean(vf_clamp_triggered_l)) if vf_clamp_triggered_l else 0.0,
                 # --- Patch 3: approx_kl + per-head entropy ---
                 "rl/approx_kl": float(np.mean(approx_kl_l)) if approx_kl_l else 0.0,
+                "rl/kl_early_stop": float(_kl_early_stop),
+                "rl/ppo_update_count": float(_ppo_update_count),
                 "rl/entropy_linear": float(np.mean(ent_lin_l)) if ent_lin_l else 0.0,
                 "rl/entropy_angular": float(np.mean(ent_ang_l)) if ent_ang_l else 0.0,
                 # --- Patch 5: total loss ---
@@ -4803,8 +5115,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if use_extractor:
                     extractor.eval()
                 preprocess_rnn.eval()
-                aux_loss_val = math.nan
-                aux_monitor["aux/loss_per_step"] = math.nan
+                aux_loss_val = 0.0
+                aux_monitor["aux/loss_per_step"] = 0.0
             else:
                 # --- TBPTT mode: sample contiguous sequences, unroll RNN ---
                 _seq_len = args_cli.aux_seq_len
@@ -4954,15 +5266,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     for p in preprocess_rnn.rnn.parameters())
                 _head_grad = any(p.grad is not None and p.grad.abs().sum() > 0
                                 for p in policy_head.parameters())
+                _encoder_grad = _e2e_frame_stack and any(
+                    p.grad is not None and p.grad.abs().sum() > 0
+                    for p in extractor.parameters())
                 _ph_lr = charge_opt_aux.param_groups[1]["lr"]
                 _fm_lr = charge_opt_aux.param_groups[2]["lr"]
                 _ff_lr = charge_opt_aux.param_groups[3]["lr"]
                 print(f"[梯度驗證] RL head={'✓' if _head_grad else '✗'} (PPO), "
+                      f"encoder={'✓' if _encoder_grad else ('N/A' if not _e2e_frame_stack else '✗')} (RL), "
                       f"RNN cell={'✓' if _rnn_grad else '✗'} (aux)")
                 _ext_info = ""
                 if use_extractor:
                     _ext_lr = charge_opt_aux.param_groups[4]["lr"]
-                    _ext_info = f" | extractor lr={_ext_lr} {'(frozen)' if _ext_lr == 0 else ''}"
+                    _ext_info = (f" | extractor aux_lr={_ext_lr} (PPO lr={args_cli.lr})"
+                                 if _e2e_frame_stack else
+                                 f" | extractor lr={_ext_lr} {'(frozen)' if _ext_lr == 0 else ''}")
                 else:
                     _ext_info = " | extractor: N/A (raw_fc_rnn)"
                 print(f"  predict_head lr={_ph_lr} | fc_middle lr={_fm_lr} | "
@@ -5014,7 +5332,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"S{int(stage)} | fps={fps:.0f} | "
                     f"R={rwd:.1f} SR={sr:.1%} CR={cr:.1%} TO={_timeout_rate:.1%} | "
                     f"ppo={charge_ppo_loss:.4f} vf={charge_vf_loss:.4f} "
-                    f"ent={charge_entropy:.3f} | "
+                    f"ent={charge_entropy:.3f} enc_g={wd_update_monitor.get('rl_encoder/grad_norm_pre_clip', 0.0):.3f} | "
                     f"gV={goal_v:+.3f} gΔ={goal_d:+.2f} h={goal_h:.0f}° "
                     f"sw={goal_sw:.3f}{obs_tag}")
             else:
@@ -5039,14 +5357,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _asl = int(aux_monitor.get("aux/seq_len", 1))
                 _ve = aux_monitor.get("rl_critic/variance_explained", 0)
                 _aux_label = "disabled" if args_cli.disable_aux_training else "tbptt"
-                print(
-                    f"  AUX({_aux_label} L={_asl}): "
-                    f"loss={aux_loss_val:.4f} "
-                    f"n1d={_n1d:.3f} n2d={_n2d:.3f} "
-                    f"valid={_vsc} | "
-                    f"rnn_grad={_rnn_gn:.4f} rnn_delta={_rnn_dn:.6f} "
-                    f"ph_delta={_ph_dn:.6f} fm_delta={_fm_dn:.6f} | "
-                    f"VE={_ve:.3f}")
+                if args_cli.disable_aux_training:
+                    print(f"  AUX(disabled): no loss/no updates | VE={_ve:.3f}")
+                else:
+                    print(
+                        f"  AUX({_aux_label} L={_asl}): "
+                        f"loss={aux_loss_val:.4f} "
+                        f"n1d={_n1d:.3f} n2d={_n2d:.3f} "
+                        f"valid={_vsc} | "
+                        f"rnn_grad={_rnn_gn:.4f} rnn_delta={_rnn_dn:.6f} "
+                        f"ph_delta={_ph_dn:.6f} fm_delta={_fm_dn:.6f} | "
+                        f"VE={_ve:.3f}")
 
         if wandb_run is not None:
             # ----------------------------------------------------------------
@@ -5177,6 +5498,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "phase_parameter/penalty_timeout": float(_spot_penalty_timeout),
                 "phase_parameter/penalty_smoothness": float(_spot_penalty_smoothness),  # v3
                 "phase_parameter/penalty_speed_near_obs": float(_spot_penalty_speed_near_obs),  # v3f-react
+                "phase_parameter/anti_spin_weight": float(args_cli.anti_spin_weight),
+                "phase_parameter/anti_spin_hazard_distance": float(args_cli.anti_spin_hazard_distance),
+                "phase_parameter/anti_spin_omega_threshold": float(args_cli.anti_spin_omega_threshold),
+                "phase_parameter/anti_spin_progress_threshold": float(args_cli.anti_spin_progress_threshold),
+                "phase_parameter/anti_spin_grace_steps": float(args_cli.anti_spin_grace_steps),
+                "phase_parameter/anti_spin_ramp_steps": float(args_cli.anti_spin_ramp_steps),
+                "phase_parameter/anti_spin_yaw_grace_deg": float(args_cli.anti_spin_yaw_grace_deg),
+                "phase_parameter/anti_spin_yaw_ramp_deg": float(args_cli.anti_spin_yaw_ramp_deg),
+                "phase_parameter/anti_spin_dt": float(args_cli.anti_spin_dt),
+                "phase_parameter/future_occupancy_weight": float(args_cli.future_occupancy_weight),
+                "phase_parameter/future_occupancy_horizon_s": float(args_cli.future_occupancy_horizon_s),
+                "phase_parameter/future_occupancy_samples": float(args_cli.future_occupancy_samples),
+                "phase_parameter/future_occupancy_safe_distance_m": float(args_cli.future_occupancy_safe_distance_m),
+                "phase_parameter/future_occupancy_near_distance_m": float(args_cli.future_occupancy_near_distance_m),
+                "phase_parameter/future_occupancy_move_threshold_mps": float(args_cli.future_occupancy_move_threshold_mps),
                 "phase_parameter/cost_operate": float(_spot_cost_operate),
                 "phase_parameter/obstacle_speed_rate": float(_obs_speed_limit),
                 "phase_parameter/obs_size_rand": float(_obs_size_rand),
@@ -5251,6 +5587,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 log_data["rgdr/env_weight_std"] = float(_ew.std())
                 log_data["rgdr/env_returns_mean"] = float(_rgdr_env_returns.mean())
                 log_data["rgdr/env_returns_std"] = float(_rgdr_env_returns.std())
+
+            # --- r_arc metrics（啟用時）---
+            if _arc_action_term is not None and _arc_stat_n > 0:
+                log_data["r_arc/mean"] = _arc_stat_sum / _arc_stat_n          # 每步平均 r_arc（負值）
+                log_data["r_arc/active_fraction"] = _arc_stat_fire / _arc_stat_n  # 每步有扣分的 env 比例
+                if _arc_ep_n > 0:
+                    log_data["r_arc/ep_penalty_mean"] = _arc_ep_sum / _arc_ep_n   # 每集累積 arc penalty 平均
 
             wandb_run.log(log_data, step=total_steps)
 

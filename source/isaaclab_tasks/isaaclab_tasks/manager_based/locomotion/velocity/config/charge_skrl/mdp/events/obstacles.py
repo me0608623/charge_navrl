@@ -704,13 +704,14 @@ def move_obstacles_vectorized(
             _sc = env._behavior_scheduler
             _p = _sc.positions[_t, _sl]
             _bt = int(_sc.behavior_type[_t, _sl].item())
-            _hv = _sc.hc_velocity[_t, _sl].tolist()
-            _cd = int(_sc.hc_cooldown[_t, _sl].item()) if hasattr(_sc, "hc_cooldown") else -1
+            _pv = _sc.pc_velocity[_t, _sl].tolist()
+            _v = _sc.velocities[_t, _sl].tolist()
+            _done = bool(_sc.pc_done[_t, _sl].item())
             env._corridor_track_steps += 1
             print(
                 f"[CORRIDOR-TRAJ] step{env._corridor_track_steps:02d} env{_t} "
                 f"ped_local_x={_p[0].item():+.3f} y={_p[1].item():+.3f} "
-                f"| behavior_type={_bt} hc_vel={_hv} cooldown={_cd}",
+                f"| behavior_type={_bt} pc_vel={_pv} actual_vel={_v} done={int(_done)}",
                 flush=True,
             )
         return

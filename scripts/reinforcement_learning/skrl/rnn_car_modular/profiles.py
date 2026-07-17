@@ -11,7 +11,7 @@ from dataclasses import dataclass, asdict
 from typing import Any
 
 # Valid profile values (for validation)
-VALID_REWARD_PROFILES = ("wd_sparse", "navrl_dense_v8", "hybrid_progress", "ttc_risk")
+VALID_REWARD_PROFILES = ("wd_sparse", "clean_progress", "navrl_dense_v8", "hybrid_progress", "ttc_risk")
 VALID_ALGORITHM_PROFILES = ("a2c_wd", "ppo_clip")
 VALID_AUX_PROFILES = ("wd_7d_geometry", "none", "future_collision_risk")
 
@@ -118,7 +118,7 @@ def validate_profiles(p: TrainerProfiles, args_cli: Any | None = None) -> None:
             )
 
     # Only wd_sparse and navrl_dense_v8 are implemented
-    implemented_rewards = ("wd_sparse", "navrl_dense_v8")
+    implemented_rewards = ("wd_sparse", "clean_progress", "navrl_dense_v8")
     if p.reward_profile not in implemented_rewards:
         raise NotImplementedError(
             f"reward_profile={p.reward_profile!r} is registered but not yet implemented. "

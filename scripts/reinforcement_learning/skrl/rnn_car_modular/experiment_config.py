@@ -69,6 +69,8 @@ class ExperimentConfig:
     ppo_epochs: int = 2
     mini_batches: int = 16
     clip_eps: float = 0.1
+    target_kl: float = 0.0
+    value_clip_eps: float = 0.0
 
     # entropy / WD update caps
     ent_coeff: float = 0.0
@@ -89,6 +91,8 @@ class ExperimentConfig:
     fc_dim: int = 48
     wd_middle_dim: int = 32
     rnn_type: str = "RNN"
+    lidar_frame_stack: int = 1
+    end_to_end_frame_stack: bool = False
     predict_dim: int = 7                  # aux target dims (7=WD original, 13=+velocity)
     aux_velocity_topk: int = 0            # 0=no velocity target; 3=nearest 3 obstacles
     aux_loss_type: str = "log"           # log=WD original (grad ∝ 1/|e|); huber=smooth-L1 (大誤差大梯度)
@@ -138,6 +142,21 @@ class ExperimentConfig:
     # >=0.0 = 覆寫 curriculum 的 spot_penalty_speed_near_obs. 對應 --penalty_speed_near_obs
     # (CLI 仍可覆寫此 YAML 值). ★寫進 config 消除 CLI-only footgun(忘帶=稅靜默關閉).
     penalty_speed_near_obs: float = -1.0
+    anti_spin_weight: float = 0.0
+    anti_spin_hazard_distance: float = 1.5
+    anti_spin_omega_threshold: float = 0.8
+    anti_spin_progress_threshold: float = 0.02
+    anti_spin_grace_steps: int = 5
+    anti_spin_ramp_steps: int = 5
+    anti_spin_yaw_grace_deg: float = 180.0
+    anti_spin_yaw_ramp_deg: float = 180.0
+    anti_spin_dt: float = 0.2
+    future_occupancy_weight: float = 0.0
+    future_occupancy_horizon_s: float = 1.5
+    future_occupancy_samples: int = 8
+    future_occupancy_safe_distance_m: float = 1.0
+    future_occupancy_near_distance_m: float = 3.0
+    future_occupancy_move_threshold_mps: float = 0.1
     action_table_sample_size: int = 0
     log_interval: int = 10
     save_interval: int = 100

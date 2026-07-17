@@ -7,9 +7,9 @@ elicits.
 
 Corridor along world-Y (see corridor_crossing_geometry). Robot at local
 (0, -corridor_half_len) facing +y; goal at (0, +corridor_half_len); walls
-(slots 0 and 1) at local x = -/+ half_width running along y; pedestrian on a
-native horizontal_crossing starting at the left wall (x=-half_width) crossing
-+x at a fixed y `crossing_ahead` metres in front of the robot.
+(slots 0 and 1) at local x = -/+ half_width running along y; pedestrian uses
+the one-shot path_crossing state machine to cross +x at a fixed y
+`crossing_ahead` metres in front of the robot.
 
 Baseline safety: when fraction=0.0 the function returns immediately without
 touching any env state — byte-for-byte identical to baseline training.
@@ -21,7 +21,7 @@ import torch
 
 from . import corridor_crossing_geometry as g
 
-# NOTE: BEHAVIOR_HORIZONTAL_CROSSING lives in the scripts-tree package
+# NOTE: behavior constants live in the scripts-tree package
 # ``obstacle_agent`` (not installed). Importing it at module load would run
 # during ``import isaaclab_tasks`` package registration — BEFORE launchers like
 # play_rnn_car.py add scripts/…/skrl to sys.path — and break the whole import.
@@ -151,13 +151,13 @@ def setup_corridor_crossing(
     goal_term.goal_pos_w[sel] = g.goal_corridor_pos(origins, corridor_half_len)
 
     # -------------------------------------------------------------------------
-    # 4. One pedestrian slot: native horizontal_crossing, left → right
+    # 4. One pedestrian slot: one-shot left → right crossing
     # -------------------------------------------------------------------------
     sched = getattr(env.unwrapped, "_behavior_scheduler", None)
     if sched is not None:
         # Lazy import: obstacle_agent is a scripts-tree package only on sys.path
         # once a launcher has started the env (see module NOTE above).
-        from obstacle_agent.behavior_config import BEHAVIOR_HORIZONTAL_CROSSING
+        from obstacle_agent.behavior_config import BEHAVIOR_PATH_CROSSING
 
         # Local Y in front of robot: robot is at -corridor_half_len, so add crossing_ahead.
         cross_y = -corridor_half_len + crossing_ahead
@@ -168,15 +168,24 @@ def setup_corridor_crossing(
         # the ped clears that buffer and can actually traverse -x_start -> +x
         # across the robot's path at x=0.
         ped_start_x = -(half_width - _WALL_CLEARANCE)
-        sched.behavior_type[sel, ped_slot] = BEHAVIOR_HORIZONTAL_CROSSING
+        # Use the existing one-shot path-crossing state machine. The repeating
+        # horizontal-crossing state machine only finishes at the arena boundary;
+        # in this injected corridor the right wall blocks it first, leaving the
+        # pedestrian pinned at x=+1.08 with a false non-zero scheduler velocity.
+        # That false velocity would corrupt future-occupancy reward targets.
+        ped_stop_x = half_width - _WALL_CLEARANCE
+        sched.behavior_type[sel, ped_slot] = BEHAVIOR_PATH_CROSSING
         sched.positions[sel, ped_slot, 0] = ped_start_x
         sched.positions[sel, ped_slot, 1] = cross_y
-        sched.hc_velocity[sel, ped_slot, 0] = ped_speed
-        sched.hc_velocity[sel, ped_slot, 1] = 0.0
-        sched.hc_cross_y[sel, ped_slot] = cross_y
-        sched.hc_spawn_pos[sel, ped_slot, 0] = ped_start_x
-        sched.hc_spawn_pos[sel, ped_slot, 1] = cross_y
-        sched.hc_cooldown[sel, ped_slot] = 0
+        sched.pc_velocity[sel, ped_slot, 0] = ped_speed
+        sched.pc_velocity[sel, ped_slot, 1] = 0.0
+        sched.velocities[sel, ped_slot, 0] = ped_speed
+        sched.velocities[sel, ped_slot, 1] = 0.0
+        sched.pc_spawn_pos[sel, ped_slot, 0] = ped_start_x
+        sched.pc_spawn_pos[sel, ped_slot, 1] = cross_y
+        sched.pc_travel_dist[sel, ped_slot] = ped_stop_x - ped_start_x
+        sched.pc_activation_delay[sel, ped_slot] = 0
+        sched.pc_done[sel, ped_slot] = False
 
     # First-fire GEOMETRY dump (once per process) — read back the direct-written
     # tensors for the first corridor env so the placed scene can be numerically
@@ -205,7 +214,7 @@ def setup_corridor_crossing(
         if _s is not None:
             print(
                 f"[CORRIDOR-GEOM] ped slot{ped_slot}: pos_local={_s.positions[e, ped_slot].tolist()} "
-                f"vel={_s.hc_velocity[e, ped_slot].tolist()} "
+                f"vel={_s.pc_velocity[e, ped_slot].tolist()} "
                 f"| expect pos≈[{-(half_width - _WALL_CLEARANCE)},{-corridor_half_len + crossing_ahead}] "
                 f"vel≈[+{ped_speed},0] (starts inside corridor, not on wall)",
                 flush=True,
