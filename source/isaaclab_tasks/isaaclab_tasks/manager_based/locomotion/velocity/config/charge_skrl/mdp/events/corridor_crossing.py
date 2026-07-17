@@ -17,21 +17,18 @@ touching any env state — byte-for-byte identical to baseline training.
 
 from __future__ import annotations
 
-import os
-import sys
-
 import torch
 
-# Resolve the obstacle_agent package (lives in scripts/…/skrl/, not installed).
-# Match the same pattern used by rule_behaviors.py and behavior_scheduler.py.
-_skrl_dir = os.path.join(os.path.dirname(__file__), "../../../../../../scripts/reinforcement_learning/skrl")
-_skrl_dir = os.path.abspath(_skrl_dir)
-if _skrl_dir not in sys.path:
-    sys.path.insert(0, _skrl_dir)
-
-from obstacle_agent.behavior_config import BEHAVIOR_HORIZONTAL_CROSSING  # noqa: E402
-
 from . import corridor_crossing_geometry as g
+
+# NOTE: BEHAVIOR_HORIZONTAL_CROSSING lives in the scripts-tree package
+# ``obstacle_agent`` (not installed). Importing it at module load would run
+# during ``import isaaclab_tasks`` package registration — BEFORE launchers like
+# play_rnn_car.py add scripts/…/skrl to sys.path — and break the whole import.
+# It is imported lazily inside setup_corridor_crossing() instead, where it is
+# only reached when the injector actually fires (fraction > 0), by which point
+# the env is running and skrl/ is on sys.path. Keeps fraction=0.0 truly
+# baseline-safe: module load never touches obstacle_agent.
 
 # Native mesh lengths of wall slots 0 and 1 (WALL_SLOT_SPECS in wall_layout.py).
 # Slot 0 length=4.0m, slot 1 length=3.0m — match the cuboid sizes at scene init.
@@ -139,6 +136,10 @@ def setup_corridor_crossing(
     # -------------------------------------------------------------------------
     sched = getattr(env.unwrapped, "_behavior_scheduler", None)
     if sched is not None:
+        # Lazy import: obstacle_agent is a scripts-tree package only on sys.path
+        # once a launcher has started the env (see module NOTE above).
+        from obstacle_agent.behavior_config import BEHAVIOR_HORIZONTAL_CROSSING
+
         # Local Y in front of robot: robot is at -corridor_half_len, so add crossing_ahead.
         cross_y = -corridor_half_len + crossing_ahead
         sched.behavior_type[sel, ped_slot] = BEHAVIOR_HORIZONTAL_CROSSING
