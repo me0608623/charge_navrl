@@ -15,6 +15,8 @@ import torch
 class ControlledBlockerSpec:
     goal_x: float = 6.0
     blocker_x: float = 1.8
+    blocker_y_max: float = 1.0   # uniform sample in [-blocker_y_max, +blocker_y_max]
+    dynamic_ratio: float = 0.5   # fraction of envs where blocker moves (0 = all static)
     corridor_clear_width: float = 4.0
     wall_width: float = 1.0
     outer_wall_length: float = 3.0
@@ -27,7 +29,8 @@ class ControlledBlockerSpec:
 
     @property
     def side_clearance(self) -> float:
-        return 0.5 * self.corridor_clear_width - self.blocker_radius
+        # worst-case: blocker pushed to blocker_y_max
+        return 0.5 * self.corridor_clear_width - self.blocker_radius - self.blocker_y_max
 
 
 def corridor_geometry(n: int, spec: ControlledBlockerSpec, device):
@@ -67,15 +70,17 @@ def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=
     goal_cfg.ranges.distance = (spec.goal_x, spec.goal_x)
     goal_cfg.ranges.angle = (0.0, 0.0)
 
+    # static_ratio + dynamic_ratio must sum to 1.0; we control exact mixing per-env at reset
     for event_name in ("randomize_obstacles", "randomize_obstacles_startup"):
         event = getattr(env_cfg.events, event_name, None)
         if event is not None:
+            n_dyn = 1 if spec.dynamic_ratio > 0.0 else 0
             event.params.update({
                 "empty_ratio": 0.0,
-                "static_ratio": 1.0,
-                "dynamic_ratio": 0.0,
+                "static_ratio": 1.0 - spec.dynamic_ratio,
+                "dynamic_ratio": spec.dynamic_ratio,
                 "num_obstacles_static": 1,
-                "num_obstacles_dynamic": 0,
+                "num_obstacles_dynamic": n_dyn,
             })
 
     wall_event = getattr(env_cfg.events, "randomize_wall_positions", None)
@@ -173,18 +178,35 @@ class ControlledBlockerController:
 
     def _place_blocker(self, env_ids: torch.Tensor) -> None:
         origins = self.env.scene.env_origins[env_ids]
-        pose = torch.zeros(len(env_ids), 7, device=self.device)
+        n = len(env_ids)
+
+        # random lateral offset: Uniform[-blocker_y_max, +blocker_y_max]
+        rand_y = (torch.rand(n, device=self.device) * 2.0 - 1.0) * self.spec.blocker_y_max
+
+        pose = torch.zeros(n, 7, device=self.device)
         pose[:, 0] = origins[:, 0] + self.spec.blocker_x
-        pose[:, 1] = origins[:, 1]
+        pose[:, 1] = origins[:, 1] + rand_y
         pose[:, 2] = 0.9
         pose[:, 3] = 1.0
-        velocity = torch.zeros(len(env_ids), 6, device=self.device)
+
+        # static or slow patrol depending on dynamic_ratio
+        velocity = torch.zeros(n, 6, device=self.device)
+        if self.spec.dynamic_ratio > 0.0:
+            is_dynamic = torch.rand(n, device=self.device) < self.spec.dynamic_ratio
+            # slow lateral patrol speed ±0.3 m/s, direction random
+            lateral_v = (torch.randint(0, 2, (n,), device=self.device).float() * 2.0 - 1.0) * 0.3
+            velocity[:, 1] = torch.where(is_dynamic, lateral_v, torch.zeros(n, device=self.device))
+
         obstacle = self.env.scene["obstacle_0"]
         obstacle.write_root_pose_to_sim(pose, env_ids=env_ids)
         obstacle.write_root_velocity_to_sim(velocity, env_ids=env_ids)
 
         if self.scheduler is not None:
             self.scheduler.positions[env_ids, 0, 0] = self.spec.blocker_x
-            self.scheduler.positions[env_ids, 0, 1] = 0.0
-            self.scheduler.velocities[env_ids, 0] = 0.0
+            self.scheduler.positions[env_ids, 0, 1] = rand_y
+            # static envs keep velocity 0; dynamic envs keep lateral_v set above
+            if self.spec.dynamic_ratio > 0.0:
+                self.scheduler.velocities[env_ids, 0] = velocity[:, 1]
+            else:
+                self.scheduler.velocities[env_ids, 0] = 0.0
 
