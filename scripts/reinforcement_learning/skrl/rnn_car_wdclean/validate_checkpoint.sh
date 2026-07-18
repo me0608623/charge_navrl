@@ -50,13 +50,13 @@ for SD in 101 202 303; do
     --obs_near_goal_count 0 --seed "$SD"
 done
 
-# Gate #3: 擋路場（單障礙放在 robot→goal 線上 1.8m，goal 在其後）+ dump
-# 不使用 obs_near_goal：它可能把障礙放進 goal 可達區，製造不可解場景。
+# Gate #3: 受控可解擋路場。外牆內表面間距 4.0m，中央 blocker 左右各留
+# 1.65m；第三面平行牆封一側，依 env 50:50 左右鏡像。
 DUMP="$OUT/blk_dump.npz"
 _play "$OUT/blk.log" \
   --stage "$STAGE" --arena_size "$A" --num_static_obs "$S" --num_dynamic_obs "$D" \
   --goal_distance_min 5 --goal_distance_max 9 --obs_near_goal_count 0 \
-  --path_blocker_count 1 --path_blocker_distance 1.8 --seed 42
+  --controlled_blocker_eval --seed 42
 DUMP=""
 
 # Gate #4: SA(N+1) preview (不訓練,直接丟下一階段場)

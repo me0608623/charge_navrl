@@ -81,27 +81,44 @@ assert (sched.behavior_type[:, 0] == BEHAVIOR_PATH_CROSSING).all(), (
     "SMOKE FAIL: ped slot 0 not set to BEHAVIOR_PATH_CROSSING"
 )
 
-# Pedestrian should move +x after a few steps.
-x0 = sched.positions[:, 0, 0].clone()
-for _ in range(5):
-    sched.step(u, dt=0.2)
+# Check the complete production path. Calling sched.step() directly is not a
+# valid smoke test: it bypasses collision termination and auto-reset, which can
+# silently replace an injected pedestrian before its first movement step.
+robot_local = u.scene["robot"].data.root_pos_w[:, :2] - u.scene.env_origins[:, :2]
+other_active = sched.behavior_type[:, 1:] != 0
+other_dist = torch.linalg.vector_norm(sched.positions[:, 1:] - robot_local[:, None, :], dim=-1)
+other_dist = torch.where(other_active, other_dist, torch.full_like(other_dist, float("inf")))
+min_other_clearance = other_dist.amin(dim=1)
 
-assert (sched.positions[:, 0, 0] > x0).all(), (
-    "SMOKE FAIL: pedestrian did not move +x (BehaviorScheduler may reset before injector)"
+x0 = sched.positions[:, 0, 0].clone()
+alive = torch.ones(NUM_ENVS, dtype=torch.bool, device=u.device)
+x_history = [x0.clone()]
+actions = torch.zeros(NUM_ENVS, 2, device=u.device)
+for _ in range(20):
+    _, _, terminated, truncated, _ = env.step(actions)
+    alive &= ~(terminated | truncated)
+    x_history.append(sched.positions[:, 0, 0].clone())
+
+x_history = torch.stack(x_history)
+print(
+    "[SMOKE-CORRIDOR] "
+    f"survived={int(alive.sum())}/{NUM_ENVS} "
+    f"min_other_clearance={min_other_clearance.min().item():.3f}m "
+    f"x0={x_history[0].tolist()} x5={x_history[5].tolist()} x20={x_history[-1].tolist()}",
+    flush=True,
 )
 
-# It must finish once on the far side and report zero actual velocity. A
-# repeating horizontal-crossing state machine would be pinned by the right wall
-# while retaining a false non-zero velocity, corrupting future-occupancy reward.
-for _ in range(15):
-    sched.step(u, dt=0.2)
-
+assert alive.all(), (
+    "SMOKE FAIL: an injected corridor env terminated/reset before the pedestrian completed; "
+    "check robot clearance from untouched obstacle slots"
+)
+assert (x_history[5] > x0).all(), "SMOKE FAIL: pedestrian did not move +x through env.step()"
 assert sched.pc_done[:, 0].all(), "SMOKE FAIL: corridor pedestrian never completed its crossing"
 assert (sched.positions[:, 0, 0] > 0.9).all(), "SMOKE FAIL: pedestrian did not cross robot path"
 assert (sched.velocities[:, 0].norm(dim=-1) == 0.0).all(), (
     "SMOKE FAIL: completed pedestrian retained a false scheduler velocity"
 )
 
-print("SMOKE PASS: corridor walls + one-shot crossing + zero terminal velocity confirmed")
+print("SMOKE PASS: production env.step corridor crossing + survival confirmed")
 env.close()
 app.close()

@@ -208,6 +208,8 @@ parser.add_argument("--near_wall_crossing_probe_output", type=str, default="",
                     help="保存 policy 實際 K 幀 LiDAR 與 crossing/wall labels 的 NPZ；自動解耦牆側與橫越方向")
 parser.add_argument("--near_wall_crossing_probe_stationary", action="store_true", default=False,
                     help="observability probe 專用：固定車體，消除 policy 軌跡與 crossing label 的位置捷徑")
+parser.add_argument("--controlled_blocker_eval", action="store_true", default=False,
+                    help="Gate3 專用：4m 通道、中央 blocker、左右鏡像封側的 deterministic 可解場")
 
 # --- Reward 模式（消融實驗用） ---
 parser.add_argument("--reward_mode", type=str, default="current",
@@ -2445,6 +2447,14 @@ def main():
         else:
             apply_arena_size(env_cfg, args_cli.arena_size)
 
+    if args_cli.controlled_blocker_eval:
+        from controlled_blocker_eval import configure_controlled_blocker_env
+        configure_controlled_blocker_env(env_cfg, scene_final, args_cli)
+        print(
+            "[PLAY] Gate3 controlled blocker: wall inner spacing=4.0m, blocker=(+1.8,0), "
+            "side clearance=1.65m, closed side mirrored 50:50"
+        )
+
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
     if args_cli.usd_scene:
         apply_usd_scene(env_cfg, args_cli.usd_scene)
@@ -2986,6 +2996,16 @@ def main():
             "[D-EVAL] 場景已固定；desired turn: right→left crossing => ω<0，"
             "left→right crossing => ω>0"
         )
+    _controlled_blocker_controller = None
+    if args_cli.controlled_blocker_eval:
+        from controlled_blocker_eval import ControlledBlockerController
+        _controlled_blocker_controller = ControlledBlockerController(
+            raw_env=raw_env,
+            scheduler=_play_behavior_scheduler,
+        )
+        _controlled_blocker_controller.reset()
+        obs = raw_env.observation_manager.compute()
+        _play_goal_mover = None
     episode_reward = torch.zeros(raw_env.num_envs, device=device)     # 累積回合獎勵
     episode_step = torch.zeros(raw_env.num_envs, dtype=torch.long, device=device)  # 回合步數
     episode_speed_sum = torch.zeros(raw_env.num_envs, device=device)   # 累積線速度 |v|（算平均）
@@ -3601,7 +3621,8 @@ def main():
             _near_wall_controller.advance()
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
         # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
-        if _play_behavior_scheduler is not None and _near_wall_controller is None:
+        if (_play_behavior_scheduler is not None and _near_wall_controller is None
+                and _controlled_blocker_controller is None):
             if int(episode_step[0].item()) > 3:
                 _play_behavior_scheduler.step(raw_env, dt=step_dt)
         # Goal movement 每步移動 goal（與訓練一致）
@@ -4002,6 +4023,15 @@ def main():
             if _near_wall_controller is not None:
                 _near_wall_controller.reset(done_ids)
                 # Auto-reset observation was computed before deterministic placement.
+                _fresh_obs = raw_env.observation_manager.compute()
+                if isinstance(next_obs, dict):
+                    for _obs_key, _obs_value in _fresh_obs.items():
+                        next_obs[_obs_key][done_ids] = _obs_value[done_ids]
+                else:
+                    next_obs[done_ids] = _fresh_obs[done_ids]
+            if _controlled_blocker_controller is not None:
+                _controlled_blocker_controller.reset(done_ids)
+                # Auto-reset observations still describe the discarded random scene.
                 _fresh_obs = raw_env.observation_manager.compute()
                 if isinstance(next_obs, dict):
                     for _obs_key, _obs_value in _fresh_obs.items():

@@ -157,7 +157,22 @@ def setup_corridor_crossing(
     if sched is not None:
         # Lazy import: obstacle_agent is a scripts-tree package only on sys.path
         # once a launcher has started the env (see module NOTE above).
-        from obstacle_agent.behavior_config import BEHAVIOR_PATH_CROSSING
+        from obstacle_agent.behavior_config import BEHAVIOR_INACTIVE, BEHAVIOR_PATH_CROSSING
+
+        # The scheduler already spawned the stage's normal obstacle set before
+        # this reset event runs. Moving the robot to the corridor mouth while
+        # leaving those obstacles in place can create an immediate geometric
+        # collision, auto-resetting the env before the pedestrian moves. Make
+        # the injected corridor a self-contained trap: retain only ped_slot.
+        for slot in range(sched.max_obstacles):
+            if slot == ped_slot:
+                continue
+            sched.behavior_type[sel, slot] = BEHAVIOR_INACTIVE
+            sched.positions[sel, slot] = 0.0
+            sched.velocities[sel, slot] = 0.0
+            sched.phase_timer[sel, slot] = 0
+            sched.pc_velocity[sel, slot] = 0.0
+            sched.pc_done[sel, slot] = True
 
         # Local Y in front of robot: robot is at -corridor_half_len, so add crossing_ahead.
         cross_y = -corridor_half_len + crossing_ahead
@@ -186,6 +201,11 @@ def setup_corridor_crossing(
         sched.pc_travel_dist[sel, ped_slot] = ped_stop_x - ped_start_x
         sched.pc_activation_delay[sel, ped_slot] = 0
         sched.pc_done[sel, ped_slot] = False
+
+        # Synchronize scheduler state to PhysX immediately. Without this write,
+        # termination checks still see the pre-injection random obstacle poses
+        # until the first interval event and can reset a valid corridor scene.
+        sched._write_positions_to_sim(env)
 
     # First-fire GEOMETRY dump (once per process) — read back the direct-written
     # tensors for the first corridor env so the placed scene can be numerically
