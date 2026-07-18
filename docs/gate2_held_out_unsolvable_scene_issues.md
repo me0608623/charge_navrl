@@ -56,7 +56,7 @@ num_active = torch.randint(min_walls, max_walls + 1, (N,))  # 每 env 2~5 道內
 |---|-----------|------|------|------|
 | 1 | `goal_command.py:389` | fallback goal 貼障礙不可達 | 接受門檻 `best_min_clearance` 0→0.45（碰撞門檻），貼障礙候選走 else 兜底 | **✅ 已修 push 696709a** |
 | 2 | ~~room 太小~~ | 查證推翻：room_size 7 = **14×14m**（半邊長），對 16 障礙合理 | — | ~~推翻~~ |
-| 3 | `walls.py:78-79`（held-out gate 牆數） | 每 env 2~5 內牆切割空間 + 走廊形狀 = 死路（**用戶點名主因**）| 降 SA6 max_walls（如 2~3）或內牆與障礙共用可行性檢查；**★先確認部署環境有無這些牆** | ★升主凶，待 Codex |
+| 3 | `wd_single_agent_v3.py` SA6 scene（walls_max=3, wall_length 4.0~4.5m；vdec/vdec2/deploy/e2e 全鏈繼承未改）| 最多 3 道但**每道長 4.5m**（佔 14×14 房間 1/3 邊長）+ 16 障礙 + 走廊形狀 = 死路（**用戶點名主因**；部署有牆但少）| 降 walls_max 3→1~2 + 縮 wall_length 4.5→~3m。★改 frozen curriculum = 破壞 SA1→SA8 血緣需重訓 = Codex/用戶重大決策 | ★升主凶，待 Codex 決策 |
 | 4 | goal_dist 約束（`goal_command.py:288,313`）| goal 若採到障礙密集環（dist 3~5m 落 ±5 障礙區）難放 | goal_dist 偏障礙區外環，或密場景放寬約束 | 中 |
 
 ## 決定性一步
