@@ -1,4 +1,8 @@
-"""Deterministic, solvable blocker-with-wall scene for promotion Gate 3."""
+"""Deterministic, solvable blocker-with-corridor scene for promotion Gate 3.
+
+Two outer walls (slot 1 = +y, slot 7 = −y) create a 4.0 m symmetric corridor.
+The blocker sits at x=1.8 m on the centre line; both sides offer 1.65 m clearance.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,6 @@ class ControlledBlockerSpec:
     corridor_clear_width: float = 4.0
     wall_width: float = 1.0
     outer_wall_length: float = 3.0
-    pressure_wall_length: float = 4.0
     robot_radius: float = 0.35
     blocker_radius: float = 0.35
 
@@ -26,46 +29,33 @@ class ControlledBlockerSpec:
     def side_clearance(self) -> float:
         return 0.5 * self.corridor_clear_width - self.blocker_radius
 
-    @property
-    def pressure_wall_y(self) -> float:
-        # Its inner face overlaps the blocker by 5 cm, closing exactly one side.
-        return self.blocker_radius + 0.5 * self.wall_width - 0.05
 
-    @property
-    def pressure_wall_x(self) -> float:
-        # The wall starts at the blocker centre and extends toward the goal.
-        return self.blocker_x + 0.5 * self.pressure_wall_length
-
-
-def mirrored_geometry(env_ids: torch.Tensor, spec: ControlledBlockerSpec):
-    """Return local wall geometry; even envs close left, odd envs close right."""
-    closed_sign = torch.where(env_ids % 2 == 0, 1.0, -1.0)
-    n = env_ids.numel()
-    centers = torch.zeros(n, 3, 2, device=env_ids.device)
+def corridor_geometry(n: int, spec: ControlledBlockerSpec, device):
+    """Return local wall geometry for the symmetric two-wall corridor."""
+    centers = torch.zeros(n, 2, 2, device=device)
     sizes = torch.zeros_like(centers)
 
+    # slot 1: outer wall at +y
     centers[:, 0, 0] = spec.blocker_x
     centers[:, 0, 1] = spec.outer_wall_y
+    # slot 7: outer wall at −y
     centers[:, 1, 0] = spec.blocker_x
     centers[:, 1, 1] = -spec.outer_wall_y
-    centers[:, 2, 0] = spec.pressure_wall_x
-    centers[:, 2, 1] = closed_sign * spec.pressure_wall_y
+
     sizes[:, 0:2, 0] = spec.outer_wall_length
     sizes[:, 0:2, 1] = spec.wall_width
-    sizes[:, 2, 0] = spec.pressure_wall_length
-    sizes[:, 2, 1] = spec.wall_width
-    return closed_sign, centers, sizes
+    return centers, sizes
 
 
 def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=None) -> None:
-    """Remove random scene factors and reserve three wall slots plus one blocker."""
+    """Remove random scene factors and reserve two corridor walls plus one blocker."""
     spec = spec or ControlledBlockerSpec()
     scene_final.update({
         "num_goals": 1,
         "num_static": 1,
         "num_dynamic": 0,
-        "walls_min": 3,
-        "walls_max": 3,
+        "walls_min": 2,
+        "walls_max": 2,
         "goal_dist_min": spec.goal_x,
         "goal_dist_max": spec.goal_x,
     })
@@ -90,7 +80,7 @@ def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=
 
     wall_event = getattr(env_cfg.events, "randomize_wall_positions", None)
     if wall_event is not None:
-        wall_event.params.update({"min_walls": 3, "max_walls": 3})
+        wall_event.params.update({"min_walls": 2, "max_walls": 2})
 
     reset_event = getattr(env_cfg.events, "reset_base", None)
     if reset_event is not None:
@@ -100,19 +90,16 @@ def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=
         for key in ("x", "y", "z", "roll", "pitch", "yaw"):
             velocity_range[key] = (0.0, 0.0)
 
-    # Slots 1 and 7 have identical 3 m meshes; slot 0 is the 4 m pressure wall.
-    for slot, size in ((1, (spec.outer_wall_length, spec.wall_width, 3.0)),
-                       (7, (spec.outer_wall_length, spec.wall_width, 3.0)),
-                       (0, (spec.pressure_wall_length, spec.wall_width, 3.0))):
+    for slot in (1, 7):
         wall_cfg = getattr(env_cfg.scene, f"wall_internal_{slot}", None)
         if wall_cfg is not None:
-            wall_cfg.spawn.size = size
+            wall_cfg.spawn.size = (spec.outer_wall_length, spec.wall_width, 3.0)
 
 
 class ControlledBlockerController:
-    """Own fixed robot, goal, blocker, and mirrored wall placement across resets."""
+    """Own fixed robot, goal, blocker, and symmetric corridor wall placement across resets."""
 
-    WALL_SLOTS = (1, 7, 0)
+    WALL_SLOTS = (1, 7)
 
     def __init__(self, raw_env, scheduler=None, spec=None) -> None:
         self.env = raw_env
@@ -158,7 +145,7 @@ class ControlledBlockerController:
 
     def _place_walls(self, env_ids: torch.Tensor) -> None:
         origins = self.env.scene.env_origins[env_ids]
-        _, centers, sizes = mirrored_geometry(env_ids, self.spec)
+        centers, sizes = corridor_geometry(len(env_ids), self.spec, self.device)
         active = set(self.WALL_SLOTS)
         hidden_z = -10.0
 
