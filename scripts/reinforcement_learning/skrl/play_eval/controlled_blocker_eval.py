@@ -1,7 +1,9 @@
 """Deterministic, solvable blocker-with-corridor scene for promotion Gate 3.
 
-Two outer walls (slot 1 = +y, slot 7 = −y) create a 4.0 m symmetric corridor.
-The blocker sits at x=1.8 m on the centre line; both sides offer 1.65 m clearance.
+Two full-length outer walls (slot 1 = +y, slot 7 = −y) create a 4.0 m-wide symmetric
+corridor that spans the whole start→goal path, so the robot cannot escape around the
+wall ends and must pass the blocker inside the corridor. The blocker sits at x=1.8 m
+and resamples its lateral offset every episode.
 """
 
 from __future__ import annotations
@@ -19,9 +21,15 @@ class ControlledBlockerSpec:
     dynamic_ratio: float = 0.5   # fraction of envs where blocker moves (0 = all static)
     corridor_clear_width: float = 4.0
     wall_width: float = 1.0
-    outer_wall_length: float = 3.0
+    corridor_length: float = 12.0   # wall x-length = deployment room size, so the robot
+                                    # cannot escape around the wall ends (must pass in-corridor)
     robot_radius: float = 0.35
     blocker_radius: float = 0.35
+
+    @property
+    def corridor_center_x(self) -> float:
+        # Walls span the whole start→goal path, centred at its midpoint.
+        return 0.5 * self.goal_x
 
     @property
     def outer_wall_y(self) -> float:
@@ -38,16 +46,29 @@ def corridor_geometry(n: int, spec: ControlledBlockerSpec, device):
     centers = torch.zeros(n, 2, 2, device=device)
     sizes = torch.zeros_like(centers)
 
-    # slot 1: outer wall at +y
-    centers[:, 0, 0] = spec.blocker_x
+    # slot 1: outer wall at +y, spanning the whole corridor (start→goal)
+    centers[:, 0, 0] = spec.corridor_center_x
     centers[:, 0, 1] = spec.outer_wall_y
     # slot 7: outer wall at −y
-    centers[:, 1, 0] = spec.blocker_x
+    centers[:, 1, 0] = spec.corridor_center_x
     centers[:, 1, 1] = -spec.outer_wall_y
 
-    sizes[:, 0:2, 0] = spec.outer_wall_length
+    sizes[:, 0:2, 0] = spec.corridor_length
     sizes[:, 0:2, 1] = spec.wall_width
     return centers, sizes
+
+
+def dynamic_env_mask(env_ids: torch.Tensor, num_envs: int, ratio: float) -> torch.Tensor:
+    """Allocate an exact, stable fraction of global env IDs to dynamic blockers."""
+    cutoff = int(round(ratio * num_envs))
+    return env_ids < cutoff
+
+
+def spec_from_cli(cli_args) -> ControlledBlockerSpec:
+    return ControlledBlockerSpec(
+        blocker_y_max=float(cli_args.controlled_blocker_y_max),
+        dynamic_ratio=float(cli_args.controlled_blocker_dynamic_ratio),
+    )
 
 
 def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=None) -> None:
@@ -70,17 +91,17 @@ def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=
     goal_cfg.ranges.distance = (spec.goal_x, spec.goal_x)
     goal_cfg.ranges.angle = (0.0, 0.0)
 
-    # static_ratio + dynamic_ratio must sum to 1.0; we control exact mixing per-env at reset
+    # The eval controller owns motion. Keep the environment obstacle static so a
+    # BehaviorScheduler cannot apply a second, conflicting motion update.
     for event_name in ("randomize_obstacles", "randomize_obstacles_startup"):
         event = getattr(env_cfg.events, event_name, None)
         if event is not None:
-            n_dyn = 1 if spec.dynamic_ratio > 0.0 else 0
             event.params.update({
                 "empty_ratio": 0.0,
-                "static_ratio": 1.0 - spec.dynamic_ratio,
-                "dynamic_ratio": spec.dynamic_ratio,
+                "static_ratio": 1.0,
+                "dynamic_ratio": 0.0,
                 "num_obstacles_static": 1,
-                "num_obstacles_dynamic": n_dyn,
+                "num_obstacles_dynamic": 0,
             })
 
     wall_event = getattr(env_cfg.events, "randomize_wall_positions", None)
@@ -98,7 +119,7 @@ def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=
     for slot in (1, 7):
         wall_cfg = getattr(env_cfg.scene, f"wall_internal_{slot}", None)
         if wall_cfg is not None:
-            wall_cfg.spawn.size = (spec.outer_wall_length, spec.wall_width, 3.0)
+            wall_cfg.spawn.size = (spec.corridor_length, spec.wall_width, 3.0)
 
 
 class ControlledBlockerController:
@@ -112,6 +133,13 @@ class ControlledBlockerController:
         self.device = raw_env.device
         self.num_envs = raw_env.num_envs
         self.spec = spec or ControlledBlockerSpec()
+        if not 0.0 <= self.spec.dynamic_ratio <= 1.0:
+            raise ValueError("dynamic_ratio must be within [0, 1]")
+        if self.spec.blocker_y_max < 0.0:
+            raise ValueError("blocker_y_max must be non-negative")
+        self.blocker_y = torch.zeros(self.num_envs, device=self.device)
+        self.blocker_vy = torch.zeros(self.num_envs, device=self.device)
+        self._motion_logged = False
 
     def reset(self, env_ids=None) -> None:
         if env_ids is None:
@@ -124,6 +152,28 @@ class ControlledBlockerController:
         self._place_robot_goal(env_ids)
         self._place_walls(env_ids)
         self._place_blocker(env_ids)
+
+    def advance(self) -> None:
+        """Advance the controlled patrol and reflect at the guaranteed-safe bounds."""
+        moving = self.blocker_vy != 0.0
+        if not moving.any():
+            return
+        previous_y = self.blocker_y.clone()
+        next_y = self.blocker_y + self.blocker_vy * self.env.step_dt
+        upper = next_y > self.spec.blocker_y_max
+        lower = next_y < -self.spec.blocker_y_max
+        reflected = upper | lower
+        self.blocker_vy[reflected] *= -1.0
+        self.blocker_y = next_y.clamp(-self.spec.blocker_y_max, self.spec.blocker_y_max)
+        self._write_blocker(torch.arange(self.num_envs, device=self.device))
+        if not self._motion_logged:
+            self._motion_logged = True
+            delta = (self.blocker_y - previous_y).abs()
+            print(
+                f"[GATE3] controller patrol active: dynamic={int(moving.sum())}/{self.num_envs}, "
+                f"speed=0.30m/s, first_step_max_dy={float(delta.max()):.3f}m",
+                flush=True,
+            )
 
     def _place_robot_goal(self, env_ids: torch.Tensor) -> None:
         origins = self.env.scene.env_origins[env_ids]
@@ -177,36 +227,29 @@ class ControlledBlockerController:
                 self.env._maze_wall_sizes[env_ids, slot] = sizes[:, geometry_idx]
 
     def _place_blocker(self, env_ids: torch.Tensor) -> None:
-        origins = self.env.scene.env_origins[env_ids]
         n = len(env_ids)
 
         # random lateral offset: Uniform[-blocker_y_max, +blocker_y_max]
         rand_y = (torch.rand(n, device=self.device) * 2.0 - 1.0) * self.spec.blocker_y_max
 
+        self.blocker_y[env_ids] = rand_y
+        # Exact deterministic allocation: for ratio=0.5, 32 of 64 envs are
+        # dynamic. Membership is stable; direction is resampled every episode.
+        is_dynamic = dynamic_env_mask(env_ids, self.num_envs, self.spec.dynamic_ratio)
+        direction = torch.randint(0, 2, (n,), device=self.device).float() * 2.0 - 1.0
+        self.blocker_vy[env_ids] = torch.where(is_dynamic, direction * 0.3, torch.zeros_like(direction))
+        self._write_blocker(env_ids)
+
+    def _write_blocker(self, env_ids: torch.Tensor) -> None:
+        origins = self.env.scene.env_origins[env_ids]
+        n = len(env_ids)
         pose = torch.zeros(n, 7, device=self.device)
         pose[:, 0] = origins[:, 0] + self.spec.blocker_x
-        pose[:, 1] = origins[:, 1] + rand_y
+        pose[:, 1] = origins[:, 1] + self.blocker_y[env_ids]
         pose[:, 2] = 0.9
         pose[:, 3] = 1.0
-
-        # static or slow patrol depending on dynamic_ratio
         velocity = torch.zeros(n, 6, device=self.device)
-        if self.spec.dynamic_ratio > 0.0:
-            is_dynamic = torch.rand(n, device=self.device) < self.spec.dynamic_ratio
-            # slow lateral patrol speed ±0.3 m/s, direction random
-            lateral_v = (torch.randint(0, 2, (n,), device=self.device).float() * 2.0 - 1.0) * 0.3
-            velocity[:, 1] = torch.where(is_dynamic, lateral_v, torch.zeros(n, device=self.device))
-
+        velocity[:, 1] = self.blocker_vy[env_ids]
         obstacle = self.env.scene["obstacle_0"]
         obstacle.write_root_pose_to_sim(pose, env_ids=env_ids)
         obstacle.write_root_velocity_to_sim(velocity, env_ids=env_ids)
-
-        if self.scheduler is not None:
-            self.scheduler.positions[env_ids, 0, 0] = self.spec.blocker_x
-            self.scheduler.positions[env_ids, 0, 1] = rand_y
-            # static envs keep velocity 0; dynamic envs keep lateral_v set above
-            if self.spec.dynamic_ratio > 0.0:
-                self.scheduler.velocities[env_ids, 0] = velocity[:, 1]
-            else:
-                self.scheduler.velocities[env_ids, 0] = 0.0
-
