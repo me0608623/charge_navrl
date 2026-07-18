@@ -1,0 +1,99 @@
+name: e2e_sa3_fsppo_clean
+description: "SA3 warm start from the deterministic-accepted SA2 checkpoint: first dynamic-obstacle stage with the accepted 4-frame LiDAR CNN, clean_progress reward, symmetric critic, and standard PPO."
+
+# Environment / curriculum
+task: Isaac-Navigation-Charge-VLP16-Curriculum-WD
+curriculum_version: warp_drive_e2e_final20_v1
+initial_stage: 3
+fixed_stage: true
+scene_profile: warp_drive_e2e_final20_v1
+obstacle_mode: rule_based
+room_size: 8.5
+max_active_obstacles: 20
+
+# Information flow: unchanged from accepted SA2
+reward_profile: clean_progress
+algorithm: ppo
+aux_profile: none
+encoder_profile: e2e_frame_stack
+critic_profile: symmetric
+charge_encoder_mode: extractor_rnn
+lidar_frame_stack: 4
+end_to_end_frame_stack: true
+feat_norm: false
+
+# Training budget
+num_envs: 1024
+rollout_length: 128
+timesteps: 270000
+seed: 42
+
+# Standard PPO
+lr: 0.0002
+rnn_lr: 0.0
+aux_lr: 0.0
+aux_lr_predict_head: 0.0
+aux_lr_fc_middle: 0.0
+aux_lr_fc_front: 0.0
+aux_lr_extractor: 0.0
+vf_coeff: 0.5
+gamma: 0.99
+gae_lambda: 0.95
+normalize_return: false
+adv_norm_mode: full
+value_init_bias: 0.0
+max_grad_norm: 0.5
+ppo_epochs: 4
+mini_batches: 8
+clip_eps: 0.2
+target_kl: 0.015
+value_clip_eps: 0.2
+
+# Keep exploration fixed so stage synchronization cannot change the stage contract
+ent_coeff: 0.0
+ent_coeff_linear: 0.005
+ent_coeff_angular: 0.005
+
+# Disable legacy WD update rules; use one global gradient clip
+wd_update_clip: false
+wd_update_monitor_only: false
+wd_actor_update_clip: 8.0
+wd_critic_update_clip: 30.0
+wd_module_entropy_eps: 0.000000000001
+policy_loss_clamp: 1000000000.0
+vf_term_clamp: 1000000000.0
+
+# Legacy modules are instantiated only for checkpoint compatibility and never used
+hidden_dim: 30
+preprocess_dim: 12
+fc_dim: 48
+wd_middle_dim: 32
+rnn_type: RNN
+predict_dim: 7
+aux_velocity_topk: 0
+aux_seq_len: 15
+aux_burn_in: 0
+aux_seq_batch_size: 64
+aux_grad_clip: 0.5
+zero_preprocess_feature_for_rl: false
+
+# Keep SA3 clean; actuator/sensor DR remains reserved for the accepted DR bridge
+lidar_no_noise: true
+lidar_distance_bias: false
+lidar_per_ring_bias: false
+no_domain_randomization: true
+enable_actuator_dr: false
+obs_delay_steps: [0, 0]
+heading_stability_weight: 0.0
+
+# Runtime
+reward_speed_v05: false
+reward_mode: current
+action_table_sample_size: 0
+log_interval: 10
+save_interval: 100
+checkpoint: logs/rnn_car/sa2_e2e_fs4_cleanppo_from_sa1c25600_ne1024_s42/checkpoint_12800.pt
+no_resume_optimizer: true
+
+tags: [e2e, frame_stack4, ppo, clean_progress, sa3, warm_start, first_dynamic, final20]
+notes: "Warm-start only from deterministic-accepted SA2 checkpoint_12800. Architecture, reward, PPO weights, and clean simulation contract remain fixed; Stage 3 changes the scene to 17x17m with 6 static and 1 dynamic obstacle."
