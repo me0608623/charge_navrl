@@ -387,7 +387,12 @@ class GoalCommand(CommandTerm):
             n_failed = needs_resample.sum().item()
             failed_envs = needs_resample
             # 使用歷史最佳候選（離障礙物最遠且不在牆壁內的位置）
-            has_best = failed_envs & (best_min_clearance >= 0)
+            # ★修(07-18): 門檻 0→0.45(=body_radius 0.35 + buffer 0.10 = 碰撞門檻)。舊 >=0 只保證
+            #   goal 不在障礙「內」,但貼著障礙表面(clearance 0~0.45)機器人物理上站不進去 → goal
+            #   不可達 = held-out CR 假陽性 + 訓練學亂撞(用戶 seed303 實測)。改後貼障礙候選改走下方
+            #   else 兜底(trivial 但可達,較輕污染);根本解仍需降密度/擴 room(見 docs issue 清單)。
+            _GOAL_MIN_REACHABLE_CLEARANCE = 0.45
+            has_best = failed_envs & (best_min_clearance >= _GOAL_MIN_REACHABLE_CLEARANCE)
             best_clr = best_min_clearance[has_best].min().item() if has_best.any() else -1
             print(f"[WARN] Goal resample fallback: {n_failed}/{num_envs} envs "
                   f"failed after {max_attempts} attempts. "
