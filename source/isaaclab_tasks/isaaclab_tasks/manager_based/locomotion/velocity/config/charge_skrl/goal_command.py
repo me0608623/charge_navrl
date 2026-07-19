@@ -311,6 +311,40 @@ class GoalCommand(CommandTerm):
         else:
             required_distances = None
 
+        def evaluate_candidates(candidate_goals: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            """Return strict validity, obstacle clearance, and fallback eligibility."""
+            within_walls = (
+                (candidate_goals[:, 0].abs() < valid_boundary_x)
+                & (candidate_goals[:, 1].abs() < valid_boundary_y)
+            )
+
+            if all_obstacles is not None:
+                distances_to_obstacle_centers = masked_obstacle_distances(
+                    candidate_goals, all_obstacles, all_obstacle_visibility
+                )
+                if required_distances is not None:
+                    clear_of_obstacles = (distances_to_obstacle_centers > required_distances).all(dim=1)
+                else:
+                    conservative_distance = obstacle_safe_distance + 0.5
+                    clear_of_obstacles = distances_to_obstacle_centers.min(dim=1)[0] > conservative_distance
+
+                clearance_distances = distances_to_obstacle_centers
+                if all_obstacle_radii is not None:
+                    clearance_distances = clearance_distances - all_obstacle_radii.unsqueeze(0)
+                min_clearance = clearance_distances.min(dim=1).values
+            else:
+                clear_of_obstacles = torch.ones(num_envs, device=self.device, dtype=torch.bool)
+                min_clearance = torch.full((num_envs,), 999.0, device=self.device)
+
+            dist_to_robot = torch.norm(candidate_goals - robot_pos_local, dim=1)
+            clear_of_robot = dist_to_robot > 0.5
+            clear_of_walls = ~check_wall_proximity_perenv(
+                candidate_goals, wall_c, wall_s, wall_m, wall_safe_margin
+            )
+            valid = within_walls & clear_of_obstacles & clear_of_robot & clear_of_walls
+            eligible = within_walls & clear_of_robot & clear_of_walls
+            return valid, min_clearance, eligible
+
         for attempt in range(max_attempts):
             if not needs_resample.any():
                 break  # 所有環境都已生成有效目標
@@ -327,60 +361,7 @@ class GoalCommand(CommandTerm):
             candidate_goals_local[needs_resample, 0] = goal_x[needs_resample]
             candidate_goals_local[needs_resample, 1] = goal_y[needs_resample]
 
-            # ------------------------------------------------------------------------
-            # 檢查 1：牆壁邊界（環境局部座標系）
-            # ------------------------------------------------------------------------
-            within_walls = (
-                (candidate_goals_local[:, 0].abs() < valid_boundary_x) &
-                (candidate_goals_local[:, 1].abs() < valid_boundary_y)
-            )
-            
-            # ------------------------------------------------------------------------
-            # 檢查 2：障礙物碰撞（考慮障礙物半徑）
-            # ------------------------------------------------------------------------
-            if all_obstacles is not None:
-                distances_to_obstacle_centers = masked_obstacle_distances(
-                    candidate_goals_local, all_obstacles, all_obstacle_visibility
-                )
-
-                if required_distances is not None:
-                    clear_of_obstacles = (distances_to_obstacle_centers > required_distances).all(dim=1)
-                else:
-                    conservative_distance = obstacle_safe_distance + 0.5
-                    clear_of_obstacles = distances_to_obstacle_centers.min(dim=1)[0] > conservative_distance
-            else:
-                clear_of_obstacles = torch.ones(num_envs, device=self.device, dtype=torch.bool)
-            
-            # ------------------------------------------------------------------------
-            # 檢查 3：與機器人的距離（確保不會生成在機器人身上）
-            # ------------------------------------------------------------------------
-            dist_to_robot = torch.norm(candidate_goals_local - robot_pos_local, dim=1)
-            clear_of_robot = dist_to_robot > 0.5  # 至少離機器人 0.5 米
-            
-            # ------------------------------------------------------------------------
-            # 檢查 4：per-env 迷宮牆壁（確保目標不在牆壁內或過近）
-            # ------------------------------------------------------------------------
-            clear_of_walls = ~check_wall_proximity_perenv(
-                candidate_goals_local, wall_c, wall_s, wall_m, wall_safe_margin
-            )
-
-            # ------------------------------------------------------------------------
-            # 綜合判斷：所有條件都滿足
-            # ------------------------------------------------------------------------
-            valid_goals = within_walls & clear_of_obstacles & clear_of_robot & clear_of_walls
-
-            # 追蹤歷史最佳候選（即使不合法，也記錄離障礙物最遠的位置）
-            if all_obstacles is not None:
-                dists = masked_obstacle_distances(
-                    candidate_goals_local, all_obstacles, all_obstacle_visibility
-                )
-                if all_obstacle_radii is not None:
-                    dists = dists - all_obstacle_radii.unsqueeze(0)  # 扣除半徑
-                min_clearance = dists.min(dim=1).values  # [N]
-            else:
-                min_clearance = torch.full((num_envs,), 999.0, device=self.device)
-            # 在邊界內 & 離機器人夠遠 & 不在牆壁內的候選才有資格當 best
-            eligible = within_walls & clear_of_robot & clear_of_walls
+            valid_goals, min_clearance, eligible = evaluate_candidates(candidate_goals_local)
             improved = eligible & (min_clearance > best_min_clearance)
             best_goals_local[improved] = candidate_goals_local[improved]
             best_min_clearance[improved] = min_clearance[improved]
@@ -388,24 +369,57 @@ class GoalCommand(CommandTerm):
             # 更新需要重新採樣的環境
             needs_resample = needs_resample & (~valid_goals)
 
+        # Some robot poses cannot fit the configured minimum goal radius inside the
+        # arena. Retry only those envs with shorter, still non-trivial distances.
+        strict_failures = needs_resample.clone()
+        adaptive_min = min(d_min, self.cfg.adaptive_fallback_min_distance)
+        adaptive_max = max(adaptive_min + 0.1, d_max)
+        for _ in range(self.cfg.adaptive_resample_attempts):
+            if not needs_resample.any():
+                break
+
+            distance = torch.rand(num_envs, device=self.device) * (adaptive_max - adaptive_min) + adaptive_min
+            angle = torch.rand(num_envs, device=self.device) * (a_max - a_min) + a_min
+            adaptive_goals = torch.stack(
+                (
+                    robot_pos_local[:, 0] + distance * torch.cos(angle),
+                    robot_pos_local[:, 1] + distance * torch.sin(angle),
+                ),
+                dim=1,
+            )
+            candidate_goals_local[needs_resample] = adaptive_goals[needs_resample]
+
+            valid_goals, min_clearance, eligible = evaluate_candidates(candidate_goals_local)
+            improved = eligible & (min_clearance > best_min_clearance)
+            best_goals_local[improved] = candidate_goals_local[improved]
+            best_min_clearance[improved] = min_clearance[improved]
+            needs_resample = needs_resample & (~valid_goals)
+
+        adaptive_recovered = strict_failures & ~needs_resample
+        report_sampling_summary = num_envs >= min(64, self.num_envs)
+        if adaptive_recovered.any() and report_sampling_summary:
+            print(
+                f"[GOAL] Adaptive distance fallback recovered "
+                f"{adaptive_recovered.sum().item()}/{strict_failures.sum().item()} envs "
+                f"with range=({adaptive_min:.2f}, {adaptive_max:.2f})m"
+            )
+
         # ------------------------------------------------------------------------
         # 最終處理：如果還有環境沒有找到有效目標，使用最佳候選
         # ------------------------------------------------------------------------
         if needs_resample.any():
             n_failed = needs_resample.sum().item()
             failed_envs = needs_resample
-            # 使用歷史最佳候選（離障礙物最遠且不在牆壁內的位置）
-            # ★修(07-18): 門檻 0→0.45(=body_radius 0.35 + buffer 0.10 = 碰撞門檻)。舊 >=0 只保證
-            #   goal 不在障礙「內」,但貼著障礙表面(clearance 0~0.45)機器人物理上站不進去 → goal
-            #   不可達 = held-out CR 假陽性 + 訓練學亂撞(用戶 seed303 實測)。改後貼障礙候選改走下方
-            #   else 兜底(trivial 但可達,較輕污染);根本解仍需降密度/擴 room(見 docs issue 清單)。
+            # 使用歷史最佳候選（離障礙物最遠且不在牆壁內的位置）。
+            # 0.45m = body radius 0.35m + collision buffer 0.10m。
             _GOAL_MIN_REACHABLE_CLEARANCE = 0.45
             has_best = failed_envs & (best_min_clearance >= _GOAL_MIN_REACHABLE_CLEARANCE)
             best_clr = best_min_clearance[has_best].min().item() if has_best.any() else -1
-            print(f"[WARN] Goal resample fallback: {n_failed}/{num_envs} envs "
-                  f"failed after {max_attempts} attempts. "
-                  f"Using best candidate (min clearance={best_clr:.2f}m, "
-                  f"safe_dist={obstacle_safe_distance:.2f}m)")
+            if report_sampling_summary:
+                print(f"[WARN] Goal resample fallback: {n_failed}/{num_envs} envs "
+                      f"failed after strict+adaptive sampling. "
+                      f"Using best candidate (min clearance={best_clr:.2f}m, "
+                      f"safe_dist={obstacle_safe_distance:.2f}m)")
             candidate_goals_local[has_best] = best_goals_local[has_best]
             no_best = failed_envs & ~has_best
             if no_best.any():
@@ -435,6 +449,21 @@ class GoalCommand(CommandTerm):
                     "Goal sampler fallback overlaps a wall for "
                     f"env_ids={bad_env_ids[:16]}; refusing to create a trivial goal."
                 )
+
+        output_goal_distances = torch.norm(candidate_goals_local - robot_pos_local, dim=1)
+        too_close = output_goal_distances <= self.cfg.min_output_goal_distance
+        if too_close.any():
+            bad_env_ids = env_ids_tensor[too_close].detach().cpu().tolist()
+            raise RuntimeError(
+                f"Goal sampler produced goals within {self.cfg.min_output_goal_distance:.2f}m "
+                f"for env_ids={bad_env_ids[:16]}; refusing immediate-success goals."
+            )
+        if report_sampling_summary:
+            print(
+                f"[GOAL] Output distance: min={output_goal_distances.min().item():.2f}m "
+                f"mean={output_goal_distances.mean().item():.2f}m "
+                f"max={output_goal_distances.max().item():.2f}m"
+            )
         
         # ------------------------------------------------------------------------
         # 轉換為世界座標系並更新目標位置
@@ -703,6 +732,15 @@ class GoalCommandCfg(CommandTermCfg):
     max_resample_attempts: int = 50
     # 最大重試次數
     # 密集障礙物場景需要更多嘗試；fallback 使用歷史最佳候選（離障礙最遠的位置）
+
+    adaptive_fallback_min_distance: float = 1.5
+    # 僅在配置的最小目標距離無法放進場地時使用；必須高於成功半徑，避免 trivial goal。
+
+    adaptive_resample_attempts: int = 100
+    # 自適應距離第二階段的最大重試次數；仍套用完整牆壁與障礙安全檢查。
+
+    min_output_goal_distance: float = 0.75
+    # 所有輸出 goal 的硬下限；高於 0.5m 成功半徑，違反時直接中止而非污染 SR。
 
     num_obstacles: int = 10
     # 障礙物數量（用於碰撞檢查）

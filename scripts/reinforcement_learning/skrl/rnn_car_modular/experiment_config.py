@@ -122,6 +122,10 @@ class ExperimentConfig:
     scene_bound_base: float = 7.0
     room_size: float | None = None
 
+    # Observation layout must be fixed before isaaclab_tasks is imported.
+    # None preserves the process environment for legacy configs.
+    use_action_history: bool | None = None
+
     # v3d: act_hist dropout（訓練時隨機 mask 4D 動作歷史，弱化 "copy 上一步" shortcut）
     # 0.0 = 不啟用（v3c 行為）。配合 CHARGE_ACT_HIST_MODE=delta 一起斷 sin 波抽動。
     act_hist_dropout: float = 0.0

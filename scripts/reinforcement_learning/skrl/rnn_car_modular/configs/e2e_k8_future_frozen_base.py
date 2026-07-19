@@ -28,6 +28,7 @@ BASE_CONFIG = ExperimentConfig(
     obstacle_mode="rule_based",
     room_size=ROOM_SIZE_BY_STAGE[1],
     max_active_obstacles=20,
+    use_action_history=False,
     reward_profile="clean_progress",
     algorithm="ppo",
     aux_profile="none",

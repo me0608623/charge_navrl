@@ -1315,6 +1315,7 @@ def goal_obstacle_curriculum(
             f"障礙物={s['num_obstacles_static']}S+"
             f"{s.get('min_obstacles_dynamic', s['num_obstacles_dynamic'])}~{s['num_obstacles_dynamic']}D  "
             f"牆壁={s['min_walls']}-{s['max_walls']}  "
+            f"牆長={s.get('target_wall_length', 0.0):.1f}m  "
             f"goal_dist={s['goal_distance']}\n"
             f"  γ={s['gamma']}  episode={s['episode_length_s']}s\n"
             f"  升級: SR>{s['upgrade_sr']:.0%}"
@@ -1411,6 +1412,7 @@ def goal_obstacle_curriculum(
                 f"障礙物={s['num_obstacles_static']}S+"
                 f"{s.get('min_obstacles_dynamic', s['num_obstacles_dynamic'])}~{s['num_obstacles_dynamic']}D  "
                 f"牆壁={s['min_walls']}-{s['max_walls']}  "
+                f"牆長={s.get('target_wall_length', 0.0):.1f}m  "
                 f"goal_dist={s['goal_distance']}\n"
                 f"  γ={s['gamma']}  episode={s['episode_length_s']}s\n"
                 f"{'='*70}",

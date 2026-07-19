@@ -765,6 +765,22 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 _original_argv = list(sys.argv)  # Save before hydra strips args (for experiment_config CLI detection)
 
+# Some observation terms are selected at isaaclab_tasks import time. Bootstrap
+# only that config value now; the complete config is still applied below.
+_bootstrap_experiment_cfg = None
+if args_cli.experiment_config is not None:
+    _bootstrap_skrl_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(_bootstrap_skrl_root))
+    from rnn_car_modular.configs.registry import get_experiment_config as _get_bootstrap_config
+
+    _bootstrap_experiment_cfg = _get_bootstrap_config(args_cli.experiment_config)
+    if _bootstrap_experiment_cfg.use_action_history is not None:
+        os.environ["CHARGE_USE_ACT_HIST"] = "1" if _bootstrap_experiment_cfg.use_action_history else "0"
+        print(
+            "[EXPERIMENT_CONFIG] pre-import observation layout: "
+            f"use_action_history={_bootstrap_experiment_cfg.use_action_history}"
+        )
+
 # --scene_layout: 自動切換 task 為對應的場景佈局
 if args_cli.scene_layout == "t_corridor":
     args_cli.task = "Isaac-Navigation-Charge-VLP16-Curriculum-NavRL-Play-TCorridor"
@@ -836,7 +852,7 @@ _experiment_cfg: ExperimentConfig | None = None
 _experiment_applied_fields: list[str] = []
 if args_cli.experiment_config is not None:
     from rnn_car_modular.configs.registry import get_experiment_config
-    _experiment_cfg = get_experiment_config(args_cli.experiment_config)
+    _experiment_cfg = _bootstrap_experiment_cfg or get_experiment_config(args_cli.experiment_config)
     _experiment_applied_fields = apply_experiment_config(args_cli, _experiment_cfg, _original_argv)
     print(f"[EXPERIMENT_CONFIG] name={_experiment_cfg.name} description={_experiment_cfg.description}")
     if _experiment_applied_fields:
