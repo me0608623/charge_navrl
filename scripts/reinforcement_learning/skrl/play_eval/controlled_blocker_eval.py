@@ -2,12 +2,14 @@
 
 Two full-length outer walls (slot 1 = +y, slot 7 = −y) create a 4.0 m-wide symmetric
 corridor that spans the whole start→goal path, so the robot cannot escape around the
-wall ends and must pass the blocker inside the corridor. The blocker sits at x=1.8 m
-and resamples its lateral offset every episode.
+wall ends and must pass the blocker inside the corridor. The blocker resamples a safe
+2D position every episode; dynamic blockers patrol in a random 2D direction and reflect
+at bounds that keep the robot start and goal clear.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -16,9 +18,13 @@ import torch
 @dataclass(frozen=True)
 class ControlledBlockerSpec:
     goal_x: float = 6.0
-    blocker_x: float = 1.8
+    sampler_bootstrap_distance_min: float = 1.5
+    sampler_bootstrap_distance_max: float = 3.0
+    blocker_x_min: float = 1.2
+    blocker_x_max: float = 4.8
     blocker_y_max: float = 1.0   # uniform sample in [-blocker_y_max, +blocker_y_max]
     dynamic_ratio: float = 0.5   # fraction of envs where blocker moves (0 = all static)
+    blocker_speed: float = 0.3
     corridor_clear_width: float = 4.0
     wall_width: float = 1.0
     corridor_length: float = 12.0   # wall x-length = deployment room size, so the robot
@@ -39,6 +45,12 @@ class ControlledBlockerSpec:
     def side_clearance(self) -> float:
         # worst-case: blocker pushed to blocker_y_max
         return 0.5 * self.corridor_clear_width - self.blocker_radius - self.blocker_y_max
+
+    @property
+    def endpoint_clearance(self) -> float:
+        """Worst edge-to-edge gap from the blocker to robot start or goal."""
+        center_gap = min(self.blocker_x_min, self.goal_x - self.blocker_x_max)
+        return center_gap - self.blocker_radius - self.robot_radius
 
 
 def corridor_geometry(n: int, spec: ControlledBlockerSpec, device):
@@ -66,8 +78,11 @@ def dynamic_env_mask(env_ids: torch.Tensor, num_envs: int, ratio: float) -> torc
 
 def spec_from_cli(cli_args) -> ControlledBlockerSpec:
     return ControlledBlockerSpec(
+        blocker_x_min=float(cli_args.controlled_blocker_x_min),
+        blocker_x_max=float(cli_args.controlled_blocker_x_max),
         blocker_y_max=float(cli_args.controlled_blocker_y_max),
         dynamic_ratio=float(cli_args.controlled_blocker_dynamic_ratio),
+        blocker_speed=float(cli_args.controlled_blocker_speed),
     )
 
 
@@ -88,8 +103,14 @@ def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=
     goal_cfg = env_cfg.commands.goal_command
     goal_cfg.num_goals = 1
     goal_cfg.num_obstacles = 1
-    goal_cfg.ranges.distance = (spec.goal_x, spec.goal_x)
-    goal_cfg.ranges.angle = (0.0, 0.0)
+    # CommandManager resets before ControlledBlockerController exists. Use a
+    # temporary in-bounds goal for that bootstrap reset; the controller replaces
+    # it with the real x=goal_x target immediately after env.reset().
+    goal_cfg.ranges.distance = (
+        spec.sampler_bootstrap_distance_min,
+        spec.sampler_bootstrap_distance_max,
+    )
+    goal_cfg.ranges.angle = (-math.pi, math.pi)
 
     # The eval controller owns motion. Keep the environment obstacle static so a
     # BehaviorScheduler cannot apply a second, conflicting motion update.
@@ -106,7 +127,9 @@ def configure_controlled_blocker_env(env_cfg, scene_final: dict, cli_args, spec=
 
     wall_event = getattr(env_cfg.events, "randomize_wall_positions", None)
     if wall_event is not None:
-        wall_event.params.update({"min_walls": 2, "max_walls": 2})
+        # Command reset runs before the controller. Keep that bootstrap scene
+        # free of random walls; _place_walls installs the exact corridor later.
+        wall_event.params.update({"min_walls": 0, "max_walls": 0})
 
     reset_event = getattr(env_cfg.events, "reset_base", None)
     if reset_event is not None:
@@ -137,7 +160,17 @@ class ControlledBlockerController:
             raise ValueError("dynamic_ratio must be within [0, 1]")
         if self.spec.blocker_y_max < 0.0:
             raise ValueError("blocker_y_max must be non-negative")
+        if not 0.0 < self.spec.blocker_x_min < self.spec.blocker_x_max < self.spec.goal_x:
+            raise ValueError("blocker x bounds must satisfy 0 < min < max < goal_x")
+        if self.spec.side_clearance <= self.spec.robot_radius:
+            raise ValueError("blocker_y_max leaves no solvable side passage")
+        if self.spec.endpoint_clearance <= 0.0:
+            raise ValueError("blocker x bounds overlap the robot start or goal")
+        if self.spec.blocker_speed < 0.0:
+            raise ValueError("blocker_speed must be non-negative")
+        self.blocker_x = torch.zeros(self.num_envs, device=self.device)
         self.blocker_y = torch.zeros(self.num_envs, device=self.device)
+        self.blocker_vx = torch.zeros(self.num_envs, device=self.device)
         self.blocker_vy = torch.zeros(self.num_envs, device=self.device)
         self._motion_logged = False
 
@@ -154,24 +187,30 @@ class ControlledBlockerController:
         self._place_blocker(env_ids)
 
     def advance(self) -> None:
-        """Advance the controlled patrol and reflect at the guaranteed-safe bounds."""
-        moving = self.blocker_vy != 0.0
+        """Advance the controlled 2D patrol and reflect at guaranteed-safe bounds."""
+        moving = (self.blocker_vx != 0.0) | (self.blocker_vy != 0.0)
         if not moving.any():
             return
+        previous_x = self.blocker_x.clone()
         previous_y = self.blocker_y.clone()
+        next_x = self.blocker_x + self.blocker_vx * self.env.step_dt
         next_y = self.blocker_y + self.blocker_vy * self.env.step_dt
-        upper = next_y > self.spec.blocker_y_max
-        lower = next_y < -self.spec.blocker_y_max
-        reflected = upper | lower
-        self.blocker_vy[reflected] *= -1.0
+        reflect_x = (next_x > self.spec.blocker_x_max) | (next_x < self.spec.blocker_x_min)
+        reflect_y = (next_y > self.spec.blocker_y_max) | (next_y < -self.spec.blocker_y_max)
+        self.blocker_vx[reflect_x] *= -1.0
+        self.blocker_vy[reflect_y] *= -1.0
+        self.blocker_x = next_x.clamp(self.spec.blocker_x_min, self.spec.blocker_x_max)
         self.blocker_y = next_y.clamp(-self.spec.blocker_y_max, self.spec.blocker_y_max)
         self._write_blocker(torch.arange(self.num_envs, device=self.device))
         if not self._motion_logged:
             self._motion_logged = True
-            delta = (self.blocker_y - previous_y).abs()
+            delta_x = (self.blocker_x - previous_x).abs()
+            delta_y = (self.blocker_y - previous_y).abs()
             print(
-                f"[GATE3] controller patrol active: dynamic={int(moving.sum())}/{self.num_envs}, "
-                f"speed=0.30m/s, first_step_max_dy={float(delta.max()):.3f}m",
+                f"[GATE3] controller 2D patrol active: dynamic={int(moving.sum())}/{self.num_envs}, "
+                f"speed={self.spec.blocker_speed:.2f}m/s, "
+                f"first_step_max_dx={float(delta_x.max()):.3f}m, "
+                f"first_step_max_dy={float(delta_y.max()):.3f}m",
                 flush=True,
             )
 
@@ -229,26 +268,36 @@ class ControlledBlockerController:
     def _place_blocker(self, env_ids: torch.Tensor) -> None:
         n = len(env_ids)
 
-        # random lateral offset: Uniform[-blocker_y_max, +blocker_y_max]
+        rand_x = torch.rand(n, device=self.device) * (
+            self.spec.blocker_x_max - self.spec.blocker_x_min
+        ) + self.spec.blocker_x_min
         rand_y = (torch.rand(n, device=self.device) * 2.0 - 1.0) * self.spec.blocker_y_max
 
+        self.blocker_x[env_ids] = rand_x
         self.blocker_y[env_ids] = rand_y
         # Exact deterministic allocation: for ratio=0.5, 32 of 64 envs are
-        # dynamic. Membership is stable; direction is resampled every episode.
+        # dynamic. Membership is stable; 2D heading is resampled every episode.
         is_dynamic = dynamic_env_mask(env_ids, self.num_envs, self.spec.dynamic_ratio)
-        direction = torch.randint(0, 2, (n,), device=self.device).float() * 2.0 - 1.0
-        self.blocker_vy[env_ids] = torch.where(is_dynamic, direction * 0.3, torch.zeros_like(direction))
+        heading = torch.rand(n, device=self.device) * (2.0 * torch.pi)
+        speed = torch.where(
+            is_dynamic,
+            torch.full((n,), self.spec.blocker_speed, device=self.device),
+            torch.zeros(n, device=self.device),
+        )
+        self.blocker_vx[env_ids] = speed * torch.cos(heading)
+        self.blocker_vy[env_ids] = speed * torch.sin(heading)
         self._write_blocker(env_ids)
 
     def _write_blocker(self, env_ids: torch.Tensor) -> None:
         origins = self.env.scene.env_origins[env_ids]
         n = len(env_ids)
         pose = torch.zeros(n, 7, device=self.device)
-        pose[:, 0] = origins[:, 0] + self.spec.blocker_x
+        pose[:, 0] = origins[:, 0] + self.blocker_x[env_ids]
         pose[:, 1] = origins[:, 1] + self.blocker_y[env_ids]
         pose[:, 2] = 0.9
         pose[:, 3] = 1.0
         velocity = torch.zeros(n, 6, device=self.device)
+        velocity[:, 0] = self.blocker_vx[env_ids]
         velocity[:, 1] = self.blocker_vy[env_ids]
         obstacle = self.env.scene["obstacle_0"]
         obstacle.write_root_pose_to_sim(pose, env_ids=env_ids)

@@ -209,7 +209,21 @@ parser.add_argument("--near_wall_crossing_probe_output", type=str, default="",
 parser.add_argument("--near_wall_crossing_probe_stationary", action="store_true", default=False,
                     help="observability probe 專用：固定車體，消除 policy 軌跡與 crossing label 的位置捷徑")
 parser.add_argument("--controlled_blocker_eval", action="store_true", default=False,
-                    help="Gate3 專用：4m 通道、中央 blocker、左右鏡像封側的 deterministic 可解場")
+                    help="Gate3 專用：4m 通道與每回合重取樣 blocker 的受控可解場")
+parser.add_argument("--controlled_blocker_x_min", type=float, default=1.2,
+                    help="Gate3 blocker 每回合縱向初始位置與巡邏下界 m")
+parser.add_argument("--controlled_blocker_x_max", type=float, default=4.8,
+                    help="Gate3 blocker 每回合縱向初始位置與巡邏上界 m")
+parser.add_argument("--controlled_blocker_y_max", type=float, default=1.0,
+                    help="Gate3 blocker 每回合橫向初始位置範圍 ±m")
+parser.add_argument("--controlled_blocker_dynamic_ratio", type=float, default=0.5,
+                    help="Gate3 受控 2D 巡邏 env 比例；0=全靜止，0.5=一半動態")
+parser.add_argument("--controlled_blocker_speed", type=float, default=0.3,
+                    help="Gate3 動態 blocker 的 2D 巡邏速度 m/s")
+parser.add_argument("--solvability_audit_output", type=str, default="",
+                    help="診斷每回合起始場景的牆/靜態/全障礙可達性並輸出 JSON；不改 gate 或 policy")
+parser.add_argument("--solvability_grid_resolution", type=float, default=0.15,
+                    help="可達性 occupancy grid 解析度 m（預設 0.15）")
 
 # --- Reward 模式（消融實驗用） ---
 parser.add_argument("--reward_mode", type=str, default="current",
@@ -2448,11 +2462,14 @@ def main():
             apply_arena_size(env_cfg, args_cli.arena_size)
 
     if args_cli.controlled_blocker_eval:
-        from controlled_blocker_eval import configure_controlled_blocker_env
-        configure_controlled_blocker_env(env_cfg, scene_final, args_cli)
+        from controlled_blocker_eval import configure_controlled_blocker_env, spec_from_cli
+        configure_controlled_blocker_env(env_cfg, scene_final, args_cli, spec_from_cli(args_cli))
         print(
-            "[PLAY] Gate3 controlled blocker: wall inner spacing=4.0m, blocker=(+1.8,0), "
-            "side clearance=1.65m, closed side mirrored 50:50"
+            f"[PLAY] Gate3 controlled blocker: wall inner spacing=4.0m, "
+            f"x∈[{args_cli.controlled_blocker_x_min:.2f},{args_cli.controlled_blocker_x_max:.2f}]m, "
+            f"y∈±{args_cli.controlled_blocker_y_max:.2f}m, 2D speed="
+            f"{args_cli.controlled_blocker_speed:.2f}m/s, "
+            f"dynamic_ratio={args_cli.controlled_blocker_dynamic_ratio:.2f}"
         )
 
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
@@ -2467,9 +2484,10 @@ def main():
     if hasattr(env_cfg.scene, "lidar"):
         env_cfg.scene.lidar.debug_vis = lidar_vis
 
-    # 非 headless 模式降低渲染頻率（每 4 步渲染一次）
+    # GUI 每個 policy step render 一次。render_interval 以 physics step 計，必須
+    # 等於 decimation；舊值 4 < decimation 20 會讓每個 action 重複 render 5 次。
     if not args_cli.headless:
-        env_cfg.sim.render_interval = 4
+        env_cfg.sim.render_interval = env_cfg.decimation
 
     # USD 場景效能覆寫（必須在 lidar_vis / render_interval 之後，避免被蓋回去）
     if args_cli.usd_scene:
@@ -2996,12 +3014,33 @@ def main():
             "[D-EVAL] 場景已固定；desired turn: right→left crossing => ω<0，"
             "left→right crossing => ω>0"
         )
+    _solvability_audit = None
+    if args_cli.solvability_audit_output:
+        if args_cli.arena_size is None:
+            raise ValueError("--solvability_audit_output requires --arena_size")
+        from scene_solvability import SceneSolvabilityAudit, SolvabilitySpec
+        _solvability_audit = SceneSolvabilityAudit(
+            raw_env=raw_env,
+            scheduler=_play_behavior_scheduler,
+            output_path=args_cli.solvability_audit_output,
+            spec=SolvabilitySpec(
+                half_extent=0.5 * float(args_cli.arena_size),
+                resolution=float(args_cli.solvability_grid_resolution),
+            ),
+        )
+        _solvability_audit.capture()
+        print(
+            f"[SOLVABILITY] enabled: arena={args_cli.arena_size:.1f}m, "
+            f"grid={args_cli.solvability_grid_resolution:.2f}m, "
+            "inflation=robot 0.35m + buffer 0.10m"
+        )
     _controlled_blocker_controller = None
     if args_cli.controlled_blocker_eval:
-        from controlled_blocker_eval import ControlledBlockerController
+        from controlled_blocker_eval import ControlledBlockerController, spec_from_cli
         _controlled_blocker_controller = ControlledBlockerController(
             raw_env=raw_env,
             scheduler=_play_behavior_scheduler,
+            spec=spec_from_cli(args_cli),
         )
         _controlled_blocker_controller.reset()
         obs = raw_env.observation_manager.compute()
@@ -3619,6 +3658,8 @@ def main():
         if _near_wall_controller is not None:
             # 先推進行人，再讓 physics/observation manager 計算這一步，避免一幀位置延遲。
             _near_wall_controller.advance()
+        if _controlled_blocker_controller is not None:
+            _controlled_blocker_controller.advance()
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
         # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
         if (_play_behavior_scheduler is not None and _near_wall_controller is None
@@ -3861,6 +3902,8 @@ def main():
             terminated_flat = terminated.squeeze(-1) if terminated.ndim > 1 else terminated
             truncated_flat = truncated.squeeze(-1) if truncated.ndim > 1 else truncated
             cause = detect_termination_cause(raw_env, terminated_flat, truncated_flat)
+            if _solvability_audit is not None:
+                _solvability_audit.finish(done_ids, cause)
             if _near_wall_controller is not None:
                 for _d_row in _near_wall_controller.finish_episodes(done_ids, cause):
                     print(
@@ -4038,6 +4081,8 @@ def main():
                         next_obs[_obs_key][done_ids] = _obs_value[done_ids]
                 else:
                     next_obs[done_ids] = _fresh_obs[done_ids]
+            if _solvability_audit is not None:
+                _solvability_audit.capture(done_ids)
 
         # --- 每 200 步印出進度摘要 ---
         if step % 200 == 0:
@@ -4234,6 +4279,8 @@ def main():
             print(f"[D-EVAL] JSON report: {args_cli.near_wall_crossing_output}")
         if args_cli.near_wall_crossing_probe_output:
             print(f"[D-EVAL] observability probe: {args_cli.near_wall_crossing_probe_output}")
+    if _solvability_audit is not None:
+        _solvability_audit.write_report()
     # --- 反應曲線最終彙總（全程樣本平均）---
     if _react_curve_on:
         print_react_curve(_react_speed_bins, _react_omega_bins, tag="全程彙總")

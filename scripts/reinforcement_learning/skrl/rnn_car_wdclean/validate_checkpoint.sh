@@ -1,6 +1,7 @@
 #!/bin/bash
 # validate_checkpoint.sh — e2e checkpoint 晉級四閘驗收(用戶 2026-07-15 協定)
 # 用法: bash validate_checkpoint.sh <ckpt.pt> [stage=1] [wandb_id=gtefxx15]
+# GUI 可視化: GUI=1 CAMERA=top NUM_ENVS=4 bash validate_checkpoint.sh ...
 #   跑 gate#2(3-seed held-out det) + gate#3(可解的路徑擋路場 det+dump) + gate#4(SA(N+1) preview),
 #   再呼叫 validate_gates.py 拉 gate#1(wandb 健康) + 逐 gate 判 PASS/FAIL。
 # 注意: play 自動從 ckpt 偵測 e2e 架構(frame_stack/end_to_end);e2e 不加 --feat_norm。
@@ -12,7 +13,14 @@ GATES_PY="$REPO/scripts/reinforcement_learning/skrl/rnn_car_wdclean/validate_gat
 PLAY="$REPO/scripts/reinforcement_learning/skrl/play_eval/play_rnn_car.py"
 CURR=warp_drive_e2e_final20_v1
 RUN_NAME="$(basename "$(dirname "$CKPT")")"
-OUT="/tmp/validate_${RUN_NAME}_$(basename "$CKPT" .pt)_s${STAGE}"
+NUM_ENVS="${NUM_ENVS:-64}"
+OUT_SUFFIX=""
+RENDER_ARGS=(--headless)
+if [ "${GUI:-0}" = "1" ]; then
+  RENDER_ARGS=(--camera "${CAMERA:-top}")
+  OUT_SUFFIX="_gui${NUM_ENVS}"
+fi
+OUT="/tmp/validate_${RUN_NAME}_$(basename "$CKPT" .pt)_s${STAGE}${OUT_SUFFIX}"
 mkdir -p "$OUT"
 cd "$REPO"; source /home/aa/miniconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
 [ -f "$CKPT" ] || { echo "找不到 $CKPT"; exit 2; }
@@ -37,8 +45,16 @@ _play() {  # _play <out.log> <scene args...>
   PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 CHARGE_LIDAR_DUMP="$DUMP" \
     ./isaaclab.sh -p "$PLAY" \
     --checkpoint "$CKPT" --task Isaac-Navigation-Charge-VLP16-Curriculum-WD \
-    --curriculum_version "$CURR" --deterministic --num_envs 64 --steps 1200 --headless \
+    --curriculum_version "$CURR" --deterministic --num_envs "$NUM_ENVS" --steps 1200 "${RENDER_ARGS[@]}" \
     --num_goals_override 1 --no_goal_movement "$@" > "$log" 2>&1
+  if grep -Eq 'Traceback \(most recent call last\)|RuntimeError:' "$log"; then
+    echo "  ✗ $(basename "$log") simulator traceback; see $log" >&2
+    return 1
+  fi
+  if [ -n "$DUMP" ] && [ ! -s "$DUMP" ]; then
+    echo "  ✗ $(basename "$log") did not produce required dump $DUMP" >&2
+    return 1
+  fi
 }
 
 echo "=== 驗收 $CKPT (Stage $STAGE) → $OUT ==="
@@ -47,11 +63,14 @@ echo "=== 驗收 $CKPT (Stage $STAGE) → $OUT ==="
 for SD in 101 202 303; do
   _play "$OUT/det_s${SD}.log" \
     --stage "$STAGE" --arena_size "$A" --num_static_obs "$S" --num_dynamic_obs "$D" \
-    --obs_near_goal_count 0 --seed "$SD"
+    --obs_near_goal_count 0 --seed "$SD" \
+    --solvability_audit_output "$OUT/solvability_s${SD}.json"
 done
 
-# Gate #3: 受控可解擋路場。外牆內表面間距 4.0m，中央 blocker 左右各留
-# 1.65m；第三面平行牆封一側，依 env 50:50 左右鏡像。
+# Gate #3: 受控可解擋路場。兩側長牆內表面間距 4.0m；blocker 每回合
+# 在 x∈[1.2,4.8], y∈[-1,+1] 重採樣，最窄側仍有 0.65m 淨空，
+# 起點/goal 邊緣淨空至少 0.5m。預設 50% 靜止、50% 以 0.3m/s
+# 隨機 2D heading 巡邏並在安全邊界反射；沒有舊版第三面壓力牆。
 DUMP="$OUT/blk_dump.npz"
 _play "$OUT/blk.log" \
   --stage "$STAGE" --arena_size "$A" --num_static_obs "$S" --num_dynamic_obs "$D" \

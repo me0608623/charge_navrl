@@ -152,8 +152,15 @@ def blocking_behavior(dump_path: str, ahead_deg=20.0, horizon=2.7, body_radius=0
     absw = np.abs(omega)
 
     clear = ahead & (fd > 3.0)                                    # goal 正前方 + 無近障 = clear
+    recovery_clear = (
+        (np.abs(np.arctan2(goal[..., 1], goal[..., 0])) < np.deg2rad(15.0))
+        & (fd > 2.5)
+    )                                                             # 繞障後應回正的開闊直行幀
     near = ahead & (fd >= 1.5) & (fd < 2.0)                       # 1.5-2.0m 擋路
     clear_omega = float(np.median(absw[clear])) if clear.any() else float("nan")
+    recovery_clear_omega = (
+        float(np.median(absw[recovery_clear])) if recovery_clear.any() else float("nan")
+    )
     near_omega = float(np.mean(absw[near])) if near.any() else float("nan")
     delta_omega = near_omega - clear_omega if np.isfinite(near_omega) and np.isfinite(clear_omega) else float("nan")
     clear_stop = float((v[clear] < stop_v).mean()) if clear.any() else float("nan")
@@ -177,7 +184,8 @@ def blocking_behavior(dump_path: str, ahead_deg=20.0, horizon=2.7, body_radius=0
             lidar, pose, nmask, horizon=horizon, control_dt=control_dt,
             body_radius=body_radius, safe_clearance=safe_clearance,
         )
-    return dict(clear_omega=clear_omega, near_omega=near_omega, delta_omega=delta_omega,
+    return dict(clear_omega=clear_omega, recovery_clear_omega=recovery_clear_omega,
+                near_omega=near_omega, delta_omega=delta_omega,
                 clear_stop=clear_stop, open_loop_safe_arc=open_loop_safe_arc,
                 closed_loop_safe_arc=closed_loop_safe_arc, closed_loop_n=closed_loop_n)
 
@@ -276,6 +284,8 @@ def main():
             print(f"    {_p(ok)} {k:12s} {s}")
         print(f"    診斷 固定動作2.7s安全弧={beh['open_loop_safe_arc']:.3f} "
               f"(非部署控制器；閉迴路樣本={beh['closed_loop_n']})")
+        print(f"    診斷 path-recovery |ω|中位={beh['recovery_clear_omega']:.3f} rad/s "
+              "(goal<15deg 且前錐>2.5m；僅觀察、不參與 PASS/FAIL)")
     results.append(("擋路測試", g3))
 
     # gate #4 preview

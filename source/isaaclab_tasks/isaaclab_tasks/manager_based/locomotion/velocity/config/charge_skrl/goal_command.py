@@ -34,6 +34,8 @@ from isaaclab.markers.config import (
 )
 from isaaclab.utils import configclass  # 配置類裝飾器
 
+from .goal_sampling import masked_obstacle_distances, visible_obstacle_xy
+
 # 類型檢查時才導入（避免運行時循環導入）
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -228,6 +230,7 @@ class GoalCommand(CommandTerm):
         # 收集所有障礙物位置和大小（環境局部座標系）
         # ------------------------------------------------------------------------
         obstacle_positions = []
+        obstacle_visibility = []
         obstacle_radii = []
         
         # 獲取障礙物尺寸（如果可用）
@@ -237,9 +240,10 @@ class GoalCommand(CommandTerm):
         for i in range(num_obstacles):
             try:
                 obstacle = self._env.scene[f"obstacle_{i}"]
-                obs_pos_world = obstacle.data.root_pos_w[env_ids_tensor, :2]  # [num_envs, 2]
-                obs_pos_local = obs_pos_world - env_origins  # [num_envs, 2]
+                obs_root_pos_world = obstacle.data.root_pos_w[env_ids_tensor, :3]
+                obs_pos_local, obs_visible = visible_obstacle_xy(obs_root_pos_world, env_origins)
                 obstacle_positions.append(obs_pos_local)
+                obstacle_visibility.append(obs_visible)
                 
                 # 獲取障礙物半徑（如果可用）
                 if obstacle_sizes is not None and i < len(obstacle_sizes):
@@ -256,10 +260,12 @@ class GoalCommand(CommandTerm):
         # 將障礙物位置堆疊為 [num_envs, num_valid_obstacles, 2]
         if obstacle_positions:
             all_obstacles = torch.stack(obstacle_positions, dim=1)  # [num_envs, num_obstacles, 2]
+            all_obstacle_visibility = torch.stack(obstacle_visibility, dim=1)
             # 將障礙物半徑轉換為張量 [num_valid_obstacles]
             all_obstacle_radii = torch.tensor(obstacle_radii, device=self.device, dtype=torch.float32)
         else:
             all_obstacles = None
+            all_obstacle_visibility = None
             all_obstacle_radii = None
         
         # ------------------------------------------------------------------------
@@ -333,8 +339,9 @@ class GoalCommand(CommandTerm):
             # 檢查 2：障礙物碰撞（考慮障礙物半徑）
             # ------------------------------------------------------------------------
             if all_obstacles is not None:
-                goal_expanded = candidate_goals_local.unsqueeze(1)  # [num_envs, 1, 2]
-                distances_to_obstacle_centers = torch.norm(goal_expanded - all_obstacles, dim=2)  # [num_envs, num_obstacles]
+                distances_to_obstacle_centers = masked_obstacle_distances(
+                    candidate_goals_local, all_obstacles, all_obstacle_visibility
+                )
 
                 if required_distances is not None:
                     clear_of_obstacles = (distances_to_obstacle_centers > required_distances).all(dim=1)
@@ -364,8 +371,9 @@ class GoalCommand(CommandTerm):
 
             # 追蹤歷史最佳候選（即使不合法，也記錄離障礙物最遠的位置）
             if all_obstacles is not None:
-                goal_exp = candidate_goals_local.unsqueeze(1)  # [N, 1, 2]
-                dists = torch.norm(goal_exp - all_obstacles, dim=2)  # [N, num_obs]
+                dists = masked_obstacle_distances(
+                    candidate_goals_local, all_obstacles, all_obstacle_visibility
+                )
                 if all_obstacle_radii is not None:
                     dists = dists - all_obstacle_radii.unsqueeze(0)  # 扣除半徑
                 min_clearance = dists.min(dim=1).values  # [N]
@@ -398,12 +406,15 @@ class GoalCommand(CommandTerm):
                   f"failed after {max_attempts} attempts. "
                   f"Using best candidate (min clearance={best_clr:.2f}m, "
                   f"safe_dist={obstacle_safe_distance:.2f}m)")
-            if has_best.any():
-                candidate_goals_local[has_best] = best_goals_local[has_best]
-            else:
-                # 所有嘗試都落在牆壁內（T 走廊等窄場景常見）→ 放在機器人附近
-                candidate_goals_local[failed_envs] = robot_pos_local[failed_envs] + 1.0
-                print(f"[WARN] No valid best candidate found, placing goal near robot")
+            candidate_goals_local[has_best] = best_goals_local[has_best]
+            no_best = failed_envs & ~has_best
+            if no_best.any():
+                bad_env_ids = env_ids_tensor[no_best].detach().cpu().tolist()
+                raise RuntimeError(
+                    "Goal sampler found no physically reachable fallback after "
+                    f"{max_attempts} attempts for env_ids={bad_env_ids[:16]}. "
+                    "Refusing to create a near-robot trivial goal."
+                )
             # 兜底: clamp 到邊界內
             candidate_goals_local[failed_envs, 0] = torch.clamp(
                 candidate_goals_local[failed_envs, 0],
@@ -413,15 +424,17 @@ class GoalCommand(CommandTerm):
                 candidate_goals_local[failed_envs, 1],
                 -valid_boundary_y, valid_boundary_y
             )
-            # 最後安全檢查：fallback 候選仍在牆壁內 → 強制放回機器人前方 1m
+            # fallback 仍在牆內代表場景或採樣器不一致，不可靜默改成 trivial goal。
             still_in_wall = check_wall_proximity_perenv(
                 candidate_goals_local, wall_c, wall_s, wall_m, wall_safe_margin
             )
             if (failed_envs & still_in_wall).any():
                 stuck = failed_envs & still_in_wall
-                candidate_goals_local[stuck] = robot_pos_local[stuck] + 1.0
-                print(f"[WARN] {stuck.sum().item()} envs fallback still in wall, "
-                      f"placing goal 1m from robot")
+                bad_env_ids = env_ids_tensor[stuck].detach().cpu().tolist()
+                raise RuntimeError(
+                    "Goal sampler fallback overlaps a wall for "
+                    f"env_ids={bad_env_ids[:16]}; refusing to create a trivial goal."
+                )
         
         # ------------------------------------------------------------------------
         # 轉換為世界座標系並更新目標位置
