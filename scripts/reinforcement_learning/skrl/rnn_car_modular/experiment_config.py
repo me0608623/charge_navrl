@@ -269,7 +269,7 @@ _FIELD_TO_FLAGS: dict[str, list[str]] = {
     "wd_update_clip": ["--wd_update_clip", "--no_wd_update_clip"],
     "fixed_stage": ["--fixed_stage"],
     "lidar_no_noise": ["--lidar_no_noise"],
-    "no_resume_optimizer": ["--no_resume_optimizer"],
+    "no_resume_optimizer": ["--no_resume_optimizer", "--resume_optimizer"],
     "wd_update_monitor_only": ["--wd_update_monitor_only"],
     "zero_preprocess_feature_for_rl": ["--zero_preprocess_feature_for_rl"],
     "no_domain_randomization": ["--no_domain_randomization"],

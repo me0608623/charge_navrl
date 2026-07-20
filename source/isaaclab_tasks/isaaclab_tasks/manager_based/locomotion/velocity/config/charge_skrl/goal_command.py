@@ -34,7 +34,12 @@ from isaaclab.markers.config import (
 )
 from isaaclab.utils import configclass  # 配置類裝飾器
 
-from .goal_sampling import masked_obstacle_distances, visible_obstacle_xy
+from .goal_sampling import (
+    masked_obstacle_distances,
+    record_unsolvable_scene,
+    regenerate_unsolvable_scenes,
+    visible_obstacle_xy,
+)
 
 # 類型檢查時才導入（避免運行時循環導入）
 if TYPE_CHECKING:
@@ -171,7 +176,7 @@ class GoalCommand(CommandTerm):
         """
         pass  # 目標導航不需要特殊指標
 
-    def _resample_command(self, env_ids: Sequence[int]):
+    def _resample_command(self, env_ids: Sequence[int], _scene_retry_depth: int = 0):
         """重新採樣命令（生成新的目標位置）
         
         這是核心方法！負責生成目標位置。
@@ -423,12 +428,54 @@ class GoalCommand(CommandTerm):
             candidate_goals_local[has_best] = best_goals_local[has_best]
             no_best = failed_envs & ~has_best
             if no_best.any():
-                bad_env_ids = env_ids_tensor[no_best].detach().cpu().tolist()
-                raise RuntimeError(
-                    "Goal sampler found no physically reachable fallback after "
-                    f"{max_attempts} attempts for env_ids={bad_env_ids[:16]}. "
-                    "Refusing to create a near-robot trivial goal."
+                retry_env_ids = env_ids_tensor[no_best]
+                bad_env_ids = retry_env_ids.detach().cpu().tolist()
+                total_rejected = record_unsolvable_scene(self._env, retry_env_ids.numel())
+
+                if _scene_retry_depth >= self.cfg.unsolvable_scene_max_retries:
+                    print(
+                        f"[UNSOLVABLE] Rejected {retry_env_ids.numel()} scene(s) for "
+                        f"env_ids={bad_env_ids[:16]}; exhausted "
+                        f"{self.cfg.unsolvable_scene_max_retries} per-env regenerations "
+                        f"(total rejected={total_rejected}).",
+                        flush=True,
+                    )
+                    raise RuntimeError(
+                        "Goal sampler exhausted per-env scene regeneration for "
+                        f"env_ids={bad_env_ids[:16]}. This indicates a systemic scene-generator failure, "
+                        "not an isolated unsolvable episode."
+                    )
+
+                print(
+                    f"[UNSOLVABLE] Rejected {retry_env_ids.numel()} scene(s) for "
+                    f"env_ids={bad_env_ids[:16]} retry={_scene_retry_depth + 1}/"
+                    f"{self.cfg.unsolvable_scene_max_retries} total={total_rejected}; "
+                    "regenerating only the affected envs.",
+                    flush=True,
                 )
+
+                # Commit every valid env before replacing the rejected scene. The rejected
+                # episode has not started yet, so synchronous regeneration avoids creating a
+                # fake one-step transition or a near-robot goal.
+                keep = ~no_best
+                if keep.any():
+                    keep_goal_distances = torch.norm(
+                        candidate_goals_local[keep] - robot_pos_local[keep], dim=1
+                    )
+                    if (keep_goal_distances <= self.cfg.min_output_goal_distance).any():
+                        raise RuntimeError("Goal sampler produced an immediate-success goal before scene recovery.")
+                    keep_world = candidate_goals_local[keep] + env_origins[keep]
+                    keep_env_ids = env_ids_tensor[keep]
+                    self.goal_pos_w[keep_env_ids, :2] = keep_world
+                    self.goal_pos_w[keep_env_ids, 2] = 0.0
+
+                regenerate_unsolvable_scenes(self._env, retry_env_ids)
+                GoalCommand._resample_command(
+                    self,
+                    retry_env_ids,
+                    _scene_retry_depth=_scene_retry_depth + 1,
+                )
+                return
             # 兜底: clamp 到邊界內
             candidate_goals_local[failed_envs, 0] = torch.clamp(
                 candidate_goals_local[failed_envs, 0],
@@ -741,6 +788,9 @@ class GoalCommandCfg(CommandTermCfg):
 
     min_output_goal_distance: float = 0.75
     # 所有輸出 goal 的硬下限；高於 0.5m 成功半徑，違反時直接中止而非污染 SR。
+
+    unsolvable_scene_max_retries: int = 8
+    # 單一 env 的場景拒收上限。孤立死局只重生該 env；連續耗盡才視為生成器系統性故障。
 
     num_obstacles: int = 10
     # 障礙物數量（用於碰撞檢查）

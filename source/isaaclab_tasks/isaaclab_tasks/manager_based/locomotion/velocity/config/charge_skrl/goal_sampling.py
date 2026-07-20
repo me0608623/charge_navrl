@@ -5,6 +5,24 @@ from __future__ import annotations
 import torch
 
 
+def record_unsolvable_scene(env, count: int) -> int:
+    """Record rejected scenes on the environment and return the cumulative count."""
+    total = int(getattr(env, "_unsolvable_scene_count_total", 0)) + int(count)
+    env._unsolvable_scene_count_total = total
+    return total
+
+
+def regenerate_unsolvable_scenes(env, env_ids: torch.Tensor) -> None:
+    """Reset and rerun scene-randomization events only for rejected environments."""
+    env.scene.reset(env_ids)
+    env_step_count = env._sim_step_counter // env.cfg.decimation
+    env.event_manager.apply(
+        mode="reset",
+        env_ids=env_ids,
+        global_env_step_count=env_step_count,
+    )
+
+
 def visible_obstacle_xy(
     root_positions_w: torch.Tensor,
     env_origins_xy: torch.Tensor,

@@ -13,6 +13,8 @@ _MODULE = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_MODULE)
 masked_obstacle_distances = _MODULE.masked_obstacle_distances
+record_unsolvable_scene = _MODULE.record_unsolvable_scene
+regenerate_unsolvable_scenes = _MODULE.regenerate_unsolvable_scenes
 visible_obstacle_xy = _MODULE.visible_obstacle_xy
 
 
@@ -52,3 +54,42 @@ def test_no_visible_obstacles_has_infinite_clearance():
     )
 
     assert torch.isinf(distances).all()
+
+
+def test_unsolvable_scene_counter_is_cumulative():
+    class Env:
+        pass
+
+    env = Env()
+    assert record_unsolvable_scene(env, 1) == 1
+    assert record_unsolvable_scene(env, 3) == 4
+    assert env._unsolvable_scene_count_total == 4
+
+
+def test_unsolvable_scene_regeneration_is_scoped_to_requested_envs():
+    calls = []
+
+    class Scene:
+        def reset(self, env_ids):
+            calls.append(("scene", env_ids.clone()))
+
+    class Events:
+        def apply(self, **kwargs):
+            calls.append(("events", kwargs))
+
+    class Cfg:
+        decimation = 20
+
+    class Env:
+        scene = Scene()
+        event_manager = Events()
+        cfg = Cfg()
+        _sim_step_counter = 240
+
+    env_ids = torch.tensor([7, 19])
+    regenerate_unsolvable_scenes(Env(), env_ids)
+
+    assert torch.equal(calls[0][1], env_ids)
+    assert calls[1][1]["mode"] == "reset"
+    assert torch.equal(calls[1][1]["env_ids"], env_ids)
+    assert calls[1][1]["global_env_step_count"] == 12

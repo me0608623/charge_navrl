@@ -556,6 +556,8 @@ parser.add_argument("--checkpoint", type=str, default=None, help="Load checkpoin
 parser.add_argument("--no_resume_optimizer", action="store_true", default=False,
                     help="When loading --checkpoint, load model weights only and skip optimizer states. "
                          "Default is full resume if optimizer states are present.")
+parser.add_argument("--resume_optimizer", action="store_true", default=False,
+                    help="Force optimizer-state restore for an interrupted same-stage continuation.")
 # --action_table_sample_size
 # - 用意：每 iteration 記錄到 WandB 的 action table 最大抽樣行數。0=停用。
 # - 正常範圍：0～4096（太大 WandB upload 變慢）。
@@ -854,6 +856,8 @@ if args_cli.experiment_config is not None:
     from rnn_car_modular.configs.registry import get_experiment_config
     _experiment_cfg = _bootstrap_experiment_cfg or get_experiment_config(args_cli.experiment_config)
     _experiment_applied_fields = apply_experiment_config(args_cli, _experiment_cfg, _original_argv)
+    if args_cli.resume_optimizer:
+        args_cli.no_resume_optimizer = False
     print(f"[EXPERIMENT_CONFIG] name={_experiment_cfg.name} description={_experiment_cfg.description}")
     if _experiment_applied_fields:
         _applied_summary = " ".join(
@@ -3704,6 +3708,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _prev_stage = -1         # 追蹤上一個 curriculum stage（用於偵測 phase 切換）
     _prev_obs_agent_active = True  # 追蹤 obs_agent 是否活躍（用於 logging）
     _prev_rnn_feature_mean = None  # 追蹤 RNN feature 分佈，偵測漂移
+    _prev_unsolvable_scene_count = int(getattr(env.unwrapped, "_unsolvable_scene_count_total", 0))
 
     # --- Obs Delay DR：模擬真實感測器管線延遲（20-50ms → 0-2 steps）---
     # 真實世界 LiDAR→policy 有 ~30ms 延遲，sim 裡 policy 看到即時觀測。
@@ -5326,6 +5331,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         total_steps = (iteration + 1) * RL     # 累計 env-steps（所有 env 的總 frame 數）
         fps = num_envs * RL / elapsed           # 訓練速率（env-frames/sec）
         wd = metrics.collect()                  # 取得本 iteration 的 WandB metrics dict
+        _unsolvable_total = int(getattr(env.unwrapped, "_unsolvable_scene_count_total", 0))
+        _unsolvable_rollout = _unsolvable_total - _prev_unsolvable_scene_count
+        _prev_unsolvable_scene_count = _unsolvable_total
+        wd["scene/unsolvable_scene_count_total"] = float(_unsolvable_total)
+        wd["scene/unsolvable_scene_count_rollout"] = float(_unsolvable_rollout)
+        wd["scene/unsolvable_scene_rate"] = float(
+            _unsolvable_rollout / max(wd.get("charge/total_episodes", 0.0), 1.0)
+        )
 
         # Timeout rate from metrics
         _timeout_rate = wd.get("charge/timeout_rate", 0)
