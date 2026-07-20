@@ -3705,7 +3705,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     #   5. Logging: WandB metrics + console print
     #   6. Checkpoint: 每 save_interval 次儲存模型
 
-    _prev_stage = -1         # 追蹤上一個 curriculum stage（用於偵測 phase 切換）
+    # A same-stage interrupted resume must preserve the restored Adam state. Curriculum
+    # metrics are empty before the first rollout, so seed the stage from the frozen config
+    # instead of briefly treating the run as stage 1 and triggering a false 1→N reset.
+    _prev_stage = int(args_cli.initial_stage) if args_cli.resume_optimizer else -1
     _prev_obs_agent_active = True  # 追蹤 obs_agent 是否活躍（用於 logging）
     _prev_rnn_feature_mean = None  # 追蹤 RNN feature 分佈，偵測漂移
     _prev_unsolvable_scene_count = int(getattr(env.unwrapped, "_unsolvable_scene_count_total", 0))
@@ -3814,7 +3817,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # === WD: Reset optimizer momentum on phase change（對應 WD: reset_model_mentum）===
         # 在 phase 切換時，清空 Adam 的動量（exp_avg/exp_avg_sq），
         # 避免舊 phase 積累的動量方向影響新 phase 的梯度更新。
-        _cur_stage = int(metrics._curriculum_info.get("stage", 1))
+        _cur_stage_default = _prev_stage if _prev_stage > 0 else 1
+        _cur_stage = int(metrics._curriculum_info.get("stage", _cur_stage_default))
         _stage_changed = (_cur_stage != _prev_stage)
         if _stage_changed and _prev_stage > 0:
             for opt in [charge_opt_rl, charge_opt_aux] + ([obs_optimizer] if obs_optimizer else []):
