@@ -21,6 +21,7 @@ STATE_FILE = STATE_DIR / "auto_advance_state.json"
 EXPECTED_RUN_FILE = STATE_DIR / "expected_run.txt"
 STATUS_FILE = STATE_DIR / "status.txt"
 PYTHON = Path("/home/aa/miniconda3/envs/env_isaaclab/bin/python")
+CONDA_ENV = PYTHON.parent.parent
 TRAINER = REPO / "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py"
 VALIDATOR = REPO / "scripts/reinforcement_learning/skrl/rnn_car_wdclean/validate_checkpoint.sh"
 CONFIG_DIR = REPO / "scripts/reinforcement_learning/skrl/rnn_car_modular/configs"
@@ -33,6 +34,17 @@ DRY_RUN = False
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def isaaclab_subprocess_env() -> dict[str, str]:
+    """Build a deterministic env_isaaclab environment for non-interactive jobs."""
+    env = os.environ.copy()
+    env["CONDA_PREFIX"] = str(CONDA_ENV)
+    env["CONDA_DEFAULT_ENV"] = CONDA_ENV.name
+    path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    conda_bin = str(CONDA_ENV / "bin")
+    env["PATH"] = os.pathsep.join([conda_bin, *[entry for entry in path_entries if entry != conda_bin]])
+    return env
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -240,12 +252,13 @@ def launch_gate(state: dict[str, Any], *, dry_run: bool = False) -> None:
         return
     with gate_log.open("w", encoding="utf-8") as output:
         wrapper = (
-            'set +e; "$1" "$2" "$3" "$4" "$5"; rc=$?; '
+            '"$1" "$2" "$3" "$4" "$5"; rc=$?; '
             'printf "%s\\n" "$rc" > "$6.tmp"; mv "$6.tmp" "$6"; exit "$rc"'
         )
         proc = subprocess.Popen(
             ["bash", "-c", wrapper, "gate-job", *cmd, str(exit_file)],
             cwd=REPO,
+            env=isaaclab_subprocess_env(),
             stdout=output,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -296,7 +309,7 @@ def launch_next_stage(state: dict[str, Any], *, dry_run: bool = False) -> None:
     if run_dir.exists() and any(run_dir.iterdir()):
         _set_phase(state, "HALTED_ALERT", f"next-stage run directory already exists: {run_dir}")
         return
-    env = os.environ.copy()
+    env = isaaclab_subprocess_env()
     env["PYTHONUNBUFFERED"] = "1"
     env["CHARGE_SUPERVISOR_STOP_FILE"] = str(run_dir / "supervisor_stop.request")
     with log_path.open("w", encoding="utf-8") as output:

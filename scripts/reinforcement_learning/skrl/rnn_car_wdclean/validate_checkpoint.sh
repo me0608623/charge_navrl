@@ -9,7 +9,8 @@
 set -euo pipefail
 CKPT="$1"; STAGE="${2:-1}"; WID="${3:-gtefxx15}"
 REPO=/home/aa/IsaacLab
-PY=/home/aa/miniconda3/envs/env_isaaclab/bin/python
+CONDA_ENV=/home/aa/miniconda3/envs/env_isaaclab
+PY="$CONDA_ENV/bin/python"
 GATES_PY="$REPO/scripts/reinforcement_learning/skrl/rnn_car_wdclean/validate_gates.py"
 PLAY="$REPO/scripts/reinforcement_learning/skrl/play_eval/play_rnn_car.py"
 CURR=warp_drive_e2e_final20_v1
@@ -23,7 +24,15 @@ if [ "${GUI:-0}" = "1" ]; then
 fi
 OUT="/tmp/validate_${RUN_NAME}_$(basename "$CKPT" .pt)_s${STAGE}${OUT_SUFFIX}"
 mkdir -p "$OUT"
-cd "$REPO"; source /home/aa/miniconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
+cd "$REPO"
+export CONDA_PREFIX="$CONDA_ENV"
+export CONDA_DEFAULT_ENV=env_isaaclab
+export PATH="$CONDA_ENV/bin:$PATH"
+if ! env -u PYTHONPATH "$PY" -c 'import yaml' >/dev/null 2>&1; then
+  echo "env_isaaclab 缺少可獨立載入的 PyYAML: $PY" >&2
+  echo "請安裝至該環境，不可依賴外部 ROS PYTHONPATH。" >&2
+  exit 78
+fi
 [ -f "$CKPT" ] || { echo "找不到 $CKPT"; exit 2; }
 LOCK_KEY="$(printf '%s\n' "$CKPT|$STAGE" | sha256sum | cut -d' ' -f1)"
 LOCK_FILE="/tmp/isaaclab_validate_${LOCK_KEY}.lock"

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import auto_advance_supervisor as supervisor
@@ -77,6 +78,15 @@ def test_read_metrics_deduplicates_iterations(tmp_path: Path):
 def test_all_obb_stage_configs_exist():
     for stage in range(1, 9):
         assert (supervisor.CONFIG_DIR / f"e2e_sa{stage}_k8_obb.py").is_file()
+
+
+def test_isaaclab_subprocess_env_selects_frozen_conda_python(monkeypatch):
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", str(supervisor.CONDA_ENV / "bin")]))
+    env = supervisor.isaaclab_subprocess_env()
+    assert env["CONDA_PREFIX"] == str(supervisor.CONDA_ENV)
+    assert env["CONDA_DEFAULT_ENV"] == "env_isaaclab"
+    assert env["PATH"].split(os.pathsep)[0] == str(supervisor.CONDA_ENV / "bin")
+    assert env["PATH"].split(os.pathsep).count(str(supervisor.CONDA_ENV / "bin")) == 1
 
 
 def test_gate_failure_is_fail_closed(tmp_path: Path):
