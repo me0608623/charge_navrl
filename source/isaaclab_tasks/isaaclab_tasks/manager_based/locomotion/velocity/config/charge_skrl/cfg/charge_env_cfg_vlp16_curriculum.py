@@ -101,6 +101,7 @@ from ..mdp.events.walls import init_perenv_walls, randomize_walls
 from ..domain_randomization import apply_domain_randomization
 from ..mdp.events.state import set_obstacle_metadata
 from ..mdp.events import corridor_crossing as _corridor_crossing_mod
+from ..mdp.events import narrow_passage_bridge as _narrow_passage_bridge_mod
 
 # 課程
 from ..curriculum.goal_obstacle_curriculum import goal_obstacle_curriculum
@@ -369,6 +370,25 @@ class EventCfgVLP16Curriculum:
         },
     )
 
+    # SA5 warm-start bridge injector. The default fraction=0.0 is a strict no-op;
+    # an experiment config must add the two bridge wall assets and enable it.
+    narrow_passage_bridge = EventTerm(
+        func=_narrow_passage_bridge_mod.setup_narrow_passage_bridge,
+        mode="reset",
+        params={
+            "fraction": 0.0,
+            "schedule_steps": 19200,
+            "room_half_extent": 7.5,
+            "boundary_wall_width": 1.0,
+            "segment_length": 9.0,
+            "gap_center_limit": 1.0,
+            "barrier_x_limit": 0.5,
+            "start_goal_distance": 3.0,
+            "final_stress_ratio": 0.25,
+            "wall_z": 1.5,
+        },
+    )
+
     domain_randomization = EventTerm(
         func=apply_domain_randomization,
         mode="reset",
@@ -402,6 +422,15 @@ class EventCfgVLP16Curriculum:
             "goal_move_dir_steps_min": 15,
             "goal_move_dir_steps_max": 40,
         },
+    )
+
+    # Runs after move_goal and pins only active bridge envs to the exact target
+    # across the barrier. Baseline and ordinary SA5 envs are untouched.
+    maintain_narrow_passage_goal = EventTerm(
+        func=_narrow_passage_bridge_mod.maintain_narrow_passage_goal,
+        mode="interval",
+        interval_range_s=(0.2, 0.2),
+        params={},
     )
 
 

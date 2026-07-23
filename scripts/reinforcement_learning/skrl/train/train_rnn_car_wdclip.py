@@ -2762,6 +2762,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_lidar_noise_config(env_cfg, args_cli)
     _apply_dr_param_overrides(env_cfg, args_cli)
 
+    # SA5 narrow-passage bridge: add two dedicated wall assets before gym.make
+    # and enable the last reset event. Reward, network, PPO and DR stay untouched.
+    _narrow_fraction = float(getattr(args_cli, "narrow_passage_fraction", 0.0))
+    if _narrow_fraction > 0.0:
+        if not (0.10 <= _narrow_fraction <= 0.15):
+            raise ValueError(
+                "narrow_passage_fraction must stay in [0.10, 0.15] for the "
+                f"accepted SA5 bridge, got {_narrow_fraction}"
+            )
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.narrow_passage_bridge import (
+            configure_narrow_passage_assets,
+        )
+
+        configure_narrow_passage_assets(
+            env_cfg,
+            fraction=_narrow_fraction,
+            schedule_steps=int(getattr(args_cli, "narrow_passage_schedule_steps", 19200)),
+            room_half_extent=float(args_cli.room_size),
+            segment_length=float(getattr(args_cli, "narrow_passage_segment_length", 9.0)),
+            final_stress_ratio=float(
+                getattr(args_cli, "narrow_passage_final_stress_ratio", 0.25)
+            ),
+        )
+
     # --- Curriculum version：設定 goal_obstacle_curriculum 的版本與起始階段 ---
     # curriculum_version 決定用哪組 phase config（warp_drive_single_agent_v1 等）
     # initial_stage 決定從哪個 phase 開始（1 = 最簡單，通常 5 = 最難）
@@ -3717,7 +3741,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # A same-stage interrupted resume must preserve the restored Adam state. Curriculum
     # metrics are empty before the first rollout, so seed the stage from the frozen config
     # instead of briefly treating the run as stage 1 and triggering a false 1→N reset.
-    _prev_stage = int(args_cli.initial_stage) if args_cli.resume_optimizer else -1
+    _optimizer_was_resumed = (
+        args_cli.checkpoint is not None
+        and not args_cli.no_resume_optimizer
+        and not args_cli.play
+    )
+    _prev_stage = int(args_cli.initial_stage) if _optimizer_was_resumed else -1
     _prev_obs_agent_active = True  # 追蹤 obs_agent 是否活躍（用於 logging）
     _prev_rnn_feature_mean = None  # 追蹤 RNN feature 分佈，偵測漂移
     _prev_unsolvable_scene_count = int(getattr(env.unwrapped, "_unsolvable_scene_count_total", 0))
@@ -5585,6 +5614,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # --- charge/* + goal_diagnostics/* + curriculum/* from MetricsCollector ---
             log_data.update(wd)
+
+            # --- SA5 narrow-passage bridge reset/schedule audit ---
+            _raw_env = env.unwrapped
+            if hasattr(_raw_env, "_narrow_bridge_reset_count"):
+                _nb_resets = max(int(_raw_env._narrow_bridge_reset_count), 1)
+                log_data.update({
+                    "narrow_bridge/injected_fraction_actual":
+                        float(_raw_env._narrow_bridge_injected_count) / _nb_resets,
+                    "narrow_bridge/injected_episodes":
+                        float(_raw_env._narrow_bridge_injected_count),
+                    "narrow_bridge/unsolvable_count":
+                        float(_raw_env._narrow_bridge_unsolvable_count),
+                    "narrow_bridge/schedule_progress":
+                        float(getattr(_raw_env, "_narrow_bridge_last_progress", 0.0)),
+                    "narrow_bridge/gap_min_m":
+                        float(getattr(_raw_env, "_narrow_bridge_last_width_min", 0.0)),
+                    "narrow_bridge/gap_max_m":
+                        float(getattr(_raw_env, "_narrow_bridge_last_width_max", 0.0)),
+                    "narrow_bridge/yaw_limit_deg":
+                        float(getattr(_raw_env, "_narrow_bridge_last_yaw_limit_deg", 0.0)),
+                    "narrow_bridge/stress_ratio":
+                        float(getattr(_raw_env, "_narrow_bridge_last_stress_ratio", 0.0)),
+                })
 
             if args_cli.action_table_sample_size > 0:
                 action_rows = metrics.action_speed_accel_rows()

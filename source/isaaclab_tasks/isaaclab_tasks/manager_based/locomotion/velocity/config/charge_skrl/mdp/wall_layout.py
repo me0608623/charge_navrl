@@ -417,9 +417,22 @@ def get_combined_wall_data(env) -> tuple[Tensor, Tensor, Tensor]:
         bs_exp = bs.unsqueeze(0).expand(N, -1, -1)   # [N, B, 2]
         bm = torch.ones(N, B, dtype=torch.bool, device=mc.device)
 
-        centers = torch.cat([mc, bc_exp], dim=1)  # [N, W_total, 2]
-        sizes = torch.cat([ms, bs_exp], dim=1)
-        mask = torch.cat([mm, bm], dim=1)
+        center_parts = [mc]
+        size_parts = [ms]
+        mask_parts = [mm]
+        # Bridge-only wall assets are kept separate from the eight random wall
+        # slots so ordinary SA5 episodes preserve their original distribution.
+        if hasattr(env, "_narrow_bridge_wall_centers"):
+            center_parts.append(env._narrow_bridge_wall_centers)
+            size_parts.append(env._narrow_bridge_wall_sizes)
+            mask_parts.append(env._narrow_bridge_wall_mask)
+        center_parts.append(bc_exp)
+        size_parts.append(bs_exp)
+        mask_parts.append(bm)
+
+        centers = torch.cat(center_parts, dim=1)
+        sizes = torch.cat(size_parts, dim=1)
+        mask = torch.cat(mask_parts, dim=1)
 
         return centers, sizes, mask
 

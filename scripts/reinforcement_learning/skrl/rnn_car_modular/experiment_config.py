@@ -121,6 +121,12 @@ class ExperimentConfig:
     scene_bound_rand: float = 0.0
     scene_bound_base: float = 7.0
     room_size: float | None = None
+    # Optional fixed-stage narrow-passage bridge. A zero fraction is a strict
+    # no-op and does not add bridge assets or alter reset behavior.
+    narrow_passage_fraction: float = 0.0
+    narrow_passage_schedule_steps: int = 19200
+    narrow_passage_segment_length: float = 9.0
+    narrow_passage_final_stress_ratio: float = 0.25
 
     # Observation layout must be fixed before isaaclab_tasks is imported.
     # None preserves the process environment for legacy configs.
