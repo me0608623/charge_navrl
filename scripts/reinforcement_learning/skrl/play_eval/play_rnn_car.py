@@ -162,6 +162,8 @@ parser.add_argument("--seed", type=int, default=None,
                     help="環境隨機種子（控制 obstacle/goal 生成順序，None=使用 env config 預設 42）")
 parser.add_argument("--real_time", action="store_true", default=REAL_TIME,
                     help="以真實時間步進（插入 sleep 模擬 dt）")
+parser.add_argument("--no_mark_dynamic_red", action="store_true", default=False,
+                    help="關閉『動態障礙物 GUI 材質固定深紅』的視覺標記（預設 GUI 開啟，方便肉眼區別動/靜障礙）")
 
 # --- 場景覆寫 ---
 # 上方設定區的值作為 default；CLI 參數可再覆寫
@@ -1128,6 +1130,120 @@ def hide_robot_camera_gizmo(raw_env) -> int:
     else:
         print(f"[PLAY] ⚠ 未找到相機 gizmo mesh ('{_CAMERA_GIZMO_LEAF}')，可能 USD 版本不同")
     return hidden
+
+
+# ── 動態障礙物 GUI 視覺標記：材質固定「深紅」，方便肉眼區別動 / 靜障礙 ──
+# 深紅 (dark red)；PreviewSurface diffuseColor 為線性色空間，取偏暗的純紅。
+DYNAMIC_OBS_COLOR = (0.35, 0.0, 0.0)
+
+
+def _dynamic_obstacle_mask(raw_env):
+    """回傳 [num_envs, num_slots] bool tensor：True = 該 (env, slot) 障礙物為『動態』。
+
+    判定來源優先序（穩定度由高到低）：
+      1. BehaviorScheduler.behavior_type >= BEHAVIOR_PATROL(2)（play 主路徑，語意最準）。
+      2. env._obstacle_velocities 速度非零（scheduler 未啟用時的 runtime 訊號）。
+      3. 索引慣例：動態佔高索引 [num_static, num_static+num_dynamic)（最後保底）。
+    slot i ↔ env.scene["obstacle_i"] ↔ /World/envs/env_*/Obstacle_i
+    （見 behavior_scheduler._write_positions_to_sim）。
+    取不到任何訊號時回傳 None。
+    """
+    import torch as _torch
+
+    # 1) BehaviorScheduler：behavior_type 直接語意化 static/dynamic
+    sched = getattr(raw_env, "_behavior_scheduler", None)
+    if sched is not None and hasattr(sched, "behavior_type"):
+        try:
+            from obstacle_agent.behavior_config import BEHAVIOR_PATROL
+            return sched.behavior_type >= BEHAVIOR_PATROL  # [E, N] bool，>=2 皆為動態行為
+        except Exception:
+            pass
+
+    # 2) runtime 速度訊號：任一軸速度非零視為動態（門檻避免浮點殘值）
+    #    僅在確實有障礙物在動時採用，否則（例如尚未 step、速度全零）落到索引保底。
+    vel = getattr(raw_env, "_obstacle_velocities", None)
+    if vel is not None:
+        try:
+            vmask = vel.norm(dim=-1) > 1e-4  # [E, N] bool
+            if bool(vmask.any()):
+                return vmask
+        except Exception:
+            pass
+
+    # 3) 索引慣例保底：動態排在靜態之後（與 move_obstacles_vectorized dyn_start 一致）
+    num_static = getattr(raw_env, "_num_obstacles_static_mixed", None)
+    num_total = getattr(raw_env, "_num_obstacles", None)
+    if num_static is not None and num_total is not None and num_total > 0:
+        mask = _torch.zeros(raw_env.num_envs, num_total, dtype=_torch.bool, device=raw_env.device)
+        mask[:, int(num_static):] = True
+        return mask
+    return None
+
+
+def mark_dynamic_obstacles_red(raw_env, color=DYNAMIC_OBS_COLOR) -> int:
+    """把動態障礙物的 USD PreviewSurface 材質改為深紅，方便 GUI 區別。回傳染色 prim 數。
+
+    在 env.reset()（scheduler 已分配 behavior_type + obstacle 已 clone 到 stage）之後呼叫。
+    純視覺：不改物理 / 碰撞 / LiDAR，不影響觀測與評估。失敗只印警告不中斷 play。
+    """
+    mask = _dynamic_obstacle_mask(raw_env)
+    if mask is None:
+        print("[PLAY] ⚠ 無法判定動態障礙物（無 scheduler / 速度 / 索引訊號），略過深紅標記")
+        return 0
+
+    try:
+        from pxr import Usd, UsdShade, Gf
+        try:
+            from isaacsim.core.utils.stage import get_current_stage
+            stage = get_current_stage()
+        except Exception:
+            import omni.usd
+            stage = omni.usd.get_context().get_stage()
+    except Exception as exc:  # pragma: no cover — 環境未起 USD 時的保護
+        print(f"[PLAY] ⚠ 無法取得 USD stage，略過動態障礙深紅標記: {exc}")
+        return 0
+    if stage is None:
+        print("[PLAY] ⚠ USD stage 為 None，略過動態障礙深紅標記")
+        return 0
+
+    gf_color = Gf.Vec3f(float(color[0]), float(color[1]), float(color[2]))
+    mask = mask.detach().to("cpu")  # 一次搬到 CPU，避免逐元素 GPU 同步
+    num_envs = int(mask.shape[0])
+    num_slots = int(mask.shape[1])
+    recolored = 0
+    dyn_slot_union = set()
+
+    for e in range(num_envs):
+        for i in range(num_slots):
+            if not bool(mask[e, i]):
+                continue
+            dyn_slot_union.add(i)
+            base = stage.GetPrimAtPath(f"/World/envs/env_{e}/Obstacle_{i}")
+            if not base or not base.IsValid():
+                continue
+            # 遍歷該障礙物子樹（材質在 Obstacle_i/geometry/material/Shader），改 diffuseColor。
+            # env clone 若為 USD instanceable，clone 是 instance proxy 不可編輯；
+            # PrimRange 預設不進 instance，只會在 env_0（prototype 來源）命中 Shader，
+            # 編輯後由 instancing 自動傳播到所有 clone；非 instanced 時各 env 逐一命中。
+            for prim in Usd.PrimRange(base):
+                if prim.IsInstanceProxy() or not prim.IsA(UsdShade.Shader):
+                    continue
+                diffuse = UsdShade.Shader(prim).GetInput("diffuseColor")
+                if not diffuse:
+                    continue
+                try:
+                    diffuse.Set(gf_color)
+                    recolored += 1
+                except Exception:  # noqa: BLE001 — 個別 shader 編輯失敗不影響整體
+                    pass
+
+    if recolored:
+        _slots = ",".join(str(s) for s in sorted(dyn_slot_union))
+        print(f"[PLAY] 已將動態障礙物染深紅 {tuple(color)}：{recolored} 個 shader，slots=[{_slots}]（GUI 區別用）")
+    else:
+        print("[PLAY] ⚠ 未染任何動態障礙物（可能無動態障礙或 prim 路徑不符），slots="
+              f"[{','.join(str(s) for s in sorted(dyn_slot_union))}]")
+    return recolored
 
 
 def sample_action(logits: torch.Tensor, deterministic: bool) -> torch.Tensor:
@@ -3001,6 +3117,11 @@ def main():
            "scripted interval events 啟用" if args_cli.scripted_obstacles else
            "全部靜止")
     )
+
+    # 動態障礙物材質固定深紅，GUI 中肉眼即可區別動 / 靜障礙。
+    # 放在 BehaviorScheduler 建立 + reset 之後（behavior_type 已定），材質不受後續位置更新影響，只需一次。
+    if not args_cli.headless and not args_cli.no_mark_dynamic_red:
+        mark_dynamic_obstacles_red(raw_env)
 
     # Goal movement（與訓練一致，--no_goal_movement 可強制關閉）
     _play_goal_mover = None
