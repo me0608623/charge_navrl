@@ -176,6 +176,9 @@ parser.add_argument("--num_walls", type=int, default=NUM_WALLS,
                     help="覆寫內部牆壁數量（設為 walls_min = walls_max = N）")
 parser.add_argument("--wall_length", type=float, default=WALL_LENGTH,
                     help="覆寫牆壁長度 (m)")
+parser.add_argument("--wall_thickness", type=float, default=0.0,
+                    help="覆寫內牆壁厚度 (m)；0=用預設(WALL_SLOT_SPECS 內建 1.0m)。"
+                         "play 專用：在 env 建立前 patch WALL_SLOT_SPECS 全 slot width。")
 parser.add_argument("--goal_distance_min", type=float, default=GOAL_DIST_MIN,
                     help="覆寫最小目標距離 (m)")
 parser.add_argument("--goal_distance_max", type=float, default=GOAL_DIST_MAX,
@@ -212,7 +215,7 @@ parser.add_argument("--controlled_blocker_eval", action="store_true", default=Fa
                     help="Gate3 專用：4m 通道與每回合重取樣 blocker 的受控可解場")
 parser.add_argument("--controlled_blocker_x_min", type=float, default=1.2,
                     help="Gate3 blocker 每回合縱向初始位置與巡邏下界 m")
-parser.add_argument("--controlled_blocker_x_max", type=float, default=4.8,
+parser.add_argument("--controlled_blocker_x_max", type=float, default=3.8,
                     help="Gate3 blocker 每回合縱向初始位置與巡邏上界 m")
 parser.add_argument("--controlled_blocker_y_max", type=float, default=1.0,
                     help="Gate3 blocker 每回合橫向初始位置範圍 ±m")
@@ -220,6 +223,8 @@ parser.add_argument("--controlled_blocker_dynamic_ratio", type=float, default=0.
                     help="Gate3 受控 2D 巡邏 env 比例；0=全靜止，0.5=一半動態")
 parser.add_argument("--controlled_blocker_speed", type=float, default=0.3,
                     help="Gate3 動態 blocker 的 2D 巡邏速度 m/s")
+parser.add_argument("--narrow_gap_eval", action="store_true", default=False,
+                    help="OBB lineage Gate5：強制穿越中央 0.85m 牆縫並量測 throat yaw")
 parser.add_argument("--solvability_audit_output", type=str, default="",
                     help="診斷每回合起始場景的牆/靜態/全障礙可達性並輸出 JSON；不改 gate 或 policy")
 parser.add_argument("--solvability_grid_resolution", type=float, default=0.15,
@@ -399,6 +404,8 @@ parser.add_argument("--oracle_k", type=int, default=5,
                     help="oracle 時間窗幀數 (預設 5 ≈ 1.0s @dt=0.2s)")
 parser.add_argument("--no_domain_randomization", action="store_true", default=False,
                     help="關閉 domain randomization")
+parser.add_argument("--use_obb_collision", action="store_true", default=False,
+                    help="使用實測 0.70×0.60m（含輪）方向性車體碰撞 termination")
 
 # --- Actuator DR (致動延遲 / 馬達 lag)：play 端對齊訓練 + 真車 200ms 延遲 ---
 # 訓練有 enable_actuator_dr=true（YAML），但 play 預設關閉 → train/play 不一致會讓 RNN
@@ -539,6 +546,10 @@ def _autodetect_obs_layout_env(cli) -> None:
     elif state_7d:
         # v3f/v3 等 7D-state（無 LV-DOT）：env 需移除 act_hist 才是 79D
         _set("CHARGE_USE_ACT_HIST", "0", "7D state checkpoint（act_hist 已移除）")
+    else:
+        # 11D state means the checkpoint was trained with the 4D, two-step
+        # applied-action history. Override stale shell settings as well.
+        _set("CHARGE_USE_ACT_HIST", "1", "11D state checkpoint（含 4D act_hist）")
 
 
 try:
@@ -699,6 +710,11 @@ def configure_play_scene(env_cfg, stage_cfg: dict | None, cli_args) -> dict:
     _num_walls_override = _scene_arg(cli_args, "num_walls", None, ("--num_walls",))
     final["walls_min"] = _num_walls_override if _num_walls_override is not None else defaults["walls_min"]
     final["walls_max"] = _num_walls_override if _num_walls_override is not None else defaults["walls_max"]
+    # --no_walls 為權威旗標：強制清零內牆，覆寫 --num_walls / stage 預設
+    # （原 bug：--no_walls 定義了卻從未被讀取，checkbox 無效）。
+    if getattr(cli_args, "no_walls", False):
+        final["walls_min"] = 0
+        final["walls_max"] = 0
     final["wall_length"] = _scene_arg(cli_args, "wall_length", defaults["wall_length"], ("--wall_length",))
     final["goal_dist_min"] = _scene_arg(cli_args, "goal_distance_min", defaults["goal_dist_min"], ("--goal_distance_min",))
     final["goal_dist_max"] = _scene_arg(cli_args, "goal_distance_max", defaults["goal_dist_max"], ("--goal_distance_max",))
@@ -2409,6 +2425,12 @@ def main():
         print("[PLAY] 自動啟用 --lidar_no_noise（從 checkpoint 讀取）")
         args_cli.lidar_no_noise = True
 
+    # Collision semantics are part of the policy lineage. An OBB-trained
+    # checkpoint must not be evaluated with the legacy circular footprint.
+    if _ckpt_args.get("use_obb_collision", False) and not args_cli.use_obb_collision:
+        print("[PLAY] 自動啟用 --use_obb_collision（從 checkpoint 讀取）")
+        args_cli.use_obb_collision = True
+
     # 自動繼承 vlp16_noise_mode（2026-07-03 fix 審計5-A1：對齊訓練時的實測雜訊分佈，
     # 否則 full_material 訓的 policy 會在近乾淨 LiDAR 下評估 → SR/CR 偏樂觀）
     if getattr(args_cli, "vlp16_noise_mode", None) is None:
@@ -2429,6 +2451,20 @@ def main():
     # ================================================================
     # 3. 環境配置建立與覆寫
     # ================================================================
+    # 內牆厚度覆寫（play 專用）：必須在 env_cfg 建立【前】patch WALL_SLOT_SPECS，
+    # 讓 mesh spawn(charge_env_cfg_vlp16_curriculum.py 讀 slot width 建 CuboidCfg)
+    # 與 AABB(events/walls.py init_wall_layout 讀同一 list) 一致；in-place 改 list
+    # element 只影響本 play 進程,不動訓練。0=不覆寫,用內建 1.0m。
+    if getattr(args_cli, "wall_thickness", 0.0) and args_cli.wall_thickness > 0:
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.wall_layout import (
+            WALL_SLOT_SPECS,
+        )
+        _wt = float(args_cli.wall_thickness)
+        for _i in range(len(WALL_SLOT_SPECS)):
+            _len, _width, _height = WALL_SLOT_SPECS[_i]
+            WALL_SLOT_SPECS[_i] = (_len, _wt, _height)
+        print(f"[PLAY] 內牆厚度覆寫 → {_wt:.2f}m（patch WALL_SLOT_SPECS 全 {len(WALL_SLOT_SPECS)} slot width）")
+
     env_cfg = resolve_env_cfg(args_cli.task)
     env_cfg.scene.num_envs = args_cli.num_envs
     if args_cli.device is not None:
@@ -2445,6 +2481,13 @@ def main():
 
     # 套用場景參數：stage_parameter=True 時保留 stage 預設，只有明確 CLI 才覆寫；False 時用手動設定區/CLI。
     scene_final = configure_play_scene(env_cfg, stage_cfg, args_cli)
+
+    if sum(bool(x) for x in (
+        args_cli.near_wall_crossing_eval,
+        args_cli.controlled_blocker_eval,
+        args_cli.narrow_gap_eval,
+    )) > 1:
+        raise ValueError("near-wall crossing, controlled blocker, and narrow-gap eval are mutually exclusive")
 
     if args_cli.near_wall_crossing_eval:
         from near_wall_crossing_eval import configure_near_wall_crossing_env
@@ -2470,6 +2513,16 @@ def main():
             f"y∈±{args_cli.controlled_blocker_y_max:.2f}m, 2D speed="
             f"{args_cli.controlled_blocker_speed:.2f}m/s, "
             f"dynamic_ratio={args_cli.controlled_blocker_dynamic_ratio:.2f}"
+        )
+
+    if args_cli.narrow_gap_eval:
+        from narrow_gap_eval import NarrowGapSpec, configure_narrow_gap_env
+        _narrow_spec = NarrowGapSpec()
+        configure_narrow_gap_env(env_cfg, scene_final, args_cli, _narrow_spec)
+        print(
+            f"[PLAY] OBB narrow-gap gate: gap={_narrow_spec.gap_width:.2f}m, "
+            f"start=({_narrow_spec.start_x:.1f},0), goal=({_narrow_spec.goal_x:.1f},0), "
+            f"yaw_limit=±{_narrow_spec.yaw_limit_deg:.2f}deg"
         )
 
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
@@ -3043,6 +3096,13 @@ def main():
             spec=spec_from_cli(args_cli),
         )
         _controlled_blocker_controller.reset()
+        obs = raw_env.observation_manager.compute()
+        _play_goal_mover = None
+    _narrow_gap_controller = None
+    if args_cli.narrow_gap_eval:
+        from narrow_gap_eval import NarrowGapController, NarrowGapSpec
+        _narrow_gap_controller = NarrowGapController(raw_env=raw_env, spec=NarrowGapSpec())
+        _narrow_gap_controller.reset()
         obs = raw_env.observation_manager.compute()
         _play_goal_mover = None
     episode_reward = torch.zeros(raw_env.num_envs, device=device)     # 累積回合獎勵
@@ -3661,9 +3721,11 @@ def main():
         if _controlled_blocker_controller is not None:
             _controlled_blocker_controller.advance()
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
+        if _narrow_gap_controller is not None:
+            _narrow_gap_controller.observe()
         # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
         if (_play_behavior_scheduler is not None and _near_wall_controller is None
-                and _controlled_blocker_controller is None):
+                and _controlled_blocker_controller is None and _narrow_gap_controller is None):
             if int(episode_step[0].item()) > 3:
                 _play_behavior_scheduler.step(raw_env, dt=step_dt)
         # Goal movement 每步移動 goal（與訓練一致）
@@ -3920,6 +3982,8 @@ def main():
                         f"contact=W{int(_d_row['wall_contact'])}/O{int(_d_row['obstacle_contact'])} "
                         f"cause={_d_row['termination_cause']}"
                     )
+            if _narrow_gap_controller is not None:
+                _narrow_gap_controller.finish_episodes(done_ids)
 
             # 批次 GPU→CPU sync：把所有 done env 需要的 scalar 一次性 stack 後
             # .tolist()，取代原本每 env 12+ 次 .item() 個別 sync（12N 次 → 1 次）。
@@ -4075,6 +4139,14 @@ def main():
             if _controlled_blocker_controller is not None:
                 _controlled_blocker_controller.reset(done_ids)
                 # Auto-reset observations still describe the discarded random scene.
+                _fresh_obs = raw_env.observation_manager.compute()
+                if isinstance(next_obs, dict):
+                    for _obs_key, _obs_value in _fresh_obs.items():
+                        next_obs[_obs_key][done_ids] = _obs_value[done_ids]
+                else:
+                    next_obs[done_ids] = _fresh_obs[done_ids]
+            if _narrow_gap_controller is not None:
+                _narrow_gap_controller.reset(done_ids)
                 _fresh_obs = raw_env.observation_manager.compute()
                 if isinstance(next_obs, dict):
                     for _obs_key, _obs_value in _fresh_obs.items():
@@ -4246,6 +4318,8 @@ def main():
                 print(f"  碰撞 × 障礙行為分項: 取得失敗 ({type(_e).__name__})")
     else:
         print("  未完成任何回合。")
+    if _narrow_gap_controller is not None:
+        print(_narrow_gap_controller.summary_line())
     # --- 軌跡曲率量測 dump ---
     if _TRAJ_DUMP and len(_traj_robot) > 0:
         import numpy as _np_traj

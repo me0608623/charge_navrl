@@ -305,17 +305,11 @@ class DiscreteDifferentialDriveAction(ActionTerm):
                 marker_cfg.prim_path = "/Visuals/Actions/velocity_goal"
                 marker_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
                 self.vel_goal_visualizer = VisualizationMarkers(marker_cfg)
-
-                marker_cfg = BLUE_ARROW_X_MARKER_CFG.copy()
-                marker_cfg.prim_path = "/Visuals/Actions/velocity_current"
-                marker_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
-                self.vel_current_visualizer = VisualizationMarkers(marker_cfg)
+            # 藍色 vel_current 箭頭已永久移除（僅保留綠色 vel_goal 速度目標箭頭）。
             self.vel_goal_visualizer.set_visibility(True)
-            self.vel_current_visualizer.set_visibility(True)
         else:
             if hasattr(self, "vel_goal_visualizer"):
                 self.vel_goal_visualizer.set_visibility(False)
-                self.vel_current_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):
         if not hasattr(self, "vel_goal_visualizer"):
@@ -329,11 +323,7 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         vel_goal_xy = self._current_velocity.unsqueeze(1)
         vel_goal_scale, vel_goal_quat = self._resolve_velocity_to_arrow(vel_goal_xy)
 
-        robot_vel_w = self._asset.data.root_lin_vel_w[:, :2]
-        vel_current_scale, vel_current_quat = self._resolve_velocity_to_arrow(robot_vel_w)
-
         self.vel_goal_visualizer.visualize(base_pos_w, vel_goal_quat, vel_goal_scale)
-        self.vel_current_visualizer.visualize(base_pos_w, vel_current_quat, vel_current_scale)
 
     def _resolve_velocity_to_arrow(self, xy_velocity: torch.Tensor):
         if hasattr(self, "vel_goal_visualizer"):

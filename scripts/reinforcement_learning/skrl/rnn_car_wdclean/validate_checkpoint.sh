@@ -2,7 +2,8 @@
 # validate_checkpoint.sh — e2e checkpoint 晉級四閘驗收(用戶 2026-07-15 協定)
 # 用法: bash validate_checkpoint.sh <ckpt.pt> [stage=1] [wandb_id=gtefxx15]
 # GUI 可視化: GUI=1 CAMERA=top NUM_ENVS=4 bash validate_checkpoint.sh ...
-#   跑 gate#2(3-seed held-out det) + gate#3(可解的路徑擋路場 det+dump) + gate#4(SA(N+1) preview),
+#   跑 gate#2(3-seed held-out det) + gate#4(SA(N+1) preview)；SA5 起另跑
+#   gate#3(可解的路徑擋路場 det+dump)與 OBB gate#5(0.85m 窄縫)，
 #   再呼叫 validate_gates.py 拉 gate#1(wandb 健康) + 逐 gate 判 PASS/FAIL。
 # 注意: play 自動從 ckpt 偵測 e2e 架構(frame_stack/end_to_end);e2e 不加 --feat_norm。
 set -euo pipefail
@@ -24,6 +25,21 @@ OUT="/tmp/validate_${RUN_NAME}_$(basename "$CKPT" .pt)_s${STAGE}${OUT_SUFFIX}"
 mkdir -p "$OUT"
 cd "$REPO"; source /home/aa/miniconda3/etc/profile.d/conda.sh && conda activate env_isaaclab
 [ -f "$CKPT" ] || { echo "找不到 $CKPT"; exit 2; }
+LOCK_KEY="$(printf '%s\n' "$CKPT|$STAGE" | sha256sum | cut -d' ' -f1)"
+LOCK_FILE="/tmp/isaaclab_validate_${LOCK_KEY}.lock"
+exec 8>"$LOCK_FILE"
+if ! flock -n 8; then
+  echo "同一 checkpoint/stage 的驗收已在執行: $CKPT stage=$STAGE" >&2
+  exit 75
+fi
+USE_OBB="$($PY - "$CKPT" <<'PY'
+import sys, torch
+ck = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+a = ck.get("args", {})
+a = a if isinstance(a, dict) else vars(a)
+print("1" if a.get("use_obb_collision", False) else "0")
+PY
+)"
 
 # 逐階段場景(arena/靜/動 + 下一階段 preview 場)
 case "$STAGE" in
@@ -37,12 +53,16 @@ case "$STAGE" in
   8) A=12; S=14; D=6; A2=0;  S2=0;  D2=0; PST=0;;
   *) echo "不支援 Stage $STAGE（只接受 1..8）"; exit 2;;
 esac
+RUN_ADVANCED_GATES=0
+if [ "$STAGE" -ge 5 ]; then
+  RUN_ADVANCED_GATES=1
+fi
 
 DUMP=""   # 只有 gate#3 設;其餘空
 _play() {  # _play <out.log> <scene args...>
   local log="$1"; shift
   echo "  ▶ $(basename "$log") ..."
-  PYTHONUNBUFFERED=1 CHARGE_USE_ACT_HIST=0 CHARGE_LIDAR_DUMP="$DUMP" \
+  PYTHONUNBUFFERED=1 CHARGE_LIDAR_DUMP="$DUMP" \
     ./isaaclab.sh -p "$PLAY" \
     --checkpoint "$CKPT" --task Isaac-Navigation-Charge-VLP16-Curriculum-WD \
     --curriculum_version "$CURR" --deterministic --num_envs "$NUM_ENVS" --steps 1200 "${RENDER_ARGS[@]}" \
@@ -68,15 +88,21 @@ for SD in 101 202 303; do
 done
 
 # Gate #3: 受控可解擋路場。兩側長牆內表面間距 4.0m；blocker 每回合
-# 在 x∈[1.2,4.8], y∈[-1,+1] 重採樣，最窄側仍有 0.65m 淨空，
+# 在 x∈[1.2,3.8], y∈[-1,+1] 重採樣，最窄側仍有 0.65m 淨空，
 # 起點/goal 邊緣淨空至少 0.5m。預設 50% 靜止、50% 以 0.3m/s
 # 隨機 2D heading 巡邏並在安全邊界反射；沒有舊版第三面壓力牆。
-DUMP="$OUT/blk_dump.npz"
-_play "$OUT/blk.log" \
-  --stage "$STAGE" --arena_size "$A" --num_static_obs "$S" --num_dynamic_obs "$D" \
-  --goal_distance_min 5 --goal_distance_max 9 --obs_near_goal_count 0 \
-  --controlled_blocker_eval --seed 42
-DUMP=""
+BLK_ARGS=()
+if [ "$RUN_ADVANCED_GATES" = "1" ]; then
+  DUMP="$OUT/blk_dump.npz"
+  _play "$OUT/blk.log" \
+    --stage "$STAGE" --arena_size "$A" --num_static_obs "$S" --num_dynamic_obs "$D" \
+    --goal_distance_min 5 --goal_distance_max 9 --obs_near_goal_count 0 \
+    --controlled_blocker_eval --seed 42
+  DUMP=""
+  BLK_ARGS=(--blk_log "$OUT/blk.log" --blk_dump "$OUT/blk_dump.npz")
+else
+  echo "  ↷ Gate3 deferred until SA5 (current SA${STAGE})"
+fi
 
 # Gate #4: SA(N+1) preview (不訓練,直接丟下一階段場)
 PREVIEW_ARG=""
@@ -87,7 +113,19 @@ if [ "$PST" != "0" ]; then
   PREVIEW_ARG="--preview_log $OUT/preview.log"
 fi
 
+# Gate #5: only OBB-lineage checkpoints must prove the learned policy can
+# traverse the deployment-critical 0.85 m opening with the required alignment.
+NARROW_ARG=""
+if [ "$USE_OBB" = "1" ] && [ "$RUN_ADVANCED_GATES" = "1" ]; then
+  _play "$OUT/narrow_gap.log" \
+    --stage "$STAGE" --arena_size 10 --num_static_obs 0 --num_dynamic_obs 0 \
+    --obs_near_goal_count 0 --narrow_gap_eval --seed 404
+  NARROW_ARG="--narrow_log $OUT/narrow_gap.log"
+elif [ "$USE_OBB" = "1" ]; then
+  echo "  ↷ Gate5 deferred until SA5 (current SA${STAGE})"
+fi
+
 # 分析 + 逐 gate 判定
 echo
 $PY "$GATES_PY" --stage "$STAGE" --wandb_id "$WID" --ckpt "$CKPT" \
-  --det_glob "$OUT/det_s*.log" --blk_log "$OUT/blk.log" --blk_dump "$OUT/blk_dump.npz" $PREVIEW_ARG
+  --det_glob "$OUT/det_s*.log" "${BLK_ARGS[@]}" $PREVIEW_ARG $NARROW_ARG

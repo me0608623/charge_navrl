@@ -1,0 +1,48 @@
+# SA8 e2e K8 GUI 驗收 scene preset
+# ---------------------------------------------------------------------------
+# 用途：在 play_launcher.py GUI 驗收目前 SA8 run 時的場景參數基準與變體。
+#
+# 觀測資訊(CNN / lidar frame_stack / obs 維度)【不需在此設定】——
+#    play_rnn_car.py 會從 checkpoint args 自動偵測(見下 obs_autodetected 區),
+#    curriculum_version 也自動繼承。本檔只記錄「場景參數」供你在 GUI 任意調整。
+#
+# GUI 的「Load Stage Params」按鈕載的是舊 wd_single_agent_v1 curriculum,
+#    對 SA8 e2e 是【錯的】——請【不要按】,改用本檔 baseline 手動填 GUI。
+# ---------------------------------------------------------------------------
+
+run: sa8_e2e_k8_future_frozen_goalrecovery_v2_cont_from115200_s42
+checkpoint_dir: logs/rnn_car/sa8_e2e_k8_future_frozen_goalrecovery_v2_cont_from115200_s42
+best_candidate_ckpt: logs/rnn_car/sa8_e2e_k8_future_frozen_goaladaptive_ne1024_s42_from_sa7c83200/checkpoint_89600.pt
+
+# === 由 checkpoint 自動偵測(唯讀參考,play 自己讀,GUI 不必設) ===
+obs_autodetected:
+  encoder: e2e_frame_stack_CNN_RNN_bypassed
+  end_to_end_frame_stack: true
+  lidar_frame_stack: 8            # 8 幀 LiDAR 疊幀(lidar_hist_dim=504, rl_in=175)
+  raw_obs_dim: 79                 # ego4 + goal2 + lidar72 + time1
+  use_action_history: false
+  feat_norm: false
+  curriculum_version: warp_drive_e2e_final20_v1
+  lidar_r_min: 0.5
+
+# === 訓練 baseline 場景(GUI 從這裡開始,再任意調) ===
+baseline:
+  stage: 8
+  arena_size: 12
+  num_static_obs: 14
+  num_dynamic_obs: 6
+  goal_distance_min: 5.0
+  goal_distance_max: 9.0
+  obs_near_goal_count: 2
+  camera: top
+  num_envs: 4
+  steps: 1200
+  deterministic: true
+  headless: false
+
+# === 驗收變體(改 GUI 對應欄位) ===
+variants:
+  真實部署密度: { arena_size: 12, num_static_obs: 20, num_dynamic_obs: 0 }
+  高動態:       { arena_size: 12, num_static_obs: 8,  num_dynamic_obs: 12 }
+  稀疏開闊:     { arena_size: 16, num_static_obs: 6,  num_dynamic_obs: 4 }
+  貼身窄場:     { arena_size: 8,  num_static_obs: 10, num_dynamic_obs: 6 }

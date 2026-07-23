@@ -36,6 +36,7 @@ Usage:
 # ============================================================================
 
 import argparse
+import json
 import math
 import os
 import random
@@ -2753,9 +2754,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 統一由 charge_env_overrides 處理，YAML 設定經 ExperimentConfig → args_cli 傳入。
     # lidar_no_noise=True → 全部歸零（legacy）；False → 使用 YAML 中的 per-param 值。
     from charge_env_overrides import (
+        _apply_obb_collision_config,
         _apply_lidar_noise_config,
         _apply_dr_param_overrides,
     )
+    _apply_obb_collision_config(env_cfg, args_cli)
     _apply_lidar_noise_config(env_cfg, args_cli)
     _apply_dr_param_overrides(env_cfg, args_cli)
 
@@ -3624,6 +3627,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # --- Initial reset ---
     obs, info = env.reset()
     start_time = time.time()
+    _supervisor_stop_file = os.environ.get(
+        "CHARGE_SUPERVISOR_STOP_FILE",
+        os.path.join(log_dir, "supervisor_stop.request"),
+    )
+    _supervisor_metrics_file = os.path.join(log_dir, "supervisor_metrics.jsonl")
+    _supervisor_stopped = False
 
     # --- WD reward params (initial, Phase 1 defaults) ---
     _spot_penalty_hit = -5.0
@@ -5630,8 +5639,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             wandb_run.log(log_data, step=total_steps)
 
+        # Local, structured metrics let the cron supervisor make convergence
+        # decisions without depending on W&B/network availability.
+        _supervisor_metrics = {
+            "iteration": iteration + 1,
+            "iterations_target": num_iterations,
+            "total_steps": total_steps,
+            "stage": int(wd.get("curriculum/stage", 0)),
+            "sr": float(wd.get("charge/goal_reach_rate", 0.0)),
+            "cr": float(wd.get("charge/hit_probability", 0.0)),
+            "timeout": float(_timeout_rate),
+            "policy_loss": float(charge_ppo_loss),
+            "vf": float(charge_vf_loss),
+            "entropy": float(charge_entropy),
+            "kl": float(wd_update_monitor.get("rl/approx_kl", 0.0)),
+            "clip_fraction": float(wd_update_monitor.get("rl/clip_fraction", 0.0)),
+            "encoder_grad": float(wd_update_monitor.get("rl_encoder/grad_norm_pre_clip", 0.0)),
+            "fps": float(fps),
+        }
+        with open(_supervisor_metrics_file, "a", encoding="utf-8") as _metrics_fp:
+            _metrics_fp.write(json.dumps(_supervisor_metrics, separators=(",", ":")) + "\n")
+
         # === Save checkpoint：定期儲存模型、optimizer state、normalizer 統計 ===
-        if (iteration + 1) % args_cli.save_interval == 0 or iteration == num_iterations - 1:
+        _supervisor_stop_requested = os.path.isfile(_supervisor_stop_file)
+        if ((iteration + 1) % args_cli.save_interval == 0
+                or iteration == num_iterations - 1
+                or _supervisor_stop_requested):
             ckpt_path = os.path.join(log_dir, f"checkpoint_{total_steps}.pt")
             _ckpt_dict = {
                 "preprocess_rnn": preprocess_rnn.state_dict(),   # RNN cell + fc_front/middle + predict_head
@@ -5665,10 +5698,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             torch.save(_ckpt_dict, ckpt_path)
             print(f"[SAVE] {ckpt_path}")
 
+        if _supervisor_stop_requested:
+            print(
+                f"[SUPERVISOR] cooperative stop accepted after iteration {iteration + 1}; "
+                f"checkpoint={ckpt_path}"
+            )
+            try:
+                os.remove(_supervisor_stop_file)
+            except FileNotFoundError:
+                pass
+            _supervisor_stopped = True
+            break
+
     # === Finish：訓練結束，收尾並關閉資源 ===
     total_time = time.time() - start_time
     print(f"\n{'='*60}")
-    print(f"Training complete: {total_timesteps:,} steps in {total_time:.0f}s ({total_time/60:.1f}min)")
+    if _supervisor_stopped:
+        print(
+            f"Training stopped cooperatively: {total_steps:,}/{total_timesteps:,} steps "
+            f"in {total_time:.0f}s ({total_time/60:.1f}min)"
+        )
+    else:
+        print(f"Training complete: {total_timesteps:,} steps in {total_time:.0f}s ({total_time/60:.1f}min)")
     print(f"{'='*60}")
     if wandb_run is not None:
         import wandb

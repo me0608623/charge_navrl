@@ -52,6 +52,7 @@ STAGE_THRESH = {
             preview_stage=None, preview_sr=None),  # SA8 = 畢業(部署標準),無 preview
 }
 FRONT_LO, FRONT_HI = 30, 43  # 前錐 bin36±6
+NARROW_THRESH = dict(sr=0.90, cr=0.05, crossing=0.95, yaw_p95_deg=2.52, yaw_within=0.95)
 
 
 # ── log 解析 ─────────────────────────────────────────────
@@ -82,6 +83,23 @@ def agg_seeds(paths: list[str]) -> dict:
     N = sum(r["n"] for r in rs) or 1
     w = lambda k: sum(r[k] * r["n"] for r in rs) / N
     return {"n": N, "sr": w("sr"), "cr": w("cr"), "to": w("to"), "seeds": len(rs)}
+
+
+def parse_narrow_gap(path: str) -> dict | None:
+    """Parse policy outcomes plus throat-yaw statistics from narrow-gap play."""
+    summary = parse_play_summary(path)
+    try:
+        txt = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return None
+    line = re.search(r"\[NARROW-GAP-METRICS\](.*)", txt)
+    if not summary or not line:
+        return None
+    values = {
+        key: float(value)
+        for key, value in re.findall(r"([A-Za-z0-9_.]+)=([+-]?(?:nan|\d+(?:\.\d+)?))", line.group(1))
+    }
+    return {**summary, **values}
 
 
 # ── gate #3 行為指標(擋路場 dump) ────────────────────────
@@ -226,14 +244,16 @@ def main():
     p.add_argument("--stage", type=int, required=True)
     p.add_argument("--wandb_id", default="gtefxx15")
     p.add_argument("--det_glob", required=True, help="held-out det logs glob(3 seed)")
-    p.add_argument("--blk_log", required=True, help="擋路場 det log")
-    p.add_argument("--blk_dump", required=True, help="擋路場 CHARGE_LIDAR_DUMP npz")
+    p.add_argument("--blk_log", default="", help="SA5+ 擋路場 det log")
+    p.add_argument("--blk_dump", default="", help="SA5+ 擋路場 CHARGE_LIDAR_DUMP npz")
     p.add_argument("--preview_log", default="", help="SA(N+1) preview det log")
+    p.add_argument("--narrow_log", default="", help="OBB lineage 0.85m narrow-gap det log")
     p.add_argument("--ckpt", default="")
     args = p.parse_args()
     if args.stage not in STAGE_THRESH:
         p.error(f"unsupported stage {args.stage}; expected one of {sorted(STAGE_THRESH)}")
     th = STAGE_THRESH[args.stage]
+    advanced_gates = args.stage >= 5
 
     print(f"\n{'='*68}\ncheckpoint 晉級驗收 — Stage {args.stage}  {os.path.basename(args.ckpt)}\n{'='*68}")
     results = []
@@ -263,30 +283,34 @@ def main():
     results.append(("held-out det", g2))
 
     # gate #3 擋路測試
-    blk = parse_play_summary(args.blk_log)
-    beh = blocking_behavior(args.blk_dump) if os.path.exists(args.blk_dump) else {}
-    if not blk or blk["sr"] is None or not beh:
-        print(f"[Gate3 擋路測試] ⚠ 缺 log/dump"); g3 = None
+    if not advanced_gates:
+        print(f"[Gate3 擋路測試] ↷ DEFERRED — 依協定自 SA5 起啟用")
+        g3 = None
     else:
-        checks = {
-            "SR": (blk["sr"] >= th["blk_sr"], f"{blk['sr']:.3f}≥{th['blk_sr']}"),
-            "CR": (blk["cr"] <= th["blk_cr"], f"{blk['cr']:.3f}≤{th['blk_cr']}"),
-            "TO": (blk["to"] <= th["blk_to"], f"{blk['to']:.3f}≤{th['blk_to']}"),
-            "clear|ω|": (beh["clear_omega"] <= th["clear_omega_max"], f"{beh['clear_omega']:.3f}≤{th['clear_omega_max']}"),
-            "Δ|ω|@1.5-2m": (beh["delta_omega"] >= th["delta_omega_min"], f"{beh['delta_omega']:+.3f}≥{th['delta_omega_min']}"),
-            "閉迴路安全弧%": (beh["closed_loop_safe_arc"] >= th["safe_arc_min"],
-                              f"{beh['closed_loop_safe_arc']:.3f}≥{th['safe_arc_min']}"),
-            "clear停止率": (beh["clear_stop"] <= th["clear_stop_max"], f"{beh['clear_stop']:.3f}≤{th['clear_stop_max']}"),
-        }
-        g3 = all(ok for ok, _ in checks.values())
-        print(f"[Gate3 擋路測試] {_p(g3)}")
-        for k, (ok, s) in checks.items():
-            print(f"    {_p(ok)} {k:12s} {s}")
-        print(f"    診斷 固定動作2.7s安全弧={beh['open_loop_safe_arc']:.3f} "
-              f"(非部署控制器；閉迴路樣本={beh['closed_loop_n']})")
-        print(f"    診斷 path-recovery |ω|中位={beh['recovery_clear_omega']:.3f} rad/s "
-              "(goal<15deg 且前錐>2.5m；僅觀察、不參與 PASS/FAIL)")
-    results.append(("擋路測試", g3))
+        blk = parse_play_summary(args.blk_log)
+        beh = blocking_behavior(args.blk_dump) if os.path.exists(args.blk_dump) else {}
+        if not blk or blk["sr"] is None or not beh:
+            print(f"[Gate3 擋路測試] ⚠ 缺 log/dump"); g3 = None
+        else:
+            checks = {
+                "SR": (blk["sr"] >= th["blk_sr"], f"{blk['sr']:.3f}≥{th['blk_sr']}"),
+                "CR": (blk["cr"] <= th["blk_cr"], f"{blk['cr']:.3f}≤{th['blk_cr']}"),
+                "TO": (blk["to"] <= th["blk_to"], f"{blk['to']:.3f}≤{th['blk_to']}"),
+                "clear|ω|": (beh["clear_omega"] <= th["clear_omega_max"], f"{beh['clear_omega']:.3f}≤{th['clear_omega_max']}"),
+                "Δ|ω|@1.5-2m": (beh["delta_omega"] >= th["delta_omega_min"], f"{beh['delta_omega']:+.3f}≥{th['delta_omega_min']}"),
+                "閉迴路安全弧%": (beh["closed_loop_safe_arc"] >= th["safe_arc_min"],
+                                  f"{beh['closed_loop_safe_arc']:.3f}≥{th['safe_arc_min']}"),
+                "clear停止率": (beh["clear_stop"] <= th["clear_stop_max"], f"{beh['clear_stop']:.3f}≤{th['clear_stop_max']}"),
+            }
+            g3 = all(ok for ok, _ in checks.values())
+            print(f"[Gate3 擋路測試] {_p(g3)}")
+            for k, (ok, s) in checks.items():
+                print(f"    {_p(ok)} {k:12s} {s}")
+            print(f"    診斷 固定動作2.7s安全弧={beh['open_loop_safe_arc']:.3f} "
+                  f"(非部署控制器；閉迴路樣本={beh['closed_loop_n']})")
+            print(f"    診斷 path-recovery |ω|中位={beh['recovery_clear_omega']:.3f} rad/s "
+                  "(goal<15deg 且前錐>2.5m；僅觀察、不參與 PASS/FAIL)")
+        results.append(("擋路測試", g3))
 
     # gate #4 preview
     if th["preview_stage"] is None:
@@ -299,6 +323,33 @@ def main():
         g4 = pv and pv["sr"] is not None and pv["sr"] >= th["preview_sr"]
         print(f"[Gate4 SA{th['preview_stage']} preview] {_p(g4)}  det SR={pv['sr'] if pv else None}(≥{th['preview_sr']})")
     results.append((f"SA{th['preview_stage']} preview" if th["preview_stage"] else "preview", g4))
+
+    # OBB lineage extra gate: the policy must actually traverse the 0.85 m
+    # opening, not merely benefit from a corrected collision function.
+    if not advanced_gates:
+        print(f"[Gate5 0.85m窄縫] ↷ DEFERRED — 依協定自 SA5 起啟用")
+    elif args.narrow_log:
+        ng = parse_narrow_gap(args.narrow_log)
+        if not ng or ng.get("sr") is None:
+            print("[Gate5 0.85m窄縫] ⚠ 缺摘要或 NARROW-GAP-METRICS"); g5 = None
+        else:
+            checks = {
+                "到達SR": (ng["sr"] >= NARROW_THRESH["sr"], f"{ng['sr']:.3f}≥{NARROW_THRESH['sr']}"),
+                "碰撞CR": (ng["cr"] <= NARROW_THRESH["cr"], f"{ng['cr']:.3f}≤{NARROW_THRESH['cr']}"),
+                "穿越率": (ng["crossing_rate"] >= NARROW_THRESH["crossing"],
+                           f"{ng['crossing_rate']:.3f}≥{NARROW_THRESH['crossing']}"),
+                "喉部yaw p95": (ng["yaw_abs_p95_deg"] <= NARROW_THRESH["yaw_p95_deg"],
+                                f"{ng['yaw_abs_p95_deg']:.3f}°≤{NARROW_THRESH['yaw_p95_deg']}°"),
+                "yaw界內率": (ng["yaw_within_2.52deg"] >= NARROW_THRESH["yaw_within"],
+                              f"{ng['yaw_within_2.52deg']:.3f}≥{NARROW_THRESH['yaw_within']}"),
+            }
+            g5 = all(ok for ok, _ in checks.values())
+            print(f"[Gate5 0.85m窄縫] {_p(g5)}  n={ng['n']} yaw_frames={int(ng['yaw_frames'])}")
+            for key, (ok, value) in checks.items():
+                print(f"    {_p(ok)} {key:12s} {value}")
+            print(f"    yaw分布 p50={ng['yaw_abs_p50_deg']:.3f}° "
+                  f"p90={ng['yaw_abs_p90_deg']:.3f}° p95={ng['yaw_abs_p95_deg']:.3f}°")
+        results.append(("0.85m窄縫", g5))
 
     # 綜合
     hard = [r for _, r in results if r is not None]

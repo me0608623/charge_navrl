@@ -34,6 +34,16 @@ from ..wall_layout import (
     check_wall_proximity_perenv,
     get_combined_wall_data,
 )
+from .obb_collision import obb_aabb_collision, relative_points_in_obb_frame
+
+# ---- 方向性長方形（OBB）車體常數 ----
+# 實車完整量測值（2026-07-20）：車長 0.70m、車寬 0.60m（含輪子）。
+# USD 寬度 0.607m 與實車 0.60 僅差 7mm，對齊良好。膨脹後 OBB = 0.90×0.80m。
+_ROBOT_HALF_LEN = 0.35     # 車體半長（沿車頭方向）[m]
+_ROBOT_HALF_WID = 0.30     # 車體半寬（側向，含輪子）[m]
+_OBB_BUFFER = 0.10         # 安全裕量（= COLLISION_BUFFER）[m]
+_OBB_OFFSET_X = -0.128     # 碰撞盒中心沿車頭方向相對車體原點偏移 [m]（負=偏後）
+_DEFAULT_OBS_PHYS_RADIUS = 0.30  # 障礙物理半徑 fallback（_obstacle_phys_radii 缺席時）[m]
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -166,12 +176,47 @@ def robot_flying(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Ten
 _wall_diag_count = 0
 
 
+def robot_obb_wall_collision(
+    env: "ManagerBasedRLEnv",
+    asset_cfg: SceneEntityCfg,
+    half_len: float = _ROBOT_HALF_LEN,
+    half_wid: float = _ROBOT_HALF_WID,
+    buffer: float = _OBB_BUFFER,
+) -> torch.Tensor:
+    """方向性長方形車體 vs 牆 AABB 碰撞（撞牆 OBB 專用函式）。
+
+    ★只由 ``wall_collision_termination(use_obb=True)`` 呼叫；**不改動**共用的
+    ``check_wall_proximity_perenv``（該函式同時用於目標採樣/出生淨空/障礙擺放/牆反彈，
+    改成 OBB 會破壞那些語意）。
+
+    用車中心 + yaw + 牆 AABB 做 SAT 判定：車頭對齊時可通過 0.85m 窄縫、真正碰撞仍終止。
+    純幾何在 obb_collision.py，已離線單元測試（test_obb_collision.py）。
+
+    Returns: shape [num_envs] bool，True = 與任一啟用牆碰撞。
+    """
+    robot = env.scene[asset_cfg.name]
+    robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)
+    env_origins = env.scene.env_origins[:, :2]
+    robot_pos_local = robot_pos - env_origins
+    # yaw：車頭相對世界 +x（local/world 旋轉一致，不受平移影響）
+    yaw = torch.nan_to_num(math_utils.euler_xyz_from_quat(robot.data.root_quat_w)[2], nan=0.0)
+
+    wall_c, wall_s, wall_mask = get_combined_wall_data(env)
+    return obb_aabb_collision(
+        robot_pos_local, yaw, wall_c, wall_s, wall_mask, half_len, half_wid, buffer, _OBB_OFFSET_X
+    )
+
+
 def wall_collision_termination(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg,
     threshold: float = 0.45,
+    use_obb: bool = False,
 ) -> torch.Tensor:
     """分析式牆壁碰撞偵測 — 不依賴 LiDAR/contact sensor。
+
+    ``use_obb=True`` → 走方向性長方形（OBB）判定（見 ``robot_obb_wall_collision``），
+    讓車頭對齊時可通過 0.85m 窄縫。預設 ``False`` 維持圓/點模型（既有 run 不受影響）。
 
     用機器人 2D 位置 vs 所有牆壁 AABB 做距離計算。
     使用 wall_layout.py 的 check_wall_proximity_batch()。
@@ -195,6 +240,10 @@ def wall_collision_termination(
         False = 安全，繼續
     """
     global _wall_diag_count
+
+    # 方向性長方形（OBB）路徑：交給專用函式，不動共用 check_wall_proximity_perenv
+    if use_obb:
+        return robot_obb_wall_collision(env, asset_cfg)
 
     robot = env.scene[asset_cfg.name]
     robot_pos = torch.nan_to_num(robot.data.root_pos_w[:, :2], nan=0.0)
@@ -234,6 +283,7 @@ def obstacle_collision_geometric(
     asset_cfg: SceneEntityCfg,
     collision_distance: float = 0.9,
     max_obstacles: int = 50,
+    use_obb: bool = False,
 ) -> torch.Tensor:
     """幾何式障礙物碰撞偵測 — 不依賴 contact sensor force。
 
@@ -275,6 +325,13 @@ def obstacle_collision_geometric(
     # Per-env per-obstacle collision radii (from obs_size_rand randomization)
     has_per_obs_radii = hasattr(env, "_obstacle_radii")
 
+    # OBB 車身碰撞路徑：用車 yaw + 障礙「物理半徑」(_obstacle_phys_radii)，非膨脹門檻 _obstacle_radii
+    has_phys_radii = hasattr(env, "_obstacle_phys_radii")
+    if use_obb:
+        _yaw = torch.nan_to_num(math_utils.euler_xyz_from_quat(robot.data.root_quat_w)[2], nan=0.0)
+        _cos_yaw = torch.cos(_yaw)  # [N]
+        _sin_yaw = torch.sin(_yaw)
+
     # Static/dynamic classification by env difficulty + obstacle index
     has_difficulty = hasattr(env, "_env_difficulty")
     num_static_mixed = getattr(env, "_num_obstacles_static_mixed", 0)
@@ -302,17 +359,35 @@ def obstacle_collision_geometric(
         # 隱藏障礙物 (Z ≤ 0，例如 z=-10) → 跳過
         visible = pos_w[:, 2] > 0.0
 
-        # 中心距離平方 vs threshold 平方（避免 sqrt 計算）
         delta = pos_xy - robot_pos
-        dist_sq = (delta * delta).sum(dim=1)
 
-        # Use per-env per-obstacle threshold if available, else fixed scalar
-        if has_per_obs_radii and i < env._obstacle_radii.shape[1]:
-            threshold_sq = env._obstacle_radii[:, i] ** 2  # [N]
+        if use_obb:
+            # 方向性長方形車身 vs 障礙圓（物理半徑）：把障礙轉進車體系、夾到長方形邊界求最近點
+            lx, ly = relative_points_in_obb_frame(
+                delta.unsqueeze(1),
+                _cos_yaw.unsqueeze(1),
+                _sin_yaw.unsqueeze(1),
+                _OBB_OFFSET_X,
+            )
+            lx = lx.squeeze(1)
+            ly = ly.squeeze(1)
+            cx = lx.clamp(-_ROBOT_HALF_LEN, _ROBOT_HALF_LEN)
+            cy = ly.clamp(-_ROBOT_HALF_WID, _ROBOT_HALF_WID)
+            d_obb = torch.sqrt((lx - cx) ** 2 + (ly - cy) ** 2)
+            if has_phys_radii and i < env._obstacle_phys_radii.shape[1]:
+                r_phys = env._obstacle_phys_radii[:, i]  # [N] 物理半徑
+            else:
+                r_phys = _DEFAULT_OBS_PHYS_RADIUS
+            hit = visible & (d_obb < (r_phys + _OBB_BUFFER))
         else:
-            threshold_sq = collision_distance ** 2
+            # 中心距離平方 vs threshold 平方（圓模型，避免 sqrt 計算）
+            dist_sq = (delta * delta).sum(dim=1)
+            if has_per_obs_radii and i < env._obstacle_radii.shape[1]:
+                threshold_sq = env._obstacle_radii[:, i] ** 2  # [N]
+            else:
+                threshold_sq = collision_distance ** 2
+            hit = visible & (dist_sq < threshold_sq)
 
-        hit = visible & (dist_sq < threshold_sq)
         overlap = overlap | hit
 
         # Attribute hit to static or dynamic per-env
@@ -346,12 +421,20 @@ def obstacle_collision_geometric(
             if f"obstacle_{i}" in env.scene.keys()
         )
         radii_info = ""
-        if has_per_obs_radii:
+        if use_obb and has_phys_radii:
+            r = env._obstacle_phys_radii
+            radii_info = f" phys_radii=[{r.min():.2f}, {r.max():.2f}]"
+        elif has_per_obs_radii:
             r = env._obstacle_radii
             radii_info = f" per_obs_radii=[{r.min():.2f}, {r.max():.2f}]"
+        mode_info = (
+            f"OBB half=({_ROBOT_HALF_LEN:.2f},{_ROBOT_HALF_WID:.2f}) "
+            f"offset_x={_OBB_OFFSET_X:.3f} buffer={_OBB_BUFFER:.2f}"
+            if use_obb else f"circle fallback={collision_distance:.2f}m"
+        )
         print(
             f"[障礙物幾何碰撞] 實體={n_obs_in_scene}/{max_obstacles} "
-            f"碰撞距離={collision_distance:.2f}m (fallback){radii_info} "
+            f"mode={mode_info}{radii_info} "
             f"碰撞數={int(overlap.sum().item())}/{N}",
             flush=True,
         )

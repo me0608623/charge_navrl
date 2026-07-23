@@ -17,11 +17,13 @@ import torch
 
 @dataclass(frozen=True)
 class ControlledBlockerSpec:
-    goal_x: float = 6.0
+    # arena_size=12 places the east boundary wall at x=+6 with a 1 m body.
+    # Keep the goal centre inside its inner face (x=5.5) with robot clearance.
+    goal_x: float = 5.0
     sampler_bootstrap_distance_min: float = 1.5
     sampler_bootstrap_distance_max: float = 3.0
     blocker_x_min: float = 1.2
-    blocker_x_max: float = 4.8
+    blocker_x_max: float = 3.8
     blocker_y_max: float = 1.0   # uniform sample in [-blocker_y_max, +blocker_y_max]
     dynamic_ratio: float = 0.5   # fraction of envs where blocker moves (0 = all static)
     blocker_speed: float = 0.3
@@ -31,6 +33,9 @@ class ControlledBlockerSpec:
                                     # cannot escape around the wall ends (must pass in-corridor)
     robot_radius: float = 0.35
     blocker_radius: float = 0.35
+    arena_half_extent: float = 6.0
+    boundary_wall_width: float = 1.0
+    safety_buffer: float = 0.10
 
     @property
     def corridor_center_x(self) -> float:
@@ -51,6 +56,12 @@ class ControlledBlockerSpec:
         """Worst edge-to-edge gap from the blocker to robot start or goal."""
         center_gap = min(self.blocker_x_min, self.goal_x - self.blocker_x_max)
         return center_gap - self.blocker_radius - self.robot_radius
+
+    @property
+    def goal_wall_clearance(self) -> float:
+        """Edge clearance from a robot centred on the goal to the east wall."""
+        east_inner_face = self.arena_half_extent - 0.5 * self.boundary_wall_width
+        return east_inner_face - self.goal_x - self.robot_radius
 
 
 def corridor_geometry(n: int, spec: ControlledBlockerSpec, device):
@@ -166,6 +177,8 @@ class ControlledBlockerController:
             raise ValueError("blocker_y_max leaves no solvable side passage")
         if self.spec.endpoint_clearance <= 0.0:
             raise ValueError("blocker x bounds overlap the robot start or goal")
+        if self.spec.goal_wall_clearance < self.spec.safety_buffer:
+            raise ValueError("goal lies inside the east boundary-wall collision margin")
         if self.spec.blocker_speed < 0.0:
             raise ValueError("blocker_speed must be non-negative")
         self.blocker_x = torch.zeros(self.num_envs, device=self.device)

@@ -24,16 +24,21 @@ class ControlledBlockerGeometryTest(unittest.TestCase):
         centers, sizes = corridor_geometry(1, spec, "cpu")
         wall_min_x = centers[0, 0, 0] - sizes[0, 0, 0] / 2
         wall_max_x = centers[0, 0, 0] + sizes[0, 0, 0] / 2
-        self.assertAlmostEqual(float(wall_min_x), -3.0)
-        self.assertAlmostEqual(float(wall_max_x), 9.0)
+        self.assertAlmostEqual(float(wall_min_x), -3.5)
+        self.assertAlmostEqual(float(wall_max_x), 8.5)
 
     def test_worst_case_clearance_is_solvable(self):
         spec = ControlledBlockerSpec(
-            blocker_x_min=1.2, blocker_x_max=4.8, blocker_y_max=1.0
+            blocker_x_min=1.2, blocker_x_max=3.8, blocker_y_max=1.0
         )
         self.assertAlmostEqual(spec.side_clearance, 0.65)
         self.assertGreater(spec.side_clearance, spec.robot_radius + 0.10)
         self.assertAlmostEqual(spec.endpoint_clearance, 0.5)
+
+    def test_goal_has_robot_clearance_from_east_boundary_wall(self):
+        spec = ControlledBlockerSpec()
+        self.assertAlmostEqual(spec.goal_wall_clearance, 0.15)
+        self.assertGreaterEqual(spec.goal_wall_clearance, spec.safety_buffer)
 
     def test_corridor_is_symmetric(self):
         spec = ControlledBlockerSpec()
@@ -75,7 +80,7 @@ class ControlledBlockerGeometryTest(unittest.TestCase):
         controller._place_blocker(torch.arange(4))
 
         self.assertTrue(bool((controller.blocker_x >= 1.2).all()))
-        self.assertTrue(bool((controller.blocker_x <= 4.8).all()))
+        self.assertTrue(bool((controller.blocker_x <= 3.8).all()))
         self.assertTrue(bool((controller.blocker_y.abs() <= 1.0).all()))
         speed = torch.hypot(controller.blocker_vx, controller.blocker_vy)
         torch.testing.assert_close(speed[:2], torch.full((2,), 0.3))
@@ -86,12 +91,12 @@ class ControlledBlockerGeometryTest(unittest.TestCase):
     def test_2d_patrol_advances_and_reflects_at_both_bounds(self):
         controller = ControlledBlockerController.__new__(ControlledBlockerController)
         controller.spec = ControlledBlockerSpec(
-            blocker_x_min=1.2, blocker_x_max=4.8, blocker_y_max=1.0
+            blocker_x_min=1.2, blocker_x_max=3.8, blocker_y_max=1.0
         )
         controller.env = SimpleNamespace(step_dt=0.2)
         controller.device = "cpu"
         controller.num_envs = 2
-        controller.blocker_x = torch.tensor([4.78, 2.0])
+        controller.blocker_x = torch.tensor([3.78, 2.0])
         controller.blocker_y = torch.tensor([0.0, 0.98])
         controller.blocker_vx = torch.tensor([0.30, 0.0])
         controller.blocker_vy = torch.tensor([0.0, 0.30])
@@ -101,7 +106,7 @@ class ControlledBlockerGeometryTest(unittest.TestCase):
 
         controller.advance()
 
-        torch.testing.assert_close(controller.blocker_x, torch.tensor([4.8, 2.0]))
+        torch.testing.assert_close(controller.blocker_x, torch.tensor([3.8, 2.0]))
         torch.testing.assert_close(controller.blocker_y, torch.tensor([0.0, 1.0]))
         torch.testing.assert_close(controller.blocker_vx, torch.tensor([-0.30, 0.0]))
         torch.testing.assert_close(controller.blocker_vy, torch.tensor([0.0, -0.30]))

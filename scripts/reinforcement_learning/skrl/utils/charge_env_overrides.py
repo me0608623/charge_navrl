@@ -6,8 +6,33 @@ the modular RNN trainer) can reproduce the same v21-style experiment settings.
 """
 
 
+def _apply_obb_collision_config(env_cfg, args_cli) -> bool:
+    """Enable the measured OBB termination only for explicitly opted-in runs."""
+    if not getattr(args_cli, "use_obb_collision", False):
+        return False
+
+    terminations = getattr(env_cfg, "terminations", None)
+    if terminations is None:
+        raise RuntimeError("--use_obb_collision requested but env_cfg has no terminations")
+
+    updated = []
+    for name in ("wall_collision", "obstacle_collision"):
+        term = getattr(terminations, name, None)
+        if term is None or not hasattr(term, "params"):
+            raise RuntimeError(f"--use_obb_collision requested but termination {name!r} is missing")
+        term.params["use_obb"] = True
+        updated.append(name)
+
+    print(
+        "[COLLISION] OBB enabled: half=(0.350,0.300)m "
+        "offset_x=-0.128m buffer=0.100m terms=" + ",".join(updated)
+    )
+    return True
+
+
 def apply_charge_env_overrides(env_cfg, args_cli):
     """Apply CLI-driven reward/action/curriculum overrides to env_cfg."""
+    _apply_obb_collision_config(env_cfg, args_cli)
     rewards = getattr(env_cfg, "rewards", None)
     if rewards is None:
         return

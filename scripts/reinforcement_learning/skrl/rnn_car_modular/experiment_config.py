@@ -140,6 +140,7 @@ class ExperimentConfig:
     # safety/logging/runtime switches
     lidar_no_noise: bool = True
     no_domain_randomization: bool = False
+    use_obb_collision: bool = False
     reward_speed_v05: bool = False
     reward_mode: str = "current"
     # react clearance-gated 減速稅 (距離稅). -1.0 = 不覆寫 curriculum(維持舊行為);
@@ -273,6 +274,7 @@ _FIELD_TO_FLAGS: dict[str, list[str]] = {
     "wd_update_monitor_only": ["--wd_update_monitor_only"],
     "zero_preprocess_feature_for_rl": ["--zero_preprocess_feature_for_rl"],
     "no_domain_randomization": ["--no_domain_randomization"],
+    "use_obb_collision": ["--use_obb_collision"],
     "reward_speed_v05": ["--reward_speed_v05"],
     "lidar_distance_bias": ["--lidar_distance_bias"],
     "lidar_per_ring_bias": ["--lidar_per_ring_bias"],

@@ -96,6 +96,8 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "obs_behavior": ("Obs behavior:", "障礙行為:"),
     "obs_speed": ("Obs speed:", "障礙速度:"),
     "walls": ("Walls:", "牆壁數:"),
+    "wall_length": ("Wall length:", "牆長 (m):"),
+    "wall_thickness": ("Wall thick:", "牆厚 (m):"),
     "episode_sec": ("Episode (sec):", "回合 (秒):"),
     "empty_default": ("(empty=env default)", "(空=環境預設)"),
     "obs_near_goal": ("Obs near goal:", "目標旁障礙:"),
@@ -700,6 +702,25 @@ class PlayLauncherApp:
                             variable=self.no_walls_var),
             "no_walls",
         ).grid(row=row, column=2, columnspan=2, sticky="w", padx=5)
+        row += 1
+
+        # Wall length (m) + thickness (m) — 內牆幾何。厚度 0 = 用預設 1.0m。
+        self._reg(ttk.Label(f, text=self._t("wall_length")), "wall_length").grid(
+            row=row, column=0, sticky="w", padx=5
+        )
+        self.wall_length_var = tk.DoubleVar(value=3.5)
+        ttk.Spinbox(f, from_=1.0, to=12.0, increment=0.5,
+                    textvariable=self.wall_length_var, width=8).grid(
+            row=row, column=1, sticky="w", padx=5
+        )
+        self._reg(ttk.Label(f, text=self._t("wall_thickness")), "wall_thickness").grid(
+            row=row, column=2, sticky="w", padx=5
+        )
+        self.wall_thickness_var = tk.DoubleVar(value=0.0)
+        ttk.Spinbox(f, from_=0.0, to=3.0, increment=0.1,
+                    textvariable=self.wall_thickness_var, width=8).grid(
+            row=row, column=3, sticky="w", padx=5
+        )
         row += 1
 
         # Episode length
@@ -1413,6 +1434,9 @@ class PlayLauncherApp:
         parts.append(f"--num_static_obs {self.static_obs_var.get()}")
         parts.append(f"--num_dynamic_obs {self.dynamic_obs_var.get()}")
         parts.append(f"--num_walls {self.walls_var.get()}")
+        parts.append(f"--wall_length {self.wall_length_var.get():g}")
+        if self.wall_thickness_var.get() > 0:
+            parts.append(f"--wall_thickness {self.wall_thickness_var.get():g}")
         # 目標距離夾限：min/max 皆不可超過「場景邊長 − 1」（USD 場景尺寸未知則不夾）
         self._clamp_goal_distances()
         parts.append(f"--goal_distance_min {self.goal_dist_min_var.get()}")

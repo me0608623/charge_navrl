@@ -139,6 +139,12 @@ def create_parser() -> argparse.ArgumentParser:
                              "Use --initial_stage to choose the starting phase; --fixed_stage to disable transitions.")
     parser.add_argument("--lidar_no_noise", action="store_true", default=False)
     parser.add_argument("--no_domain_randomization", action="store_true", default=False)
+    parser.add_argument(
+        "--use_obb_collision",
+        action="store_true",
+        default=False,
+        help="Use the measured oriented robot footprint for wall/obstacle termination.",
+    )
     parser.add_argument("--reward_speed_v05", action="store_true", default=False)
     parser.add_argument("--play", action="store_true", default=False,
                         help="Inference only -- no PPO training, just run rollout with loaded checkpoint")
