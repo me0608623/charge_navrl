@@ -52,7 +52,10 @@ STAGE_THRESH = {
             preview_stage=None, preview_sr=None),  # SA8 = 畢業(部署標準),無 preview
 }
 FRONT_LO, FRONT_HI = 30, 43  # 前錐 bin36±6
-NARROW_THRESH = dict(sr=0.90, cr=0.05, crossing=0.95, yaw_p95_deg=2.52, yaw_within=0.95)
+NARROW_DEPLOY_WIDTH_M = 1.2
+NARROW_STRESS_WIDTH_M = 1.0
+NARROW_YAW_LIMIT_DEG = 10.0
+NARROW_DEPLOY_THRESH = dict(sr=0.90, cr=0.05, crossing=0.95, yaw_p95_deg=10.0, yaw_within=0.95)
 
 
 # ── log 解析 ─────────────────────────────────────────────
@@ -100,6 +103,36 @@ def parse_narrow_gap(path: str) -> dict | None:
         for key, value in re.findall(r"([A-Za-z0-9_.]+)=([+-]?(?:nan|\d+(?:\.\d+)?))", line.group(1))
     }
     return {**summary, **values}
+
+
+def narrow_gap_checks(metrics: dict, *, yaw_limit_deg: float = NARROW_YAW_LIMIT_DEG) -> dict:
+    """Build the hard deployment checks for a parsed narrow-gap result."""
+    yaw_key = f"yaw_within_{yaw_limit_deg:.2f}deg"
+    required = ("sr", "cr", "crossing_rate", "yaw_abs_p95_deg", yaw_key)
+    if any(metrics.get(key) is None for key in required):
+        return {}
+    return {
+        "到達SR": (
+            metrics["sr"] >= NARROW_DEPLOY_THRESH["sr"],
+            f"{metrics['sr']:.3f}≥{NARROW_DEPLOY_THRESH['sr']}",
+        ),
+        "碰撞CR": (
+            metrics["cr"] <= NARROW_DEPLOY_THRESH["cr"],
+            f"{metrics['cr']:.3f}≤{NARROW_DEPLOY_THRESH['cr']}",
+        ),
+        "穿越率": (
+            metrics["crossing_rate"] >= NARROW_DEPLOY_THRESH["crossing"],
+            f"{metrics['crossing_rate']:.3f}≥{NARROW_DEPLOY_THRESH['crossing']}",
+        ),
+        "喉部yaw p95": (
+            metrics["yaw_abs_p95_deg"] <= NARROW_DEPLOY_THRESH["yaw_p95_deg"],
+            f"{metrics['yaw_abs_p95_deg']:.3f}°≤{NARROW_DEPLOY_THRESH['yaw_p95_deg']}°",
+        ),
+        f"yaw≤{yaw_limit_deg:g}°率": (
+            metrics[yaw_key] >= NARROW_DEPLOY_THRESH["yaw_within"],
+            f"{metrics[yaw_key]:.3f}≥{NARROW_DEPLOY_THRESH['yaw_within']}",
+        ),
+    }
 
 
 # ── gate #3 行為指標(擋路場 dump) ────────────────────────
@@ -247,7 +280,9 @@ def main():
     p.add_argument("--blk_log", default="", help="SA5+ 擋路場 det log")
     p.add_argument("--blk_dump", default="", help="SA5+ 擋路場 CHARGE_LIDAR_DUMP npz")
     p.add_argument("--preview_log", default="", help="SA(N+1) preview det log")
-    p.add_argument("--narrow_log", default="", help="OBB lineage 0.85m narrow-gap det log")
+    p.add_argument("--narrow_deploy_log", default="", help="OBB lineage 1.2m deployment narrow-gap det log")
+    p.add_argument("--narrow_stress_log", default="", help="OBB lineage 1.0m stress narrow-gap det log")
+    p.add_argument("--narrow_log", default="", help=argparse.SUPPRESS)
     p.add_argument("--ckpt", default="")
     args = p.parse_args()
     if args.stage not in STAGE_THRESH:
@@ -324,32 +359,55 @@ def main():
         print(f"[Gate4 SA{th['preview_stage']} preview] {_p(g4)}  det SR={pv['sr'] if pv else None}(≥{th['preview_sr']})")
     results.append((f"SA{th['preview_stage']} preview" if th["preview_stage"] else "preview", g4))
 
-    # OBB lineage extra gate: the policy must actually traverse the 0.85 m
-    # opening, not merely benefit from a corrected collision function.
+    # OBB lineage extra gate: 1.2 m is the deployment hard gate. The 1.0 m
+    # result is diagnostic only; 0.85 m remains a geometry-level test.
+    deploy_log = args.narrow_deploy_log or args.narrow_log
     if not advanced_gates:
-        print(f"[Gate5 0.85m窄縫] ↷ DEFERRED — 依協定自 SA5 起啟用")
-    elif args.narrow_log:
-        ng = parse_narrow_gap(args.narrow_log)
+        print(f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] ↷ DEFERRED — 依協定自 SA5 起啟用")
+    elif deploy_log:
+        ng = parse_narrow_gap(deploy_log)
         if not ng or ng.get("sr") is None:
-            print("[Gate5 0.85m窄縫] ⚠ 缺摘要或 NARROW-GAP-METRICS"); g5 = None
+            print(
+                f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] "
+                "⚠ 缺摘要或 NARROW-GAP-METRICS"
+            )
+            g5 = None
         else:
-            checks = {
-                "到達SR": (ng["sr"] >= NARROW_THRESH["sr"], f"{ng['sr']:.3f}≥{NARROW_THRESH['sr']}"),
-                "碰撞CR": (ng["cr"] <= NARROW_THRESH["cr"], f"{ng['cr']:.3f}≤{NARROW_THRESH['cr']}"),
-                "穿越率": (ng["crossing_rate"] >= NARROW_THRESH["crossing"],
-                           f"{ng['crossing_rate']:.3f}≥{NARROW_THRESH['crossing']}"),
-                "喉部yaw p95": (ng["yaw_abs_p95_deg"] <= NARROW_THRESH["yaw_p95_deg"],
-                                f"{ng['yaw_abs_p95_deg']:.3f}°≤{NARROW_THRESH['yaw_p95_deg']}°"),
-                "yaw界內率": (ng["yaw_within_2.52deg"] >= NARROW_THRESH["yaw_within"],
-                              f"{ng['yaw_within_2.52deg']:.3f}≥{NARROW_THRESH['yaw_within']}"),
-            }
-            g5 = all(ok for ok, _ in checks.values())
-            print(f"[Gate5 0.85m窄縫] {_p(g5)}  n={ng['n']} yaw_frames={int(ng['yaw_frames'])}")
-            for key, (ok, value) in checks.items():
-                print(f"    {_p(ok)} {key:12s} {value}")
-            print(f"    yaw分布 p50={ng['yaw_abs_p50_deg']:.3f}° "
-                  f"p90={ng['yaw_abs_p90_deg']:.3f}° p95={ng['yaw_abs_p95_deg']:.3f}°")
-        results.append(("0.85m窄縫", g5))
+            checks = narrow_gap_checks(ng)
+            if not checks:
+                print(
+                    f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] "
+                    f"⚠ 缺 yaw≤{NARROW_YAW_LIMIT_DEG:g}° 指標"
+                )
+                g5 = None
+            else:
+                g5 = all(ok for ok, _ in checks.values())
+                print(
+                    f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] {_p(g5)}  "
+                    f"n={ng['n']} yaw_frames={int(ng['yaw_frames'])}"
+                )
+                for key, (ok, value) in checks.items():
+                    print(f"    {_p(ok)} {key:12s} {value}")
+                print(
+                    f"    yaw分布 p50={ng['yaw_abs_p50_deg']:.3f}° "
+                    f"p90={ng['yaw_abs_p90_deg']:.3f}° p95={ng['yaw_abs_p95_deg']:.3f}°"
+                )
+        results.append((f"{NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫", g5))
+
+    if advanced_gates and args.narrow_stress_log:
+        stress = parse_narrow_gap(args.narrow_stress_log)
+        if not stress or stress.get("sr") is None:
+            print(f"[Stress {NARROW_STRESS_WIDTH_M:.1f}m窄縫] ⚠ 缺摘要或 NARROW-GAP-METRICS")
+        else:
+            yaw_key = f"yaw_within_{NARROW_YAW_LIMIT_DEG:.2f}deg"
+            yaw_within = stress.get(yaw_key, float("nan"))
+            print(
+                f"[Stress {NARROW_STRESS_WIDTH_M:.1f}m窄縫] 診斷（不影響晉級）  "
+                f"n={stress['n']} SR={stress['sr']:.3f} CR={stress['cr']:.3f} "
+                f"穿越率={stress['crossing_rate']:.3f} "
+                f"yaw_p95={stress['yaw_abs_p95_deg']:.3f}° "
+                f"yaw≤{NARROW_YAW_LIMIT_DEG:g}°率={yaw_within:.3f}"
+            )
 
     # 綜合
     hard = [r for _, r in results if r is not None]

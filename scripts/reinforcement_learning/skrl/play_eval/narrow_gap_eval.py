@@ -1,7 +1,7 @@
-"""Deterministic 0.85 m wall-gap policy evaluation scene.
+"""Deterministic configurable wall-gap policy evaluation scene.
 
 Two wall segments span the arena from the north/south boundary to a centered
-0.85 m opening. The robot starts west of the barrier and the goal is east, so
+opening. The robot starts west of the barrier and the goal is east, so
 reaching the goal requires traversing the opening rather than driving around it.
 """
 
@@ -126,7 +126,7 @@ class NarrowGapController:
             1.0 - 2.0 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
         )
         # Vehicle overlaps the barrier slab longitudinally. These are the frames
-        # where alignment determines whether the 0.85 m opening is traversable.
+        # where alignment determines whether the configured opening is traversable.
         throat = (pos[:, 0] - self.spec.barrier_x).abs() <= (0.5 * self.spec.wall_width + 0.35)
         if throat.any():
             yaw_abs_deg = torch.rad2deg(torch.atan2(torch.sin(yaw), torch.cos(yaw)).abs())

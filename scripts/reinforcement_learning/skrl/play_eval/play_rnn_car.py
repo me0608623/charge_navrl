@@ -226,7 +226,11 @@ parser.add_argument("--controlled_blocker_dynamic_ratio", type=float, default=0.
 parser.add_argument("--controlled_blocker_speed", type=float, default=0.3,
                     help="Gate3 動態 blocker 的 2D 巡邏速度 m/s")
 parser.add_argument("--narrow_gap_eval", action="store_true", default=False,
-                    help="OBB lineage Gate5：強制穿越中央 0.85m 牆縫並量測 throat yaw")
+                    help="OBB lineage 窄縫評估：強制穿越中央牆縫並量測 throat yaw")
+parser.add_argument("--narrow_gap_width", type=float, default=0.85,
+                    help="Gate5 中央牆縫寬度 m（預設 0.85；GUI 診斷可覆寫）")
+parser.add_argument("--narrow_gap_yaw_limit_deg", type=float, default=2.52,
+                    help="窄縫評估的 throat yaw 界內統計門檻（度）")
 parser.add_argument("--solvability_audit_output", type=str, default="",
                     help="診斷每回合起始場景的牆/靜態/全障礙可達性並輸出 JSON；不改 gate 或 policy")
 parser.add_argument("--solvability_grid_resolution", type=float, default=0.15,
@@ -2633,7 +2637,14 @@ def main():
 
     if args_cli.narrow_gap_eval:
         from narrow_gap_eval import NarrowGapSpec, configure_narrow_gap_env
-        _narrow_spec = NarrowGapSpec()
+        if args_cli.narrow_gap_width <= 0.0:
+            raise ValueError("--narrow_gap_width must be positive")
+        if args_cli.narrow_gap_yaw_limit_deg <= 0.0:
+            raise ValueError("--narrow_gap_yaw_limit_deg must be positive")
+        _narrow_spec = NarrowGapSpec(
+            gap_width=args_cli.narrow_gap_width,
+            yaw_limit_deg=args_cli.narrow_gap_yaw_limit_deg,
+        )
         configure_narrow_gap_env(env_cfg, scene_final, args_cli, _narrow_spec)
         print(
             f"[PLAY] OBB narrow-gap gate: gap={_narrow_spec.gap_width:.2f}m, "
@@ -3221,8 +3232,8 @@ def main():
         _play_goal_mover = None
     _narrow_gap_controller = None
     if args_cli.narrow_gap_eval:
-        from narrow_gap_eval import NarrowGapController, NarrowGapSpec
-        _narrow_gap_controller = NarrowGapController(raw_env=raw_env, spec=NarrowGapSpec())
+        from narrow_gap_eval import NarrowGapController
+        _narrow_gap_controller = NarrowGapController(raw_env=raw_env, spec=_narrow_spec)
         _narrow_gap_controller.reset()
         obs = raw_env.observation_manager.compute()
         _play_goal_mover = None

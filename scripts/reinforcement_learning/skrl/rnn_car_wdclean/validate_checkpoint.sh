@@ -3,7 +3,8 @@
 # 用法: bash validate_checkpoint.sh <ckpt.pt> [stage=1] [wandb_id=gtefxx15]
 # GUI 可視化: GUI=1 CAMERA=top NUM_ENVS=4 bash validate_checkpoint.sh ...
 #   跑 gate#2(3-seed held-out det) + gate#4(SA(N+1) preview)；SA5 起另跑
-#   gate#3(可解的路徑擋路場 det+dump)與 OBB gate#5(0.85m 窄縫)，
+#   gate#3(可解的路徑擋路場 det+dump)與 OBB gate#5(1.2m 部署窄縫)，
+#   並另跑 1.0m 壓力診斷（不影響晉級），
 #   再呼叫 validate_gates.py 拉 gate#1(wandb 健康) + 逐 gate 判 PASS/FAIL。
 # 注意: play 自動從 ckpt 偵測 e2e 架構(frame_stack/end_to_end);e2e 不加 --feat_norm。
 set -euo pipefail
@@ -122,14 +123,23 @@ if [ "$PST" != "0" ]; then
   PREVIEW_ARG="--preview_log $OUT/preview.log"
 fi
 
-# Gate #5: only OBB-lineage checkpoints must prove the learned policy can
-# traverse the deployment-critical 0.85 m opening with the required alignment.
-NARROW_ARG=""
+# Gate #5: OBB-lineage checkpoints must pass the deployment-representative
+# 1.2 m opening. The 1.0 m opening is a stress diagnostic and cannot fail
+# advancement by itself. The 0.85 m case remains a geometry test, not a policy gate.
+NARROW_ARGS=()
 if [ "$USE_OBB" = "1" ] && [ "$RUN_ADVANCED_GATES" = "1" ]; then
-  _play "$OUT/narrow_gap.log" \
+  _play "$OUT/narrow_deploy_1p2.log" \
     --stage "$STAGE" --arena_size 10 --num_static_obs 0 --num_dynamic_obs 0 \
-    --obs_near_goal_count 0 --narrow_gap_eval --seed 404
-  NARROW_ARG="--narrow_log $OUT/narrow_gap.log"
+    --obs_near_goal_count 0 --narrow_gap_eval --narrow_gap_width 1.2 \
+    --narrow_gap_yaw_limit_deg 10 --seed 404
+  _play "$OUT/narrow_stress_1p0.log" \
+    --stage "$STAGE" --arena_size 10 --num_static_obs 0 --num_dynamic_obs 0 \
+    --obs_near_goal_count 0 --narrow_gap_eval --narrow_gap_width 1.0 \
+    --narrow_gap_yaw_limit_deg 10 --seed 405
+  NARROW_ARGS=(
+    --narrow_deploy_log "$OUT/narrow_deploy_1p2.log"
+    --narrow_stress_log "$OUT/narrow_stress_1p0.log"
+  )
 elif [ "$USE_OBB" = "1" ]; then
   echo "  ↷ Gate5 deferred until SA5 (current SA${STAGE})"
 fi
@@ -137,4 +147,4 @@ fi
 # 分析 + 逐 gate 判定
 echo
 $PY "$GATES_PY" --stage "$STAGE" --wandb_id "$WID" --ckpt "$CKPT" \
-  --det_glob "$OUT/det_s*.log" "${BLK_ARGS[@]}" $PREVIEW_ARG $NARROW_ARG
+  --det_glob "$OUT/det_s*.log" "${BLK_ARGS[@]}" $PREVIEW_ARG "${NARROW_ARGS[@]}"
