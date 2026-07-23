@@ -28,7 +28,9 @@ play_rnn_car.py — Charge RL 模組化 RNN 模型 Play 視覺化腳本
 """
 
 import argparse
+import copy
 import glob
+import json
 import os
 import sys
 import time
@@ -145,6 +147,18 @@ parser.add_argument("--num_envs", type=int, default=1,
                     help="並行環境數量（play 通常用 1）")
 parser.add_argument("--checkpoint", type=str, default=CHECKPOINT,
                     help="checkpoint .pt 路徑。None 時自動搜尋最新")
+parser.add_argument(
+    "--compare_checkpoint",
+    type=str,
+    default=None,
+    help="Evaluate a second compatible policy on the primary policy's exact frames.",
+)
+parser.add_argument(
+    "--compare_output",
+    type=str,
+    default=None,
+    help="Optional JSON path for same-frame policy comparison metrics.",
+)
 parser.add_argument("--stage", type=int, default=STAGE,
                     help="固定 curriculum 階段（1-indexed）用於觀察")
 parser.add_argument("--curriculum_version", type=str, default=None,
@@ -231,6 +245,10 @@ parser.add_argument("--narrow_gap_width", type=float, default=0.85,
                     help="Gate5 中央牆縫寬度 m（預設 0.85；GUI 診斷可覆寫）")
 parser.add_argument("--narrow_gap_yaw_limit_deg", type=float, default=2.52,
                     help="窄縫評估的 throat yaw 界內統計門檻（度）")
+parser.add_argument("--long_corridor_eval", action="store_true", default=False,
+                    help="部署走廊 Gate：4m 自由寬、10m 長、4 靜態+2 動態障礙")
+parser.add_argument("--long_corridor_output", type=str, default="",
+                    help="部署走廊 Gate JSON 輸出路徑")
 parser.add_argument("--solvability_audit_output", type=str, default="",
                     help="診斷每回合起始場景的牆/靜態/全障礙可達性並輸出 JSON；不改 gate 或 policy")
 parser.add_argument("--solvability_grid_resolution", type=float, default=0.15,
@@ -588,6 +606,7 @@ sys.path.insert(0, str(_skrl_root / "utils"))          # skrl/utils/（charge_en
 
 from charge_env_overrides import apply_charge_env_overrides  # env_cfg 覆寫工具
 from modular_rnn_models import ACT_HIST_DIM, LIDAR_CONV_CH, STATE_DIM, LidarStateExtractor, PolicyHead, PreprocessRNN, RNNStateManager, ValueHead, LVDOTEncoder  # 模型元件
+from rnn_car_wdclean.teacher_retention import categorical_forward_kl
 from wd_aux_targets import build_wd_preprocess_targets  # RNN aux 7D target 計算
 
 # 139D 觀測中，policy 使用的 79 維索引：
@@ -2606,8 +2625,12 @@ def main():
         args_cli.near_wall_crossing_eval,
         args_cli.controlled_blocker_eval,
         args_cli.narrow_gap_eval,
+        args_cli.long_corridor_eval,
     )) > 1:
-        raise ValueError("near-wall crossing, controlled blocker, and narrow-gap eval are mutually exclusive")
+        raise ValueError(
+            "near-wall crossing, controlled blocker, narrow-gap and long-corridor "
+            "eval are mutually exclusive"
+        )
 
     if args_cli.near_wall_crossing_eval:
         from near_wall_crossing_eval import configure_near_wall_crossing_env
@@ -2650,6 +2673,30 @@ def main():
             f"[PLAY] OBB narrow-gap gate: gap={_narrow_spec.gap_width:.2f}m, "
             f"start=({_narrow_spec.start_x:.1f},0), goal=({_narrow_spec.goal_x:.1f},0), "
             f"yaw_limit=±{_narrow_spec.yaw_limit_deg:.2f}deg"
+        )
+
+    if args_cli.long_corridor_eval:
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.long_corridor_replay import (
+            configure_long_corridor_assets,
+        )
+
+        configure_long_corridor_assets(
+            env_cfg,
+            fraction=1.0,
+            free_width=4.0,
+            length=10.0,
+            static_obstacles=4,
+            dynamic_obstacles=2,
+            dynamic_speed_range=(0.30, 0.60),
+        )
+        scene_final["num_static"] = 4
+        scene_final["num_dynamic"] = 2
+        args_cli.obstacle_behavior = "patrol"
+        args_cli.obs_near_goal_count = 0
+        args_cli.path_blocker_count = 0
+        print(
+            "[PLAY] Deployment corridor gate: free_width=4.00m length=10.00m "
+            "obstacles=4S+2D patrol=[0.30,0.60]m/s"
         )
 
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
@@ -3021,6 +3068,91 @@ def main():
             mean = torch.zeros(_runtime_dim, device=device)
             var = torch.ones(_runtime_dim, device=device)
 
+    _compare_extractor = None
+    _compare_policy_head = None
+    _compare_mean = None
+    _compare_var = None
+    _compare_lidar_hist = None
+    _compare_stats = {}
+    if args_cli.compare_checkpoint:
+        if not end_to_end_frame_stack or lidar_frame_stack != 8 or not use_extractor:
+            raise ValueError(
+                "--compare_checkpoint currently requires a compatible K8 E2E checkpoint"
+            )
+        if _LVDOT_ENC_ON or getattr(policy_head, "_privileged_dim", 0) > 0:
+            raise ValueError(
+                "--compare_checkpoint does not support LV-DOT/oracle policy inputs"
+            )
+        compare_path = os.path.abspath(args_cli.compare_checkpoint)
+        compare_ckpt = torch.load(
+            compare_path, map_location=device, weights_only=False
+        )
+        compare_args = compare_ckpt.get("args", {})
+        compare_contract = {
+            "end_to_end_frame_stack": True,
+            "lidar_frame_stack": lidar_frame_stack,
+            "use_obb_collision": bool(ckpt_args.get("use_obb_collision", False)),
+            "use_action_history": bool(ckpt_args.get("use_action_history", False)),
+        }
+        compare_mismatches = {
+            key: (compare_args.get(key), expected)
+            for key, expected in compare_contract.items()
+            if compare_args.get(key) != expected
+        }
+        if compare_mismatches:
+            raise ValueError(
+                f"compare checkpoint is incompatible: {compare_mismatches}"
+            )
+        _compare_extractor = copy.deepcopy(extractor)
+        _compare_policy_head = copy.deepcopy(policy_head)
+        _compare_extractor.load_state_dict(compare_ckpt["extractor"], strict=True)
+        _compare_policy_head.load_state_dict(
+            compare_ckpt["policy_head"], strict=True
+        )
+        _compare_extractor.eval()
+        _compare_policy_head.eval()
+        for parameter in (
+            list(_compare_extractor.parameters())
+            + list(_compare_policy_head.parameters())
+        ):
+            parameter.requires_grad_(False)
+
+        compare_norm = compare_ckpt.get("obs_normalizer")
+        if compare_norm is None:
+            raise ValueError("compare checkpoint lacks obs_normalizer")
+        _compare_mean = compare_norm["mean"].to(device).reshape(-1)
+        _compare_var = compare_norm["var"].to(device).reshape(-1)
+        if _compare_mean.numel() != _runtime_dim:
+            raise ValueError(
+                "compare checkpoint normalizer shape mismatch: "
+                f"{_compare_mean.numel()} vs runtime {_runtime_dim}"
+            )
+        _compare_lidar_hist = torch.zeros(
+            raw_env.num_envs,
+            (lidar_frame_stack - 1) * 72,
+            device=device,
+        )
+        for region in ("all", "approach", "throat", "exit"):
+            _compare_stats[region] = {
+                "frames": 0.0,
+                "kl_linear": 0.0,
+                "kl_angular": 0.0,
+                "agreement_linear": 0.0,
+                "agreement_angular": 0.0,
+                "primary_brake": 0.0,
+                "compare_brake": 0.0,
+                "primary_coast": 0.0,
+                "compare_coast": 0.0,
+                "primary_strong_turn": 0.0,
+                "compare_strong_turn": 0.0,
+                "primary_stop_state": 0.0,
+            }
+        print(
+            "[POLICY-COMPARE] same-frame shadow policy enabled: "
+            f"primary={ckpt_path} compare={compare_path}",
+            flush=True,
+        )
+
     # RNN 隱藏狀態管理器（每個 env 獨立 hidden state）
     rnn_state = RNNStateManager(raw_env.num_envs, hidden_dim, device)
 
@@ -3121,6 +3253,36 @@ def main():
             _play_behavior_scheduler = None
     else:
         print("[PLAY] 障礙物行為: static（無 BehaviorScheduler）")
+
+    _long_corridor_motion_last = None
+    _long_corridor_motion_max = None
+    if args_cli.long_corridor_eval:
+        if _play_behavior_scheduler is None:
+            raise RuntimeError(
+                "long-corridor eval requires an active BehaviorScheduler"
+            )
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.long_corridor_replay import (
+            setup_long_corridor_replay,
+        )
+
+        _all_ids = torch.arange(raw_env.num_envs, device=device)
+        setup_long_corridor_replay(
+            raw_env,
+            _all_ids,
+            fraction=1.0,
+            free_width=4.0,
+            length=10.0,
+            static_obstacles=4,
+            dynamic_obstacles=2,
+            dynamic_speed_min=0.30,
+            dynamic_speed_max=0.60,
+        )
+        _long_corridor_motion_last = (
+            _play_behavior_scheduler.positions[:, 4:6].clone()
+        )
+        _long_corridor_motion_max = torch.zeros(
+            raw_env.num_envs, 2, device=device
+        )
 
     print(
         "[PLAY] 障礙物運動: "
@@ -3733,6 +3895,137 @@ def main():
                                    rl_in[..., _L:]], dim=-1)
             logits = policy_head(rl_in)                        # Policy head 輸出 logits
             actions = sample_action(logits, args_cli.deterministic)  # 取樣或 argmax
+            if _compare_extractor is not None:
+                _compare_obs_normed = torch.clamp(
+                    (obs_tensor - _compare_mean)
+                    / (_compare_var.sqrt() + 1e-8),
+                    -5.0,
+                    5.0,
+                )
+                _compare_p_obs = charge_obs_for_rl(_compare_obs_normed)
+                _compare_encoder_input = torch.cat(
+                    [_compare_p_obs, _compare_lidar_hist], dim=-1
+                )
+                _compare_features = _compare_extractor(
+                    _compare_encoder_input
+                )
+                _compare_logits = _compare_policy_head(
+                    torch.cat(
+                        [_compare_p_obs, _compare_features], dim=-1
+                    )
+                )
+                _compare_cur_lidar = _compare_p_obs[:, 6:78]
+                _compare_lidar_hist = torch.cat(
+                    [
+                        _compare_cur_lidar,
+                        _compare_lidar_hist[:, :-72],
+                    ],
+                    dim=-1,
+                )
+
+                _primary_linear = logits[:, :19]
+                _primary_angular = logits[:, 19:]
+                _shadow_linear = _compare_logits[:, :19]
+                _shadow_angular = _compare_logits[:, 19:]
+                _primary_linear_idx = _primary_linear.argmax(dim=-1)
+                _primary_angular_idx = _primary_angular.argmax(dim=-1)
+                _shadow_linear_idx = _shadow_linear.argmax(dim=-1)
+                _shadow_angular_idx = _shadow_angular.argmax(dim=-1)
+                _kl_linear_frame = categorical_forward_kl(
+                    _primary_linear, _shadow_linear
+                )
+                _kl_angular_frame = categorical_forward_kl(
+                    _primary_angular, _shadow_angular
+                )
+                _robot_local_x = (
+                    raw_env.scene["robot"].data.root_pos_w[:, 0]
+                    - raw_env.scene.env_origins[:, 0]
+                )
+                if _narrow_gap_controller is not None:
+                    _barrier_x = _narrow_spec.barrier_x
+                    _throat_half = (
+                        0.5 * _narrow_spec.wall_width + 0.35
+                    )
+                    _region_masks = {
+                        "all": torch.ones_like(
+                            _robot_local_x, dtype=torch.bool
+                        ),
+                        "approach": _robot_local_x
+                        < (_barrier_x - _throat_half),
+                        "throat": (
+                            (_robot_local_x - _barrier_x).abs()
+                            <= _throat_half
+                        ),
+                        "exit": _robot_local_x
+                        > (_barrier_x + _throat_half),
+                    }
+                else:
+                    _region_masks = {
+                        "all": torch.ones_like(
+                            _robot_local_x, dtype=torch.bool
+                        ),
+                        "approach": torch.zeros_like(
+                            _robot_local_x, dtype=torch.bool
+                        ),
+                        "throat": torch.zeros_like(
+                            _robot_local_x, dtype=torch.bool
+                        ),
+                        "exit": torch.zeros_like(
+                            _robot_local_x, dtype=torch.bool
+                        ),
+                    }
+                _stop_state = obs_tensor[:, 1].abs() < 0.12
+                for _region, _region_mask in _region_masks.items():
+                    _region_count = int(_region_mask.sum().item())
+                    if _region_count == 0:
+                        continue
+                    _stats = _compare_stats[_region]
+                    _stats["frames"] += _region_count
+                    _stats["kl_linear"] += float(
+                        _kl_linear_frame[_region_mask].sum().item()
+                    )
+                    _stats["kl_angular"] += float(
+                        _kl_angular_frame[_region_mask].sum().item()
+                    )
+                    _stats["agreement_linear"] += float(
+                        (
+                            _primary_linear_idx[_region_mask]
+                            == _shadow_linear_idx[_region_mask]
+                        ).sum().item()
+                    )
+                    _stats["agreement_angular"] += float(
+                        (
+                            _primary_angular_idx[_region_mask]
+                            == _shadow_angular_idx[_region_mask]
+                        ).sum().item()
+                    )
+                    _stats["primary_brake"] += float(
+                        (_primary_linear_idx[_region_mask] < 9).sum().item()
+                    )
+                    _stats["compare_brake"] += float(
+                        (_shadow_linear_idx[_region_mask] < 9).sum().item()
+                    )
+                    _stats["primary_coast"] += float(
+                        (_primary_linear_idx[_region_mask] == 9).sum().item()
+                    )
+                    _stats["compare_coast"] += float(
+                        (_shadow_linear_idx[_region_mask] == 9).sum().item()
+                    )
+                    _stats["primary_strong_turn"] += float(
+                        (
+                            (_primary_angular_idx[_region_mask] - 9).abs()
+                            >= 6
+                        ).sum().item()
+                    )
+                    _stats["compare_strong_turn"] += float(
+                        (
+                            (_shadow_angular_idx[_region_mask] - 9).abs()
+                            >= 6
+                        ).sum().item()
+                    )
+                    _stats["primary_stop_state"] += float(
+                        _stop_state[_region_mask].sum().item()
+                    )
             if args_cli.near_wall_crossing_probe_stationary:
                 if not args_cli.near_wall_crossing_probe_output:
                     raise ValueError("--near_wall_crossing_probe_stationary requires probe output")
@@ -3868,6 +4161,20 @@ def main():
             rsgs_filter.step(obs_tensor)
         # 合併 terminated + truncated 為 done 旗標
         done = (terminated.squeeze(-1) | truncated.squeeze(-1)) if terminated.ndim > 1 else (terminated | truncated)
+        if _long_corridor_motion_last is not None:
+            _corridor_dynamic_now = (
+                _play_behavior_scheduler.positions[:, 4:6].clone()
+            )
+            _corridor_dynamic_delta = (
+                _corridor_dynamic_now - _long_corridor_motion_last
+            ).norm(dim=-1)
+            _valid_motion = ~done
+            if bool(_valid_motion.any()):
+                _long_corridor_motion_max[_valid_motion] = torch.maximum(
+                    _long_corridor_motion_max[_valid_motion],
+                    _corridor_dynamic_delta[_valid_motion],
+                )
+            _long_corridor_motion_last = _corridor_dynamic_now
         # oracle 探測：reset 的 env 把時間窗 age 歸零（避免窗口跨 episode）
         if args_cli.oracle_dump:
             reset_oracle_age(done)
@@ -4232,6 +4539,10 @@ def main():
                 _lh_c = charge_features_for_rnn._lh.clone()   # clone→normal tensor(避開 inference inplace 限制)
                 _lh_c[done_ids] = 0.0
                 charge_features_for_rnn._lh = _lh_c           # 多幀:同步 reset LiDAR 歷史
+            if _compare_lidar_hist is not None and len(done_ids) > 0:
+                _compare_hist_c = _compare_lidar_hist.clone()
+                _compare_hist_c[done_ids] = 0.0
+                _compare_lidar_hist = _compare_hist_c
             episode_reward[done_ids] = 0.0
             episode_step[done_ids] = 0
             episode_speed_sum[done_ids] = 0.0
@@ -4450,8 +4761,156 @@ def main():
                 print(f"  碰撞 × 障礙行為分項: 取得失敗 ({type(_e).__name__})")
     else:
         print("  未完成任何回合。")
+    if args_cli.long_corridor_eval:
+        _corridor_centers = raw_env._long_corridor_wall_centers
+        _corridor_sizes = raw_env._long_corridor_wall_sizes
+        _corridor_inner_width = (
+            (_corridor_centers[:, 1, 0] - 0.5 * _corridor_sizes[:, 1, 0])
+            - (_corridor_centers[:, 0, 0] + 0.5 * _corridor_sizes[:, 0, 0])
+        )
+        _corridor_length = _corridor_sizes[:, :, 1]
+        _moving_slots = (
+            _long_corridor_motion_max > 0.01
+            if _long_corridor_motion_max is not None
+            else torch.zeros(raw_env.num_envs, 2, dtype=torch.bool, device=device)
+        )
+        _corridor_behavior = _play_behavior_scheduler.behavior_type
+        _static_count = (_corridor_behavior == 1).sum(dim=1)
+        _dynamic_count = (_corridor_behavior >= 2).sum(dim=1)
+        _obstacle_mix_pass = bool(
+            ((_static_count == 4) & (_dynamic_count == 2)).all().item()
+        )
+        _corridor_sr = stats_goal / stats_total if stats_total else 0.0
+        _corridor_cr = (
+            (stats_wall + stats_obs) / stats_total if stats_total else 0.0
+        )
+        _corridor_to = stats_timeout / stats_total if stats_total else 0.0
+        _corridor_report = {
+            "episodes": int(stats_total),
+            "success_rate": float(_corridor_sr),
+            "collision_rate": float(_corridor_cr),
+            "wall_collision_rate": float(stats_wall / stats_total) if stats_total else 0.0,
+            "obstacle_collision_rate": float(stats_obs / stats_total) if stats_total else 0.0,
+            "timeout_rate": float(_corridor_to),
+            "free_width_m_mean": float(_corridor_inner_width.mean().item()),
+            "length_m_mean": float(_corridor_length.mean().item()),
+            "active_env_fraction": float(
+                raw_env._long_corridor_active.float().mean().item()
+            ),
+            "dynamic_slots_moved_fraction": float(
+                _moving_slots.float().mean().item()
+            ),
+            "static_obstacles_per_env": float(_static_count.float().mean().item()),
+            "dynamic_obstacles_per_env": float(_dynamic_count.float().mean().item()),
+            "obstacle_mix_pass": _obstacle_mix_pass,
+            "constructive_unsolvable_count": int(
+                raw_env._long_corridor_unsolvable_count
+            ),
+            "max_dynamic_step_displacement_m": float(
+                _long_corridor_motion_max.max().item()
+                if _long_corridor_motion_max is not None
+                else 0.0
+            ),
+            "geometry_pass": bool(
+                torch.allclose(
+                    _corridor_inner_width,
+                    torch.full_like(_corridor_inner_width, 4.0),
+                    atol=1e-5,
+                )
+                and torch.allclose(
+                    _corridor_length,
+                    torch.full_like(_corridor_length, 10.0),
+                    atol=1e-5,
+                )
+            ),
+            "movement_pass": bool(_moving_slots.all().item()),
+        }
+        _corridor_report["gate_pass"] = bool(
+            _corridor_report["geometry_pass"]
+            and _corridor_report["movement_pass"]
+            and _corridor_report["obstacle_mix_pass"]
+            and _corridor_report["constructive_unsolvable_count"] == 0
+            and stats_total > 0
+            and _corridor_sr >= 0.90
+            and _corridor_cr <= 0.10
+            and _corridor_to <= 0.05
+        )
+        print(
+            "[LONG-CORRIDOR-METRICS] "
+            f"episodes={stats_total} SR={_corridor_sr:.1%} "
+            f"CR={_corridor_cr:.1%} TO={_corridor_to:.1%} "
+            f"width={_corridor_report['free_width_m_mean']:.3f}m "
+            f"length={_corridor_report['length_m_mean']:.3f}m "
+            f"dynamic_moved={_corridor_report['dynamic_slots_moved_fraction']:.1%} "
+            f"PASS={_corridor_report['gate_pass']}",
+            flush=True,
+        )
+        if args_cli.long_corridor_output:
+            _corridor_output = Path(args_cli.long_corridor_output).expanduser()
+            _corridor_output.parent.mkdir(parents=True, exist_ok=True)
+            _corridor_output.write_text(
+                json.dumps(_corridor_report, indent=2),
+                encoding="utf-8",
+            )
+            print(f"[LONG-CORRIDOR-METRICS] JSON report: {_corridor_output}")
     if _narrow_gap_controller is not None:
         print(_narrow_gap_controller.summary_line())
+    if _compare_extractor is not None:
+        _comparison_report = {
+            "primary_checkpoint": os.path.abspath(ckpt_path),
+            "compare_checkpoint": os.path.abspath(
+                args_cli.compare_checkpoint
+            ),
+            "kl_direction": "KL(primary||compare)",
+            "strong_turn_definition": "abs(angular_argmax_index-9)>=6",
+            "brake_definition": "linear_argmax_index<9",
+            "regions": {},
+        }
+        for _region, _totals in _compare_stats.items():
+            _count = _totals["frames"]
+            if _count <= 0:
+                continue
+            _comparison_report["regions"][_region] = {
+                key: (
+                    int(value)
+                    if key == "frames"
+                    else float(value / _count)
+                )
+                for key, value in _totals.items()
+            }
+        if (
+            _narrow_gap_controller is not None
+            and _narrow_gap_controller.completed_episodes > 0
+        ):
+            _comparison_report["primary_trajectory_crossing_rate"] = (
+                _narrow_gap_controller.crossed_episodes
+                / _narrow_gap_controller.completed_episodes
+            )
+            _comparison_report["primary_trajectory_episodes"] = (
+                _narrow_gap_controller.completed_episodes
+            )
+        print("[POLICY-COMPARE] same-frame summary")
+        for _region, _metrics in _comparison_report["regions"].items():
+            print(
+                f"  {_region}: n={_metrics['frames']} "
+                f"KL=({_metrics['kl_linear']:.5f},"
+                f"{_metrics['kl_angular']:.5f}) "
+                f"agree=({_metrics['agreement_linear']:.1%},"
+                f"{_metrics['agreement_angular']:.1%}) "
+                f"brake=({_metrics['primary_brake']:.1%},"
+                f"{_metrics['compare_brake']:.1%}) "
+                f"strong_turn=({_metrics['primary_strong_turn']:.1%},"
+                f"{_metrics['compare_strong_turn']:.1%}) "
+                f"primary_stop_state={_metrics['primary_stop_state']:.1%}"
+            )
+        if args_cli.compare_output:
+            _compare_output = Path(args_cli.compare_output).expanduser()
+            _compare_output.parent.mkdir(parents=True, exist_ok=True)
+            _compare_output.write_text(
+                json.dumps(_comparison_report, indent=2),
+                encoding="utf-8",
+            )
+            print(f"[POLICY-COMPARE] JSON report: {_compare_output}")
     # --- 軌跡曲率量測 dump ---
     if _TRAJ_DUMP and len(_traj_robot) > 0:
         import numpy as _np_traj

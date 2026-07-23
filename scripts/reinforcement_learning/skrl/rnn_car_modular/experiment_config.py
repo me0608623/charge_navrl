@@ -129,6 +129,16 @@ class ExperimentConfig:
     narrow_passage_final_stress_ratio: float = 0.25
     narrow_passage_fixed_width_range: tuple[float, float] | None = None
     narrow_passage_fixed_yaw_limit_deg: float | None = None
+    # Deployment corridor replay is disjoint from narrow-passage replay.
+    long_corridor_fraction: float = 0.0
+    long_corridor_free_width: float = 4.0
+    long_corridor_length: float = 10.0
+    long_corridor_static_obstacles: int = 4
+    long_corridor_dynamic_obstacles: int = 2
+    long_corridor_dynamic_speed_range: tuple[float, float] = (0.30, 0.60)
+    # Frozen successful policy used only on narrow-passage replay frames.
+    teacher_retention_checkpoint: str | None = None
+    teacher_retention_weight: float = 0.0
 
     # Observation layout must be fixed before isaaclab_tasks is imported.
     # None preserves the process environment for legacy configs.

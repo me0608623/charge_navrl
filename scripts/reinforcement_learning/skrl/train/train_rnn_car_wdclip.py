@@ -36,6 +36,7 @@ Usage:
 # ============================================================================
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -763,6 +764,18 @@ parser.add_argument("--experiment_config", type=str, default=None,
                          "Provides defaults for all training params; CLI flags override.")
 parser.add_argument("--print_experiment_config", action="store_true", default=False,
                     help="Print resolved experiment config and exit.")
+parser.add_argument(
+    "--teacher_retention_checkpoint",
+    type=str,
+    default=None,
+    help="Frozen teacher checkpoint for narrow-passage policy retention.",
+)
+parser.add_argument(
+    "--teacher_retention_weight",
+    type=float,
+    default=0.0,
+    help="Beta for narrow-only KL(teacher || current). Zero disables retention.",
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -822,6 +835,7 @@ sys.path.insert(0, str(_skrl_root))          # skrl/ root
 sys.path.insert(0, str(_skrl_root / "models"))  # skrl/models/
 sys.path.insert(0, str(_skrl_root / "utils"))   # skrl/utils/
 from rnn_car_wdclean import swept_arc  # ★r_arc: action-conditioned swept-arc 碰撞預測 reward（--use_arc_reward 閘）
+from rnn_car_wdclean.teacher_retention import masked_two_head_retention_loss
 
 # Charge 側網路模組（從 modular_rnn_models.py 匯入）
 from modular_rnn_models import (
@@ -1040,7 +1054,7 @@ class RunningNormalizer:
 class ChargeRolloutBuffer:
     def __init__(self, num_steps, num_envs, rl_input_dim, obs_dim, hidden_dim, device,
                  privileged_dim: int = 0, predict_dim: int = 7,
-                 encoder_input_dim: int = 0):
+                 encoder_input_dim: int = 0, teacher_logits_dim: int = 0):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.device = device
@@ -1063,6 +1077,14 @@ class ChargeRolloutBuffer:
             self.encoder_inputs = torch.zeros(
                 num_steps, num_envs, encoder_input_dim, device=device
             )
+        self._teacher_logits_dim = teacher_logits_dim
+        if teacher_logits_dim > 0:
+            self.teacher_logits = torch.zeros(
+                num_steps, num_envs, teacher_logits_dim, device=device
+            )
+            self.retention_mask = torch.zeros(
+                num_steps, num_envs, dtype=torch.bool, device=device
+            )
         # Asymmetric critic privileged obs
         self._privileged_dim = privileged_dim
         if privileged_dim > 0:
@@ -1070,7 +1092,8 @@ class ChargeRolloutBuffer:
         self.ptr = 0  # 下一個寫入步數的 pointer
 
     def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden,
-            aux_target=None, privileged=None, terminated=None, encoder_input=None):
+            aux_target=None, privileged=None, terminated=None, encoder_input=None,
+            teacher_logits=None, retention_mask=None):
         """儲存一個 rollout step 的所有資料。每次 env.step() 後呼叫。"""
         i = self.ptr
         self.rl_inputs[i] = rl_input
@@ -1089,6 +1112,13 @@ class ChargeRolloutBuffer:
             self.privileged_obs[i] = privileged
         if encoder_input is not None and self._encoder_input_dim > 0:
             self.encoder_inputs[i] = encoder_input
+        if self._teacher_logits_dim > 0:
+            if teacher_logits is None or retention_mask is None:
+                raise RuntimeError(
+                    "teacher retention buffer requires logits and scene mask at every step"
+                )
+            self.teacher_logits[i] = teacher_logits
+            self.retention_mask[i] = retention_mask
         self.ptr += 1
 
     def reset(self):
@@ -2762,6 +2792,43 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_lidar_noise_config(env_cfg, args_cli)
     _apply_dr_param_overrides(env_cfg, args_cli)
 
+    # Deployment corridor replay: dedicated 10 m walls and a controlled 4S+2D
+    # obstacle layout. This is independent of the legacy near-wall crossing event.
+    _long_corridor_fraction = float(
+        getattr(args_cli, "long_corridor_fraction", 0.0)
+    )
+    if _long_corridor_fraction > 0.0:
+        if not (0.0 < _long_corridor_fraction <= 0.20):
+            raise ValueError(
+                "long_corridor_fraction must stay in (0, 0.20], got "
+                f"{_long_corridor_fraction}"
+            )
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.long_corridor_replay import (
+            configure_long_corridor_assets,
+        )
+
+        configure_long_corridor_assets(
+            env_cfg,
+            fraction=_long_corridor_fraction,
+            free_width=float(
+                getattr(args_cli, "long_corridor_free_width", 4.0)
+            ),
+            length=float(getattr(args_cli, "long_corridor_length", 10.0)),
+            static_obstacles=int(
+                getattr(args_cli, "long_corridor_static_obstacles", 4)
+            ),
+            dynamic_obstacles=int(
+                getattr(args_cli, "long_corridor_dynamic_obstacles", 2)
+            ),
+            dynamic_speed_range=tuple(
+                getattr(
+                    args_cli,
+                    "long_corridor_dynamic_speed_range",
+                    (0.30, 0.60),
+                )
+            ),
+        )
+
     # SA5 narrow-passage bridge: add two dedicated wall assets before gym.make
     # and enable the last reset event. Reward, network, PPO and DR stay untouched.
     _narrow_fraction = float(getattr(args_cli, "narrow_passage_fraction", 0.0))
@@ -2790,6 +2857,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             fixed_yaw_limit_deg=getattr(
                 args_cli, "narrow_passage_fixed_yaw_limit_deg", None
             ),
+        )
+    if _narrow_fraction + _long_corridor_fraction >= 1.0:
+        raise ValueError(
+            "narrow and long-corridor replay fractions leave no baseline envs"
+        )
+    if _narrow_fraction > 0.0 or _long_corridor_fraction > 0.0:
+        print(
+            "[SCENE-MIX] "
+            f"original={1.0 - _narrow_fraction - _long_corridor_fraction:.3f} "
+            f"narrow={_narrow_fraction:.3f} "
+            f"long_corridor={_long_corridor_fraction:.3f} "
+            "classes_disjoint=True",
+            flush=True,
         )
 
     # --- Curriculum version：設定 goal_obstacle_curriculum 的版本與起始階段 ---
@@ -3384,6 +3464,39 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     total_timesteps = args_cli.timesteps     # 總訓練 frame 數（所有 env 累計）
     num_iterations = total_timesteps // RL   # 總 iteration 數
 
+    _teacher_retention_weight = float(
+        getattr(args_cli, "teacher_retention_weight", 0.0)
+    )
+    _teacher_retention_checkpoint = getattr(
+        args_cli, "teacher_retention_checkpoint", None
+    )
+    if _teacher_retention_weight < 0.0:
+        raise ValueError("teacher_retention_weight must be non-negative")
+    _teacher_retention_enabled = _teacher_retention_weight > 0.0
+    if _teacher_retention_enabled:
+        if not _teacher_retention_checkpoint:
+            raise ValueError(
+                "teacher_retention_weight > 0 requires "
+                "teacher_retention_checkpoint"
+            )
+        if not os.path.isfile(_teacher_retention_checkpoint):
+            raise FileNotFoundError(
+                f"teacher retention checkpoint not found: "
+                f"{_teacher_retention_checkpoint}"
+            )
+        if not _e2e_frame_stack or _K_stack != 8:
+            raise ValueError(
+                "narrow teacher retention currently requires the K8 E2E lineage"
+            )
+        if float(getattr(args_cli, "narrow_passage_fraction", 0.0)) <= 0.0:
+            raise ValueError(
+                "teacher retention requires narrow_passage_fraction > 0"
+            )
+        if _lvdot_enc_on or _oracle_to_policy:
+            raise ValueError(
+                "teacher retention does not support LV-DOT/oracle policy inputs"
+            )
+
     # WD: γ = 1 - (1 - 0.92) / rl_fps = 0.984（fps=5），跨所有 phase 固定不變
     # 注意：不同於 Isaac Lab NavRL 課程中 γ 會隨 stage 遞增（0.990→0.998）
     current_gamma = args_cli.gamma
@@ -3490,6 +3603,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device,
         privileged_dim=_priv_dim, predict_dim=_predict_dim,
         encoder_input_dim=_encoder_input_dim,
+        teacher_logits_dim=(2 * NUM_BINS if _teacher_retention_enabled else 0),
     )
     obs_buf = ObstacleRolloutBuffer(RL, num_envs, N_obs, OBS_POLICY_OBS_DIM, 2, device) if _obstacle_mode == "learned" else None
 
@@ -3531,6 +3645,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "disable_aux_training": args_cli.disable_aux_training,
                     "resume_optimizer": (args_cli.checkpoint is not None and not args_cli.no_resume_optimizer),
                     "action_table_sample_size": args_cli.action_table_sample_size,
+                    "teacher_retention_checkpoint": _teacher_retention_checkpoint,
+                    "teacher_retention_weight": _teacher_retention_weight,
                     "gamma": args_cli.gamma, "use_a2c": args_cli.use_a2c,
                     "rnn_type": args_cli.rnn_type,
                     "hidden_dim": args_cli.hidden_dim,
@@ -3653,6 +3769,71 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     except (ValueError, RuntimeError, KeyError) as e:
                         print(f"[WARN] Failed to load optimizer state {key}: {e}")
         print(f"[INFO] Loaded checkpoint: {args_cli.checkpoint}")
+
+    _teacher_extractor = None
+    _teacher_policy_head = None
+    _teacher_obs_mean = None
+    _teacher_obs_var = None
+    _teacher_lidar_hist = None
+    if _teacher_retention_enabled:
+        teacher_ckpt = torch.load(
+            _teacher_retention_checkpoint,
+            map_location=device,
+            weights_only=False,
+        )
+        teacher_args = teacher_ckpt.get("args", {})
+        teacher_contract = {
+            "end_to_end_frame_stack": True,
+            "lidar_frame_stack": _K_stack,
+            "use_obb_collision": bool(getattr(args_cli, "use_obb_collision", False)),
+            "use_action_history": bool(getattr(args_cli, "use_action_history", False)),
+        }
+        mismatches = {
+            key: (teacher_args.get(key), expected)
+            for key, expected in teacher_contract.items()
+            if teacher_args.get(key) != expected
+        }
+        if mismatches:
+            raise ValueError(
+                f"teacher checkpoint is incompatible with current lineage: {mismatches}"
+            )
+        if "extractor" not in teacher_ckpt or "policy_head" not in teacher_ckpt:
+            raise ValueError("teacher checkpoint lacks extractor/policy_head state")
+        teacher_norm = teacher_ckpt.get("obs_normalizer")
+        if teacher_norm is None:
+            raise ValueError("teacher checkpoint lacks obs_normalizer")
+        _teacher_obs_mean = teacher_norm["mean"].to(device).reshape(-1)
+        _teacher_obs_var = teacher_norm["var"].to(device).reshape(-1)
+        if _teacher_obs_mean.numel() != obs_dim or _teacher_obs_var.numel() != obs_dim:
+            raise ValueError(
+                "teacher observation normalizer shape mismatch: "
+                f"teacher={_teacher_obs_mean.numel()} runtime={obs_dim}"
+            )
+
+        _teacher_extractor = copy.deepcopy(extractor)
+        _teacher_policy_head = copy.deepcopy(policy_head)
+        _teacher_extractor.load_state_dict(teacher_ckpt["extractor"], strict=True)
+        _teacher_policy_head.load_state_dict(
+            teacher_ckpt["policy_head"], strict=True
+        )
+        _teacher_extractor.eval()
+        _teacher_policy_head.eval()
+        for parameter in (
+            list(_teacher_extractor.parameters())
+            + list(_teacher_policy_head.parameters())
+        ):
+            parameter.requires_grad_(False)
+        _teacher_lidar_hist = torch.zeros(
+            num_envs, (_K_stack - 1) * _LL, device=device
+        )
+        print(
+            "[TEACHER-RETENTION] enabled: "
+            f"beta={_teacher_retention_weight:g} scope=narrow_only "
+            f"teacher={_teacher_retention_checkpoint} "
+            "loss=KL(teacher_linear||student_linear)"
+            "+KL(teacher_angular||student_angular)",
+            flush=True,
+        )
 
     # --- Initial reset ---
     obs, info = env.reset()
@@ -4011,6 +4192,48 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 value = value_head(_rl_in_enc, _priv_obs if _use_asymmetric_critic else None).squeeze(-1)  # [E] critic value
                 actions, log_prob, _ = sample_action(logits)     # 採樣動作 + joint log_prob
                 goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)  # 目標診斷（不影響 reward）
+                _teacher_logits_step = None
+                _retention_mask_step = None
+                if _teacher_retention_enabled:
+                    _teacher_obs_normed = torch.clamp(
+                        (policy_obs - _teacher_obs_mean)
+                        / (_teacher_obs_var.sqrt() + 1e-8),
+                        -5.0,
+                        5.0,
+                    )
+                    _teacher_encoder_input = _build_extractor_input(
+                        _teacher_obs_normed, _teacher_lidar_hist
+                    )
+                    _teacher_features = _teacher_extractor(
+                        _teacher_encoder_input
+                    )
+                    _teacher_policy_obs = _charge_obs_for_rl(
+                        _teacher_obs_normed
+                    )
+                    _teacher_logits_step = _teacher_policy_head(
+                        torch.cat(
+                            [_teacher_policy_obs, _teacher_features], dim=-1
+                        )
+                    )
+                    _teacher_cur_lidar = _teacher_policy_obs[
+                        :, LIDAR_START:LIDAR_END
+                    ]
+                    _teacher_lidar_hist = torch.cat(
+                        [
+                            _teacher_cur_lidar,
+                            _teacher_lidar_hist[:, :-_LL],
+                        ],
+                        dim=-1,
+                    )
+                    _narrow_active = getattr(
+                        env.unwrapped, "_narrow_bridge_active", None
+                    )
+                    if _narrow_active is None:
+                        raise RuntimeError(
+                            "teacher retention is enabled but the narrow bridge "
+                            "injector did not create _narrow_bridge_active"
+                        )
+                    _retention_mask_step = _narrow_active.clone()
 
             # Capture dynamic obstacle state before env.step so future occupancy
             # compares the selected action against the same state seen by policy.
@@ -4338,7 +4561,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         pos_scale=args_cli.aux_target_pos_scale)  # [E, predict_dim]
             charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
                            aux_target=wd_aux_tgt, privileged=_priv_obs, terminated=_terminated_flat,
-                           encoder_input=_encoder_input)
+                           encoder_input=_encoder_input,
+                           teacher_logits=_teacher_logits_step,
+                           retention_mask=_retention_mask_step)
             if obs_buf is not None:
                 obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
 
@@ -4369,6 +4594,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _ep_arc_accum[done_ids] = 0.0
                 if _lidar_hist is not None:
                     _lidar_hist[done_ids] = 0.0   # 多幀:同步 reset LiDAR 歷史(新 episode 從零)
+                if _teacher_lidar_hist is not None:
+                    _teacher_lidar_hist[done_ids] = 0.0
                 # 重置障礙物速度 cache（避免舊 episode 的速度污染新 episode）
                 if hasattr(env.unwrapped, "_obstacle_velocities"):
                     env.unwrapped._obstacle_velocities[done_ids] = 0.0
@@ -4756,6 +4983,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 charge_buf.encoder_inputs[:RL].reshape(-1, _encoder_input_dim)
                 if _e2e_frame_stack else None
             )
+            flat_teacher_logits = (
+                charge_buf.teacher_logits[:RL].reshape(-1, 2 * NUM_BINS)
+                if _teacher_retention_enabled else None
+            )
+            flat_retention_mask = (
+                charge_buf.retention_mask[:RL].reshape(-1)
+                if _teacher_retention_enabled else None
+            )
 
             # --rnn_rl_grad: 準備在 minibatch 內重算 preprocess_feat(過 RNN,帶梯度)所需的
             # raw_obs 與 input hidden(rollout 當步存的)。讓 RL 梯度可流進 RNN。
@@ -4814,6 +5049,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             post_kl_l, post_ratio_mean_l, post_ratio_std_l = [], [], []
             post_ratio_min_l, post_ratio_max_l = [], []
             post_ratio_outside_20_l, post_ratio_outside_50_l = [], []
+            retention_kl_linear_l, retention_kl_angular_l = [], []
+            retention_agree_linear_l, retention_agree_angular_l = [], []
+            retention_loss_l, retention_active_counts = [], []
             _kl_early_stop = False
             _ppo_update_count = 0
             for _ in range(n_epochs):
@@ -4848,6 +5086,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     nl = policy_head(_ri_mb_enc, _priv_mb if _oracle_to_policy else None)
                     nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
                     nv = value_head(_ri_mb_enc, _priv_mb).squeeze(-1)
+                    _retention_result = None
+                    if _teacher_retention_enabled:
+                        _retention_result = masked_two_head_retention_loss(
+                            flat_teacher_logits[mb],
+                            nl,
+                            flat_retention_mask[mb],
+                            num_bins=NUM_BINS,
+                        )
 
                     _log_ratio = nlp - flat_lp[mb]
                     # Non-negative PPO approximate KL: E[(ratio-1)-log(ratio)].
@@ -4903,8 +5149,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         _vf_scale = abs(max(min(_vf_clamp_threshold, abs(pl.item())), _vf_clamp_threshold / 3.0) / vl.item())
                         vl = vl * _vf_scale
 
-                    # 最終 joint loss = policy + value - entropy（WD 標準公式）
-                    loss = pl_clamped + _current_vf_coeff * vl - entropy_loss
+                    _retention_term = (
+                        _teacher_retention_weight * _retention_result.loss
+                        if _retention_result is not None
+                        else torch.zeros((), device=device)
+                    )
+                    # Ordinary frames remain pure PPO. Only injected narrow
+                    # frames are anchored to the successful c20 teacher.
+                    loss = (
+                        pl_clamped
+                        + _current_vf_coeff * vl
+                        - entropy_loss
+                        + _retention_term
+                    )
                     actor_before = _snapshot_params(charge_params_actor)
                     critic_before = _snapshot_params(charge_params_critic)
 
@@ -5008,6 +5265,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     ent_ang_l.append(ent_ang.mean().item())
                     # Patch 5: total loss
                     total_loss_l.append(loss.item())
+                    if (
+                        _retention_result is not None
+                        and _retention_result.active_count > 0
+                    ):
+                        retention_active_counts.append(
+                            _retention_result.active_count
+                        )
+                        retention_kl_linear_l.append(
+                            _retention_result.kl_linear.item()
+                        )
+                        retention_kl_angular_l.append(
+                            _retention_result.kl_angular.item()
+                        )
+                        retention_agree_linear_l.append(
+                            _retention_result.agreement_linear.item()
+                        )
+                        retention_agree_angular_l.append(
+                            _retention_result.agreement_angular.item()
+                        )
+                        retention_loss_l.append(_retention_term.item())
                     # Existing wd_update tracking
                     wd_actor_grad_l.append(actor_grad)
                     wd_critic_grad_l.append(critic_grad)
@@ -5035,6 +5312,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             charge_ppo_loss = np.mean(ppo_l)
             charge_vf_loss = np.mean(vf_l)
             charge_entropy = np.mean(ent_l)
+
+            def _retention_weighted_mean(values):
+                if not values or not retention_active_counts:
+                    return 0.0
+                total = sum(retention_active_counts)
+                return float(
+                    sum(
+                        value * count
+                        for value, count in zip(
+                            values, retention_active_counts
+                        )
+                    )
+                    / max(total, 1)
+                )
+
             wd_update_monitor = {
                 # --- WD update diagnostics split by module for WandB grouping ---
                 "wd_update_actor/grad_norm": float(np.mean(wd_actor_grad_l)) if wd_actor_grad_l else 0.0,
@@ -5072,6 +5364,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "rl/entropy_angular": float(np.mean(ent_ang_l)) if ent_ang_l else 0.0,
                 # --- Patch 5: total loss ---
                 "rl/total_loss": float(np.mean(total_loss_l)) if total_loss_l else 0.0,
+                "retention/enabled": float(_teacher_retention_enabled),
+                "retention/beta": _teacher_retention_weight,
+                "retention/active_fraction": (
+                    float(flat_retention_mask.float().mean().item())
+                    if flat_retention_mask is not None else 0.0
+                ),
+                "retention/kl_linear": _retention_weighted_mean(
+                    retention_kl_linear_l
+                ),
+                "retention/kl_angular": _retention_weighted_mean(
+                    retention_kl_angular_l
+                ),
+                "retention/action_agreement_linear": _retention_weighted_mean(
+                    retention_agree_linear_l
+                ),
+                "retention/action_agreement_angular": _retention_weighted_mean(
+                    retention_agree_angular_l
+                ),
+                "retention/weighted_loss": _retention_weighted_mean(
+                    retention_loss_l
+                ),
                 # --- Patch 2: returns/advantage statistics ---
                 "rl_critic/returns_mean": _ret_mean,
                 "rl_critic/returns_std": _ret_std,
@@ -5412,6 +5725,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"ent={charge_entropy:.3f} enc_g={wd_update_monitor.get('rl_encoder/grad_norm_pre_clip', 0.0):.3f} | "
                     f"gV={goal_v:+.3f} gΔ={goal_d:+.2f} h={goal_h:.0f}° "
                     f"sw={goal_sw:.3f}{obs_tag}")
+                if _teacher_retention_enabled:
+                    print(
+                        "  RETENTION: "
+                        f"active={wd_update_monitor.get('retention/active_fraction', 0.0):.1%} "
+                        f"beta={_teacher_retention_weight:g} "
+                        f"KL=({wd_update_monitor.get('retention/kl_linear', 0.0):.4f},"
+                        f"{wd_update_monitor.get('retention/kl_angular', 0.0):.4f}) "
+                        f"agree=({wd_update_monitor.get('retention/action_agreement_linear', 0.0):.1%},"
+                        f"{wd_update_monitor.get('retention/action_agreement_angular', 0.0):.1%}) "
+                        f"weighted_loss={wd_update_monitor.get('retention/weighted_loss', 0.0):.5f}"
+                    )
             else:
                 _obs_ent = obs_metrics["entropy"] if obs_metrics else 0.0
                 _obs_pl = obs_metrics["policy_loss"] if obs_metrics else 0.0
@@ -5529,6 +5853,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "phase_parameter/ppo_epochs": float(args_cli.ppo_epochs),
                 "phase_parameter/mini_batches": float(args_cli.mini_batches),
                 "phase_parameter/train_goal_rate": float(args_cli.train_goal_rate),
+                "phase_parameter/teacher_retention_weight": _teacher_retention_weight,
                 # RL / optimizer effective hyperparameters
                 "phase_parameter/gamma": float(current_gamma),
                 "phase_parameter/gae_lambda": float(args_cli.gae_lambda),

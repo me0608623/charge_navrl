@@ -101,6 +101,7 @@ from ..mdp.events.walls import init_perenv_walls, randomize_walls
 from ..domain_randomization import apply_domain_randomization
 from ..mdp.events.state import set_obstacle_metadata
 from ..mdp.events import corridor_crossing as _corridor_crossing_mod
+from ..mdp.events import long_corridor_replay as _long_corridor_replay_mod
 from ..mdp.events import narrow_passage_bridge as _narrow_passage_bridge_mod
 
 # 課程
@@ -370,6 +371,23 @@ class EventCfgVLP16Curriculum:
         },
     )
 
+    # Deployment-corridor replay. Dedicated 10 m wall assets are added only by
+    # an experiment config; fraction=0 keeps the baseline scene unchanged.
+    long_corridor_replay = EventTerm(
+        func=_long_corridor_replay_mod.setup_long_corridor_replay,
+        mode="reset",
+        params={
+            "fraction": 0.0,
+            "free_width": 4.0,
+            "length": 10.0,
+            "static_obstacles": 4,
+            "dynamic_obstacles": 2,
+            "dynamic_speed_min": 0.30,
+            "dynamic_speed_max": 0.60,
+            "wall_z": 1.5,
+        },
+    )
+
     # SA5 warm-start bridge injector. The default fraction=0.0 is a strict no-op;
     # an experiment config must add the two bridge wall assets and enable it.
     narrow_passage_bridge = EventTerm(
@@ -430,6 +448,13 @@ class EventCfgVLP16Curriculum:
     # across the barrier. Baseline and ordinary SA5 envs are untouched.
     maintain_narrow_passage_goal = EventTerm(
         func=_narrow_passage_bridge_mod.maintain_narrow_passage_goal,
+        mode="interval",
+        interval_range_s=(0.2, 0.2),
+        params={},
+    )
+
+    maintain_long_corridor_goal = EventTerm(
+        func=_long_corridor_replay_mod.maintain_long_corridor_goal,
         mode="interval",
         interval_range_s=(0.2, 0.2),
         params={},

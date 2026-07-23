@@ -191,7 +191,23 @@ def setup_narrow_passage_bridge(
     _hide_bridge_walls(env, ids)
     env._narrow_bridge_reset_count += int(ids.numel())
 
-    selected = ids[torch.rand(ids.numel(), device=env.device) < float(fraction)]
+    # The deployment corridor event runs immediately before this event. Keep
+    # the two replay classes disjoint and compensate the Bernoulli probability
+    # so `fraction` remains the absolute narrow share of all resets.
+    eligible = ids
+    conditional_fraction = float(fraction)
+    if hasattr(env, "_long_corridor_active"):
+        eligible = ids[~env._long_corridor_active[ids]]
+        corridor_fraction = float(getattr(env, "_long_corridor_fraction", 0.0))
+        conditional_fraction = min(
+            float(fraction) / max(1.0 - corridor_fraction, 1e-6),
+            1.0,
+        )
+    if eligible.numel() == 0:
+        return
+    selected = eligible[
+        torch.rand(eligible.numel(), device=env.device) < conditional_fraction
+    ]
     if selected.numel() == 0:
         return
 

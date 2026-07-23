@@ -1966,6 +1966,23 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
         except Exception as e:
             print(f"[Curriculum] BehaviorScheduler init failed: {e}", flush=True)
 
+    # The long-corridor reset event can run during the initial env reset before
+    # the curriculum has constructed BehaviorScheduler. Complete those pending
+    # obstacle layouts immediately once the scheduler exists.
+    if hasattr(env, "_long_corridor_pending_obstacles"):
+        try:
+            from ..mdp.events.long_corridor_replay import (
+                maintain_long_corridor_goal,
+            )
+
+            maintain_long_corridor_goal(env)
+        except Exception as e:
+            print(
+                f"[Curriculum] pending long-corridor install failed: {e}",
+                flush=True,
+            )
+            raise
+
     # --- Stage-dependent reward weights ---
     rw = cfg.get("reward_weights")
     if rw is not None:

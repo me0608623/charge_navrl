@@ -426,6 +426,10 @@ def get_combined_wall_data(env) -> tuple[Tensor, Tensor, Tensor]:
             center_parts.append(env._narrow_bridge_wall_centers)
             size_parts.append(env._narrow_bridge_wall_sizes)
             mask_parts.append(env._narrow_bridge_wall_mask)
+        if hasattr(env, "_long_corridor_wall_centers"):
+            center_parts.append(env._long_corridor_wall_centers)
+            size_parts.append(env._long_corridor_wall_sizes)
+            mask_parts.append(env._long_corridor_wall_mask)
         center_parts.append(bc_exp)
         size_parts.append(bs_exp)
         mask_parts.append(bm)
