@@ -16,7 +16,12 @@ class NarrowPassageSchedule:
     stress_ratio: float
 
 
-def schedule_at(progress: float, final_stress_ratio: float = 0.25) -> NarrowPassageSchedule:
+def schedule_at(
+    progress: float,
+    final_stress_ratio: float = 0.25,
+    fixed_width_range: tuple[float, float] | None = None,
+    fixed_yaw_limit_deg: float | None = None,
+) -> NarrowPassageSchedule:
     """Return a continuous easy-to-hard bridge schedule.
 
     First half:
@@ -26,6 +31,23 @@ def schedule_at(progress: float, final_stress_ratio: float = 0.25) -> NarrowPass
         small [1.2, 1.0] m stress subset ramps from 0 to ``final_stress_ratio``.
     """
     p = min(max(float(progress), 0.0), 1.0)
+    if (fixed_width_range is None) != (fixed_yaw_limit_deg is None):
+        raise ValueError("fixed width range and yaw limit must be configured together")
+    if fixed_width_range is not None:
+        width_min, width_max = map(float, fixed_width_range)
+        yaw_limit = float(fixed_yaw_limit_deg)
+        if not 0.0 < width_min <= width_max:
+            raise ValueError(f"invalid fixed narrow-passage width range: {fixed_width_range}")
+        if yaw_limit <= 0.0:
+            raise ValueError(f"fixed narrow-passage yaw limit must be positive: {yaw_limit}")
+        return NarrowPassageSchedule(
+            progress=p,
+            width_min=width_min,
+            width_max=width_max,
+            yaw_limit_deg=yaw_limit,
+            stress_ratio=0.0,
+        )
+
     if p <= 0.5:
         q = p / 0.5
         return NarrowPassageSchedule(

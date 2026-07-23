@@ -2784,6 +2784,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             final_stress_ratio=float(
                 getattr(args_cli, "narrow_passage_final_stress_ratio", 0.25)
             ),
+            fixed_width_range=getattr(
+                args_cli, "narrow_passage_fixed_width_range", None
+            ),
+            fixed_yaw_limit_deg=getattr(
+                args_cli, "narrow_passage_fixed_yaw_limit_deg", None
+            ),
         )
 
     # --- Curriculum version：設定 goal_obstacle_curriculum 的版本與起始階段 ---

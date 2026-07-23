@@ -127,6 +127,8 @@ class ExperimentConfig:
     narrow_passage_schedule_steps: int = 19200
     narrow_passage_segment_length: float = 9.0
     narrow_passage_final_stress_ratio: float = 0.25
+    narrow_passage_fixed_width_range: tuple[float, float] | None = None
+    narrow_passage_fixed_yaw_limit_deg: float | None = None
 
     # Observation layout must be fixed before isaaclab_tasks is imported.
     # None preserves the process environment for legacy configs.

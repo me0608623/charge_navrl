@@ -385,6 +385,8 @@ class EventCfgVLP16Curriculum:
             "barrier_x_limit": 0.5,
             "start_goal_distance": 3.0,
             "final_stress_ratio": 0.25,
+            "fixed_width_range": None,
+            "fixed_yaw_limit_deg": None,
             "wall_z": 1.5,
         },
     )

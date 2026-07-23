@@ -54,6 +54,38 @@ def test_schedule_matches_requested_curriculum() -> None:
     assert end.stress_ratio == pytest.approx(0.25)
 
 
+def test_fixed_retention_schedule_does_not_ramp_or_add_stress() -> None:
+    start = schedule_at(
+        0.0,
+        final_stress_ratio=0.25,
+        fixed_width_range=(1.2, 1.4),
+        fixed_yaw_limit_deg=4.0,
+    )
+    end = schedule_at(
+        1.0,
+        final_stress_ratio=0.25,
+        fixed_width_range=(1.2, 1.4),
+        fixed_yaw_limit_deg=4.0,
+    )
+
+    for schedule in (start, end):
+        assert schedule.width_min == pytest.approx(1.2)
+        assert schedule.width_max == pytest.approx(1.4)
+        assert schedule.yaw_limit_deg == pytest.approx(4.0)
+        assert schedule.stress_ratio == pytest.approx(0.0)
+
+
+def test_fixed_retention_schedule_requires_complete_valid_override() -> None:
+    with pytest.raises(ValueError):
+        schedule_at(0.5, fixed_width_range=(1.2, 1.4))
+    with pytest.raises(ValueError):
+        schedule_at(
+            0.5,
+            fixed_width_range=(1.4, 1.2),
+            fixed_yaw_limit_deg=4.0,
+        )
+
+
 def test_measured_obb_requires_point_eight_meter_gap() -> None:
     assert minimum_solvable_gap(robot_half_width=0.30, collision_buffer=0.10) == 0.8
 

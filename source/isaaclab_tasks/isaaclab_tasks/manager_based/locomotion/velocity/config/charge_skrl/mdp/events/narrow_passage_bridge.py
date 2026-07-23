@@ -21,6 +21,8 @@ def configure_narrow_passage_assets(
     room_half_extent: float,
     segment_length: float = 9.0,
     final_stress_ratio: float = 0.25,
+    fixed_width_range: tuple[float, float] | None = None,
+    fixed_yaw_limit_deg: float | None = None,
 ) -> None:
     """Add two bridge-only wall assets and configure the reset event.
 
@@ -60,13 +62,20 @@ def configure_narrow_passage_assets(
             "room_half_extent": float(room_half_extent),
             "segment_length": float(segment_length),
             "final_stress_ratio": float(final_stress_ratio),
+            "fixed_width_range": fixed_width_range,
+            "fixed_yaw_limit_deg": fixed_yaw_limit_deg,
         }
+    )
+    schedule_mode = (
+        f"fixed widths={fixed_width_range} yaw=+/-{fixed_yaw_limit_deg}deg stress=0"
+        if fixed_width_range is not None
+        else f"ramp final_stress_ratio={final_stress_ratio:.3f}"
     )
     print(
         "[NARROW-BRIDGE-CONFIG] "
         f"fraction={fraction:.3f} original_sa5={1.0 - fraction:.3f} "
         f"schedule_steps={schedule_steps} room_half={room_half_extent:.2f} "
-        f"segment_length={segment_length:.2f} reward_unchanged=True",
+        f"segment_length={segment_length:.2f} schedule={schedule_mode} reward_unchanged=True",
         flush=True,
     )
 
@@ -167,6 +176,8 @@ def setup_narrow_passage_bridge(
     barrier_x_limit: float = 0.5,
     start_goal_distance: float = 3.0,
     final_stress_ratio: float = 0.25,
+    fixed_width_range: tuple[float, float] | None = None,
+    fixed_yaw_limit_deg: float | None = None,
     wall_z: float = 1.5,
 ) -> None:
     """Replace a fraction of reset episodes with guaranteed-solvable wall gaps."""
@@ -186,7 +197,12 @@ def setup_narrow_passage_bridge(
 
     common_steps = int(getattr(env, "common_step_counter", 0))
     progress = common_steps / max(int(schedule_steps), 1)
-    schedule = schedule_at(progress, final_stress_ratio)
+    schedule = schedule_at(
+        progress,
+        final_stress_ratio,
+        fixed_width_range=fixed_width_range,
+        fixed_yaw_limit_deg=fixed_yaw_limit_deg,
+    )
     count = selected.numel()
 
     gap_width = torch.empty(count, device=env.device).uniform_(
