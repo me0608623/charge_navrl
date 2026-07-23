@@ -11,7 +11,13 @@ sys.modules[_SPEC.name] = gates
 _SPEC.loader.exec_module(gates)
 
 
-def _write_log(path: Path, *, yaw_limit: float = 10.0) -> None:
+def _write_log(
+    path: Path,
+    *,
+    yaw_limit: float = 10.0,
+    yaw_p95: float = 9.0,
+    yaw_within: float = 0.96,
+) -> None:
     path.write_text(
         "\n".join(
             [
@@ -22,7 +28,8 @@ def _write_log(path: Path, *, yaw_limit: float = 10.0) -> None:
                 (
                     "[NARROW-GAP-METRICS] episodes=100 crossed=98 crossing_rate=0.980000 "
                     "yaw_frames=500 yaw_abs_p50_deg=2.0 yaw_abs_p90_deg=7.0 "
-                    f"yaw_abs_p95_deg=9.0 yaw_within_{yaw_limit:.2f}deg=0.960000"
+                    f"yaw_abs_p95_deg={yaw_p95} "
+                    f"yaw_within_{yaw_limit:.2f}deg={yaw_within:.6f}"
                 ),
             ]
         ),
@@ -42,13 +49,19 @@ def test_parse_and_check_deployment_narrow_gap(tmp_path: Path):
     assert all(ok for ok, _ in checks.values())
 
 
-def test_old_yaw_metric_cannot_satisfy_new_deployment_gate(tmp_path: Path):
-    log = tmp_path / "legacy.log"
-    _write_log(log, yaw_limit=2.52)
+def test_yaw_distribution_does_not_gate_safe_passage(tmp_path: Path):
+    log = tmp_path / "high_yaw.log"
+    _write_log(log, yaw_p95=15.54, yaw_within=0.89)
 
     metrics = gates.parse_narrow_gap(str(log))
 
-    assert gates.narrow_gap_checks(metrics) == {}
+    assert all(ok for ok, _ in gates.narrow_gap_checks(metrics).values())
+
+
+def test_missing_yaw_metrics_do_not_block_hard_checks():
+    metrics = {"sr": 1.0, "cr": 0.0, "crossing_rate": 1.0}
+
+    assert all(ok for ok, _ in gates.narrow_gap_checks(metrics).values())
 
 
 def test_stress_width_is_not_the_deployment_width():

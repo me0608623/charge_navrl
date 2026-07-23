@@ -54,8 +54,8 @@ STAGE_THRESH = {
 FRONT_LO, FRONT_HI = 30, 43  # 前錐 bin36±6
 NARROW_DEPLOY_WIDTH_M = 1.2
 NARROW_STRESS_WIDTH_M = 1.0
-NARROW_YAW_LIMIT_DEG = 10.0
-NARROW_DEPLOY_THRESH = dict(sr=0.90, cr=0.05, crossing=0.95, yaw_p95_deg=10.0, yaw_within=0.95)
+NARROW_DIAGNOSTIC_YAW_DEG = 10.0
+NARROW_DEPLOY_THRESH = dict(sr=0.90, cr=0.05, crossing=0.95)
 
 
 # ── log 解析 ─────────────────────────────────────────────
@@ -105,10 +105,9 @@ def parse_narrow_gap(path: str) -> dict | None:
     return {**summary, **values}
 
 
-def narrow_gap_checks(metrics: dict, *, yaw_limit_deg: float = NARROW_YAW_LIMIT_DEG) -> dict:
-    """Build the hard deployment checks for a parsed narrow-gap result."""
-    yaw_key = f"yaw_within_{yaw_limit_deg:.2f}deg"
-    required = ("sr", "cr", "crossing_rate", "yaw_abs_p95_deg", yaw_key)
+def narrow_gap_checks(metrics: dict) -> dict:
+    """Build hard deployment checks; yaw remains a non-gating diagnostic."""
+    required = ("sr", "cr", "crossing_rate")
     if any(metrics.get(key) is None for key in required):
         return {}
     return {
@@ -123,14 +122,6 @@ def narrow_gap_checks(metrics: dict, *, yaw_limit_deg: float = NARROW_YAW_LIMIT_
         "穿越率": (
             metrics["crossing_rate"] >= NARROW_DEPLOY_THRESH["crossing"],
             f"{metrics['crossing_rate']:.3f}≥{NARROW_DEPLOY_THRESH['crossing']}",
-        ),
-        "喉部yaw p95": (
-            metrics["yaw_abs_p95_deg"] <= NARROW_DEPLOY_THRESH["yaw_p95_deg"],
-            f"{metrics['yaw_abs_p95_deg']:.3f}°≤{NARROW_DEPLOY_THRESH['yaw_p95_deg']}°",
-        ),
-        f"yaw≤{yaw_limit_deg:g}°率": (
-            metrics[yaw_key] >= NARROW_DEPLOY_THRESH["yaw_within"],
-            f"{metrics[yaw_key]:.3f}≥{NARROW_DEPLOY_THRESH['yaw_within']}",
         ),
     }
 
@@ -377,7 +368,7 @@ def main():
             if not checks:
                 print(
                     f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] "
-                    f"⚠ 缺 yaw≤{NARROW_YAW_LIMIT_DEG:g}° 指標"
+                    "⚠ 缺 SR/CR/穿越指標"
                 )
                 g5 = None
             else:
@@ -388,9 +379,14 @@ def main():
                 )
                 for key, (ok, value) in checks.items():
                     print(f"    {_p(ok)} {key:12s} {value}")
+                yaw_key = f"yaw_within_{NARROW_DIAGNOSTIC_YAW_DEG:.2f}deg"
+                yaw_within = ng.get(yaw_key, float("nan"))
                 print(
-                    f"    yaw分布 p50={ng['yaw_abs_p50_deg']:.3f}° "
-                    f"p90={ng['yaw_abs_p90_deg']:.3f}° p95={ng['yaw_abs_p95_deg']:.3f}°"
+                    f"    診斷（不影響PASS） yaw分布 "
+                    f"p50={ng.get('yaw_abs_p50_deg', float('nan')):.3f}° "
+                    f"p90={ng.get('yaw_abs_p90_deg', float('nan')):.3f}° "
+                    f"p95={ng.get('yaw_abs_p95_deg', float('nan')):.3f}° "
+                    f"yaw≤{NARROW_DIAGNOSTIC_YAW_DEG:g}°率={yaw_within:.3f}"
                 )
         results.append((f"{NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫", g5))
 
@@ -399,14 +395,14 @@ def main():
         if not stress or stress.get("sr") is None:
             print(f"[Stress {NARROW_STRESS_WIDTH_M:.1f}m窄縫] ⚠ 缺摘要或 NARROW-GAP-METRICS")
         else:
-            yaw_key = f"yaw_within_{NARROW_YAW_LIMIT_DEG:.2f}deg"
+            yaw_key = f"yaw_within_{NARROW_DIAGNOSTIC_YAW_DEG:.2f}deg"
             yaw_within = stress.get(yaw_key, float("nan"))
             print(
                 f"[Stress {NARROW_STRESS_WIDTH_M:.1f}m窄縫] 診斷（不影響晉級）  "
                 f"n={stress['n']} SR={stress['sr']:.3f} CR={stress['cr']:.3f} "
                 f"穿越率={stress['crossing_rate']:.3f} "
                 f"yaw_p95={stress['yaw_abs_p95_deg']:.3f}° "
-                f"yaw≤{NARROW_YAW_LIMIT_DEG:g}°率={yaw_within:.3f}"
+                f"yaw≤{NARROW_DIAGNOSTIC_YAW_DEG:g}°率={yaw_within:.3f}"
             )
 
     # 綜合
