@@ -64,7 +64,13 @@ def test_all_motion_families_are_bounded_and_constructively_solvable() -> None:
         4096, spec, "cpu"
     )
 
-    for mode in ("lateral", "longitudinal", "random_2d", "mixed"):
+    for mode in (
+        "lateral",
+        "longitudinal",
+        "random_2d",
+        "mixed",
+        "env_stratified",
+    ):
         starts, waypoints, motion_types, target_indices = (
             sample_dynamic_trajectories(
                 dynamic, lateral_waypoints, spec, mode
@@ -137,6 +143,20 @@ def test_mixed_mode_is_balanced_over_a_gate_batch() -> None:
 
     assert counts.min().item() >= 42
     assert counts.max().item() <= 43
+
+
+def test_env_stratified_mode_balances_pure_motion_environments() -> None:
+    torch.manual_seed(46)
+    spec = LongCorridorSpec()
+    _, dynamic, lateral_waypoints = sample_obstacle_layout(96, spec, "cpu")
+
+    _, _, motion_types, _ = sample_dynamic_trajectories(
+        dynamic, lateral_waypoints, spec, "env_stratified"
+    )
+    assert torch.equal(motion_types[:, 0], motion_types[:, 1])
+
+    counts = torch.bincount(motion_types[:, 0], minlength=3)
+    assert torch.equal(counts, torch.tensor([32, 32, 32]))
 
 
 def test_invalid_motion_mode_is_rejected() -> None:

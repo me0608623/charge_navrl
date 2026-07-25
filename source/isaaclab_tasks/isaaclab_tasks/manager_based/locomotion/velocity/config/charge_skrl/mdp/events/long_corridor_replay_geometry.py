@@ -11,7 +11,13 @@ import torch
 MOTION_LATERAL = 0
 MOTION_LONGITUDINAL = 1
 MOTION_RANDOM_2D = 2
-DYNAMIC_MOTION_MODES = ("lateral", "longitudinal", "random_2d", "mixed")
+DYNAMIC_MOTION_MODES = (
+    "lateral",
+    "longitudinal",
+    "random_2d",
+    "mixed",
+    "env_stratified",
+)
 
 
 @dataclass(frozen=True)
@@ -191,6 +197,9 @@ def sample_dynamic_trajectories(
     Returns starts, two-point patrol paths, per-obstacle motion type IDs, and
     the first target waypoint index. ``mixed`` samples the three controlled
     families independently per obstacle and per environment.
+    ``env_stratified`` assigns one family to both dynamic obstacles in an
+    environment while balancing families across the batch. This matches the
+    pure-family regression gates without removing heterogeneous mixed scenes.
     """
     normalized = validate_dynamic_motion_mode(mode)
     if dynamic.ndim != 3 or dynamic.shape[1:] != (2, 2):
@@ -270,7 +279,7 @@ def sample_dynamic_trajectories(
         motion_types = torch.full(
             (count, 2), MOTION_RANDOM_2D, dtype=torch.long, device=device
         )
-    else:
+    elif normalized == "mixed":
         flat_count = count * 2
         offset = int(torch.randint(0, 3, (1,), device=device).item())
         balanced = (
@@ -279,6 +288,13 @@ def sample_dynamic_trajectories(
         motion_types = balanced[
             torch.randperm(flat_count, device=device)
         ].reshape(count, 2)
+    else:
+        offset = int(torch.randint(0, 3, (1,), device=device).item())
+        balanced = (
+            torch.arange(count, device=device) + offset
+        ) % (MOTION_RANDOM_2D + 1)
+        env_motion_types = balanced[torch.randperm(count, device=device)]
+        motion_types = env_motion_types[:, None].expand(-1, 2).clone()
 
     starts = lateral_starts
     waypoints = lateral_waypoints.clone()

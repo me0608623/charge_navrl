@@ -24,6 +24,9 @@ from rnn_car_modular.configs.e2e_sa6_k8_obb_long_c100_to_c110 import (
 from rnn_car_modular.configs.e2e_sa6_k8_obb_mixed_corridor_probe_from_c19200 import (
     CONFIG as SA6_MIXED_CORRIDOR_PROBE,
 )
+from rnn_car_modular.configs.e2e_sa6_k8_obb_corridor_env_stratified_probe_from_c100 import (
+    CONFIG as SA6_ENV_STRATIFIED_CORRIDOR_PROBE,
+)
 from rnn_car_modular.configs.e2e_sa6_k8_obb_c50_narrow_postkl_recovery import (
     CONFIG as SA6_C50_NARROW_POSTKL_RECOVERY,
 )
@@ -691,6 +694,32 @@ def test_sa6_mixed_corridor_probe_changes_only_motion_and_budget() -> None:
     assert SA6_MIXED_CORRIDOR_PROBE.previous_stage_replay_fraction == 0.10
     assert SA6_MIXED_CORRIDOR_PROBE.narrow_passage_fraction == 0.12
     assert SA6_MIXED_CORRIDOR_PROBE.teacher_retention_weight == 0.30
+
+
+def test_sa6_env_stratified_probe_changes_only_motion_and_budget() -> None:
+    assert SA6_ENV_STRATIFIED_CORRIDOR_PROBE.checkpoint.endswith(
+        "sa6_k8_obb_corridor_priority_c30_s42/checkpoint_12800.pt"
+    )
+    assert SA6_ENV_STRATIFIED_CORRIDOR_PROBE.no_resume_optimizer is False
+    assert SA6_ENV_STRATIFIED_CORRIDOR_PROBE.timesteps == 30 * 128
+    assert SA6_ENV_STRATIFIED_CORRIDOR_PROBE.save_interval == 5
+    assert SA6_ENV_STRATIFIED_CORRIDOR_PROBE.long_corridor_fraction == 0.10
+    assert (
+        SA6_ENV_STRATIFIED_CORRIDOR_PROBE.long_corridor_static_obstacles == 4
+    )
+    assert (
+        SA6_ENV_STRATIFIED_CORRIDOR_PROBE.long_corridor_dynamic_obstacles == 2
+    )
+    assert (
+        SA6_ENV_STRATIFIED_CORRIDOR_PROBE.long_corridor_dynamic_motion_mode
+        == "env_stratified"
+    )
+    assert (
+        SA6_ENV_STRATIFIED_CORRIDOR_PROBE.previous_stage_replay_fraction
+        == 0.10
+    )
+    assert SA6_ENV_STRATIFIED_CORRIDOR_PROBE.narrow_passage_fraction == 0.12
+    assert SA6_ENV_STRATIFIED_CORRIDOR_PROBE.teacher_retention_weight == 0.30
 
 
 def test_sa6_dual_retention_uses_disjoint_c20_and_c12_teachers() -> None:

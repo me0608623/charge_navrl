@@ -422,6 +422,25 @@ def setup_long_corridor_replay(
     if not getattr(env, "_long_corridor_logged", False):
         env._long_corridor_logged = True
         pending = 0 if installed else selected.numel()
+        motion_audit = ""
+        if installed and dynamic_obstacles > 0:
+            active_types = env._long_corridor_dynamic_motion_type[
+                selected, :dynamic_obstacles
+            ]
+            type_counts = torch.bincount(
+                active_types.flatten(), minlength=3
+            ).tolist()
+            pure_env_fraction = float(
+                (active_types == active_types[:, :1])
+                .all(dim=1)
+                .float()
+                .mean()
+                .item()
+            )
+            motion_audit = (
+                f" motion_slot_counts={type_counts} "
+                f"pure_env_fraction={pure_env_fraction:.3f}"
+            )
         print(
             "[LONG-CORRIDOR] injector FIRED: "
             f"{selected.numel()}/{ids.numel()} envs "
@@ -431,7 +450,7 @@ def setup_long_corridor_replay(
             f"speed=[{dynamic_speed_min:.2f},"
             f"{dynamic_speed_max:.2f}]m/s motion={motion_mode} "
             f"pending_scheduler={pending} "
-            "constructive_solvability=100%",
+            f"constructive_solvability=100%{motion_audit}",
             flush=True,
         )
 
