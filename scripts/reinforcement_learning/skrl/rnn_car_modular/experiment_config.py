@@ -40,6 +40,7 @@ class ExperimentConfig:
     aux_profile: str = "wd_7d_geometry"
     encoder_profile: str = "wd_exact_rnn"
     critic_profile: str = "symmetric"
+    critic_detach_encoder: bool = False
 
     # training budget
     num_envs: int = 1024
@@ -121,6 +122,15 @@ class ExperimentConfig:
     scene_bound_rand: float = 0.0
     scene_bound_base: float = 7.0
     room_size: float | None = None
+    # Fixed SA5 general-scene replay for later stages. This changes only the
+    # selected envs' obstacle/wall layout; current-stage reward and horizon stay.
+    previous_stage_replay_fraction: float = 0.0
+    previous_stage_replay_static_obstacles: int = 10
+    previous_stage_replay_dynamic_obstacles: int = 3
+    previous_stage_replay_min_walls: int = 2
+    previous_stage_replay_max_walls: int = 3
+    previous_stage_replay_wall_length: float = 4.0
+    previous_stage_replay_obstacle_boundary: float = 5.5
     # Optional fixed-stage narrow-passage bridge. A zero fraction is a strict
     # no-op and does not add bridge assets or alter reset behavior.
     narrow_passage_fraction: float = 0.0
@@ -129,6 +139,8 @@ class ExperimentConfig:
     narrow_passage_final_stress_ratio: float = 0.25
     narrow_passage_fixed_width_range: tuple[float, float] | None = None
     narrow_passage_fixed_yaw_limit_deg: float | None = None
+    narrow_passage_exact_width: float | None = None
+    narrow_passage_exact_width_ratio: float = 0.0
     # Deployment corridor replay is disjoint from narrow-passage replay.
     long_corridor_fraction: float = 0.0
     long_corridor_free_width: float = 4.0
@@ -139,6 +151,44 @@ class ExperimentConfig:
     # Frozen successful policy used only on narrow-passage replay frames.
     teacher_retention_checkpoint: str | None = None
     teacher_retention_weight: float = 0.0
+    teacher_retention_margin_weight: float = 0.0
+    teacher_retention_action_ce_weight: float = 0.0
+    teacher_retention_argmax_margin: float = 0.2
+    teacher_retention_post_kl_epochs: int = 0
+    teacher_retention_post_kl_lr: float = 1e-3
+    teacher_retention_post_kl_batch_size: int = 4096
+    teacher_retention_post_kl_max_grad_norm: float = 0.5
+    teacher_retention_post_margin_weight: float = 0.0
+    teacher_retention_post_action_ce_weight: float = 0.0
+    teacher_retention_post_policy_head_only: bool = False
+    teacher_retention_post_anchor_weight: float = 0.0
+    teacher_retention_rollout_override: bool = False
+    # Frozen SA5 Pareto teacher used only on previous-stage replay frames.
+    # This is independent of the narrow-passage c20 teacher above.
+    previous_stage_teacher_checkpoint: str | None = None
+    previous_stage_teacher_retention_weight: float = 0.0
+    previous_stage_teacher_scope: str = "previous_stage"
+    # Privileged teacher labels are generated only on deployment-corridor
+    # replay frames and applied as a post-PPO action projection.
+    corridor_teacher_distill_epochs: int = 0
+    corridor_teacher_distill_lr: float = 5e-4
+    corridor_teacher_distill_batch_size: int = 4096
+    corridor_teacher_distill_max_grad_norm: float = 0.5
+    corridor_teacher_distill_neighbor_mass: float = 0.20
+    corridor_teacher_distill_stride: int = 2
+    corridor_teacher_distill_chunk_size: int = 32
+    corridor_teacher_intervention_only: bool = False
+    corridor_teacher_intervention_clearance_m: float = 0.20
+    # Deployable observation-gated residual policy. The corridor scene label
+    # supervises the gate only; inference consumes the current policy obs.
+    corridor_adapter_enabled: bool = False
+    corridor_adapter_hidden_dim: int = 64
+    corridor_adapter_gate_loss_weight: float = 0.05
+    corridor_adapter_gate_init_probability: float = 0.01
+    corridor_adapter_max_logit_delta: float = 2.0
+    corridor_adapter_freeze_base: bool = False
+    corridor_adapter_gate_checkpoint: str | None = None
+    corridor_adapter_residual_features: str = "current_obs"
 
     # Observation layout must be fixed before isaaclab_tasks is imported.
     # None preserves the process environment for legacy configs.

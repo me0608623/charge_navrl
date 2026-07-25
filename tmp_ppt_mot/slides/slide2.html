@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html><head><style>
+html{background:#fff;}
+body{width:720pt;height:405pt;margin:0;padding:0;display:flex;font-family:'Noto Sans CJK TC',sans-serif;background:#EEF1F4;}
+.side{width:56pt;background:#2C8C99;display:flex;align-items:center;justify-content:center;}
+.side p{color:#fff;font-size:15pt;font-weight:bold;letter-spacing:4pt;writing-mode:vertical-rl;margin:0;}
+.main{flex:1;padding:22pt 28pt;display:flex;flex-direction:column;}
+.kicker{color:#2C8C99;font-size:11.5pt;letter-spacing:2pt;font-weight:bold;margin:0 0 3pt 0;}
+h1{color:#1B2A3A;font-size:25pt;margin:0 0 14pt 0;}
+.hyp{background:#FBEAD0;border-left:6pt solid #D98A28;border-radius:5pt;padding:11pt 15pt;margin:0 0 16pt 0;}
+.hyp p{color:#8A5312;font-size:13pt;margin:0;line-height:1.4;}
+.hyp b{color:#6E4110;}
+.row{display:flex;gap:16pt;}
+.col{flex:1;}
+.lbl{color:#2E4053;font-size:12.5pt;font-weight:bold;margin:0 0 7pt 0;}
+.card{background:#fff;border:1px solid #DCE2E8;border-radius:7pt;padding:12pt 14pt;box-shadow:1px 2px 6px rgba(20,40,60,0.06);}
+.card h3{color:#1B2A3A;font-size:13.5pt;margin:0 0 5pt 0;}
+.card .tagl{color:#2C8C99;font-size:10.5pt;font-weight:bold;margin:0 0 6pt 0;letter-spacing:1pt;}
+.card p{color:#44515E;font-size:11pt;margin:0;line-height:1.4;}
+ul{margin:0;padding-left:16pt;}
+li{color:#44515E;font-size:12pt;line-height:1.5;margin-bottom:2pt;}
+li b{color:#C0483B;}
+</style></head>
+<body>
+<div class="side"><p>問題 · 動機</p></div>
+<div class="main">
+  <p class="kicker">為什麼要做這件事</p>
+  <h1>部署病理 → 假設 → 兩大路線</h1>
+  <p class="lbl">部署觀察到的病理</p>
+  <ul>
+    <li><b>撞到／極貼身才反應</b>（LiDAR 離身體 ~0.4m 才作動），對迎面／橫穿行人晚反應</li>
+    <li>車端實測：車被行人<b>「帶著」水平側移飄走</b>（herding），逼到牆角退化成 360° 打轉</li>
+  </ul>
+  <div class="hyp"><p><b>核心假設（要被打穿的那個）：</b>policy 缺「障礙在動、往哪動、多快」→ 補上速度／未來位置 → 應能提早避讓。</p></div>
+  <div class="row">
+    <div class="col"><div class="card"><p class="tagl">路線 A · 表徵化</p><h3>RNN 自學隱式 MOT</h3><p>部署只有 LiDAR，希望 RNN 從時序串流內部自建追蹤（velocity aux 監督）</p></div></div>
+    <div class="col"><div class="card"><p class="tagl">路線 B · 顯式 + 逼用</p><h3>tracker channel 餵 obs</h3><p>直接給現成速度，再用 reward shaping／必死場景逼 policy 去用它</p></div></div>
+  </div>
+</div>
+</body></html>

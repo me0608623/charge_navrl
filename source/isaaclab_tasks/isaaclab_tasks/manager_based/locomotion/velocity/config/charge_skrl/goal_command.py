@@ -40,6 +40,11 @@ from .goal_sampling import (
     regenerate_unsolvable_scenes,
     visible_obstacle_xy,
 )
+from .fixed_scene_goals import (
+    fixed_scene_goal_mask as compute_fixed_scene_goal_mask,
+    normalize_env_ids,
+    restore_fixed_scene_goals as apply_fixed_scene_goals,
+)
 
 # 類型檢查時才導入（避免運行時循環導入）
 if TYPE_CHECKING:
@@ -160,6 +165,26 @@ class GoalCommand(CommandTerm):
         - 終止條件：goal_reached()
         """
         return self.goal_pos_w
+
+    def _normalize_env_ids(self, env_ids: Sequence[int] | None) -> torch.Tensor:
+        """Return environment ids as a device-local tensor."""
+        return normalize_env_ids(self._env, env_ids)
+
+    def fixed_scene_goal_mask(self, env_ids: Sequence[int] | None) -> torch.Tensor:
+        """Identify reset injectors whose goals must not be resampled."""
+        return compute_fixed_scene_goal_mask(self._env, env_ids)
+
+    def restore_fixed_scene_goals(
+        self, env_ids: Sequence[int] | None
+    ) -> torch.Tensor:
+        """Restore goals owned by deterministic reset injectors.
+
+        Reset events run before ``command_manager.reset()`` in Isaac Lab. These
+        goals therefore have to be restored inside the command reset itself;
+        waiting for an interval event corrupts the first observation/action and
+        leaves the GUI marker at the randomly sampled position.
+        """
+        return apply_fixed_scene_goals(self._env, self, env_ids)
 
     # ------------------------------------------------------------------------
     # 命令更新方法（父類接口）
@@ -572,25 +597,20 @@ class GoalCommand(CommandTerm):
         # ------------------------------------------------------------------------
         # 步驟 1：處理 env_ids 參數
         # ------------------------------------------------------------------------
-        if env_ids is None:
-            env_ids = slice(None)
-            # slice(None) 表示「所有元素」
-            # 等同於 [0, 1, 2, ..., num_envs-1]
-
-        # ------------------------------------------------------------------------
-        # 步驟 2：轉換 slice 為 list
-        # ------------------------------------------------------------------------
-        if isinstance(env_ids, slice):
-            env_ids = list(range(self.num_envs))
-            # 如果是 slice，轉換為完整的環境 ID 列表
-            # 例如：num_envs=128 → [0, 1, 2, ..., 127]
+        env_ids_tensor = self._normalize_env_ids(env_ids)
+        fixed_mask = self.fixed_scene_goal_mask(env_ids_tensor)
+        sampled_ids = env_ids_tensor[~fixed_mask]
 
         # ------------------------------------------------------------------------
         # 步驟 3：生成新目標位置
         # ------------------------------------------------------------------------
-        self._resample_command(env_ids)
+        self._resample_command(sampled_ids)
         # 調用核心方法生成目標位置
-        # 會更新 self.goal_pos_w[env_ids]
+        # 會更新 self.goal_pos_w[sampled_ids]
+
+        # Reset injectors run before command reset, so re-assert their exact
+        # target before observations and markers are computed.
+        self.restore_fixed_scene_goals(env_ids_tensor)
 
         # ------------------------------------------------------------------------
         # 步驟 3.5：重新放置 near-goal 障礙物
@@ -598,7 +618,8 @@ class GoalCommand(CommandTerm):
         # _reset_idx 中 event_manager.apply("reset") 在 command_manager.reset()
         # 之前執行，導致 BehaviorScheduler._place_near_goal() 讀到的是上一局
         # 的 goal 位置。在此處 goal 已更新後，重新觸發放置。
-        self._relocate_near_goal_obstacles(env_ids)
+        if sampled_ids.numel() > 0:
+            self._relocate_near_goal_obstacles(sampled_ids)
 
         # ------------------------------------------------------------------------
         # 步驟 4：更新可視化標記

@@ -94,14 +94,13 @@ class MultiGoalCommand(GoalCommand):
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict:
         """Override reset to ensure multi-goal resample + visualization."""
-        # 處理 env_ids
-        if env_ids is None:
-            env_ids = slice(None)
-        if isinstance(env_ids, slice):
-            env_ids = list(range(self.num_envs))
+        env_ids_tensor = self._normalize_env_ids(env_ids)
+        fixed_mask = self.fixed_scene_goal_mask(env_ids_tensor)
+        sampled_ids = env_ids_tensor[~fixed_mask]
 
         # 生成多目標
-        self._resample_command(env_ids)
+        self._resample_command(sampled_ids)
+        self.restore_fixed_scene_goals(env_ids_tensor)
 
         # 更新可視化
         if self.cfg.debug_vis:

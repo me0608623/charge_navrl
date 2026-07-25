@@ -1,0 +1,163 @@
+import torch
+
+from rnn_car_wdclean.privileged_corridor_teacher import (
+    CorridorTeacherSpec,
+    corridor_teacher_action_grid,
+    predict_patrol_obstacle_paths,
+    select_teacher_rollout_actions,
+)
+
+
+def _teacher_inputs(num_envs: int = 1):
+    samples = 10
+    return {
+        "current_velocity": torch.zeros(num_envs),
+        "current_omega": torch.zeros(num_envs),
+        "robot_xy_m": torch.zeros(num_envs, 2),
+        "robot_yaw_rad": torch.zeros(num_envs),
+        "goal_xy_m": torch.tensor([[5.0, 0.0]]).repeat(num_envs, 1),
+        "obstacle_paths_m": torch.zeros(
+            num_envs, 1, samples, 2
+        ),
+        "obstacle_radii_m": torch.full((num_envs, 1), 0.3),
+        "obstacle_valid": torch.zeros(
+            num_envs, 1, dtype=torch.bool
+        ),
+        "wall_centers_m": torch.zeros(num_envs, 1, 2),
+        "wall_sizes_m": torch.ones(num_envs, 1, 2),
+        "wall_valid": torch.zeros(num_envs, 1, dtype=torch.bool),
+        "num_bins": 19,
+        "dt": 0.2,
+        "max_linear_velocity": 1.0,
+        "reverse_velocity_scale": 0.2,
+        "max_linear_accel": 0.5,
+        "max_angular_velocity": 1.2,
+        "max_angular_accel": 3.0,
+    }
+
+
+def test_empty_corridor_teacher_accelerates_straight_to_goal():
+    result = corridor_teacher_action_grid(**_teacher_inputs())
+
+    assert bool(result["any_feasible"][0])
+    assert result["actions"][0].tolist() == [18, 9]
+
+
+def test_patrol_prediction_turns_at_current_waypoint():
+    positions = torch.tensor([[[1.0, 0.0]]])
+    behavior = torch.tensor([[2]])
+    waypoints = torch.tensor([[[[-1.0, 0.0], [1.0, 0.0]]]])
+    waypoint_index = torch.tensor([[1]])
+    num_waypoints = torch.tensor([[2]])
+    speed = torch.tensor([[0.5]])
+    pause = torch.tensor([[0]])
+
+    paths, valid = predict_patrol_obstacle_paths(
+        positions,
+        behavior,
+        waypoints,
+        waypoint_index,
+        num_waypoints,
+        speed,
+        pause,
+        dt=0.2,
+        samples=3,
+    )
+
+    assert bool(valid[0, 0])
+    assert torch.isclose(paths[0, 0, 0, 0], torch.tensor(1.0))
+    assert paths[0, 0, 1, 0] < paths[0, 0, 0, 0]
+    assert paths[0, 0, 2, 0] < paths[0, 0, 1, 0]
+
+
+def test_patrol_prediction_can_hold_at_future_waypoint():
+    positions = torch.tensor([[[1.0, 0.0]]])
+    behavior = torch.tensor([[2]])
+    waypoints = torch.tensor([[[[-1.0, 0.0], [1.0, 0.0]]]])
+
+    paths, _ = predict_patrol_obstacle_paths(
+        positions,
+        behavior,
+        waypoints,
+        patrol_wp_index=torch.tensor([[1]]),
+        patrol_num_waypoints=torch.tensor([[2]]),
+        patrol_speed_mps=torch.tensor([[0.5]]),
+        patrol_pause_remaining=torch.tensor([[0]]),
+        dt=0.2,
+        samples=3,
+        new_waypoint_pause_steps=5,
+    )
+
+    torch.testing.assert_close(
+        paths[0, 0, :, 0], torch.ones(3)
+    )
+
+
+def test_mirrored_crossing_produces_mirrored_teacher_turn():
+    inputs = _teacher_inputs(num_envs=2)
+    inputs["current_velocity"][:] = 0.8
+    crossing_y = torch.linspace(-0.8, 0.6, 10)
+    inputs["obstacle_paths_m"][0, 0, :, 0] = 2.0
+    inputs["obstacle_paths_m"][0, 0, :, 1] = crossing_y
+    inputs["obstacle_paths_m"][1, 0, :, 0] = 2.0
+    inputs["obstacle_paths_m"][1, 0, :, 1] = -crossing_y
+    inputs["obstacle_valid"][:] = True
+
+    result = corridor_teacher_action_grid(
+        **inputs,
+        spec=CorridorTeacherSpec(action_smoothness_weight=0.01),
+    )
+
+    assert bool(result["any_feasible"].all())
+    first = result["actions"][0]
+    second = result["actions"][1]
+    assert first[0] == second[0]
+    assert first[1] + second[1] == 18
+    assert first[1] != 9
+
+
+def test_teacher_rejects_straight_collision_with_static_obstacle():
+    inputs = _teacher_inputs()
+    inputs["current_velocity"][:] = 0.8
+    inputs["obstacle_paths_m"][0, 0, :, 0] = 1.8
+    inputs["obstacle_valid"][:] = True
+
+    result = corridor_teacher_action_grid(**inputs)
+    selected = result["actions"][0]
+
+    assert bool(result["any_feasible"][0])
+    assert bool(result["obstacle_collision_grid"][0, 9, 9])
+    assert selected[1] != 9 or selected[0] < 9
+
+
+def test_teacher_shadow_keeps_student_actions():
+    policy = torch.tensor([[18.0, 9.0], [9.0, 4.0]])
+    teacher = torch.tensor([[4, 12], [3, 15]])
+    feasible = torch.tensor([True, False])
+
+    executed = select_teacher_rollout_actions(
+        policy,
+        teacher,
+        feasible,
+        override=False,
+    )
+
+    torch.testing.assert_close(executed, policy)
+
+
+def test_teacher_override_changes_only_feasible_actions():
+    policy = torch.tensor([[18.0, 9.0], [9.0, 4.0]])
+    teacher = torch.tensor([[4, 12], [3, 15]])
+    feasible = torch.tensor([True, False])
+
+    executed = select_teacher_rollout_actions(
+        policy,
+        teacher,
+        feasible,
+        override=True,
+    )
+
+    torch.testing.assert_close(
+        executed,
+        torch.tensor([[4.0, 12.0], [9.0, 4.0]]),
+    )

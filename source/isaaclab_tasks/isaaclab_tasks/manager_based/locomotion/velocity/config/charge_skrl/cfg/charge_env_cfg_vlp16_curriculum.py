@@ -103,6 +103,7 @@ from ..mdp.events.state import set_obstacle_metadata
 from ..mdp.events import corridor_crossing as _corridor_crossing_mod
 from ..mdp.events import long_corridor_replay as _long_corridor_replay_mod
 from ..mdp.events import narrow_passage_bridge as _narrow_passage_bridge_mod
+from ..mdp.events import previous_stage_replay as _previous_stage_replay_mod
 
 # 課程
 from ..curriculum.goal_obstacle_curriculum import goal_obstacle_curriculum
@@ -353,6 +354,22 @@ class EventCfgVLP16Curriculum:
 
     reset_obstacles = None  # 由 randomize_obstacles 處理
 
+    # Fixed SA5 general-scene replay for SA6+. It runs after the ordinary
+    # current-stage reset, then corridor/narrow injectors reserve disjoint envs.
+    previous_stage_replay = EventTerm(
+        func=_previous_stage_replay_mod.setup_previous_stage_replay,
+        mode="reset",
+        params={
+            "fraction": 0.0,
+            "static_obstacles": 10,
+            "dynamic_obstacles": 3,
+            "min_walls": 2,
+            "max_walls": 3,
+            "wall_length": 4.0,
+            "obstacle_boundary": 5.5,
+        },
+    )
+
     # Corridor-crossing injector: runs AFTER reset_base so it can override the
     # random robot/goal poses for the selected fraction of envs.
     # fraction=0.0 = baseline (no injection) — byte-for-byte identical to baseline.
@@ -405,6 +422,8 @@ class EventCfgVLP16Curriculum:
             "final_stress_ratio": 0.25,
             "fixed_width_range": None,
             "fixed_yaw_limit_deg": None,
+            "exact_width": None,
+            "exact_width_ratio": 0.0,
             "wall_z": 1.5,
         },
     )

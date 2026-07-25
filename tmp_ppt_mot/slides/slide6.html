@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html><head><style>
+html{background:#fff;}
+body{width:720pt;height:405pt;margin:0;padding:0;display:flex;font-family:'Noto Sans CJK TC',sans-serif;background:#EEF1F4;}
+.side{width:56pt;background:#566B7B;display:flex;align-items:center;justify-content:center;}
+.side p{color:#fff;font-size:14pt;font-weight:bold;letter-spacing:3pt;writing-mode:vertical-rl;margin:0;}
+.main{flex:1;padding:20pt 26pt;display:flex;flex-direction:column;}
+.head{display:flex;justify-content:space-between;align-items:flex-start;margin:0 0 14pt 0;}
+.kicker{color:#566B7B;font-size:11pt;letter-spacing:2pt;font-weight:bold;margin:0 0 3pt 0;}
+h1{color:#1B2A3A;font-size:23pt;margin:0;}
+.chip{background:#FBEAD0;border:1px solid #E7B36A;border-radius:20pt;padding:7pt 15pt;}
+.chip p{color:#8A5312;font-size:11pt;font-weight:bold;margin:0;}
+.row{display:flex;gap:18pt;flex:1;}
+.col{flex:1;display:flex;flex-direction:column;}
+.card{background:#fff;border:1px solid #DCE2E8;border-radius:8pt;padding:14pt 16pt;box-shadow:1px 2px 6px rgba(20,40,60,0.06);flex:1;}
+.card h3{color:#1B2A3A;font-size:14.5pt;margin:0 0 4pt 0;}
+.card .sub{color:#566B7B;font-size:10.5pt;font-weight:bold;margin:0 0 9pt 0;letter-spacing:1pt;}
+ul{margin:0;padding-left:15pt;}
+li{color:#44515E;font-size:11.5pt;line-height:1.5;margin-bottom:5pt;}
+li b{color:#1B2A3A;}
+.hit{color:#C0483B;font-weight:bold;}
+.foot{background:#EAEEF1;border-radius:6pt;padding:9pt 13pt;margin:12pt 0 0 0;}
+.foot p{color:#3A4954;font-size:11pt;margin:0;line-height:1.4;}
+</style></head>
+<body>
+<div class="side"><p>必死場景</p></div>
+<div class="main">
+  <div class="head">
+    <div><p class="kicker">造「純反應式必死」場景逼 policy 用速度</p><h1>逼純反應式走不通</h1></div>
+    <div class="chip"><p>裁決：先撞到別的天花板</p></div>
+  </div>
+  <div class="row">
+    <div class="col"><div class="card">
+      <h3>12×12 / 20 障礙高密度</h3>
+      <p class="sub">0.14/m² · 14× 密度 + TTC 稅</p>
+      <ul>
+        <li><span class="hit">牆碰主宰 0.77</span>：縮小場 SR 天花板與 arena 尺寸綁死，卡結構性平台</li>
+        <li>20 障礙在 144m² 接近<b>幾何 packing 極限</b> → goal 放不下（resample fallback 爆）</li>
+        <li>channel 仍未被用</li>
+      </ul>
+    </div></div>
+    <div class="col"><div class="card">
+      <h3>near-wall crossing（herding 診斷場）</h3>
+      <p class="sub">行人橫越 · 牆在去向側 · goal 不洩漏</p>
+      <ul>
+        <li>決定性重現：<span class="hit">SA4 c89600 = 7/8 出現 ≥360°</span></li>
+        <li>telemetry：一直往同方向轉但仍前進 = <b>moving arc（側移飄走）</b></li>
+        <li>首轉正確僅 <b>4/12</b> → 第一次 commit 常錯</li>
+      </ul>
+    </div></div>
+  </div>
+  <div class="foot"><p><b>教訓：</b>把場景做到「反應式必死」，工程上會先撞到牆碰／packing 天花板；而且 policy 寧可接受較低 SR 也不改變風格（reward 經濟學）。<b>診斷了病理，但沒能翻案 channel 的使用。</b></p></div>
+</div>
+</body></html>

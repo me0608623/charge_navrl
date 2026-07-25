@@ -566,6 +566,21 @@ parser.add_argument("--resume_optimizer", action="store_true", default=False,
 parser.add_argument("--action_table_sample_size", type=int, default=2048,
                     help="Max sampled charge action rows logged as a WandB table per iteration. "
                          "0 disables charge/action_speed_accel_table.")
+parser.add_argument(
+    "--scene_probe_output",
+    type=str,
+    default=None,
+    help=(
+        "Optional .pt path for one rollout of normalized policy inputs and "
+        "native/SA5/narrow/corridor labels. Training behavior is unchanged."
+    ),
+)
+parser.add_argument(
+    "--scene_probe_stride",
+    type=int,
+    default=4,
+    help="Store every Nth rollout step in --scene_probe_output.",
+)
 
 # --- Env config overrides ---
 # --reward_mode
@@ -757,6 +772,12 @@ parser.add_argument("--encoder_profile", type=str, default=None,
 parser.add_argument("--critic_profile", type=str, default="symmetric",
                     choices=["symmetric", "asymmetric"],
                     help="Critic profile: symmetric (same obs as policy) or asymmetric (+ privileged obs).")
+parser.add_argument(
+    "--critic_detach_encoder",
+    action="store_true",
+    default=False,
+    help="Do not backpropagate value loss into the shared policy encoder.",
+)
 
 # --- Experiment Config (LEGO-style run composition) ---
 parser.add_argument("--experiment_config", type=str, default=None,
@@ -775,6 +796,211 @@ parser.add_argument(
     type=float,
     default=0.0,
     help="Beta for narrow-only KL(teacher || current). Zero disables retention.",
+)
+parser.add_argument(
+    "--teacher_retention_margin_weight",
+    type=float,
+    default=0.0,
+    help="Weight for the narrow-only teacher deterministic-action margin loss.",
+)
+parser.add_argument(
+    "--teacher_retention_action_ce_weight",
+    type=float,
+    default=0.0,
+    help="Weight for narrow-only teacher-argmax cross-entropy.",
+)
+parser.add_argument(
+    "--teacher_retention_argmax_margin",
+    type=float,
+    default=0.2,
+    help="Required student logit lead for the teacher argmax action.",
+)
+parser.add_argument(
+    "--teacher_retention_post_kl_epochs",
+    type=int,
+    default=0,
+    help="Post-PPO narrow replay KL projection epochs; zero disables it.",
+)
+parser.add_argument(
+    "--teacher_retention_post_kl_lr",
+    type=float,
+    default=1e-3,
+    help="Stateless SGD learning rate for post-PPO KL projection.",
+)
+parser.add_argument(
+    "--teacher_retention_post_kl_batch_size",
+    type=int,
+    default=4096,
+    help="Narrow-frame batch size for post-PPO KL projection.",
+)
+parser.add_argument(
+    "--teacher_retention_post_kl_max_grad_norm",
+    type=float,
+    default=0.5,
+    help="Actor gradient clip for post-PPO KL projection.",
+)
+parser.add_argument(
+    "--teacher_retention_post_margin_weight",
+    type=float,
+    default=0.0,
+    help="Teacher-argmax margin weight in the post-PPO narrow projection.",
+)
+parser.add_argument(
+    "--teacher_retention_post_action_ce_weight",
+    type=float,
+    default=0.0,
+    help="Teacher-argmax cross-entropy weight in the post-PPO narrow projection.",
+)
+parser.add_argument(
+    "--teacher_retention_post_policy_head_only",
+    action="store_true",
+    default=False,
+    help="Restrict the post-PPO narrow projection to policy-head parameters.",
+)
+parser.add_argument(
+    "--teacher_retention_post_anchor_weight",
+    type=float,
+    default=0.0,
+    help=(
+        "Weight for a second frozen teacher during post-update projection. "
+        "Zero preserves single-teacher behavior."
+    ),
+)
+parser.add_argument(
+    "--teacher_retention_rollout_override",
+    action="store_true",
+    default=False,
+    help=(
+        "Execute the frozen narrow teacher's deterministic action on narrow "
+        "replay envs while collecting projection data. Requires ppo_epochs=0."
+    ),
+)
+parser.add_argument(
+    "--previous_stage_teacher_checkpoint",
+    type=str,
+    default=None,
+    help="Frozen teacher checkpoint for SA5-general replay retention.",
+)
+parser.add_argument(
+    "--previous_stage_teacher_retention_weight",
+    type=float,
+    default=0.0,
+    help="Beta for KL(SA5 teacher || current) on previous-stage replay only.",
+)
+parser.add_argument(
+    "--previous_stage_teacher_scope",
+    choices=("previous_stage", "non_narrow", "corridor", "all"),
+    default="previous_stage",
+    help="Frame mask used by the second frozen teacher.",
+)
+parser.add_argument(
+    "--corridor_teacher_distill_epochs",
+    type=int,
+    default=0,
+    help="Post-PPO privileged corridor action projection epochs; zero disables it.",
+)
+parser.add_argument(
+    "--corridor_teacher_distill_lr",
+    type=float,
+    default=5e-4,
+    help="Stateless SGD learning rate for corridor teacher projection.",
+)
+parser.add_argument(
+    "--corridor_teacher_distill_batch_size",
+    type=int,
+    default=4096,
+    help="Corridor-frame batch size for privileged teacher projection.",
+)
+parser.add_argument(
+    "--corridor_teacher_distill_max_grad_norm",
+    type=float,
+    default=0.5,
+    help="Policy-head gradient clip for corridor teacher projection.",
+)
+parser.add_argument(
+    "--corridor_teacher_distill_neighbor_mass",
+    type=float,
+    default=0.20,
+    help="Soft-label mass assigned to adjacent teacher action bins.",
+)
+parser.add_argument(
+    "--corridor_teacher_distill_stride",
+    type=int,
+    default=2,
+    help="Generate privileged labels every N rollout steps.",
+)
+parser.add_argument(
+    "--corridor_teacher_distill_chunk_size",
+    type=int,
+    default=32,
+    help="Maximum corridor envs per privileged teacher geometry batch.",
+)
+parser.add_argument(
+    "--corridor_teacher_intervention_only",
+    action="store_true",
+    default=False,
+    help=(
+        "Distill only corridor states where the deterministic policy has a "
+        "predicted collision/low-clearance trajectory and the teacher differs."
+    ),
+)
+parser.add_argument(
+    "--corridor_teacher_intervention_clearance_m",
+    type=float,
+    default=0.20,
+    help="Minimum policy swept-path clearance before intervention distillation.",
+)
+parser.add_argument(
+    "--corridor_adapter_enabled",
+    action="store_true",
+    default=False,
+    help="Enable the deployable observation-gated corridor residual policy.",
+)
+parser.add_argument(
+    "--corridor_adapter_hidden_dim",
+    type=int,
+    default=64,
+    help="Hidden width of the corridor gate and residual branches.",
+)
+parser.add_argument(
+    "--corridor_adapter_gate_loss_weight",
+    type=float,
+    default=0.05,
+    help="Weight of class-balanced corridor gate BCE.",
+)
+parser.add_argument(
+    "--corridor_adapter_gate_init_probability",
+    type=float,
+    default=0.01,
+    help="Initial corridor prior when no pretrained gate is supplied.",
+)
+parser.add_argument(
+    "--corridor_adapter_max_logit_delta",
+    type=float,
+    default=2.0,
+    help="Absolute bound on each residual action logit before gate scaling.",
+)
+parser.add_argument(
+    "--corridor_adapter_freeze_base",
+    action="store_true",
+    default=False,
+    help="Freeze the base policy and CNN so PPO updates only the adapter actor.",
+)
+parser.add_argument(
+    "--corridor_adapter_gate_checkpoint",
+    type=str,
+    default=None,
+    help="Optional pretrained 83D corridor gate state_dict.",
+)
+parser.add_argument(
+    "--corridor_adapter_residual_features",
+    type=str,
+    choices=("current_obs", "policy_features"),
+    default="current_obs",
+    help=(
+        "Residual branch input: current 83D observation or the full deployable "
+        "policy feature vector including the K8 CNN embedding."
+    ),
 )
 
 AppLauncher.add_app_launcher_args(parser)
@@ -835,7 +1061,24 @@ sys.path.insert(0, str(_skrl_root))          # skrl/ root
 sys.path.insert(0, str(_skrl_root / "models"))  # skrl/models/
 sys.path.insert(0, str(_skrl_root / "utils"))   # skrl/utils/
 from rnn_car_wdclean import swept_arc  # ★r_arc: action-conditioned swept-arc 碰撞預測 reward（--use_arc_reward 閘）
-from rnn_car_wdclean.teacher_retention import masked_two_head_retention_loss
+from rnn_car_wdclean.teacher_retention import (
+    apply_masked_deterministic_teacher_actions,
+    masked_two_head_retention_loss,
+    post_update_dual_teacher_projection,
+    post_update_kl_projection,
+)
+from rnn_car_wdclean.corridor_teacher_distillation import (
+    post_update_corridor_action_projection,
+    select_corridor_interventions,
+)
+from rnn_car_wdclean.privileged_corridor_teacher import (
+    CorridorTeacherSpec,
+    corridor_teacher_action_grid,
+    predict_patrol_obstacle_paths,
+)
+from rnn_car_wdclean.reward_diagnostics import (
+    add_long_corridor_reward_diagnostics,
+)
 
 # Charge 側網路模組（從 modular_rnn_models.py 匯入）
 from modular_rnn_models import (
@@ -843,6 +1086,8 @@ from modular_rnn_models import (
     adapt_lidar_frame_stack_state_dict,
     PreprocessRNN,
     PolicyHead,
+    CorridorResidualAdapter,
+    balanced_binary_gate_loss,
     ValueHead,
     LVDOTEncoder,
     RNNStateManager,
@@ -1054,7 +1299,9 @@ class RunningNormalizer:
 class ChargeRolloutBuffer:
     def __init__(self, num_steps, num_envs, rl_input_dim, obs_dim, hidden_dim, device,
                  privileged_dim: int = 0, predict_dim: int = 7,
-                 encoder_input_dim: int = 0, teacher_logits_dim: int = 0):
+                 encoder_input_dim: int = 0, teacher_logits_dim: int = 0,
+                 previous_teacher_logits_dim: int = 0,
+                 store_corridor_mask: bool = False):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.device = device
@@ -1085,6 +1332,19 @@ class ChargeRolloutBuffer:
             self.retention_mask = torch.zeros(
                 num_steps, num_envs, dtype=torch.bool, device=device
             )
+        self._previous_teacher_logits_dim = previous_teacher_logits_dim
+        if previous_teacher_logits_dim > 0:
+            self.previous_teacher_logits = torch.zeros(
+                num_steps, num_envs, previous_teacher_logits_dim, device=device
+            )
+            self.previous_retention_mask = torch.zeros(
+                num_steps, num_envs, dtype=torch.bool, device=device
+            )
+        self._store_corridor_mask = bool(store_corridor_mask)
+        if self._store_corridor_mask:
+            self.corridor_mask = torch.zeros(
+                num_steps, num_envs, dtype=torch.bool, device=device
+            )
         # Asymmetric critic privileged obs
         self._privileged_dim = privileged_dim
         if privileged_dim > 0:
@@ -1093,7 +1353,9 @@ class ChargeRolloutBuffer:
 
     def add(self, rl_input, action, log_prob, reward, value, done, raw_ob, hidden,
             aux_target=None, privileged=None, terminated=None, encoder_input=None,
-            teacher_logits=None, retention_mask=None):
+            teacher_logits=None, retention_mask=None,
+            previous_teacher_logits=None, previous_retention_mask=None,
+            corridor_mask=None):
         """儲存一個 rollout step 的所有資料。每次 env.step() 後呼叫。"""
         i = self.ptr
         self.rl_inputs[i] = rl_input
@@ -1119,6 +1381,23 @@ class ChargeRolloutBuffer:
                 )
             self.teacher_logits[i] = teacher_logits
             self.retention_mask[i] = retention_mask
+        if self._previous_teacher_logits_dim > 0:
+            if (
+                previous_teacher_logits is None
+                or previous_retention_mask is None
+            ):
+                raise RuntimeError(
+                    "previous-stage teacher buffer requires logits and scene "
+                    "mask at every step"
+                )
+            self.previous_teacher_logits[i] = previous_teacher_logits
+            self.previous_retention_mask[i] = previous_retention_mask
+        if self._store_corridor_mask:
+            if corridor_mask is None:
+                raise RuntimeError(
+                    "corridor adapter buffer requires a scene mask at every step"
+                )
+            self.corridor_mask[i] = corridor_mask
         self.ptr += 1
 
     def reset(self):
@@ -2074,7 +2353,19 @@ class MetricsCollector:
                         "turning_direction", "early_turning", "weakened_decel", "anti_spin",
                         "anti_spin_active", "anti_spin_run_steps", "anti_spin_same_sign_yaw_deg",
                         "future_occupancy", "future_occupancy_active", "future_occupancy_risk",
-                        "future_occupancy_min_distance_m"):
+                        "future_occupancy_min_distance_m",
+                        "future_occupancy_long_corridor",
+                        "future_occupancy_active_long_corridor",
+                        "future_occupancy_risk_long_corridor",
+                        "future_occupancy_risk_active_long_corridor",
+                        "future_occupancy_min_distance_m_active_long_corridor",
+                        "progress_reward_long_corridor",
+                        "wall_collision_long_corridor",
+                        "static_obs_collision_long_corridor",
+                        "dynamic_obs_collision_long_corridor",
+                        "future_occupancy_risk_on_dynamic_collision_long_corridor",
+                        "future_occupancy_active_on_dynamic_collision_long_corridor",
+                        "future_occupancy_min_distance_m_on_dynamic_collision_long_corridor"):
                 _sv = reward_breakdown.get(_sk, None)
                 if _sv is not None:
                     self._reward_terms.setdefault(f"shaping_{_sk}", []).append(
@@ -2792,6 +3083,60 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _apply_lidar_noise_config(env_cfg, args_cli)
     _apply_dr_param_overrides(env_cfg, args_cli)
 
+    # Fixed SA5 general-scene replay for SA6+. No extra assets are needed:
+    # selected envs receive the accepted SA5 obstacle and internal-wall layout.
+    _previous_stage_fraction = float(
+        getattr(args_cli, "previous_stage_replay_fraction", 0.0)
+    )
+    if _previous_stage_fraction > 0.0:
+        if not (0.0 < _previous_stage_fraction <= 0.60):
+            raise ValueError(
+                "previous_stage_replay_fraction must stay in (0, 0.60], got "
+                f"{_previous_stage_fraction}"
+            )
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.previous_stage_replay import (
+            configure_previous_stage_replay,
+        )
+
+        configure_previous_stage_replay(
+            env_cfg,
+            fraction=_previous_stage_fraction,
+            static_obstacles=int(
+                getattr(
+                    args_cli,
+                    "previous_stage_replay_static_obstacles",
+                    10,
+                )
+            ),
+            dynamic_obstacles=int(
+                getattr(
+                    args_cli,
+                    "previous_stage_replay_dynamic_obstacles",
+                    3,
+                )
+            ),
+            min_walls=int(
+                getattr(args_cli, "previous_stage_replay_min_walls", 2)
+            ),
+            max_walls=int(
+                getattr(args_cli, "previous_stage_replay_max_walls", 3)
+            ),
+            wall_length=float(
+                getattr(
+                    args_cli,
+                    "previous_stage_replay_wall_length",
+                    4.0,
+                )
+            ),
+            obstacle_boundary=float(
+                getattr(
+                    args_cli,
+                    "previous_stage_replay_obstacle_boundary",
+                    5.5,
+                )
+            ),
+        )
+
     # Deployment corridor replay: dedicated 10 m walls and a controlled 4S+2D
     # obstacle layout. This is independent of the legacy near-wall crossing event.
     _long_corridor_fraction = float(
@@ -2857,15 +3202,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             fixed_yaw_limit_deg=getattr(
                 args_cli, "narrow_passage_fixed_yaw_limit_deg", None
             ),
+            exact_width=getattr(
+                args_cli, "narrow_passage_exact_width", None
+            ),
+            exact_width_ratio=float(
+                getattr(args_cli, "narrow_passage_exact_width_ratio", 0.0)
+            ),
         )
-    if _narrow_fraction + _long_corridor_fraction >= 1.0:
+    _replay_fraction_total = (
+        _previous_stage_fraction
+        + _narrow_fraction
+        + _long_corridor_fraction
+    )
+    if _replay_fraction_total >= 1.0:
         raise ValueError(
-            "narrow and long-corridor replay fractions leave no baseline envs"
+            "scene replay fractions leave no current-stage native envs"
         )
-    if _narrow_fraction > 0.0 or _long_corridor_fraction > 0.0:
+    if _replay_fraction_total > 0.0:
         print(
             "[SCENE-MIX] "
-            f"original={1.0 - _narrow_fraction - _long_corridor_fraction:.3f} "
+            f"native={1.0 - _replay_fraction_total:.3f} "
+            f"sa5_general={_previous_stage_fraction:.3f} "
             f"narrow={_narrow_fraction:.3f} "
             f"long_corridor={_long_corridor_fraction:.3f} "
             "classes_disjoint=True",
@@ -3270,7 +3627,120 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         rest = ri[..., L:]
         return torch.cat([base, lvdot_encoder(lvdot), rest], dim=-1)
 
+    _corridor_adapter_enabled = bool(
+        getattr(args_cli, "corridor_adapter_enabled", False)
+    )
+    _corridor_adapter_hidden_dim = int(
+        getattr(args_cli, "corridor_adapter_hidden_dim", 64)
+    )
+    _corridor_adapter_gate_loss_weight = float(
+        getattr(args_cli, "corridor_adapter_gate_loss_weight", 0.05)
+    )
+    _corridor_adapter_gate_init_probability = float(
+        getattr(args_cli, "corridor_adapter_gate_init_probability", 0.01)
+    )
+    _corridor_adapter_max_logit_delta = float(
+        getattr(args_cli, "corridor_adapter_max_logit_delta", 2.0)
+    )
+    _corridor_adapter_freeze_base = bool(
+        getattr(args_cli, "corridor_adapter_freeze_base", False)
+    )
+    _corridor_adapter_gate_checkpoint = getattr(
+        args_cli, "corridor_adapter_gate_checkpoint", None
+    )
+    _corridor_adapter_residual_features = str(
+        getattr(
+            args_cli,
+            "corridor_adapter_residual_features",
+            "current_obs",
+        )
+    )
+    if _corridor_adapter_enabled:
+        if (
+            not _e2e_frame_stack
+            or int(args_cli.lidar_frame_stack) != 8
+        ):
+            raise ValueError(
+                "corridor adapter currently requires the K8 E2E lineage"
+            )
+        if policy_obs_dim != 83:
+            raise ValueError(
+                "corridor adapter requires the deployable current 83D policy obs"
+            )
+        if _oracle_to_policy or _lvdot_enc_on:
+            raise ValueError(
+                "corridor adapter does not support oracle/LV-DOT policy inputs"
+            )
+        if float(getattr(args_cli, "long_corridor_fraction", 0.0)) <= 0.0:
+            raise ValueError(
+                "corridor adapter requires long_corridor_fraction > 0"
+            )
+        if _corridor_adapter_hidden_dim <= 0:
+            raise ValueError("corridor_adapter_hidden_dim must be positive")
+        if _corridor_adapter_gate_loss_weight <= 0.0:
+            raise ValueError(
+                "corridor_adapter_gate_loss_weight must be positive"
+            )
+        if not 0.0 < _corridor_adapter_gate_init_probability < 1.0:
+            raise ValueError(
+                "corridor_adapter_gate_init_probability must be in (0, 1)"
+            )
+        if _corridor_adapter_max_logit_delta <= 0.0:
+            raise ValueError(
+                "corridor_adapter_max_logit_delta must be positive"
+            )
+        if _corridor_adapter_residual_features not in (
+            "current_obs",
+            "policy_features",
+        ):
+            raise ValueError(
+                "corridor_adapter_residual_features must be current_obs or "
+                "policy_features"
+            )
+        if (
+            _corridor_adapter_gate_checkpoint
+            and not os.path.isfile(_corridor_adapter_gate_checkpoint)
+        ):
+            raise FileNotFoundError(
+                "corridor adapter gate checkpoint not found: "
+                f"{_corridor_adapter_gate_checkpoint}"
+            )
+
     policy_head = PolicyHead(input_dim=_head_input_dim, privileged_dim=_policy_priv_dim).to(device)   # 輸出 19×2=38 logits（雙頭離散）
+    corridor_adapter = None
+    if _corridor_adapter_enabled:
+        _corridor_adapter_residual_input_dim = (
+            _head_input_dim
+            if _corridor_adapter_residual_features == "policy_features"
+            else policy_obs_dim
+        )
+        corridor_adapter = CorridorResidualAdapter(
+            input_dim=policy_obs_dim,
+            residual_input_dim=_corridor_adapter_residual_input_dim,
+            hidden_dim=_corridor_adapter_hidden_dim,
+            gate_init_probability=_corridor_adapter_gate_init_probability,
+            max_logit_delta=_corridor_adapter_max_logit_delta,
+        ).to(device)
+        if _corridor_adapter_gate_checkpoint:
+            _gate_state = torch.load(
+                _corridor_adapter_gate_checkpoint,
+                map_location=device,
+                weights_only=True,
+            )
+            corridor_adapter.gate_net.load_state_dict(_gate_state)
+            print(
+                "[CORRIDOR-ADAPTER] loaded pretrained observation gate: "
+                f"{_corridor_adapter_gate_checkpoint}"
+            )
+        print(
+            "[CORRIDOR-ADAPTER] enabled: "
+            f"83D gate + {_corridor_adapter_residual_input_dim}D residual "
+            f"-> {_corridor_adapter_hidden_dim} hidden "
+            f"gate_bce={_corridor_adapter_gate_loss_weight:g} "
+            f"|delta_logit|<={_corridor_adapter_max_logit_delta:g} "
+            f"freeze_base={_corridor_adapter_freeze_base}; "
+            "residual output is zero-init"
+        )
     if _oracle_to_policy:
         if not _use_asymmetric_critic:
             raise ValueError("--oracle_obstacles_to_policy 需要 asymmetric critic "
@@ -3278,6 +3748,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[ORACLE] obstacles→policy: PolicyHead 殘差 priv_branch dim={_policy_priv_dim} "
               f"(zero-init → 暖啟動 identity; 診斷用, 非部署)")
     value_head = ValueHead(input_dim=_head_input_dim, privileged_dim=_priv_dim).to(device)
+    if _corridor_adapter_enabled and _corridor_adapter_freeze_base:
+        policy_head.requires_grad_(False)
+        extractor.requires_grad_(False)
+        print(
+            "[CORRIDOR-ADAPTER] base policy and K8 CNN frozen; "
+            "actor updates are structurally limited to the adapter"
+        )
     if _use_asymmetric_critic:
         print(f"[INFO] Asymmetric critic: rl_input={_head_input_dim} + privileged={_priv_dim} = {_head_input_dim + _priv_dim}D")
     if args_cli.value_init_bias is not None:
@@ -3319,12 +3796,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # WD 原版在 RL optimizer 裡，preprocess/RNN 的 lr=0（等同 freeze）。
     # IsaacLab 版本直接把 RL optimizer 限縮到只包含 policy/value head 的 params，
     # 確保 RL loss.backward() 絕對不更新 preprocess_rnn 或 extractor。
-    charge_params_actor = list(policy_head.parameters())                  # PolicyHead 的所有參數
-    if _e2e_frame_stack:
+    charge_params_actor = (
+        []
+        if (_corridor_adapter_enabled and _corridor_adapter_freeze_base)
+        else list(policy_head.parameters())
+    )
+    if _e2e_frame_stack and not (
+        _corridor_adapter_enabled and _corridor_adapter_freeze_base
+    ):
         # Shared CNN baseline: both policy and value losses flow through this
         # encoder in one optimizer. It is classified with actor params only for
         # existing diagnostics, avoiding duplicate optimizer parameters.
         charge_params_actor += list(extractor.parameters())
+    if _corridor_adapter_enabled:
+        charge_params_actor += list(corridor_adapter.parameters())
     charge_params_critic = list(value_head.parameters())                  # ValueHead 的所有參數
     charge_params_rl = charge_params_actor + charge_params_critic
     if _lvdot_enc_on:
@@ -3422,7 +3907,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if _e2e_frame_stack:
         print(f"[INFO] Charge E2E: {policy_obs_dim}D state/current LiDAR + {extractor.output_dim}D "
               f"frame-stack CNN = {rl_input_dim}D, {total_charge_params:,} trainable params")
-        print(f"[INFO] RL optimizer: extractor+policy_head+value_head lr={args_cli.lr}")
+        if _corridor_adapter_enabled and _corridor_adapter_freeze_base:
+            print(
+                f"[INFO] RL optimizer: corridor_adapter+value_head lr={args_cli.lr}; "
+                "extractor/policy_head frozen"
+            )
+        else:
+            print(
+                f"[INFO] RL optimizer: extractor+policy_head"
+                f"{'+corridor_adapter' if _corridor_adapter_enabled else ''}"
+                f"+value_head lr={args_cli.lr}"
+            )
     else:
         print(f"[INFO] Charge: {policy_obs_dim}D + {args_cli.rnn_type} {args_cli.preprocess_dim}D = "
               f"{rl_input_dim}D, {total_charge_params:,} params")
@@ -3470,14 +3965,219 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _teacher_retention_checkpoint = getattr(
         args_cli, "teacher_retention_checkpoint", None
     )
+    _teacher_retention_margin_weight = float(
+        getattr(args_cli, "teacher_retention_margin_weight", 0.0)
+    )
+    _teacher_retention_action_ce_weight = float(
+        getattr(args_cli, "teacher_retention_action_ce_weight", 0.0)
+    )
+    _teacher_retention_argmax_margin = float(
+        getattr(args_cli, "teacher_retention_argmax_margin", 0.2)
+    )
+    _teacher_retention_post_kl_epochs = int(
+        getattr(args_cli, "teacher_retention_post_kl_epochs", 0)
+    )
+    _teacher_retention_post_kl_lr = float(
+        getattr(args_cli, "teacher_retention_post_kl_lr", 1e-3)
+    )
+    _teacher_retention_post_kl_batch_size = int(
+        getattr(args_cli, "teacher_retention_post_kl_batch_size", 4096)
+    )
+    _teacher_retention_post_kl_max_grad_norm = float(
+        getattr(
+            args_cli,
+            "teacher_retention_post_kl_max_grad_norm",
+            0.5,
+        )
+    )
+    _teacher_retention_post_margin_weight = float(
+        getattr(args_cli, "teacher_retention_post_margin_weight", 0.0)
+    )
+    _teacher_retention_post_action_ce_weight = float(
+        getattr(args_cli, "teacher_retention_post_action_ce_weight", 0.0)
+    )
+    _teacher_retention_post_policy_head_only = bool(
+        getattr(args_cli, "teacher_retention_post_policy_head_only", False)
+    )
+    _teacher_retention_post_anchor_weight = float(
+        getattr(args_cli, "teacher_retention_post_anchor_weight", 0.0)
+    )
+    _teacher_retention_rollout_override = bool(
+        getattr(args_cli, "teacher_retention_rollout_override", False)
+    )
+    _previous_stage_teacher_checkpoint = getattr(
+        args_cli, "previous_stage_teacher_checkpoint", None
+    )
+    _previous_stage_teacher_retention_weight = float(
+        getattr(
+            args_cli,
+            "previous_stage_teacher_retention_weight",
+            0.0,
+        )
+    )
+    _previous_stage_teacher_scope = str(
+        getattr(args_cli, "previous_stage_teacher_scope", "previous_stage")
+    )
+    _corridor_teacher_distill_epochs = int(
+        getattr(args_cli, "corridor_teacher_distill_epochs", 0)
+    )
+    _corridor_teacher_distill_lr = float(
+        getattr(args_cli, "corridor_teacher_distill_lr", 5e-4)
+    )
+    _corridor_teacher_distill_batch_size = int(
+        getattr(args_cli, "corridor_teacher_distill_batch_size", 4096)
+    )
+    _corridor_teacher_distill_max_grad_norm = float(
+        getattr(
+            args_cli,
+            "corridor_teacher_distill_max_grad_norm",
+            0.5,
+        )
+    )
+    _corridor_teacher_distill_neighbor_mass = float(
+        getattr(
+            args_cli,
+            "corridor_teacher_distill_neighbor_mass",
+            0.20,
+        )
+    )
+    _corridor_teacher_distill_stride = int(
+        getattr(args_cli, "corridor_teacher_distill_stride", 2)
+    )
+    _corridor_teacher_distill_chunk_size = int(
+        getattr(args_cli, "corridor_teacher_distill_chunk_size", 32)
+    )
+    _corridor_teacher_intervention_only = bool(
+        getattr(args_cli, "corridor_teacher_intervention_only", False)
+    )
+    _corridor_teacher_intervention_clearance_m = float(
+        getattr(
+            args_cli,
+            "corridor_teacher_intervention_clearance_m",
+            0.20,
+        )
+    )
     if _teacher_retention_weight < 0.0:
         raise ValueError("teacher_retention_weight must be non-negative")
-    _teacher_retention_enabled = _teacher_retention_weight > 0.0
+    if _teacher_retention_margin_weight < 0.0:
+        raise ValueError(
+            "teacher_retention_margin_weight must be non-negative"
+        )
+    if _teacher_retention_action_ce_weight < 0.0:
+        raise ValueError(
+            "teacher_retention_action_ce_weight must be non-negative"
+        )
+    if _teacher_retention_argmax_margin < 0.0:
+        raise ValueError(
+            "teacher_retention_argmax_margin must be non-negative"
+        )
+    if _teacher_retention_post_kl_epochs < 0:
+        raise ValueError(
+            "teacher_retention_post_kl_epochs must be non-negative"
+        )
+    if _teacher_retention_post_kl_lr <= 0.0:
+        raise ValueError("teacher_retention_post_kl_lr must be positive")
+    if _teacher_retention_post_kl_batch_size <= 0:
+        raise ValueError(
+            "teacher_retention_post_kl_batch_size must be positive"
+        )
+    if _teacher_retention_post_kl_max_grad_norm <= 0.0:
+        raise ValueError(
+            "teacher_retention_post_kl_max_grad_norm must be positive"
+        )
+    if _teacher_retention_post_margin_weight < 0.0:
+        raise ValueError(
+            "teacher_retention_post_margin_weight must be non-negative"
+        )
+    if _teacher_retention_post_action_ce_weight < 0.0:
+        raise ValueError(
+            "teacher_retention_post_action_ce_weight must be non-negative"
+        )
+    if _teacher_retention_post_anchor_weight < 0.0:
+        raise ValueError(
+            "teacher_retention_post_anchor_weight must be non-negative"
+        )
+    if _previous_stage_teacher_retention_weight < 0.0:
+        raise ValueError(
+            "previous_stage_teacher_retention_weight must be non-negative"
+        )
+    if _previous_stage_teacher_scope not in {
+        "previous_stage",
+        "non_narrow",
+        "corridor",
+        "all",
+    }:
+        raise ValueError(
+            "previous_stage_teacher_scope must be one of "
+            "previous_stage/non_narrow/corridor/all"
+        )
+    if _corridor_teacher_distill_epochs < 0:
+        raise ValueError(
+            "corridor_teacher_distill_epochs must be non-negative"
+        )
+    if _corridor_teacher_distill_lr <= 0.0:
+        raise ValueError("corridor_teacher_distill_lr must be positive")
+    if _corridor_teacher_distill_batch_size <= 0:
+        raise ValueError(
+            "corridor_teacher_distill_batch_size must be positive"
+        )
+    if _corridor_teacher_distill_max_grad_norm <= 0.0:
+        raise ValueError(
+            "corridor_teacher_distill_max_grad_norm must be positive"
+        )
+    if not 0.0 <= _corridor_teacher_distill_neighbor_mass < 1.0:
+        raise ValueError(
+            "corridor_teacher_distill_neighbor_mass must be in [0, 1)"
+        )
+    if _corridor_teacher_distill_stride <= 0:
+        raise ValueError(
+            "corridor_teacher_distill_stride must be positive"
+        )
+    if _corridor_teacher_distill_chunk_size <= 0:
+        raise ValueError(
+            "corridor_teacher_distill_chunk_size must be positive"
+        )
+    if _corridor_teacher_intervention_clearance_m < 0.0:
+        raise ValueError(
+            "corridor_teacher_intervention_clearance_m must be non-negative"
+        )
+    _corridor_teacher_distill_enabled = (
+        _corridor_teacher_distill_epochs > 0
+    )
+    if _corridor_adapter_enabled and _corridor_teacher_distill_enabled:
+        raise ValueError(
+            "corridor adapter and privileged corridor teacher projection "
+            "must be ablated separately"
+        )
+    if (
+        _corridor_adapter_enabled
+        and _teacher_retention_post_kl_epochs > 0
+    ):
+        raise ValueError(
+            "corridor adapter currently supports in-loss narrow retention only, "
+            "not post-update KL projection"
+        )
+    _teacher_retention_enabled = (
+        _teacher_retention_weight > 0.0
+        or _teacher_retention_margin_weight > 0.0
+        or _teacher_retention_action_ce_weight > 0.0
+        or _teacher_retention_post_kl_epochs > 0
+    )
+    _previous_stage_teacher_enabled = (
+        _previous_stage_teacher_retention_weight > 0.0
+        or _teacher_retention_post_anchor_weight > 0.0
+    )
+    if (
+        _teacher_retention_post_anchor_weight > 0.0
+        and _teacher_retention_post_kl_epochs <= 0
+    ):
+        raise ValueError(
+            "post anchor requires teacher_retention_post_kl_epochs > 0"
+        )
     if _teacher_retention_enabled:
         if not _teacher_retention_checkpoint:
             raise ValueError(
-                "teacher_retention_weight > 0 requires "
-                "teacher_retention_checkpoint"
+                "teacher retention requires teacher_retention_checkpoint"
             )
         if not os.path.isfile(_teacher_retention_checkpoint):
             raise FileNotFoundError(
@@ -3488,6 +4188,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise ValueError(
                 "narrow teacher retention currently requires the K8 E2E lineage"
             )
+        if _teacher_retention_post_kl_epochs > 0 and _lvdot_enc_on:
+            raise ValueError(
+                "post-update KL projection does not support LV-DOT encoder"
+            )
         if float(getattr(args_cli, "narrow_passage_fraction", 0.0)) <= 0.0:
             raise ValueError(
                 "teacher retention requires narrow_passage_fraction > 0"
@@ -3495,6 +4199,100 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if _lvdot_enc_on or _oracle_to_policy:
             raise ValueError(
                 "teacher retention does not support LV-DOT/oracle policy inputs"
+            )
+    if _teacher_retention_rollout_override:
+        if not _teacher_retention_enabled:
+            raise ValueError(
+                "teacher retention rollout override requires teacher retention"
+            )
+        if _teacher_retention_post_kl_epochs <= 0:
+            raise ValueError(
+                "teacher retention rollout override requires post-update "
+                "projection epochs > 0"
+            )
+        if int(args_cli.ppo_epochs) != 0:
+            raise ValueError(
+                "teacher retention rollout override is projection-only and "
+                "requires ppo_epochs=0"
+            )
+    if _previous_stage_teacher_enabled:
+        if not _previous_stage_teacher_checkpoint:
+            raise ValueError(
+                "previous-stage teacher retention requires "
+                "previous_stage_teacher_checkpoint"
+            )
+        if not os.path.isfile(_previous_stage_teacher_checkpoint):
+            raise FileNotFoundError(
+                "previous-stage teacher checkpoint not found: "
+                f"{_previous_stage_teacher_checkpoint}"
+            )
+        if not _e2e_frame_stack or _K_stack != 8:
+            raise ValueError(
+                "previous-stage teacher retention requires the K8 E2E lineage"
+            )
+        if (
+            _previous_stage_teacher_scope == "previous_stage"
+            and float(
+                getattr(args_cli, "previous_stage_replay_fraction", 0.0)
+            ) <= 0.0
+        ):
+            raise ValueError(
+                "previous-stage teacher retention requires "
+                "previous_stage_replay_fraction > 0"
+            )
+        if (
+            _previous_stage_teacher_scope == "non_narrow"
+            and float(
+                getattr(args_cli, "narrow_passage_fraction", 0.0)
+            ) <= 0.0
+        ):
+            raise ValueError(
+                "non-narrow teacher scope requires "
+                "narrow_passage_fraction > 0"
+            )
+        if (
+            _previous_stage_teacher_scope == "corridor"
+            and float(
+                getattr(args_cli, "long_corridor_fraction", 0.0)
+            ) <= 0.0
+        ):
+            raise ValueError(
+                "corridor teacher scope requires "
+                "long_corridor_fraction > 0"
+            )
+        if _lvdot_enc_on or _oracle_to_policy:
+            raise ValueError(
+                "previous-stage teacher retention does not support "
+                "LV-DOT/oracle policy inputs"
+            )
+    if _corridor_teacher_distill_enabled:
+        if not _e2e_frame_stack or _K_stack != 8:
+            raise ValueError(
+                "corridor teacher distillation requires the K8 E2E lineage"
+            )
+        if _lvdot_enc_on or _oracle_to_policy:
+            raise ValueError(
+                "corridor teacher distillation does not support "
+                "LV-DOT/oracle policy inputs"
+            )
+        if float(
+            getattr(args_cli, "long_corridor_fraction", 0.0)
+        ) <= 0.0:
+            raise ValueError(
+                "corridor teacher distillation requires "
+                "long_corridor_fraction > 0"
+            )
+        if getattr(args_cli, "obstacle_mode", "") != "rule_based":
+            raise ValueError(
+                "corridor teacher distillation requires rule_based obstacles"
+            )
+        if bool(getattr(args_cli, "enable_actuator_dr", False)):
+            raise ValueError(
+                "corridor teacher does not model actuator DR"
+            )
+        if not bool(getattr(args_cli, "use_obb_collision", False)):
+            raise ValueError(
+                "corridor teacher distillation requires OBB collision lineage"
             )
 
     # WD: γ = 1 - (1 - 0.92) / rl_fps = 0.984（fps=5），跨所有 phase 固定不變
@@ -3604,6 +4402,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         privileged_dim=_priv_dim, predict_dim=_predict_dim,
         encoder_input_dim=_encoder_input_dim,
         teacher_logits_dim=(2 * NUM_BINS if _teacher_retention_enabled else 0),
+        previous_teacher_logits_dim=(
+            2 * NUM_BINS if _previous_stage_teacher_enabled else 0
+        ),
+        store_corridor_mask=_corridor_adapter_enabled,
     )
     obs_buf = ObstacleRolloutBuffer(RL, num_envs, N_obs, OBS_POLICY_OBS_DIM, 2, device) if _obstacle_mode == "learned" else None
 
@@ -3647,6 +4449,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "action_table_sample_size": args_cli.action_table_sample_size,
                     "teacher_retention_checkpoint": _teacher_retention_checkpoint,
                     "teacher_retention_weight": _teacher_retention_weight,
+                    "teacher_retention_margin_weight": _teacher_retention_margin_weight,
+                    "teacher_retention_action_ce_weight": _teacher_retention_action_ce_weight,
+                    "teacher_retention_argmax_margin": _teacher_retention_argmax_margin,
+                    "teacher_retention_post_kl_epochs": _teacher_retention_post_kl_epochs,
+                    "teacher_retention_post_kl_lr": _teacher_retention_post_kl_lr,
+                    "teacher_retention_post_kl_batch_size": _teacher_retention_post_kl_batch_size,
+                    "teacher_retention_post_kl_max_grad_norm": _teacher_retention_post_kl_max_grad_norm,
+                    "teacher_retention_post_margin_weight": _teacher_retention_post_margin_weight,
+                    "teacher_retention_post_action_ce_weight": _teacher_retention_post_action_ce_weight,
+                    "teacher_retention_post_policy_head_only": _teacher_retention_post_policy_head_only,
+                    "teacher_retention_post_anchor_weight": _teacher_retention_post_anchor_weight,
+                    "teacher_retention_rollout_override": _teacher_retention_rollout_override,
+                    "previous_stage_teacher_checkpoint": _previous_stage_teacher_checkpoint,
+                    "previous_stage_teacher_retention_weight": _previous_stage_teacher_retention_weight,
+                    "previous_stage_teacher_scope": _previous_stage_teacher_scope,
+                    "corridor_teacher_distill_epochs": _corridor_teacher_distill_epochs,
+                    "corridor_teacher_distill_lr": _corridor_teacher_distill_lr,
+                    "corridor_teacher_distill_batch_size": _corridor_teacher_distill_batch_size,
+                    "corridor_teacher_distill_max_grad_norm": _corridor_teacher_distill_max_grad_norm,
+                    "corridor_teacher_distill_neighbor_mass": _corridor_teacher_distill_neighbor_mass,
+                    "corridor_teacher_distill_stride": _corridor_teacher_distill_stride,
+                    "corridor_teacher_distill_chunk_size": _corridor_teacher_distill_chunk_size,
+                    "corridor_teacher_intervention_only": _corridor_teacher_intervention_only,
+                    "corridor_teacher_intervention_clearance_m": _corridor_teacher_intervention_clearance_m,
+                    "critic_detach_encoder": args_cli.critic_detach_encoder,
                     "gamma": args_cli.gamma, "use_a2c": args_cli.use_a2c,
                     "rnn_type": args_cli.rnn_type,
                     "hidden_dim": args_cli.hidden_dim,
@@ -3740,6 +4567,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             _vh_missing, _vh_unexpected = value_head.load_state_dict(ckpt["value_head"], strict=_vh_strict)
             if _vh_missing:
                 print(f"[INFO] ValueHead: new params (cold start): {_vh_missing}")
+        if _corridor_adapter_enabled:
+            if "corridor_adapter" in ckpt:
+                corridor_adapter.load_state_dict(ckpt["corridor_adapter"])
+                print("[CORRIDOR-ADAPTER] resumed adapter state from checkpoint")
+            else:
+                if not args_cli.no_resume_optimizer:
+                    raise ValueError(
+                        "adding a corridor adapter to a legacy checkpoint "
+                        "requires no_resume_optimizer=True"
+                    )
+                print(
+                    "[CORRIDOR-ADAPTER] legacy checkpoint migration: base loaded, "
+                    "adapter residual remains exactly zero"
+                )
         if "obs_policy" in ckpt and obs_policy is not None:
             obs_policy.load_state_dict(ckpt["obs_policy"])
             obs_value.load_state_dict(ckpt["obs_value"])
@@ -3828,8 +4669,109 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         )
         print(
             "[TEACHER-RETENTION] enabled: "
-            f"beta={_teacher_retention_weight:g} scope=narrow_only "
+            f"beta={_teacher_retention_weight:g} "
+            f"margin_weight={_teacher_retention_margin_weight:g} "
+            f"action_ce_weight={_teacher_retention_action_ce_weight:g} "
+            f"argmax_margin={_teacher_retention_argmax_margin:g} "
+            f"post_kl_epochs={_teacher_retention_post_kl_epochs} "
+            f"post_kl_lr={_teacher_retention_post_kl_lr:g} "
+            f"post_margin_weight={_teacher_retention_post_margin_weight:g} "
+            f"post_action_ce_weight={_teacher_retention_post_action_ce_weight:g} "
+            f"post_head_only={_teacher_retention_post_policy_head_only} "
+            f"post_anchor_weight={_teacher_retention_post_anchor_weight:g} "
+            f"rollout_override={_teacher_retention_rollout_override} "
+            "scope=narrow_only "
             f"teacher={_teacher_retention_checkpoint} "
+            "loss=KL(teacher_linear||student_linear)"
+            "+KL(teacher_angular||student_angular)"
+            "+teacher_argmax_margin+teacher_argmax_CE",
+            flush=True,
+        )
+
+    _previous_teacher_extractor = None
+    _previous_teacher_policy_head = None
+    _previous_teacher_obs_mean = None
+    _previous_teacher_obs_var = None
+    _previous_teacher_lidar_hist = None
+    if _previous_stage_teacher_enabled:
+        previous_teacher_ckpt = torch.load(
+            _previous_stage_teacher_checkpoint,
+            map_location=device,
+            weights_only=False,
+        )
+        previous_teacher_args = previous_teacher_ckpt.get("args", {})
+        previous_teacher_contract = {
+            "end_to_end_frame_stack": True,
+            "lidar_frame_stack": _K_stack,
+            "use_obb_collision": bool(
+                getattr(args_cli, "use_obb_collision", False)
+            ),
+            "use_action_history": bool(
+                getattr(args_cli, "use_action_history", False)
+            ),
+        }
+        previous_teacher_mismatches = {
+            key: (previous_teacher_args.get(key), expected)
+            for key, expected in previous_teacher_contract.items()
+            if previous_teacher_args.get(key) != expected
+        }
+        if previous_teacher_mismatches:
+            raise ValueError(
+                "previous-stage teacher checkpoint is incompatible with "
+                f"current lineage: {previous_teacher_mismatches}"
+            )
+        if (
+            "extractor" not in previous_teacher_ckpt
+            or "policy_head" not in previous_teacher_ckpt
+        ):
+            raise ValueError(
+                "previous-stage teacher checkpoint lacks "
+                "extractor/policy_head state"
+            )
+        previous_teacher_norm = previous_teacher_ckpt.get("obs_normalizer")
+        if previous_teacher_norm is None:
+            raise ValueError(
+                "previous-stage teacher checkpoint lacks obs_normalizer"
+            )
+        _previous_teacher_obs_mean = previous_teacher_norm["mean"].to(
+            device
+        ).reshape(-1)
+        _previous_teacher_obs_var = previous_teacher_norm["var"].to(
+            device
+        ).reshape(-1)
+        if (
+            _previous_teacher_obs_mean.numel() != obs_dim
+            or _previous_teacher_obs_var.numel() != obs_dim
+        ):
+            raise ValueError(
+                "previous-stage teacher observation normalizer shape "
+                f"mismatch: teacher={_previous_teacher_obs_mean.numel()} "
+                f"runtime={obs_dim}"
+            )
+
+        _previous_teacher_extractor = copy.deepcopy(extractor)
+        _previous_teacher_policy_head = copy.deepcopy(policy_head)
+        _previous_teacher_extractor.load_state_dict(
+            previous_teacher_ckpt["extractor"], strict=True
+        )
+        _previous_teacher_policy_head.load_state_dict(
+            previous_teacher_ckpt["policy_head"], strict=True
+        )
+        _previous_teacher_extractor.eval()
+        _previous_teacher_policy_head.eval()
+        for parameter in (
+            list(_previous_teacher_extractor.parameters())
+            + list(_previous_teacher_policy_head.parameters())
+        ):
+            parameter.requires_grad_(False)
+        _previous_teacher_lidar_hist = torch.zeros(
+            num_envs, (_K_stack - 1) * _LL, device=device
+        )
+        print(
+            "[PREVIOUS-STAGE-RETENTION] enabled: "
+            f"beta={_previous_stage_teacher_retention_weight:g} "
+            f"scope={_previous_stage_teacher_scope} "
+            f"teacher={_previous_stage_teacher_checkpoint} "
             "loss=KL(teacher_linear||student_linear)"
             "+KL(teacher_angular||student_angular)",
             flush=True,
@@ -3837,6 +4779,60 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # --- Initial reset ---
     obs, info = env.reset()
+    _long_corridor_goal_error_max = 0.0
+    _long_corridor_local_goal_error_max = 0.0
+    _long_corridor_goal_audit_frames = 0
+
+    def _audit_long_corridor_goal() -> None:
+        nonlocal _long_corridor_goal_error_max
+        nonlocal _long_corridor_local_goal_error_max
+        nonlocal _long_corridor_goal_audit_frames
+        if _long_corridor_fraction <= 0.0:
+            return
+        raw = env.unwrapped
+        active = getattr(raw, "_long_corridor_active", None)
+        expected = getattr(raw, "_long_corridor_goal_w", None)
+        if active is None or expected is None:
+            raise RuntimeError(
+                "long-corridor replay is enabled but goal ownership state is missing"
+            )
+        if not bool(active.any()):
+            return
+
+        goal_term = raw.command_manager.get_term("goal_command")
+        command_error = torch.linalg.vector_norm(
+            goal_term.command[active, :2] - expected[active, :2], dim=1
+        )
+        command_max = float(command_error.max().item())
+        _long_corridor_goal_error_max = max(
+            _long_corridor_goal_error_max, command_max
+        )
+        local_max = 0.0
+        local_goal = getattr(raw, "_local_goal_world", None)
+        if local_goal is not None:
+            local_error = torch.linalg.vector_norm(
+                local_goal[active, :2] - expected[active, :2], dim=1
+            )
+            local_max = float(local_error.max().item())
+            _long_corridor_local_goal_error_max = max(
+                _long_corridor_local_goal_error_max, local_max
+            )
+        _long_corridor_goal_audit_frames += int(active.sum().item())
+        if command_max > 1e-5 or local_max > 1e-5:
+            raise RuntimeError(
+                "long-corridor goal ownership violated: "
+                f"command_error={command_max:.3e}m "
+                f"local_error={local_max:.3e}m"
+            )
+
+    _audit_long_corridor_goal()
+    if _long_corridor_fraction > 0.0:
+        print(
+            "[LONG-CORRIDOR-GOAL] initial alignment PASS: "
+            f"command_error={_long_corridor_goal_error_max:.2e}m "
+            f"local_error={_long_corridor_local_goal_error_max:.2e}m",
+            flush=True,
+        )
     start_time = time.time()
     _supervisor_stop_file = os.environ.get(
         "CHARGE_SUPERVISOR_STOP_FILE",
@@ -4018,6 +5014,261 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # ★r_arc: per-env 每集累積 arc penalty（跨 iteration 持續、done 時記錄並歸零）
     _ep_arc_accum = torch.zeros(num_envs, device=device)
 
+    _corridor_teacher_action_term = None
+    _corridor_teacher_spec = None
+    if _corridor_teacher_distill_enabled:
+        _action_terms = getattr(
+            env.unwrapped.action_manager, "_terms", {}
+        )
+        _corridor_teacher_action_term = next(
+            (
+                term for term in _action_terms.values()
+                if hasattr(term, "_current_velocity")
+                and hasattr(term, "_current_omega")
+                and hasattr(term, "_dt")
+            ),
+            None,
+        )
+        if _corridor_teacher_action_term is None:
+            raise RuntimeError(
+                "corridor teacher could not find the discrete drive action term"
+            )
+        _corridor_teacher_spec = CorridorTeacherSpec()
+        print(
+            "[CORRIDOR-DISTILL] enabled: "
+            f"epochs={_corridor_teacher_distill_epochs} "
+            f"lr={_corridor_teacher_distill_lr:g} "
+            f"neighbor_mass={_corridor_teacher_distill_neighbor_mass:g} "
+            f"stride={_corridor_teacher_distill_stride} "
+            f"chunk={_corridor_teacher_distill_chunk_size} "
+            f"horizon={_corridor_teacher_spec.horizon_s:.1f}s "
+            f"intervention_only={_corridor_teacher_intervention_only} "
+            f"clearance<{_corridor_teacher_intervention_clearance_m:.2f}m "
+            "scope=long_corridor_only order=PPO->corridor->narrow_KL",
+            flush=True,
+        )
+
+    @torch.no_grad()
+    def _generate_corridor_teacher_labels(
+        env_ids: torch.Tensor,
+        policy_actions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, int]]:
+        """Generate robust privileged labels for selected corridor envs."""
+
+        label_stats = {
+            "candidates": int(env_ids.numel()),
+            "feasible": 0,
+            "teacher_differs": 0,
+            "policy_obstacle_collision": 0,
+            "policy_wall_collision": 0,
+            "policy_low_clearance": 0,
+            "interventions": 0,
+            "selected": 0,
+        }
+        if env_ids.numel() == 0:
+            return (
+                env_ids,
+                torch.empty(0, 2, dtype=torch.long, device=device),
+                label_stats,
+            )
+        raw_env = env.unwrapped
+        scheduler = getattr(raw_env, "_behavior_scheduler", None)
+        if scheduler is None:
+            raise RuntimeError(
+                "corridor teacher requires rule_based BehaviorScheduler"
+            )
+        required_scene_fields = (
+            "_long_corridor_wall_centers",
+            "_long_corridor_wall_sizes",
+            "_long_corridor_wall_mask",
+            "_long_corridor_obstacle_counts",
+        )
+        missing = [
+            name for name in required_scene_fields
+            if not hasattr(raw_env, name)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"corridor replay state is incomplete: {missing}"
+            )
+
+        static_count, dynamic_count = (
+            raw_env._long_corridor_obstacle_counts
+        )
+        obstacle_slots = list(range(int(static_count))) + list(
+            range(4, 4 + int(dynamic_count))
+        )
+        slot_ids = torch.tensor(
+            obstacle_slots, dtype=torch.long, device=device
+        )
+        robot = raw_env.scene["robot"].data
+        robot_xy = (
+            robot.root_pos_w[:, :2]
+            - raw_env.scene.env_origins[:, :2]
+        )
+        quaternion = robot.root_quat_w
+        robot_yaw = torch.atan2(
+            2.0
+            * (
+                quaternion[:, 0] * quaternion[:, 3]
+                + quaternion[:, 1] * quaternion[:, 2]
+            ),
+            1.0
+            - 2.0
+            * (
+                quaternion[:, 2].square()
+                + quaternion[:, 3].square()
+            ),
+        )
+        goal_term = raw_env.command_manager.get_term("goal_command")
+        goal_xy = (
+            goal_term.goal_pos_w[:, :2]
+            - raw_env.scene.env_origins[:, :2]
+        )
+        physical_radii = getattr(
+            raw_env, "_obstacle_phys_radii", None
+        )
+        if physical_radii is None:
+            physical_radii = torch.full(
+                (
+                    raw_env.num_envs,
+                    scheduler.positions.shape[1],
+                ),
+                0.30,
+                dtype=robot_xy.dtype,
+                device=device,
+            )
+
+        feasible_ids: list[torch.Tensor] = []
+        teacher_actions: list[torch.Tensor] = []
+        cfg = _corridor_teacher_action_term.cfg
+        for start in range(
+            0, env_ids.numel(), _corridor_teacher_distill_chunk_size
+        ):
+            chunk_ids = env_ids[
+                start:start + _corridor_teacher_distill_chunk_size
+            ]
+
+            def _select_slots(tensor: torch.Tensor) -> torch.Tensor:
+                return tensor.index_select(0, chunk_ids).index_select(
+                    1, slot_ids
+                )
+
+            moving_paths, moving_valid = predict_patrol_obstacle_paths(
+                _select_slots(scheduler.positions),
+                _select_slots(scheduler.behavior_type),
+                _select_slots(scheduler.patrol_waypoints),
+                _select_slots(scheduler.patrol_wp_index),
+                _select_slots(scheduler.patrol_num_waypoints),
+                _select_slots(scheduler.patrol_speed),
+                _select_slots(scheduler.patrol_pause_remaining),
+                dt=float(_corridor_teacher_action_term._dt),
+                samples=_corridor_teacher_spec.samples,
+                new_waypoint_pause_steps=0,
+            )
+            paused_paths, paused_valid = predict_patrol_obstacle_paths(
+                _select_slots(scheduler.positions),
+                _select_slots(scheduler.behavior_type),
+                _select_slots(scheduler.patrol_waypoints),
+                _select_slots(scheduler.patrol_wp_index),
+                _select_slots(scheduler.patrol_num_waypoints),
+                _select_slots(scheduler.patrol_speed),
+                _select_slots(scheduler.patrol_pause_remaining),
+                dt=float(_corridor_teacher_action_term._dt),
+                samples=_corridor_teacher_spec.samples,
+                new_waypoint_pause_steps=5,
+            )
+            obstacle_paths = torch.cat(
+                [moving_paths, paused_paths], dim=1
+            )
+            obstacle_valid = torch.cat(
+                [moving_valid, paused_valid], dim=1
+            )
+            radii = _select_slots(physical_radii)
+            radii = torch.cat([radii, radii], dim=1)
+            result = corridor_teacher_action_grid(
+                current_velocity=(
+                    _corridor_teacher_action_term._current_velocity[
+                        chunk_ids
+                    ]
+                ),
+                current_omega=(
+                    _corridor_teacher_action_term._current_omega[chunk_ids]
+                ),
+                robot_xy_m=robot_xy[chunk_ids],
+                robot_yaw_rad=robot_yaw[chunk_ids],
+                goal_xy_m=goal_xy[chunk_ids],
+                obstacle_paths_m=obstacle_paths,
+                obstacle_radii_m=radii,
+                obstacle_valid=obstacle_valid,
+                wall_centers_m=raw_env._long_corridor_wall_centers[
+                    chunk_ids
+                ],
+                wall_sizes_m=raw_env._long_corridor_wall_sizes[chunk_ids],
+                wall_valid=raw_env._long_corridor_wall_mask[chunk_ids],
+                num_bins=int(cfg.num_bins),
+                dt=float(_corridor_teacher_action_term._dt),
+                max_linear_velocity=float(cfg.max_linear_velocity),
+                reverse_velocity_scale=float(cfg.reverse_velocity_scale),
+                max_linear_accel=float(cfg.max_linear_accel),
+                max_angular_velocity=float(cfg.max_angular_vel),
+                max_angular_accel=float(cfg.max_angular_accel),
+                spec=_corridor_teacher_spec,
+            )
+            feasible = result["any_feasible"]
+            intervention = select_corridor_interventions(
+                policy_actions.index_select(0, chunk_ids),
+                result["actions"],
+                feasible,
+                result["obstacle_collision_grid"],
+                result["wall_collision_grid"],
+                result["min_obstacle_clearance_grid"],
+                clearance_threshold_m=(
+                    _corridor_teacher_intervention_clearance_m
+                ),
+            )
+            selected = (
+                intervention["intervention"]
+                if _corridor_teacher_intervention_only
+                else feasible
+            )
+            label_stats["feasible"] += int(feasible.sum().item())
+            for key in (
+                "teacher_differs",
+                "policy_obstacle_collision",
+                "policy_wall_collision",
+                "policy_low_clearance",
+            ):
+                label_stats[key] += int(intervention[key].sum().item())
+            label_stats["interventions"] += int(
+                intervention["intervention"].sum().item()
+            )
+            label_stats["selected"] += int(selected.sum().item())
+            if selected.any():
+                feasible_ids.append(chunk_ids[selected])
+                teacher_actions.append(result["actions"][selected])
+        if not feasible_ids:
+            return (
+                env_ids[:0],
+                torch.empty(0, 2, dtype=torch.long, device=device),
+                label_stats,
+            )
+        return (
+            torch.cat(feasible_ids, dim=0),
+            torch.cat(teacher_actions, dim=0).long(),
+            label_stats,
+        )
+
+    if args_cli.scene_probe_stride <= 0:
+        raise ValueError("scene_probe_stride must be positive")
+    if args_cli.scene_probe_output and not _e2e_frame_stack:
+        raise ValueError("scene probe currently requires the K8 E2E lineage")
+    _scene_probe_saved = False
+    _scene_probe_inputs: list[torch.Tensor] = []
+    _scene_probe_labels: list[torch.Tensor] = []
+    _scene_probe_env_ids: list[torch.Tensor] = []
+    _scene_probe_steps: list[torch.Tensor] = []
+
     for iteration in range(num_iterations):
         iter_start = time.time()
         charge_buf.reset()         # 重置 Charge rollout buffer（ptr=0）
@@ -4028,6 +5279,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         metrics.reset()            # 清空 MetricsCollector（完成 episode 統計）
         _arc_stat_sum, _arc_stat_fire, _arc_stat_n = 0.0, 0.0, 0  # ★r_arc per-iter step 統計
         _arc_ep_sum, _arc_ep_n = 0.0, 0  # ★r_arc per-iter 完成 episode 的累積 penalty 統計
+        _corridor_teacher_sample_indices: list[torch.Tensor] = []
+        _corridor_teacher_actions: list[torch.Tensor] = []
+        _corridor_teacher_label_stats = {
+            "candidates": 0,
+            "feasible": 0,
+            "teacher_differs": 0,
+            "policy_obstacle_collision": 0,
+            "policy_wall_collision": 0,
+            "policy_low_clearance": 0,
+            "interventions": 0,
+            "selected": 0,
+        }
+        _teacher_forced_count = 0
 
         # === Determine who trains this iteration（Warp Drive 交替訓練）===
         # WD: 每 train_goal_rate(=3) 次 iteration 中，1 次訓練 obstacle，其餘訓練 charge
@@ -4145,6 +5409,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Rollout 期間所有模型設 eval()（不需要 batch norm/dropout 行為）
         if use_extractor: extractor.eval()
         preprocess_rnn.eval(); policy_head.eval(); value_head.eval()
+        if corridor_adapter is not None:
+            corridor_adapter.eval()
         if obs_policy is not None:
             obs_policy.eval(); obs_value.eval()
 
@@ -4189,11 +5455,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _priv_obs = extract_privileged_obs(env.unwrapped) if (_use_asymmetric_critic or _oracle_to_policy) else None
                 _rl_in_enc = _encode_rl_input(rl_in)
                 logits = policy_head(_rl_in_enc, _priv_obs if _oracle_to_policy else None)  # [E, 38] policy logits（雙頭各 19）
+                if corridor_adapter is not None:
+                    (
+                        _corridor_residual_step,
+                        _corridor_gate_logits_step,
+                        _corridor_gate_probability_step,
+                    ) = corridor_adapter(
+                        p_obs,
+                        (
+                            _rl_in_enc
+                            if _corridor_adapter_residual_features
+                            == "policy_features"
+                            else None
+                        ),
+                    )
+                    logits = logits + _corridor_residual_step
                 value = value_head(_rl_in_enc, _priv_obs if _use_asymmetric_critic else None).squeeze(-1)  # [E] critic value
                 actions, log_prob, _ = sample_action(logits)     # 採樣動作 + joint log_prob
+                _corridor_policy_actions_step = torch.stack(
+                    [
+                        logits[:, :NUM_BINS].argmax(dim=-1),
+                        logits[:, NUM_BINS:].argmax(dim=-1),
+                    ],
+                    dim=-1,
+                )
                 goal_diagnostics = metrics.compute_goal_diagnostics(env.unwrapped)  # 目標診斷（不影響 reward）
                 _teacher_logits_step = None
                 _retention_mask_step = None
+                _previous_teacher_logits_step = None
+                _previous_retention_mask_step = None
                 if _teacher_retention_enabled:
                     _teacher_obs_normed = torch.clamp(
                         (policy_obs - _teacher_obs_mean)
@@ -4234,6 +5524,197 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             "injector did not create _narrow_bridge_active"
                         )
                     _retention_mask_step = _narrow_active.clone()
+                if _previous_stage_teacher_enabled:
+                    _previous_teacher_obs_normed = torch.clamp(
+                        (policy_obs - _previous_teacher_obs_mean)
+                        / (_previous_teacher_obs_var.sqrt() + 1e-8),
+                        -5.0,
+                        5.0,
+                    )
+                    _previous_teacher_encoder_input = _build_extractor_input(
+                        _previous_teacher_obs_normed,
+                        _previous_teacher_lidar_hist,
+                    )
+                    _previous_teacher_features = _previous_teacher_extractor(
+                        _previous_teacher_encoder_input
+                    )
+                    _previous_teacher_policy_obs = _charge_obs_for_rl(
+                        _previous_teacher_obs_normed
+                    )
+                    _previous_teacher_logits_step = (
+                        _previous_teacher_policy_head(
+                            torch.cat(
+                                [
+                                    _previous_teacher_policy_obs,
+                                    _previous_teacher_features,
+                                ],
+                                dim=-1,
+                            )
+                        )
+                    )
+                    _previous_teacher_cur_lidar = _previous_teacher_policy_obs[
+                        :, LIDAR_START:LIDAR_END
+                    ]
+                    _previous_teacher_lidar_hist = torch.cat(
+                        [
+                            _previous_teacher_cur_lidar,
+                            _previous_teacher_lidar_hist[:, :-_LL],
+                        ],
+                        dim=-1,
+                    )
+                    if _previous_stage_teacher_scope == "previous_stage":
+                        _previous_active = getattr(
+                            env.unwrapped,
+                            "_previous_stage_replay_active",
+                            None,
+                        )
+                        missing_name = "_previous_stage_replay_active"
+                    elif _previous_stage_teacher_scope == "non_narrow":
+                        _narrow_active = getattr(
+                            env.unwrapped, "_narrow_bridge_active", None
+                        )
+                        _previous_active = (
+                            None
+                            if _narrow_active is None
+                            else ~_narrow_active
+                        )
+                        missing_name = "_narrow_bridge_active"
+                    elif _previous_stage_teacher_scope == "corridor":
+                        _previous_active = getattr(
+                            env.unwrapped,
+                            "_long_corridor_active",
+                            None,
+                        )
+                        missing_name = "_long_corridor_active"
+                    else:
+                        _previous_active = torch.ones(
+                            num_envs, dtype=torch.bool, device=device
+                        )
+                        missing_name = ""
+                    if _previous_active is None:
+                        raise RuntimeError(
+                            "second teacher retention is enabled but the "
+                            f"environment did not create {missing_name}"
+                        )
+                    _previous_retention_mask_step = _previous_active.clone()
+                if _teacher_retention_rollout_override:
+                    if (
+                        _teacher_logits_step is None
+                        or _retention_mask_step is None
+                    ):
+                        raise RuntimeError(
+                            "teacher rollout override requires teacher logits "
+                            "and the narrow replay mask at every step"
+                        )
+                    actions = apply_masked_deterministic_teacher_actions(
+                        actions,
+                        _teacher_logits_step,
+                        _retention_mask_step,
+                        num_bins=NUM_BINS,
+                    )
+                    log_prob, _, _ = evaluate_actions(logits, actions)
+                    _teacher_forced_count += int(
+                        _retention_mask_step.sum().item()
+                    )
+
+            # Capture scene identity before env.step. Done environments are reset
+            # inside env.step, so the live mask afterward may describe a new episode.
+            _long_corridor_mask_step = getattr(
+                env.unwrapped, "_long_corridor_active", None
+            )
+            if _long_corridor_mask_step is not None:
+                _long_corridor_mask_step = _long_corridor_mask_step.clone()
+            if (
+                args_cli.scene_probe_output
+                and not _scene_probe_saved
+                and step % args_cli.scene_probe_stride == 0
+            ):
+                _probe_env = env.unwrapped
+                _probe_empty = torch.zeros(
+                    num_envs, dtype=torch.bool, device=device
+                )
+                _probe_previous = getattr(
+                    _probe_env,
+                    "_previous_stage_replay_active",
+                    _probe_empty,
+                ).clone()
+                _probe_narrow = getattr(
+                    _probe_env,
+                    "_narrow_bridge_active",
+                    _probe_empty,
+                ).clone()
+                _probe_corridor = (
+                    _long_corridor_mask_step
+                    if _long_corridor_mask_step is not None
+                    else _probe_empty
+                )
+                _probe_overlap = (
+                    (_probe_previous & _probe_narrow)
+                    | (_probe_previous & _probe_corridor)
+                    | (_probe_narrow & _probe_corridor)
+                )
+                if bool(_probe_overlap.any()):
+                    raise RuntimeError(
+                        "scene probe found overlapping replay labels"
+                    )
+                _probe_label = torch.zeros(
+                    num_envs, dtype=torch.uint8, device=device
+                )
+                _probe_label[_probe_previous] = 1
+                _probe_label[_probe_narrow] = 2
+                _probe_label[_probe_corridor] = 3
+                _scene_probe_inputs.append(
+                    _encoder_input.detach().to(device="cpu")
+                )
+                _scene_probe_labels.append(_probe_label.cpu())
+                _scene_probe_env_ids.append(
+                    torch.arange(
+                        num_envs, dtype=torch.int32, device="cpu"
+                    )
+                )
+                _scene_probe_steps.append(
+                    torch.full(
+                        (num_envs,),
+                        step,
+                        dtype=torch.int16,
+                        device="cpu",
+                    )
+                )
+            if (
+                _corridor_teacher_distill_enabled
+                and step % _corridor_teacher_distill_stride == 0
+            ):
+                if _long_corridor_mask_step is None:
+                    raise RuntimeError(
+                        "corridor teacher is enabled but the replay injector "
+                        "did not create _long_corridor_active"
+                    )
+                _corridor_env_ids = (
+                    _long_corridor_mask_step.nonzero(
+                        as_tuple=False
+                    ).flatten()
+                )
+                (
+                    _corridor_feasible_ids,
+                    _corridor_actions_step,
+                    _corridor_label_stats_step,
+                ) = _generate_corridor_teacher_labels(
+                    _corridor_env_ids,
+                    _corridor_policy_actions_step,
+                )
+                for _label_key, _label_value in (
+                    _corridor_label_stats_step.items()
+                ):
+                    _corridor_teacher_label_stats[_label_key] += (
+                        _label_value
+                    )
+                if _corridor_feasible_ids.numel() > 0:
+                    _corridor_teacher_sample_indices.append(
+                        step * num_envs + _corridor_feasible_ids
+                    )
+                    _corridor_teacher_actions.append(
+                        _corridor_actions_step
+                    )
 
             # Capture dynamic obstacle state before env.step so future occupancy
             # compares the selected action against the same state seen by policy.
@@ -4273,6 +5754,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
             # --- 2. Env step ---
             next_obs, reward, terminated, truncated, info = env.step(actions.float())
+            _audit_long_corridor_goal()
             done = (terminated.squeeze(-1) | truncated.squeeze(-1)).float()  # [E] episode 結束(term|trunc, reset/stats/aux 用)
             _terminated_flat = terminated.squeeze(-1).float()                # ★fix#1: 真terminal(撞/到達),GAE bootstrap 用
             env_reward_flat = reward.squeeze(-1)  # Isaac Lab env reward（dense，只用於 logging）
@@ -4340,6 +5822,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             reward_flat, reward_breakdown = _reward_module.compute(
                 env.unwrapped, actions, terminated, truncated,
                 context=_reward_ctx,
+            )
+            add_long_corridor_reward_diagnostics(
+                reward_breakdown,
+                _long_corridor_mask_step,
             )
             # Update prev_actions for next step (clone to detach from autograd graph)
             _prev_actions = actions.detach().clone()
@@ -4563,7 +6049,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                            aux_target=wd_aux_tgt, privileged=_priv_obs, terminated=_terminated_flat,
                            encoder_input=_encoder_input,
                            teacher_logits=_teacher_logits_step,
-                           retention_mask=_retention_mask_step)
+                           retention_mask=_retention_mask_step,
+                           previous_teacher_logits=(
+                               _previous_teacher_logits_step
+                           ),
+                           previous_retention_mask=(
+                               _previous_retention_mask_step
+                           ),
+                           corridor_mask=(
+                               _long_corridor_mask_step
+                               if _corridor_adapter_enabled
+                               else None
+                           ))
             if obs_buf is not None:
                 obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
 
@@ -4596,6 +6093,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _lidar_hist[done_ids] = 0.0   # 多幀:同步 reset LiDAR 歷史(新 episode 從零)
                 if _teacher_lidar_hist is not None:
                     _teacher_lidar_hist[done_ids] = 0.0
+                if _previous_teacher_lidar_hist is not None:
+                    _previous_teacher_lidar_hist[done_ids] = 0.0
                 # 重置障礙物速度 cache（避免舊 episode 的速度污染新 episode）
                 if hasattr(env.unwrapped, "_obstacle_velocities"):
                     env.unwrapped._obstacle_velocities[done_ids] = 0.0
@@ -4628,6 +6127,41 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         + _rgdr_alpha * _rgdr_episode_reward[done_ids])
                     _rgdr_episode_reward[done_ids] = 0.0
             obs = next_obs  # 更新當前觀測
+
+        if args_cli.scene_probe_output and not _scene_probe_saved:
+            probe_path = Path(args_cli.scene_probe_output).expanduser().resolve()
+            probe_path.parent.mkdir(parents=True, exist_ok=True)
+            probe_labels = torch.cat(_scene_probe_labels, dim=0)
+            torch.save(
+                {
+                    "inputs": torch.cat(_scene_probe_inputs, dim=0),
+                    "labels": probe_labels,
+                    "env_ids": torch.cat(_scene_probe_env_ids, dim=0),
+                    "rollout_steps": torch.cat(_scene_probe_steps, dim=0),
+                    "metadata": {
+                        "label_names": {
+                            0: "native",
+                            1: "sa5_general",
+                            2: "narrow",
+                            3: "corridor",
+                        },
+                        "policy_obs_dim": int(policy_obs_dim),
+                        "encoder_input_dim": int(_encoder_input_dim),
+                        "lidar_frame_stack": int(_K_stack),
+                        "stride": int(args_cli.scene_probe_stride),
+                        "num_envs": int(num_envs),
+                    },
+                },
+                probe_path,
+            )
+            counts = torch.bincount(probe_labels.long(), minlength=4)
+            print(
+                "[SCENE-PROBE] saved "
+                f"path={probe_path} samples={probe_labels.numel()} "
+                f"counts={counts.tolist()}",
+                flush=True,
+            )
+            _scene_probe_saved = True
 
         # === Charge PPO Update（play 模式跳過所有訓練）===
         charge_ppo_loss = 0.0
@@ -4964,9 +6498,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                           f"max={_env_weight.max():.2f} "
                           f"std={_env_weight.std():.3f}")
 
-            policy_head.train(); value_head.train()
-            if _e2e_frame_stack:
+            if _corridor_adapter_enabled and _corridor_adapter_freeze_base:
+                policy_head.eval()
+            else:
+                policy_head.train()
+            value_head.train()
+            if corridor_adapter is not None:
+                corridor_adapter.train()
+            if _e2e_frame_stack and not (
+                _corridor_adapter_enabled and _corridor_adapter_freeze_base
+            ):
                 extractor.train()
+            elif _e2e_frame_stack:
+                extractor.eval()
             # extractor/preprocess_rnn 維持 eval()：RL 只訓練 RL heads，不更新 aux module
             # WD 等價做法：concat_input = rl_in_.detach()（custom_trainer.py line 573）
             # IsaacLab 版本：rl_in 在 torch.no_grad() 下計算，效果相同（無梯度流到 RNN/extractor）
@@ -4990,6 +6534,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             flat_retention_mask = (
                 charge_buf.retention_mask[:RL].reshape(-1)
                 if _teacher_retention_enabled else None
+            )
+            flat_previous_teacher_logits = (
+                charge_buf.previous_teacher_logits[:RL].reshape(
+                    -1, 2 * NUM_BINS
+                )
+                if _previous_stage_teacher_enabled else None
+            )
+            flat_previous_retention_mask = (
+                charge_buf.previous_retention_mask[:RL].reshape(-1)
+                if _previous_stage_teacher_enabled else None
+            )
+            flat_corridor_mask = (
+                charge_buf.corridor_mask[:RL].reshape(-1)
+                if _corridor_adapter_enabled else None
             )
 
             # --rnn_rl_grad: 準備在 minibatch 內重算 preprocess_feat(過 RNN,帶梯度)所需的
@@ -5050,8 +6608,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             post_ratio_min_l, post_ratio_max_l = [], []
             post_ratio_outside_20_l, post_ratio_outside_50_l = [], []
             retention_kl_linear_l, retention_kl_angular_l = [], []
+            retention_margin_linear_l, retention_margin_angular_l = [], []
+            retention_action_ce_linear_l, retention_action_ce_angular_l = [], []
             retention_agree_linear_l, retention_agree_angular_l = [], []
+            retention_post_kl_linear_l, retention_post_kl_angular_l = [], []
+            retention_post_margin_linear_l, retention_post_margin_angular_l = [], []
+            retention_post_agree_linear_l, retention_post_agree_angular_l = [], []
             retention_loss_l, retention_active_counts = [], []
+            previous_retention_kl_linear_l = []
+            previous_retention_kl_angular_l = []
+            previous_retention_agree_linear_l = []
+            previous_retention_agree_angular_l = []
+            previous_retention_loss_l = []
+            previous_retention_active_counts = []
+            adapter_gate_loss_l = []
+            adapter_gate_corridor_prob_l = []
+            adapter_gate_other_prob_l = []
+            adapter_gate_recall_l = []
+            adapter_gate_specificity_l = []
+            adapter_residual_corridor_l2_l = []
+            adapter_residual_other_l2_l = []
+            _retention_projection_stats = None
+            _retention_anchor_projection_stats = None
+            _corridor_projection_stats = None
             _kl_early_stop = False
             _ppo_update_count = 0
             for _ in range(n_epochs):
@@ -5084,8 +6663,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _priv_mb = flat_priv[mb] if flat_priv is not None else None
                     _ri_mb_enc = _encode_rl_input(_ri_mb)   # ★LV-DOT encoder(帶梯度,RL loss 流回 encoder)
                     nl = policy_head(_ri_mb_enc, _priv_mb if _oracle_to_policy else None)
+                    _adapter_gate_loss = torch.zeros((), device=device)
+                    _adapter_residual_mb = None
+                    _adapter_gate_logits_mb = None
+                    _adapter_gate_probability_mb = None
+                    if corridor_adapter is not None:
+                        (
+                            _adapter_residual_mb,
+                            _adapter_gate_logits_mb,
+                            _adapter_gate_probability_mb,
+                        ) = corridor_adapter(
+                            _pobs_mb,
+                            (
+                                _ri_mb_enc
+                                if _corridor_adapter_residual_features
+                                == "policy_features"
+                                else None
+                            ),
+                        )
+                        nl = nl + _adapter_residual_mb
+                        _adapter_gate_loss = balanced_binary_gate_loss(
+                            _adapter_gate_logits_mb,
+                            flat_corridor_mask[mb],
+                        )
                     nlp, ent_lin, ent_ang = evaluate_actions(nl, flat_act[mb])
-                    nv = value_head(_ri_mb_enc, _priv_mb).squeeze(-1)
+                    _critic_input = (
+                        _ri_mb_enc.detach()
+                        if args_cli.critic_detach_encoder
+                        else _ri_mb_enc
+                    )
+                    nv = value_head(_critic_input, _priv_mb).squeeze(-1)
                     _retention_result = None
                     if _teacher_retention_enabled:
                         _retention_result = masked_two_head_retention_loss(
@@ -5093,6 +6700,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             nl,
                             flat_retention_mask[mb],
                             num_bins=NUM_BINS,
+                            argmax_margin=_teacher_retention_argmax_margin,
+                        )
+                    _previous_retention_result = None
+                    if _previous_stage_teacher_enabled:
+                        _previous_retention_result = (
+                            masked_two_head_retention_loss(
+                                flat_previous_teacher_logits[mb],
+                                nl,
+                                flat_previous_retention_mask[mb],
+                                num_bins=NUM_BINS,
+                                argmax_margin=0.0,
+                            )
                         )
 
                     _log_ratio = nlp - flat_lp[mb]
@@ -5150,17 +6769,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         vl = vl * _vf_scale
 
                     _retention_term = (
-                        _teacher_retention_weight * _retention_result.loss
+                        (
+                            _teacher_retention_weight
+                            * _retention_result.loss
+                            + _teacher_retention_margin_weight
+                            * _retention_result.margin_loss
+                            + _teacher_retention_action_ce_weight
+                            * _retention_result.action_ce_loss
+                        )
                         if _retention_result is not None
                         else torch.zeros((), device=device)
                     )
+                    _previous_retention_term = (
+                        _previous_stage_teacher_retention_weight
+                        * _previous_retention_result.loss
+                        if _previous_retention_result is not None
+                        else torch.zeros((), device=device)
+                    )
                     # Ordinary frames remain pure PPO. Only injected narrow
-                    # frames are anchored to the successful c20 teacher.
+                    # frames are anchored to c20, and only previous-stage
+                    # replay frames are independently anchored to c12.
                     loss = (
                         pl_clamped
                         + _current_vf_coeff * vl
                         - entropy_loss
                         + _retention_term
+                        + _previous_retention_term
+                        + (
+                            _corridor_adapter_gate_loss_weight
+                            * _adapter_gate_loss
+                        )
                     )
                     actor_before = _snapshot_params(charge_params_actor)
                     critic_before = _snapshot_params(charge_params_critic)
@@ -5230,7 +6868,62 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             )
                         else:
                             _post_ri = flat_ri[mb]
-                        _post_nl = policy_head(_encode_rl_input(_post_ri), (flat_priv[mb] if (_oracle_to_policy and flat_priv is not None) else None))
+                        _post_ri_enc = _encode_rl_input(_post_ri)
+                        _post_nl = policy_head(_post_ri_enc, (flat_priv[mb] if (_oracle_to_policy and flat_priv is not None) else None))
+                        if corridor_adapter is not None:
+                            _post_pobs = _post_ri[:, :policy_obs_dim]
+                            (
+                                _post_adapter_residual,
+                                _post_adapter_gate_logits,
+                                _post_adapter_gate_probability,
+                            ) = corridor_adapter(
+                                _post_pobs,
+                                (
+                                    _post_ri_enc
+                                    if _corridor_adapter_residual_features
+                                    == "policy_features"
+                                    else None
+                                ),
+                            )
+                            _post_nl = _post_nl + _post_adapter_residual
+                            _post_corridor_mask = flat_corridor_mask[mb]
+                            _post_other_mask = ~_post_corridor_mask
+                            adapter_gate_loss_l.append(
+                                balanced_binary_gate_loss(
+                                    _post_adapter_gate_logits,
+                                    _post_corridor_mask,
+                                ).item()
+                            )
+                            if bool(_post_corridor_mask.any()):
+                                _corridor_prob = _post_adapter_gate_probability[
+                                    _post_corridor_mask
+                                ]
+                                adapter_gate_corridor_prob_l.append(
+                                    _corridor_prob.mean().item()
+                                )
+                                adapter_gate_recall_l.append(
+                                    (_corridor_prob >= 0.5).float().mean().item()
+                                )
+                                adapter_residual_corridor_l2_l.append(
+                                    _post_adapter_residual[
+                                        _post_corridor_mask
+                                    ].norm(dim=-1).mean().item()
+                                )
+                            if bool(_post_other_mask.any()):
+                                _other_prob = _post_adapter_gate_probability[
+                                    _post_other_mask
+                                ]
+                                adapter_gate_other_prob_l.append(
+                                    _other_prob.mean().item()
+                                )
+                                adapter_gate_specificity_l.append(
+                                    (_other_prob < 0.5).float().mean().item()
+                                )
+                                adapter_residual_other_l2_l.append(
+                                    _post_adapter_residual[
+                                        _post_other_mask
+                                    ].norm(dim=-1).mean().item()
+                                )
                         _post_lp, _, _ = evaluate_actions(_post_nl, flat_act[mb])
                         _post_ratio = (_post_lp - flat_lp[mb]).exp()
                         post_kl_l.append((flat_lp[mb] - _post_lp).mean().item())
@@ -5240,6 +6933,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         post_ratio_max_l.append(_post_ratio.max().item())
                         post_ratio_outside_20_l.append(((_post_ratio - 1.0).abs() > 0.2).float().mean().item())
                         post_ratio_outside_50_l.append(((_post_ratio - 1.0).abs() > 0.5).float().mean().item())
+                        if _teacher_retention_enabled:
+                            _post_retention_result = (
+                                masked_two_head_retention_loss(
+                                    flat_teacher_logits[mb],
+                                    _post_nl,
+                                    flat_retention_mask[mb],
+                                    num_bins=NUM_BINS,
+                                    argmax_margin=_teacher_retention_argmax_margin,
+                                )
+                            )
+                            if _post_retention_result.active_count > 0:
+                                retention_post_kl_linear_l.append(
+                                    _post_retention_result.kl_linear.item()
+                                )
+                                retention_post_kl_angular_l.append(
+                                    _post_retention_result.kl_angular.item()
+                                )
+                                retention_post_margin_linear_l.append(
+                                    _post_retention_result.margin_linear.item()
+                                )
+                                retention_post_margin_angular_l.append(
+                                    _post_retention_result.margin_angular.item()
+                                )
+                                retention_post_agree_linear_l.append(
+                                    _post_retention_result.agreement_linear.item()
+                                )
+                                retention_post_agree_angular_l.append(
+                                    _post_retention_result.agreement_angular.item()
+                                )
 
                     actor_delta = _param_delta_norm(actor_before, charge_params_actor)
                     critic_delta = _param_delta_norm(critic_before, charge_params_critic)
@@ -5278,6 +7000,18 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         retention_kl_angular_l.append(
                             _retention_result.kl_angular.item()
                         )
+                        retention_margin_linear_l.append(
+                            _retention_result.margin_linear.item()
+                        )
+                        retention_margin_angular_l.append(
+                            _retention_result.margin_angular.item()
+                        )
+                        retention_action_ce_linear_l.append(
+                            _retention_result.action_ce_linear.item()
+                        )
+                        retention_action_ce_angular_l.append(
+                            _retention_result.action_ce_angular.item()
+                        )
                         retention_agree_linear_l.append(
                             _retention_result.agreement_linear.item()
                         )
@@ -5285,6 +7019,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             _retention_result.agreement_angular.item()
                         )
                         retention_loss_l.append(_retention_term.item())
+                    if (
+                        _previous_retention_result is not None
+                        and _previous_retention_result.active_count > 0
+                    ):
+                        previous_retention_active_counts.append(
+                            _previous_retention_result.active_count
+                        )
+                        previous_retention_kl_linear_l.append(
+                            _previous_retention_result.kl_linear.item()
+                        )
+                        previous_retention_kl_angular_l.append(
+                            _previous_retention_result.kl_angular.item()
+                        )
+                        previous_retention_agree_linear_l.append(
+                            _previous_retention_result.agreement_linear.item()
+                        )
+                        previous_retention_agree_angular_l.append(
+                            _previous_retention_result.agreement_angular.item()
+                        )
+                        previous_retention_loss_l.append(
+                            _previous_retention_term.item()
+                        )
                     # Existing wd_update tracking
                     wd_actor_grad_l.append(actor_grad)
                     wd_critic_grad_l.append(critic_grad)
@@ -5309,6 +7065,151 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if _kl_early_stop:
                     break
 
+            if _corridor_teacher_distill_enabled:
+                if _corridor_teacher_sample_indices:
+                    _corridor_projection_indices = torch.cat(
+                        _corridor_teacher_sample_indices, dim=0
+                    )
+                    _corridor_projection_actions = torch.cat(
+                        _corridor_teacher_actions, dim=0
+                    )
+                else:
+                    _corridor_projection_indices = torch.empty(
+                        0, dtype=torch.long, device=device
+                    )
+                    _corridor_projection_actions = torch.empty(
+                        0, 2, dtype=torch.long, device=device
+                    )
+
+                def _corridor_projection_student_forward(
+                    sample_indices: torch.Tensor,
+                ) -> torch.Tensor:
+                    with torch.no_grad():
+                        encoder_input = flat_encoder_input[
+                            sample_indices.long()
+                        ]
+                        feature = extractor(encoder_input)
+                        policy_obs_projection = encoder_input[
+                            :, :policy_obs_dim
+                        ]
+                        policy_input = torch.cat(
+                            [policy_obs_projection, feature], dim=-1
+                        )
+                    return policy_head(policy_input)
+
+                _corridor_projection_stats = (
+                    post_update_corridor_action_projection(
+                        _corridor_projection_student_forward,
+                        policy_head.parameters(),
+                        _corridor_projection_indices,
+                        _corridor_projection_actions,
+                        num_bins=NUM_BINS,
+                        epochs=_corridor_teacher_distill_epochs,
+                        learning_rate=_corridor_teacher_distill_lr,
+                        batch_size=(
+                            _corridor_teacher_distill_batch_size
+                        ),
+                        max_grad_norm=(
+                            _corridor_teacher_distill_max_grad_norm
+                        ),
+                        neighbor_mass=(
+                            _corridor_teacher_distill_neighbor_mass
+                        ),
+                    )
+                )
+                charge_opt_rl.zero_grad(set_to_none=True)
+
+            if _teacher_retention_post_kl_epochs > 0:
+                _projection_inputs = torch.arange(
+                    batch_size, device=device, dtype=torch.long
+                )
+
+                def _projection_student_forward(
+                    sample_indices: torch.Tensor,
+                ) -> torch.Tensor:
+                    encoder_input = flat_encoder_input[sample_indices.long()]
+                    feature = extractor(encoder_input)
+                    policy_obs_projection = encoder_input[:, :policy_obs_dim]
+                    policy_input = torch.cat(
+                        [policy_obs_projection, feature], dim=-1
+                    )
+                    privileged = (
+                        flat_priv[sample_indices.long()]
+                        if (_oracle_to_policy and flat_priv is not None)
+                        else None
+                    )
+                    return policy_head(
+                        _encode_rl_input(policy_input), privileged
+                    )
+
+                _projection_parameters = (
+                    policy_head.parameters()
+                    if _teacher_retention_post_policy_head_only
+                    else charge_params_actor
+                )
+                if _teacher_retention_post_anchor_weight > 0.0:
+                    _dual_projection_stats = (
+                        post_update_dual_teacher_projection(
+                            _projection_student_forward,
+                            _projection_parameters,
+                            _projection_inputs,
+                            flat_teacher_logits,
+                            flat_retention_mask,
+                            flat_previous_teacher_logits,
+                            flat_previous_retention_mask,
+                            anchor_weight=(
+                                _teacher_retention_post_anchor_weight
+                            ),
+                            num_bins=NUM_BINS,
+                            epochs=_teacher_retention_post_kl_epochs,
+                            learning_rate=_teacher_retention_post_kl_lr,
+                            batch_size=(
+                                _teacher_retention_post_kl_batch_size
+                            ),
+                            max_grad_norm=(
+                                _teacher_retention_post_kl_max_grad_norm
+                            ),
+                            argmax_margin=(
+                                _teacher_retention_argmax_margin
+                            ),
+                            margin_weight=(
+                                _teacher_retention_post_margin_weight
+                            ),
+                            action_ce_weight=(
+                                _teacher_retention_post_action_ce_weight
+                            ),
+                        )
+                    )
+                    _retention_projection_stats = (
+                        _dual_projection_stats.primary
+                    )
+                    _retention_anchor_projection_stats = (
+                        _dual_projection_stats.anchor
+                    )
+                else:
+                    _retention_projection_stats = post_update_kl_projection(
+                        _projection_student_forward,
+                        _projection_parameters,
+                        _projection_inputs,
+                        flat_teacher_logits,
+                        flat_retention_mask,
+                        num_bins=NUM_BINS,
+                        epochs=_teacher_retention_post_kl_epochs,
+                        learning_rate=_teacher_retention_post_kl_lr,
+                        batch_size=_teacher_retention_post_kl_batch_size,
+                        max_grad_norm=(
+                            _teacher_retention_post_kl_max_grad_norm
+                        ),
+                        argmax_margin=_teacher_retention_argmax_margin,
+                        margin_weight=(
+                            _teacher_retention_post_margin_weight
+                        ),
+                        action_ce_weight=(
+                            _teacher_retention_post_action_ce_weight
+                        ),
+                    )
+                charge_opt_rl.zero_grad(set_to_none=True)
+
             charge_ppo_loss = np.mean(ppo_l)
             charge_vf_loss = np.mean(vf_l)
             charge_entropy = np.mean(ent_l)
@@ -5322,6 +7223,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         value * count
                         for value, count in zip(
                             values, retention_active_counts
+                        )
+                    )
+                    / max(total, 1)
+                )
+
+            def _previous_retention_weighted_mean(values):
+                if not values or not previous_retention_active_counts:
+                    return 0.0
+                total = sum(previous_retention_active_counts)
+                return float(
+                    sum(
+                        value * count
+                        for value, count in zip(
+                            values, previous_retention_active_counts
                         )
                     )
                     / max(total, 1)
@@ -5364,8 +7279,273 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "rl/entropy_angular": float(np.mean(ent_ang_l)) if ent_ang_l else 0.0,
                 # --- Patch 5: total loss ---
                 "rl/total_loss": float(np.mean(total_loss_l)) if total_loss_l else 0.0,
+                "corridor_adapter/enabled": float(
+                    _corridor_adapter_enabled
+                ),
+                "corridor_adapter/gate_bce": (
+                    float(np.mean(adapter_gate_loss_l))
+                    if adapter_gate_loss_l else 0.0
+                ),
+                "corridor_adapter/gate_probability_corridor": (
+                    float(np.mean(adapter_gate_corridor_prob_l))
+                    if adapter_gate_corridor_prob_l else 0.0
+                ),
+                "corridor_adapter/gate_probability_other": (
+                    float(np.mean(adapter_gate_other_prob_l))
+                    if adapter_gate_other_prob_l else 0.0
+                ),
+                "corridor_adapter/gate_recall": (
+                    float(np.mean(adapter_gate_recall_l))
+                    if adapter_gate_recall_l else 0.0
+                ),
+                "corridor_adapter/gate_specificity": (
+                    float(np.mean(adapter_gate_specificity_l))
+                    if adapter_gate_specificity_l else 0.0
+                ),
+                "corridor_adapter/residual_l2_corridor": (
+                    float(np.mean(adapter_residual_corridor_l2_l))
+                    if adapter_residual_corridor_l2_l else 0.0
+                ),
+                "corridor_adapter/residual_l2_other": (
+                    float(np.mean(adapter_residual_other_l2_l))
+                    if adapter_residual_other_l2_l else 0.0
+                ),
+                "corridor_distill/enabled": float(
+                    _corridor_teacher_distill_enabled
+                ),
+                "corridor_distill/intervention_only": float(
+                    _corridor_teacher_intervention_only
+                ),
+                "corridor_distill/candidate_count": float(
+                    _corridor_teacher_label_stats["candidates"]
+                ),
+                "corridor_distill/feasible_count": float(
+                    _corridor_teacher_label_stats["feasible"]
+                ),
+                "corridor_distill/intervention_count": float(
+                    _corridor_teacher_label_stats["interventions"]
+                ),
+                "corridor_distill/selected_fraction": (
+                    _corridor_teacher_label_stats["selected"]
+                    / max(
+                        _corridor_teacher_label_stats["candidates"],
+                        1,
+                    )
+                ),
+                "corridor_distill/intervention_fraction": (
+                    _corridor_teacher_label_stats["interventions"]
+                    / max(
+                        _corridor_teacher_label_stats["candidates"],
+                        1,
+                    )
+                ),
+                "corridor_distill/policy_obstacle_collision_fraction": (
+                    _corridor_teacher_label_stats[
+                        "policy_obstacle_collision"
+                    ]
+                    / max(
+                        _corridor_teacher_label_stats["candidates"],
+                        1,
+                    )
+                ),
+                "corridor_distill/policy_wall_collision_fraction": (
+                    _corridor_teacher_label_stats[
+                        "policy_wall_collision"
+                    ]
+                    / max(
+                        _corridor_teacher_label_stats["candidates"],
+                        1,
+                    )
+                ),
+                "corridor_distill/policy_low_clearance_fraction": (
+                    _corridor_teacher_label_stats[
+                        "policy_low_clearance"
+                    ]
+                    / max(
+                        _corridor_teacher_label_stats["candidates"],
+                        1,
+                    )
+                ),
+                "corridor_distill/active_count": float(
+                    _corridor_projection_stats.active_count
+                    if _corridor_projection_stats is not None
+                    else 0
+                ),
+                "corridor_distill/optimizer_steps": float(
+                    _corridor_projection_stats.optimizer_steps
+                    if _corridor_projection_stats is not None
+                    else 0
+                ),
+                "corridor_distill/loss_before": float(
+                    _corridor_projection_stats.loss_before
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
+                "corridor_distill/loss_after": float(
+                    _corridor_projection_stats.loss_after
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
+                "corridor_distill/agreement_before_joint": float(
+                    _corridor_projection_stats.agreement_before_joint
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
+                "corridor_distill/agreement_after_joint": float(
+                    _corridor_projection_stats.agreement_after_joint
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
+                "corridor_distill/within_one_before_joint": float(
+                    _corridor_projection_stats.within_one_before_joint
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
+                "corridor_distill/within_one_after_joint": float(
+                    _corridor_projection_stats.within_one_after_joint
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
+                "corridor_distill/agreement_after_linear": float(
+                    _corridor_projection_stats.agreement_after_linear
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
+                "corridor_distill/agreement_after_angular": float(
+                    _corridor_projection_stats.agreement_after_angular
+                    if _corridor_projection_stats is not None
+                    else 0.0
+                ),
                 "retention/enabled": float(_teacher_retention_enabled),
                 "retention/beta": _teacher_retention_weight,
+                "retention/margin_weight": _teacher_retention_margin_weight,
+                "retention/action_ce_weight": _teacher_retention_action_ce_weight,
+                "retention/argmax_margin": _teacher_retention_argmax_margin,
+                "previous_retention/enabled": float(
+                    _previous_stage_teacher_enabled
+                ),
+                "previous_retention/beta": (
+                    _previous_stage_teacher_retention_weight
+                ),
+                "retention/post_kl_projection_epochs": float(
+                    _teacher_retention_post_kl_epochs
+                ),
+                "retention/post_kl_projection_lr": (
+                    _teacher_retention_post_kl_lr
+                ),
+                "retention/post_kl_projection_margin_weight": (
+                    _teacher_retention_post_margin_weight
+                ),
+                "retention/post_kl_projection_action_ce_weight": (
+                    _teacher_retention_post_action_ce_weight
+                ),
+                "retention/post_kl_projection_policy_head_only": float(
+                    _teacher_retention_post_policy_head_only
+                ),
+                "retention/post_anchor_weight": (
+                    _teacher_retention_post_anchor_weight
+                ),
+                "retention/rollout_override": float(
+                    _teacher_retention_rollout_override
+                ),
+                "retention/teacher_forced_fraction": (
+                    _teacher_forced_count / max(RL * num_envs, 1)
+                ),
+                "retention/post_kl_projection_active_count": float(
+                    _retention_projection_stats.active_count
+                    if _retention_projection_stats is not None
+                    else 0
+                ),
+                "retention/post_kl_projection_optimizer_steps": float(
+                    _retention_projection_stats.optimizer_steps
+                    if _retention_projection_stats is not None
+                    else 0
+                ),
+                "retention/post_kl_projection_before_linear": float(
+                    _retention_projection_stats.kl_before_linear
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_before_angular": float(
+                    _retention_projection_stats.kl_before_angular
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_after_linear": float(
+                    _retention_projection_stats.kl_after_linear
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_after_angular": float(
+                    _retention_projection_stats.kl_after_angular
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_agree_after_linear": float(
+                    _retention_projection_stats.agreement_after_linear
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_agree_after_angular": float(
+                    _retention_projection_stats.agreement_after_angular
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_margin_before_linear": float(
+                    _retention_projection_stats.margin_before_linear
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_margin_before_angular": float(
+                    _retention_projection_stats.margin_before_angular
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_margin_after_linear": float(
+                    _retention_projection_stats.margin_after_linear
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_kl_projection_margin_after_angular": float(
+                    _retention_projection_stats.margin_after_angular
+                    if _retention_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_anchor_active_count": float(
+                    _retention_anchor_projection_stats.active_count
+                    if _retention_anchor_projection_stats is not None
+                    else 0
+                ),
+                "retention/post_anchor_before_linear": float(
+                    _retention_anchor_projection_stats.kl_before_linear
+                    if _retention_anchor_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_anchor_before_angular": float(
+                    _retention_anchor_projection_stats.kl_before_angular
+                    if _retention_anchor_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_anchor_after_linear": float(
+                    _retention_anchor_projection_stats.kl_after_linear
+                    if _retention_anchor_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_anchor_after_angular": float(
+                    _retention_anchor_projection_stats.kl_after_angular
+                    if _retention_anchor_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_anchor_agree_after_linear": float(
+                    _retention_anchor_projection_stats.agreement_after_linear
+                    if _retention_anchor_projection_stats is not None
+                    else 0.0
+                ),
+                "retention/post_anchor_agree_after_angular": float(
+                    _retention_anchor_projection_stats.agreement_after_angular
+                    if _retention_anchor_projection_stats is not None
+                    else 0.0
+                ),
                 "retention/active_fraction": (
                     float(flat_retention_mask.float().mean().item())
                     if flat_retention_mask is not None else 0.0
@@ -5376,14 +7556,76 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "retention/kl_angular": _retention_weighted_mean(
                     retention_kl_angular_l
                 ),
+                "retention/margin_linear": _retention_weighted_mean(
+                    retention_margin_linear_l
+                ),
+                "retention/margin_angular": _retention_weighted_mean(
+                    retention_margin_angular_l
+                ),
+                "retention/action_ce_linear": _retention_weighted_mean(
+                    retention_action_ce_linear_l
+                ),
+                "retention/action_ce_angular": _retention_weighted_mean(
+                    retention_action_ce_angular_l
+                ),
                 "retention/action_agreement_linear": _retention_weighted_mean(
                     retention_agree_linear_l
                 ),
                 "retention/action_agreement_angular": _retention_weighted_mean(
                     retention_agree_angular_l
                 ),
+                "retention/post_kl_linear": _retention_weighted_mean(
+                    retention_post_kl_linear_l
+                ),
+                "retention/post_kl_angular": _retention_weighted_mean(
+                    retention_post_kl_angular_l
+                ),
+                "retention/post_margin_linear": _retention_weighted_mean(
+                    retention_post_margin_linear_l
+                ),
+                "retention/post_margin_angular": _retention_weighted_mean(
+                    retention_post_margin_angular_l
+                ),
+                "retention/post_action_agreement_linear": _retention_weighted_mean(
+                    retention_post_agree_linear_l
+                ),
+                "retention/post_action_agreement_angular": _retention_weighted_mean(
+                    retention_post_agree_angular_l
+                ),
                 "retention/weighted_loss": _retention_weighted_mean(
                     retention_loss_l
+                ),
+                "previous_retention/active_fraction": (
+                    float(
+                        flat_previous_retention_mask.float().mean().item()
+                    )
+                    if flat_previous_retention_mask is not None
+                    else 0.0
+                ),
+                "previous_retention/kl_linear": (
+                    _previous_retention_weighted_mean(
+                        previous_retention_kl_linear_l
+                    )
+                ),
+                "previous_retention/kl_angular": (
+                    _previous_retention_weighted_mean(
+                        previous_retention_kl_angular_l
+                    )
+                ),
+                "previous_retention/action_agreement_linear": (
+                    _previous_retention_weighted_mean(
+                        previous_retention_agree_linear_l
+                    )
+                ),
+                "previous_retention/action_agreement_angular": (
+                    _previous_retention_weighted_mean(
+                        previous_retention_agree_angular_l
+                    )
+                ),
+                "previous_retention/weighted_loss": (
+                    _previous_retention_weighted_mean(
+                        previous_retention_loss_l
+                    )
                 ),
                 # --- Patch 2: returns/advantage statistics ---
                 "rl_critic/returns_mean": _ret_mean,
@@ -5648,6 +7890,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     for p in preprocess_rnn.rnn.parameters())
                 _head_grad = any(p.grad is not None and p.grad.abs().sum() > 0
                                 for p in policy_head.parameters())
+                _adapter_grad = (
+                    corridor_adapter is not None
+                    and any(
+                        p.grad is not None and p.grad.abs().sum() > 0
+                        for p in corridor_adapter.parameters()
+                    )
+                )
                 _encoder_grad = _e2e_frame_stack and any(
                     p.grad is not None and p.grad.abs().sum() > 0
                     for p in extractor.parameters())
@@ -5655,6 +7904,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _fm_lr = charge_opt_aux.param_groups[2]["lr"]
                 _ff_lr = charge_opt_aux.param_groups[3]["lr"]
                 print(f"[梯度驗證] RL head={'✓' if _head_grad else '✗'} (PPO), "
+                      f"corridor_adapter={'✓' if _adapter_grad else ('N/A' if corridor_adapter is None else '✗')} (PPO+BCE), "
                       f"encoder={'✓' if _encoder_grad else ('N/A' if not _e2e_frame_stack else '✗')} (RL), "
                       f"RNN cell={'✓' if _rnn_grad else '✗'} (aux)")
                 _ext_info = ""
@@ -5725,16 +7975,138 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     f"ent={charge_entropy:.3f} enc_g={wd_update_monitor.get('rl_encoder/grad_norm_pre_clip', 0.0):.3f} | "
                     f"gV={goal_v:+.3f} gΔ={goal_d:+.2f} h={goal_h:.0f}° "
                     f"sw={goal_sw:.3f}{obs_tag}")
+                _replay_env = env.unwrapped
+                _mask_template = torch.zeros(
+                    num_envs, dtype=torch.bool, device=device
+                )
+                _previous_mask = getattr(
+                    _replay_env,
+                    "_previous_stage_replay_active",
+                    _mask_template,
+                )
+                _corridor_mask = getattr(
+                    _replay_env, "_long_corridor_active", _mask_template
+                )
+                _narrow_mask = getattr(
+                    _replay_env, "_narrow_bridge_active", _mask_template
+                )
+                _replay_overlap = (
+                    (_previous_mask & _corridor_mask)
+                    | (_previous_mask & _narrow_mask)
+                    | (_corridor_mask & _narrow_mask)
+                )
+                if bool(_replay_overlap.any()):
+                    raise RuntimeError(
+                        "scene replay masks overlap for "
+                        f"{int(_replay_overlap.sum().item())} envs"
+                    )
+                if bool(
+                    _previous_mask.any()
+                    or _corridor_mask.any()
+                    or _narrow_mask.any()
+                ):
+                    _native_mask = ~(
+                        _previous_mask | _corridor_mask | _narrow_mask
+                    )
+                    print(
+                        "  REPLAY-MIX: "
+                        f"native={_native_mask.float().mean().item():.1%} "
+                        f"sa5_general={_previous_mask.float().mean().item():.1%} "
+                        f"narrow={_narrow_mask.float().mean().item():.1%} "
+                        f"corridor={_corridor_mask.float().mean().item():.1%} "
+                        "overlap=0"
+                    )
+                if _corridor_adapter_enabled:
+                    print(
+                        "  CORRIDOR-ADAPTER: "
+                        f"gate_bce={wd_update_monitor.get('corridor_adapter/gate_bce', 0.0):.4f} "
+                        f"p(corr)={wd_update_monitor.get('corridor_adapter/gate_probability_corridor', 0.0):.3f} "
+                        f"p(other)={wd_update_monitor.get('corridor_adapter/gate_probability_other', 0.0):.3f} "
+                        f"recall={wd_update_monitor.get('corridor_adapter/gate_recall', 0.0):.1%} "
+                        f"specificity={wd_update_monitor.get('corridor_adapter/gate_specificity', 0.0):.1%} "
+                        f"residual_l2=({wd_update_monitor.get('corridor_adapter/residual_l2_corridor', 0.0):.3f},"
+                        f"{wd_update_monitor.get('corridor_adapter/residual_l2_other', 0.0):.3f})"
+                    )
+                if _corridor_teacher_distill_enabled:
+                    print(
+                        "  CORRIDOR-DISTILL: "
+                        f"mode={'intervention' if _corridor_teacher_intervention_only else 'all'} "
+                        f"selected={wd_update_monitor.get('corridor_distill/active_count', 0.0):.0f}/"
+                        f"{wd_update_monitor.get('corridor_distill/candidate_count', 0.0):.0f} "
+                        f"intervene={wd_update_monitor.get('corridor_distill/intervention_fraction', 0.0):.1%} "
+                        f"steps={wd_update_monitor.get('corridor_distill/optimizer_steps', 0.0):.0f} "
+                        f"loss={wd_update_monitor.get('corridor_distill/loss_before', 0.0):.4f}"
+                        "->"
+                        f"{wd_update_monitor.get('corridor_distill/loss_after', 0.0):.4f} "
+                        f"agree_joint={wd_update_monitor.get('corridor_distill/agreement_before_joint', 0.0):.1%}"
+                        "->"
+                        f"{wd_update_monitor.get('corridor_distill/agreement_after_joint', 0.0):.1%} "
+                        f"within1_joint={wd_update_monitor.get('corridor_distill/within_one_before_joint', 0.0):.1%}"
+                        "->"
+                        f"{wd_update_monitor.get('corridor_distill/within_one_after_joint', 0.0):.1%}"
+                    )
                 if _teacher_retention_enabled:
                     print(
                         "  RETENTION: "
                         f"active={wd_update_monitor.get('retention/active_fraction', 0.0):.1%} "
+                        f"teacher_forced={wd_update_monitor.get('retention/teacher_forced_fraction', 0.0):.1%} "
                         f"beta={_teacher_retention_weight:g} "
+                        f"margin_w={_teacher_retention_margin_weight:g} "
+                        f"ce_w={_teacher_retention_action_ce_weight:g} "
                         f"KL=({wd_update_monitor.get('retention/kl_linear', 0.0):.4f},"
                         f"{wd_update_monitor.get('retention/kl_angular', 0.0):.4f}) "
+                        f"margin=({wd_update_monitor.get('retention/margin_linear', 0.0):.4f},"
+                        f"{wd_update_monitor.get('retention/margin_angular', 0.0):.4f}) "
+                        f"CE=({wd_update_monitor.get('retention/action_ce_linear', 0.0):.4f},"
+                        f"{wd_update_monitor.get('retention/action_ce_angular', 0.0):.4f}) "
                         f"agree=({wd_update_monitor.get('retention/action_agreement_linear', 0.0):.1%},"
                         f"{wd_update_monitor.get('retention/action_agreement_angular', 0.0):.1%}) "
+                        f"post_agree=({wd_update_monitor.get('retention/post_action_agreement_linear', 0.0):.1%},"
+                        f"{wd_update_monitor.get('retention/post_action_agreement_angular', 0.0):.1%}) "
                         f"weighted_loss={wd_update_monitor.get('retention/weighted_loss', 0.0):.5f}"
+                    )
+                    if _teacher_retention_post_kl_epochs > 0:
+                        print(
+                            "  RETENTION-PROJECT: "
+                            f"epochs={_teacher_retention_post_kl_epochs} "
+                            f"steps={wd_update_monitor.get('retention/post_kl_projection_optimizer_steps', 0.0):.0f} "
+                            f"KL=({wd_update_monitor.get('retention/post_kl_projection_before_linear', 0.0):.4f},"
+                            f"{wd_update_monitor.get('retention/post_kl_projection_before_angular', 0.0):.4f})"
+                            "->"
+                            f"({wd_update_monitor.get('retention/post_kl_projection_after_linear', 0.0):.4f},"
+                            f"{wd_update_monitor.get('retention/post_kl_projection_after_angular', 0.0):.4f}) "
+                            f"margin=({wd_update_monitor.get('retention/post_kl_projection_margin_before_linear', 0.0):.4f},"
+                            f"{wd_update_monitor.get('retention/post_kl_projection_margin_before_angular', 0.0):.4f})"
+                            "->"
+                            f"({wd_update_monitor.get('retention/post_kl_projection_margin_after_linear', 0.0):.4f},"
+                            f"{wd_update_monitor.get('retention/post_kl_projection_margin_after_angular', 0.0):.4f}) "
+                            f"agree=({wd_update_monitor.get('retention/post_kl_projection_agree_after_linear', 0.0):.1%},"
+                            f"{wd_update_monitor.get('retention/post_kl_projection_agree_after_angular', 0.0):.1%})"
+                        )
+                        if _retention_anchor_projection_stats is not None:
+                            print(
+                                "  RETENTION-ANCHOR: "
+                                f"scope={_previous_stage_teacher_scope} "
+                                f"weight={_teacher_retention_post_anchor_weight:g} "
+                                f"active={wd_update_monitor.get('retention/post_anchor_active_count', 0.0):.0f} "
+                                f"KL=({wd_update_monitor.get('retention/post_anchor_before_linear', 0.0):.4f},"
+                                f"{wd_update_monitor.get('retention/post_anchor_before_angular', 0.0):.4f})"
+                                "->"
+                                f"({wd_update_monitor.get('retention/post_anchor_after_linear', 0.0):.4f},"
+                                f"{wd_update_monitor.get('retention/post_anchor_after_angular', 0.0):.4f}) "
+                                f"agree=({wd_update_monitor.get('retention/post_anchor_agree_after_linear', 0.0):.1%},"
+                                f"{wd_update_monitor.get('retention/post_anchor_agree_after_angular', 0.0):.1%})"
+                            )
+                if _previous_stage_teacher_enabled:
+                    print(
+                        "  PREVIOUS-RETENTION: "
+                        f"active={wd_update_monitor.get('previous_retention/active_fraction', 0.0):.1%} "
+                        f"beta={_previous_stage_teacher_retention_weight:g} "
+                        f"KL=({wd_update_monitor.get('previous_retention/kl_linear', 0.0):.4f},"
+                        f"{wd_update_monitor.get('previous_retention/kl_angular', 0.0):.4f}) "
+                        f"agree=({wd_update_monitor.get('previous_retention/action_agreement_linear', 0.0):.1%},"
+                        f"{wd_update_monitor.get('previous_retention/action_agreement_angular', 0.0):.1%}) "
+                        f"weighted_loss={wd_update_monitor.get('previous_retention/weighted_loss', 0.0):.5f}"
                     )
             else:
                 _obs_ent = obs_metrics["entropy"] if obs_metrics else 0.0
@@ -5854,6 +8226,74 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "phase_parameter/mini_batches": float(args_cli.mini_batches),
                 "phase_parameter/train_goal_rate": float(args_cli.train_goal_rate),
                 "phase_parameter/teacher_retention_weight": _teacher_retention_weight,
+                "phase_parameter/teacher_retention_margin_weight": _teacher_retention_margin_weight,
+                "phase_parameter/teacher_retention_action_ce_weight": _teacher_retention_action_ce_weight,
+                "phase_parameter/teacher_retention_argmax_margin": _teacher_retention_argmax_margin,
+                "phase_parameter/teacher_retention_post_kl_epochs": float(
+                    _teacher_retention_post_kl_epochs
+                ),
+                "phase_parameter/teacher_retention_post_kl_lr": (
+                    _teacher_retention_post_kl_lr
+                ),
+                "phase_parameter/teacher_retention_post_kl_batch_size": float(
+                    _teacher_retention_post_kl_batch_size
+                ),
+                "phase_parameter/teacher_retention_post_kl_max_grad_norm": (
+                    _teacher_retention_post_kl_max_grad_norm
+                ),
+                "phase_parameter/teacher_retention_rollout_override": float(
+                    _teacher_retention_rollout_override
+                ),
+                "phase_parameter/previous_stage_teacher_retention_weight": (
+                    _previous_stage_teacher_retention_weight
+                ),
+                "phase_parameter/corridor_teacher_distill_epochs": float(
+                    _corridor_teacher_distill_epochs
+                ),
+                "phase_parameter/corridor_teacher_distill_lr": (
+                    _corridor_teacher_distill_lr
+                ),
+                "phase_parameter/corridor_teacher_distill_batch_size": float(
+                    _corridor_teacher_distill_batch_size
+                ),
+                "phase_parameter/corridor_teacher_distill_max_grad_norm": (
+                    _corridor_teacher_distill_max_grad_norm
+                ),
+                "phase_parameter/corridor_teacher_distill_neighbor_mass": (
+                    _corridor_teacher_distill_neighbor_mass
+                ),
+                "phase_parameter/corridor_teacher_distill_stride": float(
+                    _corridor_teacher_distill_stride
+                ),
+                "phase_parameter/corridor_teacher_intervention_only": float(
+                    _corridor_teacher_intervention_only
+                ),
+                "phase_parameter/corridor_teacher_intervention_clearance_m": (
+                    _corridor_teacher_intervention_clearance_m
+                ),
+                "phase_parameter/corridor_adapter_enabled": float(
+                    _corridor_adapter_enabled
+                ),
+                "phase_parameter/corridor_adapter_hidden_dim": float(
+                    _corridor_adapter_hidden_dim
+                ),
+                "phase_parameter/corridor_adapter_gate_loss_weight": (
+                    _corridor_adapter_gate_loss_weight
+                ),
+                "phase_parameter/corridor_adapter_max_logit_delta": (
+                    _corridor_adapter_max_logit_delta
+                ),
+                "phase_parameter/corridor_adapter_freeze_base": float(
+                    _corridor_adapter_freeze_base
+                ),
+                "phase_parameter/corridor_adapter_residual_policy_features":
+                    float(
+                        _corridor_adapter_residual_features
+                        == "policy_features"
+                    ),
+                "phase_parameter/critic_detach_encoder": float(
+                    args_cli.critic_detach_encoder
+                ),
                 # RL / optimizer effective hyperparameters
                 "phase_parameter/gamma": float(current_gamma),
                 "phase_parameter/gae_lambda": float(args_cli.gae_lambda),
@@ -5946,8 +8386,30 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # --- charge/* + goal_diagnostics/* + curriculum/* from MetricsCollector ---
             log_data.update(wd)
 
-            # --- SA5 narrow-passage bridge reset/schedule audit ---
+            # --- Fixed previous-stage scene replay audit ---
             _raw_env = env.unwrapped
+            if hasattr(_raw_env, "_previous_stage_replay_reset_count"):
+                _ps_resets = max(
+                    int(_raw_env._previous_stage_replay_reset_count), 1
+                )
+                _ps_active = _raw_env._previous_stage_replay_active
+                log_data.update({
+                    "previous_stage_replay/injected_fraction_actual":
+                        float(_raw_env._previous_stage_replay_injected_count)
+                        / _ps_resets,
+                    "previous_stage_replay/active_fraction":
+                        float(_ps_active.float().mean().item()),
+                    "previous_stage_replay/injected_episodes":
+                        float(_raw_env._previous_stage_replay_injected_count),
+                    "previous_stage_replay/installed_episodes":
+                        float(_raw_env._previous_stage_replay_installed_count),
+                    "previous_stage_replay/pending_envs":
+                        float(
+                            _raw_env._previous_stage_replay_pending.sum().item()
+                        ),
+                })
+
+            # --- SA5 narrow-passage bridge reset/schedule audit ---
             if hasattr(_raw_env, "_narrow_bridge_reset_count"):
                 _nb_resets = max(int(_raw_env._narrow_bridge_reset_count), 1)
                 log_data.update({
@@ -5967,6 +8429,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         float(getattr(_raw_env, "_narrow_bridge_last_yaw_limit_deg", 0.0)),
                     "narrow_bridge/stress_ratio":
                         float(getattr(_raw_env, "_narrow_bridge_last_stress_ratio", 0.0)),
+                })
+
+            # --- Deployment-corridor goal ownership audit ---
+            if hasattr(_raw_env, "_long_corridor_reset_count"):
+                _lc_resets = max(int(_raw_env._long_corridor_reset_count), 1)
+                log_data.update({
+                    "long_corridor/injected_fraction_actual":
+                        float(_raw_env._long_corridor_injected_count) / _lc_resets,
+                    "long_corridor/active_fraction":
+                        float(_raw_env._long_corridor_active.float().mean().item()),
+                    "long_corridor/goal_command_max_error_m":
+                        _long_corridor_goal_error_max,
+                    "long_corridor/local_goal_max_error_m":
+                        _long_corridor_local_goal_error_max,
+                    "long_corridor/goal_audit_frames":
+                        float(_long_corridor_goal_audit_frames),
+                    "long_corridor/unsolvable_count":
+                        float(_raw_env._long_corridor_unsolvable_count),
                 })
 
             if args_cli.action_table_sample_size > 0:
@@ -6038,6 +8518,66 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "kl": float(wd_update_monitor.get("rl/approx_kl", 0.0)),
             "clip_fraction": float(wd_update_monitor.get("rl/clip_fraction", 0.0)),
             "encoder_grad": float(wd_update_monitor.get("rl_encoder/grad_norm_pre_clip", 0.0)),
+            "corridor_adapter_gate_recall": float(
+                wd_update_monitor.get(
+                    "corridor_adapter/gate_recall", 0.0
+                )
+            ),
+            "corridor_adapter_gate_specificity": float(
+                wd_update_monitor.get(
+                    "corridor_adapter/gate_specificity", 0.0
+                )
+            ),
+            "corridor_adapter_residual_l2_corridor": float(
+                wd_update_monitor.get(
+                    "corridor_adapter/residual_l2_corridor", 0.0
+                )
+            ),
+            "corridor_adapter_residual_l2_other": float(
+                wd_update_monitor.get(
+                    "corridor_adapter/residual_l2_other", 0.0
+                )
+            ),
+            "retention_post_agreement_linear": float(
+                wd_update_monitor.get(
+                    "retention/post_action_agreement_linear", 0.0
+                )
+            ),
+            "retention_post_agreement_angular": float(
+                wd_update_monitor.get(
+                    "retention/post_action_agreement_angular", 0.0
+                )
+            ),
+            "retention_projection_kl_after_linear": float(
+                wd_update_monitor.get(
+                    "retention/post_kl_projection_after_linear", 0.0
+                )
+            ),
+            "retention_projection_kl_after_angular": float(
+                wd_update_monitor.get(
+                    "retention/post_kl_projection_after_angular", 0.0
+                )
+            ),
+            "retention_projection_agreement_linear": float(
+                wd_update_monitor.get(
+                    "retention/post_kl_projection_agree_after_linear", 0.0
+                )
+            ),
+            "retention_projection_agreement_angular": float(
+                wd_update_monitor.get(
+                    "retention/post_kl_projection_agree_after_angular", 0.0
+                )
+            ),
+            "retention_projection_margin_after_linear": float(
+                wd_update_monitor.get(
+                    "retention/post_kl_projection_margin_after_linear", 0.0
+                )
+            ),
+            "retention_projection_margin_after_angular": float(
+                wd_update_monitor.get(
+                    "retention/post_kl_projection_margin_after_angular", 0.0
+                )
+            ),
             "fps": float(fps),
         }
         with open(_supervisor_metrics_file, "a", encoding="utf-8") as _metrics_fp:
@@ -6069,6 +8609,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             }
             if use_extractor:
                 _ckpt_dict["extractor"] = extractor.state_dict()  # Conv1d extractor（only in extractor_rnn mode）
+            if corridor_adapter is not None:
+                _ckpt_dict["corridor_adapter"] = corridor_adapter.state_dict()
             if _lvdot_enc_on and lvdot_encoder is not None:
                 _ckpt_dict["lvdot_encoder"] = lvdot_encoder.state_dict()  # ★LV-DOT channel encoder
             if args_cli.feat_norm:

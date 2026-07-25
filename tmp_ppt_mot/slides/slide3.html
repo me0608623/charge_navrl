@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html><head><style>
+html{background:#fff;}
+body{width:720pt;height:405pt;margin:0;padding:0;display:flex;font-family:'Noto Sans CJK TC',sans-serif;background:#EEF1F4;}
+.side{width:56pt;background:#3A6EA5;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.side .big{color:#fff;font-size:34pt;font-weight:bold;margin:0;}
+.side .sm{color:#BcD3EA;font-size:11pt;margin:6pt 0 0 0;writing-mode:vertical-rl;letter-spacing:3pt;}
+.main{flex:1;padding:20pt 26pt;display:flex;flex-direction:column;}
+.head{display:flex;justify-content:space-between;align-items:flex-start;margin:0 0 12pt 0;}
+.kicker{color:#3A6EA5;font-size:11pt;letter-spacing:2pt;font-weight:bold;margin:0 0 3pt 0;}
+h1{color:#1B2A3A;font-size:23pt;margin:0;}
+.chip{background:#FBEAD0;border:1px solid #E7B36A;border-radius:20pt;padding:7pt 15pt;}
+.chip p{color:#8A5312;font-size:11pt;font-weight:bold;margin:0;}
+.row{display:flex;gap:18pt;flex:1;}
+.col{flex:1;display:flex;flex-direction:column;}
+.lbl{color:#3A6EA5;font-size:11.5pt;font-weight:bold;margin:0 0 6pt 0;letter-spacing:1pt;}
+ul{margin:0 0 10pt 0;padding-left:15pt;}
+li{color:#44515E;font-size:11.5pt;line-height:1.45;margin-bottom:3pt;}
+li b{color:#1B2A3A;}
+.trow{display:flex;background:#fff;border:1px solid #DCE2E8;border-bottom:none;}
+.trow:last-child{border-bottom:1px solid #DCE2E8;border-radius:0 0 5pt 5pt;}
+.trow.h{background:#3A6EA5;border-radius:5pt 5pt 0 0;}
+.tc{flex:1;padding:7pt 9pt;}
+.tc.k{flex:1.3;}
+.trow.h .tc p{color:#fff;font-size:10.5pt;font-weight:bold;margin:0;}
+.tc p{color:#44515E;font-size:10.5pt;margin:0;line-height:1.3;}
+.good{color:#1E5E3A;font-weight:bold;}
+.bad{color:#C0483B;font-weight:bold;}
+.note{background:#EAF0F6;border-radius:5pt;padding:8pt 11pt;margin:8pt 0 0 0;}
+.note p{color:#33506E;font-size:10.5pt;margin:0;line-height:1.35;}
+</style></head>
+<body>
+<div class="side"><p class="big">A</p><p class="sm">表徵化</p></div>
+<div class="main">
+  <div class="head">
+    <div><p class="kicker">路線 A · RNN 隱式 MOT</p><h1>RNN 從 LiDAR 自學追蹤</h1></div>
+    <div class="chip"><p>裁決：位置可學 · 速度學不到</p></div>
+  </div>
+  <div class="row">
+    <div class="col">
+      <p class="lbl">做法</p>
+      <ul>
+        <li>RNN 從 raw LiDAR 串流學障礙位置／速度（velocity aux 監督）</li>
+        <li>離線 probe：RNN hidden → 真實障礙狀態的 R² / rel err</li>
+      </ul>
+      <p class="lbl">途中抓出的 3 個真 bug（都在繞症狀）</p>
+      <ul>
+        <li><b>dead-ReLU</b>：predict_head 末端 ReLU → 輸出恆 0</li>
+        <li><b>reshape 錯位</b>：特徵與 target 對不上 → aux 從沒真訓過</li>
+        <li><b>zero-velocity 標籤</b>：速度 label 全 0 = 量測假象</li>
+      </ul>
+    </div>
+    <div class="col">
+      <p class="lbl">修好一切後的決定性數據</p>
+      <div class="trow h"><div class="tc k"><p>測試</p></div><div class="tc"><p>位置</p></div><div class="tc"><p>速度 R²</p></div></div>
+      <div class="trow"><div class="tc k"><p>離線 GRU（架構上限）</p></div><div class="tc"><p class="good">30.9%</p></div><div class="tc"><p>—</p></div></div>
+      <div class="trow"><div class="tc k"><p>多幀+真標籤 60k</p></div><div class="tc"><p class="good">0.27</p></div><div class="tc"><p class="bad">0.005</p></div></div>
+      <div class="trow"><div class="tc k"><p>多幀+真標籤 120k</p></div><div class="tc"><p class="good">0.26</p></div><div class="tc"><p class="bad">0.009</p></div></div>
+      <div class="trow"><div class="tc k"><p>oracle（K 幀原始 obs）</p></div><div class="tc"><p class="good">有</p></div><div class="tc"><p class="bad">推不出</p></div></div>
+      <div class="note"><p><b>是輸入層問題：</b>單幀 72-bin LiDAR 連 oracle 都推不出速度。「RNN 學不會 MOT」與「多幀輸入有用（SR 0.758 最強）」同時成立 → 運動資訊正解是<b>餵 policy 直通</b>，非逼 RNN 編碼。</p></div>
+    </div>
+  </div>
+</div>
+</body></html>

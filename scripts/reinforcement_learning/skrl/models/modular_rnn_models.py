@@ -476,6 +476,118 @@ class PolicyHead(nn.Module):
         return logits
 
 
+class CorridorResidualAdapter(nn.Module):
+    """Observation-gated residual policy for deployment-corridor recovery.
+
+    The gate consumes only the current deployable policy observation. Scene
+    labels are used to supervise the gate during training, but are never an
+    inference input. The residual output layer is zero initialized so adding
+    the adapter to an existing checkpoint preserves its policy exactly.
+    """
+
+    def __init__(
+        self,
+        input_dim: int = USED_OBS_DIM,
+        residual_input_dim: int | None = None,
+        hidden_dim: int = 64,
+        gate_init_probability: float = 0.01,
+        max_logit_delta: float = 2.0,
+    ):
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError("input_dim must be positive")
+        if residual_input_dim is not None and residual_input_dim <= 0:
+            raise ValueError("residual_input_dim must be positive")
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        if not 0.0 < gate_init_probability < 1.0:
+            raise ValueError("gate_init_probability must be in (0, 1)")
+        if max_logit_delta <= 0.0:
+            raise ValueError("max_logit_delta must be positive")
+
+        self.input_dim = int(input_dim)
+        self.residual_input_dim = int(residual_input_dim or input_dim)
+        self.max_logit_delta = float(max_logit_delta)
+        self.gate_net = nn.Sequential(
+            nn.Linear(self.input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.residual_net = nn.Sequential(
+            nn.Linear(self.residual_input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, TOTAL_LOGITS),
+        )
+
+        # A known low prior prevents ordinary scenes from receiving material
+        # residual gradients before the supervised gate has separated them.
+        nn.init.zeros_(self.gate_net[-1].weight)
+        gate_bias = np.log(
+            gate_init_probability / (1.0 - gate_init_probability)
+        )
+        nn.init.constant_(self.gate_net[-1].bias, float(gate_bias))
+
+        # Exact checkpoint migration contract: residual == 0 at initialization.
+        nn.init.zeros_(self.residual_net[-1].weight)
+        nn.init.zeros_(self.residual_net[-1].bias)
+
+    def forward(
+        self,
+        current_policy_obs: torch.Tensor,
+        residual_features: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if current_policy_obs.shape[-1] != self.input_dim:
+            raise ValueError(
+                "corridor adapter expected "
+                f"{self.input_dim}D input, got {current_policy_obs.shape[-1]}D"
+            )
+        if residual_features is None:
+            residual_features = current_policy_obs
+        if residual_features.shape[-1] != self.residual_input_dim:
+            raise ValueError(
+                "corridor adapter expected "
+                f"{self.residual_input_dim}D residual input, got "
+                f"{residual_features.shape[-1]}D"
+            )
+        gate_logits = self.gate_net(current_policy_obs).squeeze(-1)
+        gate_probability = torch.sigmoid(gate_logits)
+        raw_residual = self.residual_net(residual_features)
+        bounded_residual = self.max_logit_delta * torch.tanh(raw_residual)
+
+        # PPO must not teach the classifier to open its own gate. The gate is
+        # updated only by the explicit corridor/non-corridor BCE objective.
+        residual = gate_probability.detach().unsqueeze(-1) * bounded_residual
+        return residual, gate_logits, gate_probability
+
+
+def balanced_binary_gate_loss(
+    gate_logits: torch.Tensor,
+    corridor_targets: torch.Tensor,
+) -> torch.Tensor:
+    """Class-balanced BCE for a minority corridor scene label."""
+
+    logits = gate_logits.reshape(-1)
+    targets = corridor_targets.reshape(-1).bool()
+    if logits.numel() != targets.numel():
+        raise ValueError("gate logits and targets must have the same size")
+    positive = targets
+    negative = ~targets
+    if bool(positive.any()) and bool(negative.any()):
+        pos_loss = nn.functional.binary_cross_entropy_with_logits(
+            logits[positive],
+            torch.ones_like(logits[positive]),
+        )
+        neg_loss = nn.functional.binary_cross_entropy_with_logits(
+            logits[negative],
+            torch.zeros_like(logits[negative]),
+        )
+        return 0.5 * (pos_loss + neg_loss)
+    return nn.functional.binary_cross_entropy_with_logits(
+        logits,
+        targets.to(dtype=logits.dtype),
+    )
+
+
 class ValueHead(nn.Module):
     """Value head: input_dim → scalar.
 

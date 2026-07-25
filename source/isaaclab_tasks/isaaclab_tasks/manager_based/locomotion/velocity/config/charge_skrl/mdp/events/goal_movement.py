@@ -256,6 +256,13 @@ def move_goal_positions(
                 except Exception:
                     pass
 
+        # Fixed replay scenes own their goal. Restore it before rendering so
+        # neither the policy input nor the GUI marker can drift.
+        if hasattr(goal_cmd, "restore_fixed_scene_goals"):
+            goal_cmd.restore_fixed_scene_goals(
+                torch.arange(N, device=device, dtype=torch.long)
+            )
+
         # 更新 marker
         try:
             if hasattr(goal_cmd, '_update_goal_markers'):
@@ -524,6 +531,13 @@ def move_goal_positions(
     else:
         goal_pos[:, 0] = candidate[:, 0]
         goal_pos[:, 1] = candidate[:, 1]
+
+    # Fixed replay scenes own their goal. Restore it before rendering so
+    # neither the policy input nor the GUI marker can drift.
+    if hasattr(goal_cmd, "restore_fixed_scene_goals"):
+        goal_cmd.restore_fixed_scene_goals(
+            torch.arange(N, device=device, dtype=torch.long)
+        )
 
     # 更新 marker
     try:

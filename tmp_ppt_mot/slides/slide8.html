@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html><head><style>
+html{background:#fff;}
+body{width:720pt;height:405pt;margin:0;padding:0;display:flex;font-family:'Noto Sans CJK TC',sans-serif;background:#16232F;}
+.main{flex:1;padding:24pt 32pt;display:flex;flex-direction:column;}
+.kicker{color:#5FB6C4;font-size:11.5pt;letter-spacing:2pt;font-weight:bold;margin:0 0 3pt 0;}
+h1{color:#fff;font-size:24pt;margin:0 0 13pt 0;}
+.row{display:flex;gap:20pt;flex:1;}
+.col{flex:1;display:flex;flex-direction:column;}
+.lbl{color:#5FB6C4;font-size:11.5pt;font-weight:bold;margin:0 0 7pt 0;letter-spacing:1pt;}
+.prow{display:flex;background:#22323F;border:1px solid #33475A;border-radius:6pt;padding:8pt 11pt;margin:0 0 6pt 0;align-items:flex-start;gap:9pt;}
+.pk{background:#C0483B;border-radius:4pt;padding:2pt 7pt;}
+.pk.p1{background:#C0483B;}
+.pk p{color:#fff;font-size:10pt;font-weight:bold;margin:0;}
+.prow .txt{color:#C6D2DC;font-size:10.5pt;margin:0;line-height:1.32;}
+.prow .txt b{color:#fff;}
+.fix{background:#1E4D3E;border:1px solid #37785E;border-radius:7pt;padding:11pt 14pt;margin:0 0 8pt 0;}
+.fix .t{color:#8FE0B4;font-size:12pt;font-weight:bold;margin:0 0 6pt 0;}
+.fix ul{margin:0;padding-left:15pt;}
+.fix li{color:#D3EADD;font-size:10.8pt;line-height:1.42;margin-bottom:3pt;}
+.fix li b{color:#fff;}
+.next{background:#243545;border-left:5pt solid #5FB6C4;border-radius:6pt;padding:10pt 14pt;}
+.next p{color:#CFDCE5;font-size:11pt;margin:0;line-height:1.4;}
+.next b{color:#fff;}
+.foot{color:#7C8B98;font-size:9.5pt;margin:10pt 0 0 0;}
+</style></head>
+<body>
+<div class="main">
+  <p class="kicker">收斂點 · 下一步</p>
+  <h1>從「壓症狀」轉向「治結構」</h1>
+  <div class="row">
+    <div class="col">
+      <p class="lbl">訓練設計審計：4 個結構性根本</p>
+      <div class="prow"><div class="pk p1"><p>P1</p></div><p class="txt"><b>RNN/extractor 收不到 RL 梯度</b>（no_grad 快取）→ 記憶靠會塌的 aux 撐。最關鍵</p></div>
+      <div class="prow"><div class="pk"><p>P2</p></div><p class="txt">reward 純稀疏，goal +40 壓倒避障，接觸前零梯度</p></div>
+      <div class="prow"><div class="pk"><p>P3</p></div><p class="txt">優化無 trust region（KL early-stop 死碼）</p></div>
+      <div class="prow"><div class="pk"><p>P4</p></div><p class="txt">aux target runtime 退化成常數</p></div>
+    </div>
+    <div class="col">
+      <p class="lbl">e2e clean-PPO 重設計（走論文簡單設計）</p>
+      <div class="fix">
+        <p class="t">4-frame LiDAR CNN 端到端</p>
+        <ul>
+          <li>PPO minibatch <b>重算 CNN feature</b>（不用 cache）→ 治 P1</li>
+          <li>固定 reward：progress + goal10 &lt; 撞15 + timeout−5 → 治 P2</li>
+          <li>標準 PPO：4ep / KL stop 0.015 / clip → 治 P3；移除 aux → 消 P4</li>
+          <li>上線驗證：<b>enc_g=1.847</b>（RL 梯度進 CNN）、KL stop 活了</li>
+        </ul>
+      </div>
+      <div class="next"><p><b>下一步：</b>避障能否從乾淨設計<b>自然浮現</b> —— 反應曲線左移 + 動態撞↓，待後期 stage 驗收（4 幀 0.8s 夠不夠推動態速度是關鍵未知）。</p></div>
+    </div>
+  </div>
+  <p class="foot">※ 「別人怎麼讓 RL 用 MOT（SOTA 文獻對照：DRL-VO / SARL / DS-RNN / Missing-Velocity …）」另有完整一份報告。</p>
+</div>
+</body></html>

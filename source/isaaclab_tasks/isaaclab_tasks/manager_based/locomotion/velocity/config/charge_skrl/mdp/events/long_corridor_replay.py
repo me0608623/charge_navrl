@@ -10,6 +10,7 @@ from .long_corridor_replay_geometry import (
     LongCorridorSpec,
     layout_is_constructively_solvable,
     sample_obstacle_layout,
+    validate_obstacle_counts,
     validate_spec,
     wall_geometry,
 )
@@ -35,8 +36,7 @@ def configure_long_corridor_assets(
 
     spec = LongCorridorSpec(free_width=float(free_width), length=float(length))
     validate_spec(spec)
-    if static_obstacles != 4 or dynamic_obstacles != 2:
-        raise ValueError("the frozen corridor recipe requires 4 static and 2 dynamic obstacles")
+    validate_obstacle_counts(static_obstacles, dynamic_obstacles)
     speed_min, speed_max = map(float, dynamic_speed_range)
     if not (0.0 < speed_min <= speed_max):
         raise ValueError("dynamic corridor speed range must be positive and ordered")
@@ -185,14 +185,17 @@ def _install_obstacles(
     spec: LongCorridorSpec,
     speed_min: float,
     speed_max: float,
+    static_obstacles: int,
+    dynamic_obstacles: int,
 ) -> bool:
     scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
     if scheduler is None:
         env._long_corridor_pending_obstacles[selected] = True
         return False
-    if scheduler.max_obstacles < 6:
+    validate_obstacle_counts(static_obstacles, dynamic_obstacles)
+    if scheduler.max_obstacles < 4 + dynamic_obstacles:
         raise RuntimeError(
-            "long corridor requires at least 6 BehaviorScheduler obstacle slots"
+            "long corridor requires enough BehaviorScheduler obstacle slots"
         )
 
     from .behavior_scheduler import (
@@ -216,35 +219,56 @@ def _install_obstacles(
     scheduler.velocities[selected] = 0.0
     scheduler.phase_timer[selected] = 0
     scheduler.patrol_pause_remaining[selected] = 0
+    env._long_corridor_dynamic_start[selected] = 0.0
 
-    scheduler.behavior_type[selected, :4] = BEHAVIOR_STATIC
-    scheduler.positions[selected, :4] = static
+    if static_obstacles > 0:
+        static_slots = slice(0, static_obstacles)
+        scheduler.behavior_type[selected, static_slots] = BEHAVIOR_STATIC
+        scheduler.positions[selected, static_slots] = static[
+            :, :static_obstacles
+        ]
 
-    scheduler.behavior_type[selected, 4:6] = BEHAVIOR_PATROL
-    scheduler.positions[selected, 4:6] = dynamic
-    scheduler.patrol_waypoints[selected, 4:6, :2] = waypoints
-    scheduler.patrol_waypoints[selected, 4:6, 2:] = 0.0
-    scheduler.patrol_num_waypoints[selected, 4:6] = 2
-    direction_right = torch.rand(count, 2, device=env.device) < 0.5
-    scheduler.patrol_wp_index[selected, 4:6] = direction_right.long()
-    speeds = torch.empty(count, 2, device=env.device).uniform_(
-        float(speed_min), float(speed_max)
-    )
-    scheduler.patrol_speed[selected, 4:6] = speeds
-    velocity_sign = torch.where(
-        direction_right,
-        torch.ones_like(speeds),
-        -torch.ones_like(speeds),
-    )
-    scheduler.velocities[selected, 4:6, 0] = velocity_sign * speeds
-    scheduler.velocities[selected, 4:6, 1] = 0.0
-    env._long_corridor_dynamic_start[selected] = dynamic
+    if dynamic_obstacles > 0:
+        dynamic_slots = slice(4, 4 + dynamic_obstacles)
+        active_dynamic = dynamic[:, :dynamic_obstacles]
+        active_waypoints = waypoints[:, :dynamic_obstacles]
+        scheduler.behavior_type[selected, dynamic_slots] = BEHAVIOR_PATROL
+        scheduler.positions[selected, dynamic_slots] = active_dynamic
+        scheduler.patrol_waypoints[selected, dynamic_slots, :2] = (
+            active_waypoints
+        )
+        scheduler.patrol_waypoints[selected, dynamic_slots, 2:] = 0.0
+        scheduler.patrol_num_waypoints[selected, dynamic_slots] = 2
+        direction_right = (
+            torch.rand(count, dynamic_obstacles, device=env.device) < 0.5
+        )
+        scheduler.patrol_wp_index[selected, dynamic_slots] = (
+            direction_right.long()
+        )
+        speeds = torch.empty(
+            count, dynamic_obstacles, device=env.device
+        ).uniform_(float(speed_min), float(speed_max))
+        scheduler.patrol_speed[selected, dynamic_slots] = speeds
+        velocity_sign = torch.where(
+            direction_right,
+            torch.ones_like(speeds),
+            -torch.ones_like(speeds),
+        )
+        scheduler.velocities[selected, dynamic_slots, 0] = (
+            velocity_sign * speeds
+        )
+        scheduler.velocities[selected, dynamic_slots, 1] = 0.0
+        env._long_corridor_dynamic_start[selected, :dynamic_obstacles] = (
+            active_dynamic
+        )
     env._long_corridor_pending_obstacles[selected] = False
     scheduler._write_positions_to_sim(env)
     return True
 
 
-def _write_goal(env, selected: torch.Tensor) -> None:
+def _write_goal(
+    env, selected: torch.Tensor, *, update_markers: bool = False
+) -> None:
     goal = env._long_corridor_goal_w[selected]
     goal_term = env.command_manager.get_term("goal_command")
     goal_term.goal_pos_w[selected] = goal
@@ -252,6 +276,8 @@ def _write_goal(env, selected: torch.Tensor) -> None:
         goal_term.all_goals_pos_w[selected] = goal[:, None, :]
     if hasattr(env, "_local_goal_world") and env._local_goal_world is not None:
         env._local_goal_world[selected, :2] = goal[:, :2]
+    if update_markers and hasattr(goal_term, "_update_goal_markers"):
+        goal_term._update_goal_markers()
 
 
 def setup_long_corridor_replay(
@@ -270,8 +296,7 @@ def setup_long_corridor_replay(
     """Replace a fraction of resets with the frozen deployment corridor."""
     if fraction <= 0.0:
         return
-    if static_obstacles != 4 or dynamic_obstacles != 2:
-        raise ValueError("long corridor replay is frozen at 4 static + 2 dynamic")
+    validate_obstacle_counts(static_obstacles, dynamic_obstacles)
 
     ids = _as_env_ids(env, env_ids)
     if ids.numel() == 0:
@@ -285,10 +310,33 @@ def setup_long_corridor_replay(
         float(dynamic_speed_min),
         float(dynamic_speed_max),
     )
+    env._long_corridor_obstacle_counts = (
+        int(static_obstacles),
+        int(dynamic_obstacles),
+    )
     _hide_corridor_walls(env, ids)
     env._long_corridor_reset_count += int(ids.numel())
 
-    selected = ids[torch.rand(ids.numel(), device=env.device) < float(fraction)]
+    # Previous-stage replay runs immediately before this event. Exclude those
+    # envs and compensate the Bernoulli probability so `fraction` remains the
+    # absolute long-corridor share of all resets.
+    eligible = ids
+    conditional_fraction = float(fraction)
+    if hasattr(env, "_previous_stage_replay_active"):
+        eligible = ids[~env._previous_stage_replay_active[ids]]
+        previous_fraction = float(
+            getattr(env, "_previous_stage_replay_fraction", 0.0)
+        )
+        conditional_fraction = min(
+            float(fraction) / max(1.0 - previous_fraction, 1e-6),
+            1.0,
+        )
+    if eligible.numel() == 0:
+        return
+    selected = eligible[
+        torch.rand(eligible.numel(), device=env.device)
+        < conditional_fraction
+    ]
     if selected.numel() == 0:
         return
 
@@ -323,9 +371,15 @@ def setup_long_corridor_replay(
     goal[:, 2] = 0.0
     env._long_corridor_goal_w[selected] = goal
     env._long_corridor_active[selected] = True
-    _write_goal(env, selected)
+    _write_goal(env, selected, update_markers=True)
     installed = _install_obstacles(
-        env, selected, spec, dynamic_speed_min, dynamic_speed_max
+        env,
+        selected,
+        spec,
+        dynamic_speed_min,
+        dynamic_speed_max,
+        static_obstacles,
+        dynamic_obstacles,
     )
 
     env._long_corridor_injected_count += int(selected.numel())
@@ -337,7 +391,8 @@ def setup_long_corridor_replay(
             f"{selected.numel()}/{ids.numel()} envs "
             f"free_width={spec.free_width:.2f}m length={spec.length:.2f}m "
             f"walls_x=+/-{spec.wall_center_offset:.2f}m "
-            f"obstacles=4S+2D speed=[{dynamic_speed_min:.2f},"
+            f"obstacles={static_obstacles}S+{dynamic_obstacles}D "
+            f"speed=[{dynamic_speed_min:.2f},"
             f"{dynamic_speed_max:.2f}]m/s pending_scheduler={pending} "
             "constructive_solvability=100%",
             flush=True,
@@ -361,6 +416,11 @@ def maintain_long_corridor_goal(env, env_ids=None) -> None:
     if pending.numel() > 0:
         speed_min, speed_max = env._long_corridor_speed_range
         _install_obstacles(
-            env, pending, env._long_corridor_spec, speed_min, speed_max
+            env,
+            pending,
+            env._long_corridor_spec,
+            speed_min,
+            speed_max,
+            *env._long_corridor_obstacle_counts,
         )
     _write_goal(env, selected)

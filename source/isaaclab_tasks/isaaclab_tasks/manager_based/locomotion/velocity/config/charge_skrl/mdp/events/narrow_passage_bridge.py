@@ -23,12 +23,13 @@ def configure_narrow_passage_assets(
     final_stress_ratio: float = 0.25,
     fixed_width_range: tuple[float, float] | None = None,
     fixed_yaw_limit_deg: float | None = None,
+    exact_width: float | None = None,
+    exact_width_ratio: float = 0.0,
 ) -> None:
     """Add two bridge-only wall assets and configure the reset event.
 
-    The assets are not part of the eight random SA5 wall slots. They remain
-    hidden for ordinary episodes, so 1-fraction of resets keep the original SA5
-    scene distribution.
+    The assets are not part of the eight random wall slots. They remain hidden
+    outside selected narrow-replay episodes.
     """
     from isaaclab.assets import RigidObjectCfg
     import isaaclab.sim as sim_utils
@@ -64,8 +65,26 @@ def configure_narrow_passage_assets(
             "final_stress_ratio": float(final_stress_ratio),
             "fixed_width_range": fixed_width_range,
             "fixed_yaw_limit_deg": fixed_yaw_limit_deg,
+            "exact_width": exact_width,
+            "exact_width_ratio": float(exact_width_ratio),
         }
     )
+    if not 0.0 <= float(exact_width_ratio) <= 1.0:
+        raise ValueError(
+            f"exact narrow-passage width ratio must be in [0, 1]: {exact_width_ratio}"
+        )
+    if (exact_width is None) != (float(exact_width_ratio) == 0.0):
+        raise ValueError(
+            "exact_width and a positive exact_width_ratio must be configured together"
+        )
+    if exact_width is not None:
+        if fixed_width_range is None:
+            raise ValueError("exact-width replay requires a fixed width range")
+        width_min, width_max = map(float, fixed_width_range)
+        if not width_min <= float(exact_width) <= width_max:
+            raise ValueError(
+                f"exact width {exact_width} is outside fixed range {fixed_width_range}"
+            )
     schedule_mode = (
         f"fixed widths={fixed_width_range} yaw=+/-{fixed_yaw_limit_deg}deg stress=0"
         if fixed_width_range is not None
@@ -73,9 +92,11 @@ def configure_narrow_passage_assets(
     )
     print(
         "[NARROW-BRIDGE-CONFIG] "
-        f"fraction={fraction:.3f} original_sa5={1.0 - fraction:.3f} "
+        f"fraction={fraction:.3f} "
         f"schedule_steps={schedule_steps} room_half={room_half_extent:.2f} "
-        f"segment_length={segment_length:.2f} schedule={schedule_mode} reward_unchanged=True",
+        f"segment_length={segment_length:.2f} schedule={schedule_mode} "
+        f"exact_width={exact_width} exact_ratio={float(exact_width_ratio):.3f} "
+        "reward_unchanged=True",
         flush=True,
     )
 
@@ -178,6 +199,8 @@ def setup_narrow_passage_bridge(
     final_stress_ratio: float = 0.25,
     fixed_width_range: tuple[float, float] | None = None,
     fixed_yaw_limit_deg: float | None = None,
+    exact_width: float | None = None,
+    exact_width_ratio: float = 0.0,
     wall_z: float = 1.5,
 ) -> None:
     """Replace a fraction of reset episodes with guaranteed-solvable wall gaps."""
@@ -191,18 +214,28 @@ def setup_narrow_passage_bridge(
     _hide_bridge_walls(env, ids)
     env._narrow_bridge_reset_count += int(ids.numel())
 
-    # The deployment corridor event runs immediately before this event. Keep
-    # the two replay classes disjoint and compensate the Bernoulli probability
-    # so `fraction` remains the absolute narrow share of all resets.
+    # Previous-stage and deployment-corridor events run before this event. Keep
+    # all replay classes disjoint and compensate the Bernoulli probability so
+    # `fraction` remains the absolute narrow share of all resets.
     eligible = ids
     conditional_fraction = float(fraction)
-    if hasattr(env, "_long_corridor_active"):
-        eligible = ids[~env._long_corridor_active[ids]]
-        corridor_fraction = float(getattr(env, "_long_corridor_fraction", 0.0))
-        conditional_fraction = min(
-            float(fraction) / max(1.0 - corridor_fraction, 1e-6),
-            1.0,
+    reserved_fraction = 0.0
+    if hasattr(env, "_previous_stage_replay_active"):
+        eligible = eligible[
+            ~env._previous_stage_replay_active[eligible]
+        ]
+        reserved_fraction += float(
+            getattr(env, "_previous_stage_replay_fraction", 0.0)
         )
+    if hasattr(env, "_long_corridor_active"):
+        eligible = eligible[~env._long_corridor_active[eligible]]
+        reserved_fraction += float(
+            getattr(env, "_long_corridor_fraction", 0.0)
+        )
+    conditional_fraction = min(
+        float(fraction) / max(1.0 - reserved_fraction, 1e-6),
+        1.0,
+    )
     if eligible.numel() == 0:
         return
     selected = eligible[
@@ -224,6 +257,12 @@ def setup_narrow_passage_bridge(
     gap_width = torch.empty(count, device=env.device).uniform_(
         schedule.width_min, schedule.width_max
     )
+    exact_mask = torch.zeros(count, dtype=torch.bool, device=env.device)
+    if exact_width is not None and exact_width_ratio > 0.0:
+        exact_mask = (
+            torch.rand(count, device=env.device) < float(exact_width_ratio)
+        )
+        gap_width[exact_mask] = float(exact_width)
     if schedule.stress_ratio > 0.0:
         stress = torch.rand(count, device=env.device) < schedule.stress_ratio
         if stress.any():
@@ -344,6 +383,7 @@ def setup_narrow_passage_bridge(
             "[NARROW-BRIDGE] injector FIRED: "
             f"{count}/{ids.numel()} envs progress={schedule.progress:.3f} "
             f"gap=[{float(gap_width.min()):.3f},{float(gap_width.max()):.3f}]m "
+            f"exact={int(exact_mask.sum())}/{count} "
             f"yaw=+/-{schedule.yaw_limit_deg:.1f}deg stress={int(stress.sum())}/{count} "
             f"constructive_solvability=100% mirror_left_right=True",
             flush=True,

@@ -94,6 +94,17 @@ def validate_spec(spec: LongCorridorSpec) -> None:
         raise ValueError("dynamic patrol lane can overlap a static obstacle")
 
 
+def validate_obstacle_counts(
+    static_obstacles: int,
+    dynamic_obstacles: int,
+) -> None:
+    """Validate a curriculum subset of the frozen 4S+2D template."""
+    if not 0 <= int(static_obstacles) <= 4:
+        raise ValueError("corridor static obstacle count must be in [0, 4]")
+    if not 0 <= int(dynamic_obstacles) <= 2:
+        raise ValueError("corridor dynamic obstacle count must be in [0, 2]")
+
+
 def wall_geometry(
     count: int,
     spec: LongCorridorSpec,

@@ -33,6 +33,7 @@ LongCorridorSpec = _MOD.LongCorridorSpec
 layout_is_constructively_solvable = _MOD.layout_is_constructively_solvable
 sample_obstacle_layout = _MOD.sample_obstacle_layout
 validate_spec = _MOD.validate_spec
+validate_obstacle_counts = _MOD.validate_obstacle_counts
 wall_geometry = _MOD.wall_geometry
 
 
@@ -61,3 +62,17 @@ def test_invalid_wall_clearance_is_rejected() -> None:
     except ValueError:
         return
     raise AssertionError("too-narrow deployment corridor was accepted")
+
+
+def test_curriculum_obstacle_subsets_stay_within_frozen_capacity() -> None:
+    for static, dynamic in ((2, 0), (3, 1), (4, 2)):
+        validate_obstacle_counts(static, dynamic)
+
+    for static, dynamic in ((-1, 0), (5, 0), (0, -1), (0, 3)):
+        try:
+            validate_obstacle_counts(static, dynamic)
+        except ValueError:
+            continue
+        raise AssertionError(
+            f"invalid corridor obstacle subset accepted: {static}S+{dynamic}D"
+        )

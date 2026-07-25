@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><style>
+html{background:#fff;}
+body{width:720pt;height:405pt;margin:0;padding:0;display:flex;font-family:'Noto Sans CJK TC',sans-serif;background:#EEF1F4;}
+.side{width:56pt;background:#2E8B57;display:flex;align-items:center;justify-content:center;}
+.side p{color:#fff;font-size:15pt;font-weight:bold;letter-spacing:4pt;writing-mode:vertical-rl;margin:0;}
+.main{flex:1;padding:20pt 26pt;display:flex;flex-direction:column;}
+.kicker{color:#2E8B57;font-size:11pt;letter-spacing:2pt;font-weight:bold;margin:0 0 3pt 0;}
+h1{color:#1B2A3A;font-size:22pt;margin:0 0 9pt 0;}
+.trow{display:flex;background:#fff;border:1px solid #D3DAE0;border-bottom:none;}
+.trow:last-child{border-bottom:1px solid #D3DAE0;}
+.trow.h{background:#2E4053;}
+.trow.h .tc p{color:#fff;font-weight:bold;font-size:11pt;margin:0;}
+.tc{padding:6pt 11pt;}
+.tc.k{flex:0.9;border-right:1px solid #E4E9ED;}
+.tc.d{flex:1.4;border-right:1px solid #E4E9ED;}
+.tc.r{flex:2.1;}
+.tc p{color:#44515E;font-size:10.5pt;margin:0;line-height:1.34;}
+.tc .rt{color:#1B2A3A;font-weight:bold;}
+.bad{color:#C0483B;font-weight:bold;}
+.concl{background:#1E4D3E;border-radius:8pt;padding:11pt 17pt;margin:9pt 0 0 0;}
+.concl .t{color:#8FE0B4;font-size:12pt;font-weight:bold;margin:0 0 6pt 0;letter-spacing:1pt;}
+.concl p{color:#E0F0E7;font-size:12.5pt;margin:0;line-height:1.5;}
+.concl b{color:#FFFFFF;}
+</style></head>
+<body>
+<div class="side"><p>統一結論</p></div>
+<div class="main">
+  <p class="kicker">四條路線一張表</p>
+  <h1>三個獨立方向，同一個根本原因</h1>
+  <div class="trow h"><div class="tc k"><p>路線</p></div><div class="tc d"><p>做法</p></div><div class="tc r"><p>決定性結果</p></div></div>
+  <div class="trow"><div class="tc k"><p class="rt">A 表徵化</p></div><div class="tc d"><p>RNN 自學隱式 MOT（velocity aux）</p></div><div class="tc r"><p>位置學得到、<span class="bad">速度學不到</span>（R²≈0）；且是輸入層問題 —— 單幀 LiDAR 連 oracle 都推不出速度</p></div></div>
+  <div class="trow"><div class="tc k"><p class="rt">B 顯式 channel</p></div><div class="tc d"><p>tracker [x,y,vx,vy,r] 直接餵 obs</p></div><div class="tc r"><p>三路 det eval：速度歸零、整條歸零 SR <span class="bad">全在噪音內</span> → channel 可省。梯度歸因翻案（H3：有讀但冗餘）</p></div></div>
+  <div class="trow"><div class="tc k"><p class="rt">Reward shaping</p></div><div class="tc d"><p>swept-arc / teardrop / TTC 稅逼用速度</p></div><div class="tc r"><p>全部<span class="bad">動不了 d_safe 分佈</span> → 避障風格由 reward 經濟學決定（論文級結論）</p></div></div>
+  <div class="trow"><div class="tc k"><p class="rt">必死場景</p></div><div class="tc d"><p>12×12/20 高密度、near-wall crossing</p></div><div class="tc r"><p>先撞到牆碰／packing 天花板；重現了 herding 病理但<span class="bad">沒逼出速度依賴</span></p></div></div>
+  <div class="concl"><p class="t">為什麼四路都碰壁</p><p><b>任務用不到速度就能過關</b>（reward 沒把速度變成必要）+ <b>資訊流把 encoder 從 RL 切開</b>（P1）。不是某個 bug、某個超參，是設計層的結構性問題。</p></div>
+</div>
+</body></html>

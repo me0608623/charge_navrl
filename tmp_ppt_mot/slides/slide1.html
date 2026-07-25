@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><style>
+html{background:#fff;}
+body{width:720pt;height:405pt;margin:0;padding:0;display:flex;font-family:'Noto Sans CJK TC',sans-serif;background:#16232F;}
+.wrap{margin:0;padding:52pt 56pt;display:flex;flex-direction:column;justify-content:center;width:100%;}
+.kicker{color:#5FB6C4;font-size:14pt;letter-spacing:3pt;margin:0 0 18pt 0;font-weight:bold;}
+h1{color:#FFFFFF;font-size:40pt;line-height:1.18;margin:0 0 10pt 0;}
+.accent{color:#5FB6C4;}
+.sub{color:#B8C4CE;font-size:17pt;margin:0 0 30pt 0;}
+.bar{width:70pt;height:5pt;background:#5FB6C4;margin:0 0 26pt 0;}
+.meta{display:flex;gap:14pt;}
+.tag{background:#22323F;border:1px solid #33475A;border-radius:6pt;padding:9pt 14pt;}
+.tag p{color:#9FB0BC;font-size:11pt;margin:0;}
+.tag b{color:#E8EEF2;}
+.thesis{background:#1E4D3E;border-left:6pt solid #4CB782;border-radius:6pt;padding:12pt 16pt;margin:26pt 0 0 0;}
+.thesis p{color:#D6ECE0;font-size:12.5pt;margin:0;line-height:1.4;}
+</style></head>
+<body>
+<div class="wrap">
+  <p class="kicker">進度報告 · 實驗室 MEETING · 2026-07-16</p>
+  <h1>讓 RL 學會使用 <span class="accent">MOT</span><br>動態障礙運動資訊</h1>
+  <div class="bar"></div>
+  <p class="sub">三條路線的實驗歷程與決定性結果</p>
+  <div class="meta">
+    <div class="tag"><p>任務　<b>差速輪 + 2D LiDAR</b></p></div>
+    <div class="tag"><p>場景　<b>密集動態行人導航</b></p></div>
+    <div class="tag"><p>觀測　<b>79D（無特權障礙）</b></p></div>
+  </div>
+  <div class="thesis"><p><b>一句話結論：</b>無論用哪種方式把速度放進系統（RNN 隱式學／顯式 channel／reward 逼），policy 都不會主動使用速度 —— 因為<b>任務用不到速度就能過關</b>。</p></div>
+</div>
+</body></html>

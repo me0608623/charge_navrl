@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html><head><style>
+html{background:#fff;}
+body{width:720pt;height:405pt;margin:0;padding:0;display:flex;font-family:'Noto Sans CJK TC',sans-serif;background:#EEF1F4;}
+.side{width:56pt;background:#2C8C99;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.side .big{color:#fff;font-size:34pt;font-weight:bold;margin:0;}
+.side .sm{color:#BfE3E8;font-size:11pt;margin:6pt 0 0 0;writing-mode:vertical-rl;letter-spacing:3pt;}
+.main{flex:1;padding:20pt 26pt;display:flex;flex-direction:column;}
+.head{display:flex;justify-content:space-between;align-items:flex-start;margin:0 0 12pt 0;}
+.kicker{color:#2C8C99;font-size:11pt;letter-spacing:2pt;font-weight:bold;margin:0 0 3pt 0;}
+h1{color:#1B2A3A;font-size:23pt;margin:0;}
+.chip{background:#FBEAD0;border:1px solid #E7B36A;border-radius:20pt;padding:7pt 15pt;}
+.chip p{color:#8A5312;font-size:11pt;font-weight:bold;margin:0;}
+.row{display:flex;gap:18pt;flex:1;}
+.col{flex:1;display:flex;flex-direction:column;}
+.lbl{color:#2C8C99;font-size:11.5pt;font-weight:bold;margin:0 0 6pt 0;letter-spacing:1pt;}
+ul{margin:0 0 9pt 0;padding-left:15pt;}
+li{color:#44515E;font-size:11.5pt;line-height:1.45;margin-bottom:3pt;}
+li b{color:#1B2A3A;}
+.ruler{background:#fff;border:1px solid #DCE2E8;border-radius:6pt;padding:9pt 12pt;margin:0 0 8pt 0;}
+.ruler p{margin:0;color:#44515E;font-size:11pt;line-height:1.35;}
+.ruler .t{color:#2C8C99;font-weight:bold;}
+.bad{color:#C0483B;font-weight:bold;}
+.trow{display:flex;background:#fff;border:1px solid #DCE2E8;border-bottom:none;}
+.trow:last-child{border-bottom:1px solid #DCE2E8;border-radius:0 0 5pt 5pt;}
+.trow.h{background:#2C8C99;border-radius:5pt 5pt 0 0;}
+.tc{flex:1;padding:6pt 9pt;}
+.tc.k{flex:1.5;}
+.trow.h .tc p{color:#fff;font-size:10.5pt;font-weight:bold;margin:0;}
+.tc p{color:#44515E;font-size:10.5pt;margin:0;line-height:1.3;}
+</style></head>
+<body>
+<div class="side"><p class="big">B</p><p class="sm">顯式 channel</p></div>
+<div class="main">
+  <div class="head">
+    <div><p class="kicker">路線 B · 顯式 LV-DOT 速度 channel</p><h1>直接把速度餵進 obs</h1></div>
+    <div class="chip"><p>裁決：有讀但冗餘 · channel 可省</p></div>
+  </div>
+  <div class="row">
+    <div class="col">
+      <p class="lbl">做法（接線已 parity 驗證 1e-8）</p>
+      <ul>
+        <li>tracker 的 <b>[x,y,vx,vy,r]</b>（K=5）直接餵 obs：79D → 109D</li>
+        <li>三把尺方法論：機制 / 行為 / 結果，缺一不可</li>
+      </ul>
+      <div class="ruler"><p><span class="t">機制</span>　ablation 速度頭 KL = <span class="bad">0.0001</span>（加稅後降到 0）→ 完全不因障礙改變速度</p></div>
+      <div class="ruler"><p><span class="t">行為</span>　距障礙 0–0.5m 仍<span class="bad">全速 0.82 m/s</span> 前衝、ω 全程平 → velocity-blind</p></div>
+      <div class="ruler"><p><span class="t">結果</span>　velocity-zero ablation ΔSR <span class="bad">≈ 0</span></p></div>
+    </div>
+    <div class="col">
+      <p class="lbl">三路 det eval（各 ~6400 回合）</p>
+      <div class="trow h"><div class="tc k"><p>條件</p></div><div class="tc"><p>SR</p></div><div class="tc"><p>撞障礙</p></div></div>
+      <div class="trow"><div class="tc k"><p>A 速度完整</p></div><div class="tc"><p>63.9%</p></div><div class="tc"><p>26.4%</p></div></div>
+      <div class="trow"><div class="tc k"><p>B 只歸零 vx,vy</p></div><div class="tc"><p>63.8%</p></div><div class="tc"><p>26.5%</p></div></div>
+      <div class="trow"><div class="tc k"><p>C 整條 channel 歸零</p></div><div class="tc"><p>63.9%</p></div><div class="tc"><p>25.9%</p></div></div>
+      <p class="lbl" style="margin-top:9pt;">梯度歸因翻案（H3）</p>
+      <ul>
+        <li>速度欄敏感度 = LiDAR 的 <b>51%</b>（不是 0，policy 確實有讀）</li>
+        <li>但 ΔSR≈0 → <b>有讀但冗餘</b>：反應式靠 LiDAR 就過關</li>
+        <li>★ <b>梯度敏感度 ≠ 因果重要性</b>；問題不在架構，在任務</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</body></html>

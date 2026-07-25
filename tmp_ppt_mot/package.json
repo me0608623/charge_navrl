@@ -1,0 +1,17 @@
+{
+  "name": "tmp_ppt_mot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "playwright": "^1.61.1",
+    "pptxgenjs": "^4.0.1",
+    "sharp": "^0.35.3"
+  }
+}

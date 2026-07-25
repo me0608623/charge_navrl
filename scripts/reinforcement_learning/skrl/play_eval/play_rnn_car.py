@@ -159,6 +159,63 @@ parser.add_argument(
     default=None,
     help="Optional JSON path for same-frame policy comparison metrics.",
 )
+# === Multi-expert routing（additive；不影響單專家路徑）===
+parser.add_argument(
+    "--multi_expert",
+    action="store_true",
+    default=False,
+    help="啟用多專家路由：載入 corridor + narrow 兩個 e2e 專家，router 每步依 LiDAR "
+         "決定每個 env 用哪個專家的動作。啟用時忽略 --checkpoint 的單專家推論。",
+)
+parser.add_argument(
+    "--corridor_ckpt",
+    type=str,
+    default=None,
+    help="走廊/開闊專家 checkpoint（e2e K8 frame-stack）。--multi_expert 必填。",
+)
+parser.add_argument(
+    "--narrow_ckpt",
+    type=str,
+    default=None,
+    help="窄縫專家 checkpoint（e2e K8 frame-stack）。--multi_expert 必填。",
+)
+parser.add_argument(
+    "--router_mode",
+    type=str,
+    default="rule",
+    choices=["rule", "always_corridor", "always_narrow"],
+    help="路由模式：rule=啟發式；always_*=固定路由（parity 用）。",
+)
+parser.add_argument(
+    "--router_side_clear_thresh",
+    type=float,
+    default=1.10,
+    help="router 閾值：左右兩側最近牆 < 此值（公尺）視為被牆夾住。",
+)
+parser.add_argument(
+    "--router_front_min_clear",
+    type=float,
+    default=0.55,
+    help="router 閾值：前方最近障礙 > 此值（公尺）視為前方有路。",
+)
+parser.add_argument(
+    "--router_front_cone_deg",
+    type=float,
+    default=30.0,
+    help="router 前錐半角（度）。",
+)
+parser.add_argument(
+    "--router_side_cone_deg",
+    type=float,
+    default=40.0,
+    help="router 側錐半角（度）。",
+)
+parser.add_argument(
+    "--router_verbose_every",
+    type=int,
+    default=100,
+    help="每 N 步列印一次路由分布統計（0=不列印）。",
+)
 parser.add_argument("--stage", type=int, default=STAGE,
                     help="固定 curriculum 階段（1-indexed）用於觀察")
 parser.add_argument("--curriculum_version", type=str, default=None,
@@ -249,6 +306,61 @@ parser.add_argument("--long_corridor_eval", action="store_true", default=False,
                     help="部署走廊 Gate：4m 自由寬、10m 長、4 靜態+2 動態障礙")
 parser.add_argument("--long_corridor_output", type=str, default="",
                     help="部署走廊 Gate JSON 輸出路徑")
+parser.add_argument("--long_corridor_static_obstacles", type=int, default=4,
+                    help="走廊診斷用靜態障礙數；正式 Gate 預設維持 4")
+parser.add_argument("--long_corridor_dynamic_obstacles", type=int, default=2,
+                    help="走廊診斷用動態障礙數；正式 Gate 預設維持 2")
+parser.add_argument(
+    "--future_occupancy_counterfactual_audit",
+    action="store_true",
+    default=False,
+    help="在 long-corridor deterministic eval 中比較 policy 動作、只轉向、只煞車及 19x19 全動作的 future risk",
+)
+parser.add_argument(
+    "--future_occupancy_counterfactual_output",
+    type=str,
+    default="",
+    help="future-occupancy 反事實動作審計 JSON 輸出路徑",
+)
+parser.add_argument(
+    "--future_occupancy_counterfactual_risk_threshold",
+    type=float,
+    default=0.05,
+    help="只對 selected future risk 達此值或發生動態碰撞的 active 幀展開 19x19 動作",
+)
+parser.add_argument(
+    "--future_occupancy_counterfactual_lead_steps",
+    type=int,
+    default=8,
+    help="動態碰撞前回溯的 counterfactual lead-time 步數（dt=0.2s）",
+)
+parser.add_argument(
+    "--privileged_corridor_teacher",
+    action="store_true",
+    default=False,
+    help="teacher-only 閉環審計：以 waypoint-aware、OBB-aware 19x19 teacher 取代 policy 動作",
+)
+parser.add_argument(
+    "--privileged_corridor_teacher_shadow",
+    action="store_true",
+    default=False,
+    help=(
+        "DAgger 資料收集：計算 privileged teacher 標籤，但仍執行 policy "
+        "動作，使 probe 包含 student 實際造訪的狀態"
+    ),
+)
+parser.add_argument(
+    "--privileged_corridor_teacher_output",
+    type=str,
+    default="",
+    help="teacher-only 走廊審計 JSON 輸出路徑",
+)
+parser.add_argument(
+    "--privileged_corridor_teacher_probe_output",
+    type=str,
+    default="",
+    help="保存 policy 179D 輸入與同幀 teacher actions，供 held-out 可學性 probe",
+)
 parser.add_argument("--solvability_audit_output", type=str, default="",
                     help="診斷每回合起始場景的牆/靜態/全障礙可達性並輸出 JSON；不改 gate 或 policy")
 parser.add_argument("--solvability_grid_resolution", type=float, default=0.15,
@@ -605,7 +717,34 @@ sys.path.insert(0, str(_skrl_root / "models"))         # skrl/models/（modular_
 sys.path.insert(0, str(_skrl_root / "utils"))          # skrl/utils/（charge_env_overrides.py, wd_aux_targets.py）
 
 from charge_env_overrides import apply_charge_env_overrides  # env_cfg 覆寫工具
-from modular_rnn_models import ACT_HIST_DIM, LIDAR_CONV_CH, STATE_DIM, LidarStateExtractor, PolicyHead, PreprocessRNN, RNNStateManager, ValueHead, LVDOTEncoder  # 模型元件
+from modular_rnn_models import (
+    ACT_HIST_DIM,
+    LIDAR_CONV_CH,
+    STATE_DIM,
+    CorridorResidualAdapter,
+    LidarStateExtractor,
+    LVDOTEncoder,
+    PolicyHead,
+    PreprocessRNN,
+    RNNStateManager,
+    ValueHead,
+)
+from rnn_car_wdclean.privileged_corridor_teacher import (
+    CorridorTeacherSpec,
+    corridor_teacher_action_grid,
+    predict_patrol_obstacle_paths,
+    select_teacher_rollout_actions,
+)
+from rnn_car_wdclean.corridor_eval_metrics import (
+    corridor_clear_mask,
+    summarize_corridor_actions,
+)
+from rnn_car_wdclean.reward_diagnostics import (
+    FutureOccupancyLeadTimeAudit,
+    decode_discrete_drive_action_grid,
+    future_occupancy_action_counterfactuals,
+    future_occupancy_risk_grid,
+)
 from rnn_car_wdclean.teacher_retention import categorical_forward_kl
 from wd_aux_targets import build_wd_preprocess_targets  # RNN aux 7D target 計算
 
@@ -2680,23 +2819,32 @@ def main():
             configure_long_corridor_assets,
         )
 
+        _corridor_static_obstacles = int(
+            args_cli.long_corridor_static_obstacles
+        )
+        _corridor_dynamic_obstacles = int(
+            args_cli.long_corridor_dynamic_obstacles
+        )
         configure_long_corridor_assets(
             env_cfg,
             fraction=1.0,
             free_width=4.0,
             length=10.0,
-            static_obstacles=4,
-            dynamic_obstacles=2,
+            static_obstacles=_corridor_static_obstacles,
+            dynamic_obstacles=_corridor_dynamic_obstacles,
             dynamic_speed_range=(0.30, 0.60),
         )
+        # Dynamic corridor slots start at index 4. Keep four asset/scheduler
+        # slots even on the 2S+0D diagnostic rung; unused slots are hidden.
         scene_final["num_static"] = 4
-        scene_final["num_dynamic"] = 2
+        scene_final["num_dynamic"] = _corridor_dynamic_obstacles
         args_cli.obstacle_behavior = "patrol"
         args_cli.obs_near_goal_count = 0
         args_cli.path_blocker_count = 0
         print(
             "[PLAY] Deployment corridor gate: free_width=4.00m length=10.00m "
-            "obstacles=4S+2D patrol=[0.30,0.60]m/s"
+            f"obstacles={_corridor_static_obstacles}S+"
+            f"{_corridor_dynamic_obstacles}D patrol=[0.30,0.60]m/s"
         )
 
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
@@ -2992,6 +3140,53 @@ def main():
     else:
         _head_in_dim = _rl_in_dim
     policy_head = PolicyHead(input_dim=_head_in_dim).to(device)
+    corridor_adapter = None
+    if "corridor_adapter" in ckpt:
+        _corridor_adapter_residual_features = str(
+            ckpt_args.get(
+                "corridor_adapter_residual_features",
+                "current_obs",
+            )
+        )
+        if _corridor_adapter_residual_features not in (
+            "current_obs",
+            "policy_features",
+        ):
+            raise ValueError(
+                "unsupported corridor adapter residual feature source: "
+                f"{_corridor_adapter_residual_features}"
+            )
+        corridor_adapter = CorridorResidualAdapter(
+            input_dim=policy_obs_dim,
+            residual_input_dim=(
+                _head_in_dim
+                if _corridor_adapter_residual_features == "policy_features"
+                else policy_obs_dim
+            ),
+            hidden_dim=int(
+                ckpt_args.get("corridor_adapter_hidden_dim", 64)
+            ),
+            gate_init_probability=float(
+                ckpt_args.get(
+                    "corridor_adapter_gate_init_probability",
+                    0.01,
+                )
+            ),
+            max_logit_delta=float(
+                ckpt_args.get("corridor_adapter_max_logit_delta", 2.0)
+            ),
+        ).to(device)
+        corridor_adapter.load_state_dict(ckpt["corridor_adapter"])
+        corridor_adapter.eval()
+        print(
+            "[PLAY] Corridor residual adapter loaded "
+            "(deployable 83D observation gate, residual="
+            f"{_corridor_adapter_residual_features})"
+        )
+    elif bool(ckpt_args.get("corridor_adapter_enabled", False)):
+        raise RuntimeError(
+            "checkpoint metadata enables corridor adapter but its state is missing"
+        )
     # Asymmetric critic（v2）：ValueHead 多一條 50D privileged 通道
     # 雖然 play 不會真的呼叫 value forward，但 load_state_dict 必須 shape 對齊
     critic_profile = ckpt_args.get("critic_profile", "symmetric")
@@ -3139,6 +3334,14 @@ def main():
                 "kl_angular": 0.0,
                 "agreement_linear": 0.0,
                 "agreement_angular": 0.0,
+                "disagreement_linear": 0.0,
+                "disagreement_angular": 0.0,
+                "primary_margin_linear": 0.0,
+                "primary_margin_angular": 0.0,
+                "compare_margin_linear": 0.0,
+                "compare_margin_angular": 0.0,
+                "primary_margin_linear_on_disagreement": 0.0,
+                "primary_margin_angular_on_disagreement": 0.0,
                 "primary_brake": 0.0,
                 "compare_brake": 0.0,
                 "primary_coast": 0.0,
@@ -3157,6 +3360,110 @@ def main():
     rnn_state = RNNStateManager(raw_env.num_envs, hidden_dim, device)
 
     # ================================================================
+    # 6b. Multi-expert routing 設定（additive；--multi_expert 才啟用）
+    # ================================================================
+    # 目標:載入兩個 e2e K8 frame-stack 專家(corridor + narrow)+ 一個 router,
+    #   rollout 時對每專家各自 forward(各自 obs_normalizer + lidar_hist + extractor +
+    #   policy_head),router 每步依「原始公尺 LiDAR」決定每個 env 用哪個專家的動作。
+    # 每專家隔離:{mean,var,extractor,policy_head,lidar_hist}。唯一共享=raw obs 與
+    #   POLICY_OBS_INDICES 切片與 env。done reset 時每專家 lidar_hist 對 done envs 歸零。
+    _experts = None
+    _router_cfg = None
+    if args_cli.multi_expert:
+        from multi_expert_router import (
+            RouterConfig,
+            route as _router_route,
+            routing_stats as _router_stats,
+            EXPERT_CORRIDOR,
+            EXPERT_NARROW,
+        )
+
+        if not args_cli.corridor_ckpt or not args_cli.narrow_ckpt:
+            raise ValueError("--multi_expert 需同時提供 --corridor_ckpt 與 --narrow_ckpt")
+        if not (end_to_end_frame_stack and use_extractor and lidar_frame_stack >= 2):
+            raise ValueError(
+                "multi_expert 目前僅支援 e2e K8 frame-stack checkpoint "
+                "(end_to_end_frame_stack=True, extractor_rnn, lidar_frame_stack>=2)"
+            )
+
+        _runtime_dim_me = obs_tensor.shape[-1]
+
+        def load_expert(ckpt_path, label):
+            """載入一個 e2e 專家為可重複呼叫的 bundle。
+
+            回傳 dict:{label, extractor, policy_head, mean, var, lidar_hist,
+                      hist_dim}。extractor/policy_head 依主專家相同結構建立
+            (legacy/include_act_hist/frame_stack/policy_obs_dim/privileged 一致),
+            再從各自 checkpoint 載入權重與 obs_normalizer 統計。
+            """
+            _p = os.path.abspath(os.path.expanduser(ckpt_path))
+            _ck = torch.load(_p, map_location=device, weights_only=False)
+            _ck_args = _ck.get("args", {})
+            # 契約檢查:必須與主 e2e 結構相容(否則 stack/normalizer 對不上)
+            if not bool(_ck_args.get("end_to_end_frame_stack", False)):
+                raise ValueError(f"[{label}] {ckpt_path} 不是 e2e frame-stack checkpoint")
+            if int(_ck_args.get("lidar_frame_stack", 1)) != lidar_frame_stack:
+                raise ValueError(
+                    f"[{label}] lidar_frame_stack={_ck_args.get('lidar_frame_stack')} "
+                    f"!= 主 {lidar_frame_stack}"
+                )
+            # extractor:偵測 legacy / act_hist(比照主專家載入邏輯)
+            _ext_state = _ck.get("extractor", {})
+            _lp = _ext_state.get("lidar_proj.weight", None)
+            _legacy = _lp is not None and _lp.shape[1] == LIDAR_CONV_CH
+            _sw = _ext_state.get("state_mlp.0.weight", None)
+            _inc_act = not (_sw is not None and _sw.shape[1] == STATE_DIM - ACT_HIST_DIM)
+            _ext = LidarStateExtractor(
+                legacy=_legacy, include_act_hist=_inc_act, frame_stack=lidar_frame_stack,
+            ).to(device)
+            _ext.load_state_dict(_ext_state, strict=True)
+            _ext.train(False)
+            for _pm in _ext.parameters():
+                _pm.requires_grad_(False)
+            # policy_head:輸入 = policy_obs_dim + extractor.output_dim(與主專家一致)
+            _ph = PolicyHead(input_dim=policy_obs_dim + _ext.output_dim).to(device)
+            _ph.load_state_dict(_ck["policy_head"], strict=True)
+            _ph.train(False)
+            for _pm in _ph.parameters():
+                _pm.requires_grad_(False)
+            # obs_normalizer:各專家獨立統計
+            _on = _ck.get("obs_normalizer")
+            if _on is None:
+                raise ValueError(f"[{label}] checkpoint 缺 obs_normalizer")
+            _m = _on["mean"].to(device).reshape(-1)
+            _v = _on["var"].to(device).reshape(-1)
+            if _m.numel() != _runtime_dim_me:
+                raise ValueError(
+                    f"[{label}] obs_normalizer dim {_m.numel()} != runtime {_runtime_dim_me}"
+                )
+            _hist_dim = (lidar_frame_stack - 1) * 72
+            _lh = torch.zeros(raw_env.num_envs, _hist_dim, device=device)
+            print(f"[PLAY][multi_expert] 載入專家 '{label}': {_p} "
+                  f"(legacy={_legacy}, act_hist={_inc_act}, hist_dim={_hist_dim})")
+            return {
+                "label": label,
+                "extractor": _ext,
+                "policy_head": _ph,
+                "mean": _m,
+                "var": _v,
+                "lidar_hist": _lh,
+                "hist_dim": _hist_dim,
+            }
+
+        # 索引順序必須對齊 router:0=corridor, 1=narrow
+        _experts = [
+            load_expert(args_cli.corridor_ckpt, "corridor"),
+            load_expert(args_cli.narrow_ckpt, "narrow"),
+        ]
+        _router_cfg = RouterConfig(
+            side_clear_thresh=args_cli.router_side_clear_thresh,
+            front_min_clear=args_cli.router_front_min_clear,
+            front_cone_deg=args_cli.router_front_cone_deg,
+            side_cone_deg=args_cli.router_side_cone_deg,
+        )
+        print(f"[PLAY][multi_expert] router_mode={args_cli.router_mode} cfg={_router_cfg}")
+
+    # ================================================================
     # 7. 障礙物運動控制
     # ================================================================
     # 預設關閉 scripted 運動（與訓練行為一致）
@@ -3170,7 +3477,12 @@ def main():
     _n_dynamic_play = scene_final["num_dynamic"]
     # num_dynamic=0 → 全部強制靜態，跳過 BehaviorScheduler
     _effective_behavior = args_cli.obstacle_behavior
-    if _n_dynamic_play == 0 and _effective_behavior and _effective_behavior != "static":
+    if (
+        _n_dynamic_play == 0
+        and not args_cli.long_corridor_eval
+        and _effective_behavior
+        and _effective_behavior != "static"
+    ):
         print(f"[PLAY] num_dynamic_obs=0 → obstacle_behavior 強制改為 'static'（原設定: '{_effective_behavior}'）")
         _effective_behavior = "static"
     if _effective_behavior and _effective_behavior != "static":
@@ -3256,6 +3568,38 @@ def main():
 
     _long_corridor_motion_last = None
     _long_corridor_motion_max = None
+    _long_corridor_goal_error_max = 0.0
+    _long_corridor_local_goal_error_max = 0.0
+    _long_corridor_applied_actions: list[torch.Tensor] = []
+    _long_corridor_clear_actions: list[torch.Tensor] = []
+
+    def _audit_long_corridor_goal() -> None:
+        nonlocal _long_corridor_goal_error_max
+        nonlocal _long_corridor_local_goal_error_max
+        if not args_cli.long_corridor_eval:
+            return
+        active = getattr(raw_env, "_long_corridor_active", None)
+        expected = getattr(raw_env, "_long_corridor_goal_w", None)
+        if active is None or expected is None or not bool(active.any()):
+            return
+        goal_term = raw_env.command_manager.get_term("goal_command")
+        command_error = torch.linalg.vector_norm(
+            goal_term.command[active, :2] - expected[active, :2], dim=1
+        )
+        _long_corridor_goal_error_max = max(
+            _long_corridor_goal_error_max,
+            float(command_error.max().item()),
+        )
+        local_goal = getattr(raw_env, "_local_goal_world", None)
+        if local_goal is not None:
+            local_error = torch.linalg.vector_norm(
+                local_goal[active, :2] - expected[active, :2], dim=1
+            )
+            _long_corridor_local_goal_error_max = max(
+                _long_corridor_local_goal_error_max,
+                float(local_error.max().item()),
+            )
+
     if args_cli.long_corridor_eval:
         if _play_behavior_scheduler is None:
             raise RuntimeError(
@@ -3272,17 +3616,23 @@ def main():
             fraction=1.0,
             free_width=4.0,
             length=10.0,
-            static_obstacles=4,
-            dynamic_obstacles=2,
+            static_obstacles=_corridor_static_obstacles,
+            dynamic_obstacles=_corridor_dynamic_obstacles,
             dynamic_speed_min=0.30,
             dynamic_speed_max=0.60,
         )
+        _corridor_dynamic_slice = slice(
+            4, 4 + _corridor_dynamic_obstacles
+        )
         _long_corridor_motion_last = (
-            _play_behavior_scheduler.positions[:, 4:6].clone()
+            _play_behavior_scheduler.positions[
+                :, _corridor_dynamic_slice
+            ].clone()
         )
         _long_corridor_motion_max = torch.zeros(
-            raw_env.num_envs, 2, device=device
+            raw_env.num_envs, _corridor_dynamic_obstacles, device=device
         )
+        _audit_long_corridor_goal()
 
     print(
         "[PLAY] 障礙物運動: "
@@ -3423,6 +3773,181 @@ def main():
     # 讀取動作項目參數（用於計算 ω_target）
     _action_term_ref = list(raw_env.action_manager._terms.values())[0]
     _max_ang_vel = float(_action_term_ref.cfg.max_angular_vel)
+    _corridor_teacher_override = bool(
+        args_cli.privileged_corridor_teacher
+    )
+    _corridor_teacher_shadow = bool(
+        args_cli.privileged_corridor_teacher_shadow
+    )
+    if _corridor_teacher_override and _corridor_teacher_shadow:
+        raise ValueError(
+            "choose exactly one privileged corridor teacher mode: "
+            "override or shadow"
+        )
+    _corridor_teacher_enabled = (
+        _corridor_teacher_override or _corridor_teacher_shadow
+    )
+    _corridor_teacher_stats = None
+    _corridor_teacher_spec = None
+    _corridor_teacher_probe = None
+    if _corridor_teacher_enabled:
+        if not args_cli.long_corridor_eval:
+            raise ValueError(
+                "privileged corridor teacher modes require "
+                "--long_corridor_eval"
+            )
+        if not args_cli.deterministic:
+            raise ValueError(
+                "privileged corridor teacher modes require --deterministic"
+            )
+        if bool(
+            getattr(_action_term_ref.cfg, "enable_actuator_dr", False)
+        ):
+            raise ValueError(
+                "privileged corridor teacher does not model actuator DR"
+            )
+        _teacher_zero = lambda: torch.zeros(  # noqa: E731
+            (), dtype=torch.float32, device=device
+        )
+        _corridor_teacher_stats = {
+            key: _teacher_zero()
+            for key in (
+                "frames",
+                "feasible_frames",
+                "feasible_fraction_sum",
+                "agreement_both",
+                "agreement_linear",
+                "agreement_angular",
+                "teacher_brake",
+                "teacher_strong_turn",
+                "teacher_stop_command",
+                "teacher_left_turn",
+                "teacher_right_turn",
+            )
+        }
+        _corridor_teacher_spec = CorridorTeacherSpec()
+        if args_cli.privileged_corridor_teacher_probe_output:
+            _corridor_teacher_probe = {
+                "policy_input": [],
+                "teacher_action": [],
+                "policy_action": [],
+                "feasible": [],
+                "env_id": [],
+            }
+        print(
+            "[CORRIDOR-TEACHER] enabled "
+            f"(mode={'override' if _corridor_teacher_override else 'shadow'}): "
+            "waypoint-aware patrol prediction, "
+            "OBB-circle obstacles, OBB-AABB walls, 19x19 reachable actions, "
+            f"horizon={_corridor_teacher_spec.horizon_s:.1f}s, "
+            "reverse=disabled, future_pause_branches=0/5 steps",
+            flush=True,
+        )
+    _future_cf_enabled = bool(
+        args_cli.future_occupancy_counterfactual_audit
+    )
+    _future_cf_stats = None
+    _future_cf_lead_audit = None
+    if _future_cf_enabled:
+        if not args_cli.long_corridor_eval:
+            raise ValueError(
+                "--future_occupancy_counterfactual_audit requires "
+                "--long_corridor_eval"
+            )
+        if not args_cli.deterministic:
+            raise ValueError(
+                "--future_occupancy_counterfactual_audit requires "
+                "--deterministic"
+            )
+        if bool(
+            getattr(_action_term_ref.cfg, "enable_actuator_dr", False)
+        ):
+            raise ValueError(
+                "future-occupancy counterfactual audit does not model "
+                "actuator DR"
+            )
+        if args_cli.future_occupancy_counterfactual_risk_threshold < 0.0:
+            raise ValueError(
+                "counterfactual risk threshold must be non-negative"
+            )
+        if args_cli.future_occupancy_counterfactual_lead_steps < 1:
+            raise ValueError(
+                "counterfactual lead steps must be positive"
+            )
+
+        def _future_cf_zero() -> torch.Tensor:
+            return torch.zeros((), dtype=torch.float32, device=device)
+
+        def _future_cf_bucket() -> dict[str, torch.Tensor]:
+            return {
+                key: _future_cf_zero()
+                for key in (
+                    "frames",
+                    "selected_risk_sum",
+                    "best_any_risk_sum",
+                    "best_turn_risk_sum",
+                    "best_brake_risk_sum",
+                    "safe_any_count",
+                    "safe_turn_count",
+                    "safe_brake_count",
+                    "meaningful_any_count",
+                    "meaningful_turn_count",
+                    "meaningful_brake_count",
+                )
+            }
+
+        def _future_cf_update_bucket(
+            bucket: dict[str, torch.Tensor],
+            result: dict[str, torch.Tensor],
+            mask: torch.Tensor | None = None,
+        ) -> None:
+            selected = result["selected_risk"]
+            if mask is not None:
+                selected = selected[mask]
+            if selected.numel() == 0:
+                return
+            bucket["frames"] += selected.new_tensor(
+                float(selected.numel())
+            )
+            bucket["selected_risk_sum"] += selected.sum()
+            for label in ("any", "turn", "brake"):
+                best = result[f"best_{label}_risk"]
+                if mask is not None:
+                    best = best[mask]
+                bucket[f"best_{label}_risk_sum"] += best.sum()
+                bucket[f"safe_{label}_count"] += (
+                    best <= 0.01
+                ).float().sum()
+                bucket[f"meaningful_{label}_count"] += (
+                    selected - best >= 0.20
+                ).float().sum()
+
+        _future_cf_stats = {
+            "total_frames": _future_cf_zero(),
+            "active_frames": _future_cf_zero(),
+            "selected_risky_frames": _future_cf_zero(),
+            "dynamic_collision_frames": _future_cf_zero(),
+            "dynamic_collision_inactive_frames": _future_cf_zero(),
+            "audited": _future_cf_bucket(),
+            "dynamic_collision": _future_cf_bucket(),
+            "selected_risk_recompute_max_error": _future_cf_zero(),
+            "decoded_linear_max_error_mps": _future_cf_zero(),
+            "decoded_angular_max_error_rad_s": _future_cf_zero(),
+        }
+        _future_cf_lead_audit = FutureOccupancyLeadTimeAudit(
+            raw_env.num_envs,
+            max_lead_steps=int(
+                args_cli.future_occupancy_counterfactual_lead_steps
+            ),
+            device=device,
+        )
+        print(
+            "[FUTURE-CF-AUDIT] enabled: selected risk >= "
+            f"{args_cli.future_occupancy_counterfactual_risk_threshold:.3f} "
+            "or dynamic collision; safe<=0.01, meaningful delta>=0.20; "
+            f"lead=1..{args_cli.future_occupancy_counterfactual_lead_steps} steps",
+            flush=True,
+        )
 
     # --- 回合統計計數器 ---
     stats_goal = 0       # 到達目標次數
@@ -3894,7 +4419,60 @@ def main():
                                    lvdot_encoder(rl_in[..., _L - 30:_L]),
                                    rl_in[..., _L:]], dim=-1)
             logits = policy_head(rl_in)                        # Policy head 輸出 logits
+            if corridor_adapter is not None:
+                _corridor_residual, _, _ = corridor_adapter(
+                    p_obs,
+                    (
+                        rl_in
+                        if _corridor_adapter_residual_features
+                        == "policy_features"
+                        else None
+                    ),
+                )
+                logits = logits + _corridor_residual
             actions = sample_action(logits, args_cli.deterministic)  # 取樣或 argmax
+            # === Multi-expert routing 覆寫（additive）===
+            # 對每專家各自 forward(各自 normalize→各自 lidar_hist stack→各自 extractor→
+            #   各自 policy_head),router 用「原始公尺 LiDAR」(obs_tensor[:,6:78],未正規化)
+            #   決定每個 env 的專家索引,再從對應專家的 logits 取動作。
+            #   單專家路徑(上方 logits/actions)照跑但被此處覆寫,故不影響 --multi_expert 關閉時行為。
+            if _experts is not None:
+                _me_logits = []
+                for _exp in _experts:
+                    # 各自 obs_normalizer 正規化(與該專家訓練統計一致)
+                    _exp_normed = torch.clamp(
+                        (obs_tensor - _exp["mean"]) / (_exp["var"].sqrt() + 1e-8),
+                        -5.0, 5.0,
+                    )
+                    # 各自 policy obs 切片(共享 POLICY_OBS_INDICES)
+                    _exp_p_obs = charge_obs_for_rl(_exp_normed)
+                    # 各自 K8 lidar 歷史 stack:extractor 輸入 = cat(normed_obs, lidar_hist)
+                    _exp_ext_in = torch.cat([_exp_normed, _exp["lidar_hist"]], dim=-1)
+                    _exp_feat = _exp["extractor"](_exp_ext_in)
+                    _exp_rl_in = torch.cat([_exp_p_obs, _exp_feat], dim=-1)
+                    _me_logits.append(_exp["policy_head"](_exp_rl_in))
+                    # 更新該專家的 lidar_hist:prepend 當前 normed lidar,drop oldest
+                    _exp_cur_lidar = _exp_normed[:, 6:78]
+                    if _exp["hist_dim"] > 0:
+                        _exp["lidar_hist"] = torch.cat(
+                            [_exp_cur_lidar, _exp["lidar_hist"][:, :-72]], dim=-1
+                        )
+                # router:用原始公尺 LiDAR(未正規化前錐距離)
+                _router_lidar_m = obs_tensor[:, 6:78]
+                _choice = _router_route(
+                    _router_lidar_m, mode=args_cli.router_mode, cfg=_router_cfg
+                )  # [B] long, 0=corridor 1=narrow
+                # gather:每個 env 取對應專家的 logits
+                _stacked = torch.stack(_me_logits, dim=0)  # [n_expert, B, 38]
+                _idx = _choice.view(1, -1, 1).expand(1, _stacked.shape[1], _stacked.shape[2])
+                _sel_logits = _stacked.gather(0, _idx).squeeze(0)  # [B, 38]
+                actions = sample_action(_sel_logits, args_cli.deterministic)
+                logits = _sel_logits  # 讓下游診斷(反應曲線等)用實際採用的 logits
+                if args_cli.router_verbose_every > 0 and (step % args_cli.router_verbose_every == 0):
+                    _rs = _router_stats(_choice)
+                    print(f"[PLAY][multi_expert] step {step}: "
+                          f"corridor={_rs['corridor']} narrow={_rs['narrow']} "
+                          f"narrow_frac={_rs['narrow_frac']:.2f}", flush=True)
             if _compare_extractor is not None:
                 _compare_obs_normed = torch.clamp(
                     (obs_tensor - _compare_mean)
@@ -3931,6 +4509,28 @@ def main():
                 _primary_angular_idx = _primary_angular.argmax(dim=-1)
                 _shadow_linear_idx = _shadow_linear.argmax(dim=-1)
                 _shadow_angular_idx = _shadow_angular.argmax(dim=-1)
+                _primary_linear_margin = (
+                    _primary_linear.topk(2, dim=-1).values[:, 0]
+                    - _primary_linear.topk(2, dim=-1).values[:, 1]
+                )
+                _primary_angular_margin = (
+                    _primary_angular.topk(2, dim=-1).values[:, 0]
+                    - _primary_angular.topk(2, dim=-1).values[:, 1]
+                )
+                _shadow_linear_margin = (
+                    _shadow_linear.topk(2, dim=-1).values[:, 0]
+                    - _shadow_linear.topk(2, dim=-1).values[:, 1]
+                )
+                _shadow_angular_margin = (
+                    _shadow_angular.topk(2, dim=-1).values[:, 0]
+                    - _shadow_angular.topk(2, dim=-1).values[:, 1]
+                )
+                _linear_disagreement = (
+                    _primary_linear_idx != _shadow_linear_idx
+                )
+                _angular_disagreement = (
+                    _primary_angular_idx != _shadow_angular_idx
+                )
                 _kl_linear_frame = categorical_forward_kl(
                     _primary_linear, _shadow_linear
                 )
@@ -3998,6 +4598,44 @@ def main():
                             _primary_angular_idx[_region_mask]
                             == _shadow_angular_idx[_region_mask]
                         ).sum().item()
+                    )
+                    _linear_disagree_mask = (
+                        _region_mask & _linear_disagreement
+                    )
+                    _angular_disagree_mask = (
+                        _region_mask & _angular_disagreement
+                    )
+                    _stats["disagreement_linear"] += float(
+                        _linear_disagree_mask.sum().item()
+                    )
+                    _stats["disagreement_angular"] += float(
+                        _angular_disagree_mask.sum().item()
+                    )
+                    _stats["primary_margin_linear"] += float(
+                        _primary_linear_margin[_region_mask].sum().item()
+                    )
+                    _stats["primary_margin_angular"] += float(
+                        _primary_angular_margin[_region_mask].sum().item()
+                    )
+                    _stats["compare_margin_linear"] += float(
+                        _shadow_linear_margin[_region_mask].sum().item()
+                    )
+                    _stats["compare_margin_angular"] += float(
+                        _shadow_angular_margin[_region_mask].sum().item()
+                    )
+                    _stats[
+                        "primary_margin_linear_on_disagreement"
+                    ] += float(
+                        _primary_linear_margin[
+                            _linear_disagree_mask
+                        ].sum().item()
+                    )
+                    _stats[
+                        "primary_margin_angular_on_disagreement"
+                    ] += float(
+                        _primary_angular_margin[
+                            _angular_disagree_mask
+                        ].sum().item()
                     )
                     _stats["primary_brake"] += float(
                         (_primary_linear_idx[_region_mask] < 9).sum().item()
@@ -4106,6 +4744,17 @@ def main():
                                        lvdot_encoder(_rl_g[..., _Lg - 30:_Lg]),
                                        _rl_g[..., _Lg:]], dim=-1)
                 _lg_g = policy_head(_rl_g)
+                if corridor_adapter is not None:
+                    _adapter_residual_g, _, _ = corridor_adapter(
+                        _p,
+                        (
+                            _rl_g
+                            if _corridor_adapter_residual_features
+                            == "policy_features"
+                            else None
+                        ),
+                    )
+                    _lg_g = _lg_g + _adapter_residual_g
                 _S = torch.logsumexp(_lg_g, dim=-1).sum()
                 _S.backward()
                 _g = _xn.grad.abs().mean(dim=0)          # [D] per-dim 敏感度(normalized 空間)
@@ -4138,6 +4787,349 @@ def main():
         # 但 per-env hidden reset 需要寫入，所以要 clone
         new_hidden = new_hidden.clone()
 
+        if _corridor_teacher_enabled:
+            with torch.no_grad():
+                _teacher_policy_actions = actions.detach().clone()
+                (
+                    _teacher_obstacle_paths_moving,
+                    _teacher_obstacle_valid_moving,
+                ) = predict_patrol_obstacle_paths(
+                    _play_behavior_scheduler.positions,
+                    _play_behavior_scheduler.behavior_type,
+                    _play_behavior_scheduler.patrol_waypoints,
+                    _play_behavior_scheduler.patrol_wp_index,
+                    _play_behavior_scheduler.patrol_num_waypoints,
+                    _play_behavior_scheduler.patrol_speed,
+                    _play_behavior_scheduler.patrol_pause_remaining,
+                    dt=float(step_dt),
+                    samples=_corridor_teacher_spec.samples,
+                    new_waypoint_pause_steps=0,
+                )
+                (
+                    _teacher_obstacle_paths_paused,
+                    _teacher_obstacle_valid_paused,
+                ) = predict_patrol_obstacle_paths(
+                    _play_behavior_scheduler.positions,
+                    _play_behavior_scheduler.behavior_type,
+                    _play_behavior_scheduler.patrol_waypoints,
+                    _play_behavior_scheduler.patrol_wp_index,
+                    _play_behavior_scheduler.patrol_num_waypoints,
+                    _play_behavior_scheduler.patrol_speed,
+                    _play_behavior_scheduler.patrol_pause_remaining,
+                    dt=float(step_dt),
+                    samples=_corridor_teacher_spec.samples,
+                    new_waypoint_pause_steps=5,
+                )
+                _teacher_obstacle_paths = torch.cat(
+                    [
+                        _teacher_obstacle_paths_moving,
+                        _teacher_obstacle_paths_paused,
+                    ],
+                    dim=1,
+                )
+                _teacher_obstacle_valid = torch.cat(
+                    [
+                        _teacher_obstacle_valid_moving,
+                        _teacher_obstacle_valid_paused,
+                    ],
+                    dim=1,
+                )
+                _teacher_robot = raw_env.scene["robot"].data
+                _teacher_robot_xy = (
+                    _teacher_robot.root_pos_w[:, :2]
+                    - raw_env.scene.env_origins[:, :2]
+                )
+                _teacher_q = _teacher_robot.root_quat_w
+                _teacher_yaw = torch.atan2(
+                    2.0
+                    * (
+                        _teacher_q[:, 0] * _teacher_q[:, 3]
+                        + _teacher_q[:, 1] * _teacher_q[:, 2]
+                    ),
+                    1.0
+                    - 2.0
+                    * (
+                        _teacher_q[:, 2].square()
+                        + _teacher_q[:, 3].square()
+                    ),
+                )
+                _teacher_goal_term = raw_env.command_manager.get_term(
+                    "goal_command"
+                )
+                _teacher_goal_xy = (
+                    _teacher_goal_term.goal_pos_w[:, :2]
+                    - raw_env.scene.env_origins[:, :2]
+                )
+                _teacher_slot_count = (
+                    _play_behavior_scheduler.positions.shape[1]
+                )
+                _teacher_radii = getattr(
+                    raw_env, "_obstacle_phys_radii", None
+                )
+                if _teacher_radii is None:
+                    _teacher_radii = torch.full(
+                        (
+                            raw_env.num_envs,
+                            _teacher_slot_count,
+                        ),
+                        0.30,
+                        dtype=_teacher_robot_xy.dtype,
+                        device=device,
+                    )
+                else:
+                    _teacher_radii = _teacher_radii[
+                        :, :_teacher_slot_count
+                    ]
+                _teacher_radii = torch.cat(
+                    [_teacher_radii, _teacher_radii], dim=1
+                )
+                _teacher_cfg = _action_term_ref.cfg
+                _teacher_result = corridor_teacher_action_grid(
+                    current_velocity=(
+                        _action_term_ref._current_velocity.clone()
+                    ),
+                    current_omega=(
+                        _action_term_ref._current_omega.clone()
+                    ),
+                    robot_xy_m=_teacher_robot_xy,
+                    robot_yaw_rad=_teacher_yaw,
+                    goal_xy_m=_teacher_goal_xy,
+                    obstacle_paths_m=_teacher_obstacle_paths,
+                    obstacle_radii_m=_teacher_radii,
+                    obstacle_valid=_teacher_obstacle_valid,
+                    wall_centers_m=(
+                        raw_env._long_corridor_wall_centers
+                    ),
+                    wall_sizes_m=raw_env._long_corridor_wall_sizes,
+                    wall_valid=raw_env._long_corridor_wall_mask,
+                    num_bins=int(_teacher_cfg.num_bins),
+                    dt=float(_action_term_ref._dt),
+                    max_linear_velocity=float(
+                        _teacher_cfg.max_linear_velocity
+                    ),
+                    reverse_velocity_scale=float(
+                        _teacher_cfg.reverse_velocity_scale
+                    ),
+                    max_linear_accel=float(
+                        _teacher_cfg.max_linear_accel
+                    ),
+                    max_angular_velocity=float(
+                        _teacher_cfg.max_angular_vel
+                    ),
+                    max_angular_accel=float(
+                        _teacher_cfg.max_angular_accel
+                    ),
+                    spec=_corridor_teacher_spec,
+                )
+                _teacher_feasible = _teacher_result["any_feasible"]
+                _teacher_actions = _teacher_result["actions"]
+                actions = select_teacher_rollout_actions(
+                    _teacher_policy_actions,
+                    _teacher_actions,
+                    _teacher_feasible,
+                    override=_corridor_teacher_override,
+                ).float()
+
+                _teacher_policy_indices = (
+                    _teacher_policy_actions.round().long()
+                )
+                _corridor_teacher_stats["frames"] += actions.new_tensor(
+                    float(raw_env.num_envs)
+                )
+                _corridor_teacher_stats[
+                    "feasible_frames"
+                ] += _teacher_feasible.float().sum()
+                _corridor_teacher_stats[
+                    "feasible_fraction_sum"
+                ] += _teacher_result["feasible_fraction"].sum()
+                _corridor_teacher_stats["agreement_both"] += (
+                    (_teacher_actions == _teacher_policy_indices).all(dim=1)
+                    & _teacher_feasible
+                ).float().sum()
+                _corridor_teacher_stats["agreement_linear"] += (
+                    (_teacher_actions[:, 0] == _teacher_policy_indices[:, 0])
+                    & _teacher_feasible
+                ).float().sum()
+                _corridor_teacher_stats["agreement_angular"] += (
+                    (_teacher_actions[:, 1] == _teacher_policy_indices[:, 1])
+                    & _teacher_feasible
+                ).float().sum()
+                _corridor_teacher_stats["teacher_brake"] += (
+                    (_teacher_actions[:, 0] < int(_teacher_cfg.num_bins) // 2)
+                    & _teacher_feasible
+                ).float().sum()
+                _corridor_teacher_stats["teacher_strong_turn"] += (
+                    (
+                        _teacher_actions[:, 1]
+                        - int(_teacher_cfg.num_bins) // 2
+                    ).abs()
+                    >= 6
+                ).logical_and(_teacher_feasible).float().sum()
+                _corridor_teacher_stats["teacher_left_turn"] += (
+                    (
+                        _teacher_actions[:, 1]
+                        < int(_teacher_cfg.num_bins) // 2
+                    )
+                    & _teacher_feasible
+                ).float().sum()
+                _corridor_teacher_stats["teacher_right_turn"] += (
+                    (
+                        _teacher_actions[:, 1]
+                        > int(_teacher_cfg.num_bins) // 2
+                    )
+                    & _teacher_feasible
+                ).float().sum()
+                _teacher_env_index = torch.arange(
+                    raw_env.num_envs, device=device
+                )
+                _teacher_selected_v = _teacher_result[
+                    "linear_velocity_grid"
+                ][
+                    _teacher_env_index,
+                    _teacher_actions[:, 0],
+                    _teacher_actions[:, 1],
+                ]
+                _corridor_teacher_stats[
+                    "teacher_stop_command"
+                ] += (
+                    (_teacher_selected_v.abs() < 0.10)
+                    & _teacher_feasible
+                ).float().sum()
+                if _corridor_teacher_probe is not None:
+                    _corridor_teacher_probe["policy_input"].append(
+                        rl_in.detach().to(
+                            device="cpu", dtype=torch.float16
+                        )
+                    )
+                    _corridor_teacher_probe["teacher_action"].append(
+                        _teacher_actions.detach().to(
+                            device="cpu", dtype=torch.uint8
+                        )
+                    )
+                    _corridor_teacher_probe["policy_action"].append(
+                        _teacher_policy_indices.detach().to(
+                            device="cpu", dtype=torch.uint8
+                        )
+                    )
+                    _corridor_teacher_probe["feasible"].append(
+                        _teacher_feasible.detach().to(device="cpu")
+                    )
+                    _corridor_teacher_probe["env_id"].append(
+                        torch.arange(
+                            raw_env.num_envs, dtype=torch.int16
+                        )
+                    )
+
+        _future_cf_step = None
+        if _future_cf_enabled:
+            with torch.no_grad():
+                _cf_cfg = _action_term_ref.cfg
+                _cf_current_v = _action_term_ref._current_velocity.clone()
+                _cf_current_w = _action_term_ref._current_omega.clone()
+                _cf_robot = raw_env.scene["robot"].data
+                _cf_robot_local_xy = (
+                    _cf_robot.root_pos_w[:, :2]
+                    - raw_env.scene.env_origins[:, :2]
+                )
+                _cf_delta_world = (
+                    _play_behavior_scheduler.positions[:, :, :2]
+                    - _cf_robot_local_xy[:, None, :]
+                )
+                _cf_velocity_world = (
+                    _play_behavior_scheduler.velocities[:, :, :2]
+                )
+                _cf_q = _cf_robot.root_quat_w
+                _cf_yaw = torch.atan2(
+                    2.0
+                    * (
+                        _cf_q[:, 0] * _cf_q[:, 3]
+                        + _cf_q[:, 1] * _cf_q[:, 2]
+                    ),
+                    1.0
+                    - 2.0
+                    * (_cf_q[:, 2].square() + _cf_q[:, 3].square()),
+                )
+                _cf_cos = torch.cos(_cf_yaw)[:, None]
+                _cf_sin = torch.sin(_cf_yaw)[:, None]
+                _cf_obstacle_pos = torch.stack(
+                    [
+                        _cf_cos * _cf_delta_world[:, :, 0]
+                        + _cf_sin * _cf_delta_world[:, :, 1],
+                        -_cf_sin * _cf_delta_world[:, :, 0]
+                        + _cf_cos * _cf_delta_world[:, :, 1],
+                    ],
+                    dim=-1,
+                )
+                _cf_obstacle_vel = torch.stack(
+                    [
+                        _cf_cos * _cf_velocity_world[:, :, 0]
+                        + _cf_sin * _cf_velocity_world[:, :, 1],
+                        -_cf_sin * _cf_velocity_world[:, :, 0]
+                        + _cf_cos * _cf_velocity_world[:, :, 1],
+                    ],
+                    dim=-1,
+                )
+                _cf_linear_grid, _cf_angular_grid = (
+                    decode_discrete_drive_action_grid(
+                        _cf_current_v,
+                        _cf_current_w,
+                        num_bins=int(_cf_cfg.num_bins),
+                        dt=float(_action_term_ref._dt),
+                        max_linear_velocity=float(
+                            _cf_cfg.max_linear_velocity
+                        ),
+                        reverse_velocity_scale=float(
+                            _cf_cfg.reverse_velocity_scale
+                        ),
+                        max_linear_accel=float(
+                            _cf_cfg.max_linear_accel
+                        ),
+                        max_angular_velocity=float(
+                            _cf_cfg.max_angular_vel
+                        ),
+                        max_angular_accel=float(
+                            _cf_cfg.max_angular_accel
+                        ),
+                    )
+                )
+                _cf_action_indices = actions.round().long()
+                _cf_linear_index = _cf_action_indices[:, 0].clamp(
+                    0, int(_cf_cfg.num_bins) - 1
+                )
+                _cf_angular_index = _cf_action_indices[:, 1].clamp(
+                    0, int(_cf_cfg.num_bins) - 1
+                )
+                _cf_env_index = torch.arange(
+                    raw_env.num_envs, device=device
+                )
+                _cf_selected_v = _cf_linear_grid[
+                    _cf_env_index, _cf_linear_index, _cf_angular_index
+                ]
+                _cf_selected_w = _cf_angular_grid[
+                    _cf_env_index, _cf_linear_index, _cf_angular_index
+                ]
+                (
+                    _cf_selected_risk_grid,
+                    _,
+                    _cf_active,
+                ) = future_occupancy_risk_grid(
+                    _cf_selected_v[:, None, None],
+                    _cf_selected_w[:, None, None],
+                    _cf_obstacle_pos,
+                    _cf_obstacle_vel,
+                )
+                _future_cf_step = {
+                    "current_v": _cf_current_v,
+                    "current_w": _cf_current_w,
+                    "actions": actions.detach().clone(),
+                    "obstacle_pos": _cf_obstacle_pos,
+                    "obstacle_vel": _cf_obstacle_vel,
+                    "selected_v": _cf_selected_v,
+                    "selected_w": _cf_selected_w,
+                    "selected_risk": _cf_selected_risk_grid[:, 0, 0],
+                    "active": _cf_active,
+                }
+
         # --- 環境步進 ---
         _t0_env = time.time()
         if _near_wall_controller is not None:
@@ -4146,6 +5138,37 @@ def main():
         if _controlled_blocker_controller is not None:
             _controlled_blocker_controller.advance()
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
+        if args_cli.long_corridor_eval:
+            _corridor_applied = getattr(
+                _action_term_ref, "processed_actions", None
+            )
+            _corridor_active = getattr(
+                raw_env, "_long_corridor_active", None
+            )
+            if (
+                _corridor_applied is not None
+                and _corridor_active is not None
+                and _corridor_applied.shape[0] == raw_env.num_envs
+                and bool(_corridor_active.any())
+            ):
+                _long_corridor_applied_actions.append(
+                    _corridor_applied[_corridor_active, :2]
+                    .detach()
+                    .clone()
+                )
+                _corridor_obs = obs_tensor.reshape(
+                    raw_env.num_envs, -1
+                )
+                _corridor_clear = (
+                    _corridor_active
+                    & corridor_clear_mask(_corridor_obs)
+                )
+                if bool(_corridor_clear.any()):
+                    _long_corridor_clear_actions.append(
+                        _corridor_applied[_corridor_clear, :2]
+                        .detach()
+                        .clone()
+                    )
         if _narrow_gap_controller is not None:
             _narrow_gap_controller.observe()
         # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
@@ -4156,14 +5179,168 @@ def main():
         # Goal movement 每步移動 goal（與訓練一致）
         if _play_goal_mover is not None:
             _play_goal_mover(raw_env)
+        _audit_long_corridor_goal()
         # RSGS-Lite: stuck detection + recovery goal injection
         if rsgs_filter is not None:
             rsgs_filter.step(obs_tensor)
         # 合併 terminated + truncated 為 done 旗標
         done = (terminated.squeeze(-1) | truncated.squeeze(-1)) if terminated.ndim > 1 else (terminated | truncated)
+        if _future_cf_step is not None:
+            with torch.no_grad():
+                _cf_active = _future_cf_step["active"]
+                _cf_selected_risk = _future_cf_step["selected_risk"]
+                _future_cf_stats["total_frames"] += _cf_active.new_tensor(
+                    float(_cf_active.numel()), dtype=torch.float32
+                )
+                _cf_dynamic_collision = getattr(
+                    raw_env,
+                    "_obs_collision_dynamic_mask",
+                    torch.zeros_like(_cf_active),
+                ).reshape(-1).bool()
+                _future_cf_stats["active_frames"] += (
+                    _cf_active.float().sum()
+                )
+                _future_cf_stats["selected_risky_frames"] += (
+                    _cf_active
+                    & (
+                        _cf_selected_risk
+                        >= float(
+                            args_cli.future_occupancy_counterfactual_risk_threshold
+                        )
+                    )
+                ).float().sum()
+                _future_cf_stats["dynamic_collision_frames"] += (
+                    _cf_dynamic_collision.float().sum()
+                )
+                _future_cf_stats[
+                    "dynamic_collision_inactive_frames"
+                ] += (_cf_dynamic_collision & ~_cf_active).float().sum()
+
+                _cf_valid_decode = ~done
+                if bool(_cf_valid_decode.any()):
+                    _cf_processed = _action_term_ref.processed_actions
+                    _future_cf_stats[
+                        "decoded_linear_max_error_mps"
+                    ] = torch.maximum(
+                        _future_cf_stats[
+                            "decoded_linear_max_error_mps"
+                        ],
+                        (
+                            _future_cf_step["selected_v"][
+                                _cf_valid_decode
+                            ]
+                            - _cf_processed[_cf_valid_decode, 0]
+                        )
+                        .abs()
+                        .max(),
+                    )
+                    _future_cf_stats[
+                        "decoded_angular_max_error_rad_s"
+                    ] = torch.maximum(
+                        _future_cf_stats[
+                            "decoded_angular_max_error_rad_s"
+                        ],
+                        (
+                            _future_cf_step["selected_w"][
+                                _cf_valid_decode
+                            ]
+                            - _cf_processed[_cf_valid_decode, 1]
+                        )
+                        .abs()
+                        .max(),
+                    )
+
+                _cf_audit_mask = _cf_active & (
+                    (
+                        _cf_selected_risk
+                        >= float(
+                            args_cli.future_occupancy_counterfactual_risk_threshold
+                        )
+                    )
+                    | _cf_dynamic_collision
+                )
+                _cf_best_any_full = torch.zeros_like(_cf_selected_risk)
+                _cf_best_turn_full = torch.zeros_like(
+                    _cf_selected_risk
+                )
+                _cf_best_brake_full = torch.zeros_like(
+                    _cf_selected_risk
+                )
+                if bool(_cf_audit_mask.any()):
+                    _cf_cfg = _action_term_ref.cfg
+                    _cf_result = (
+                        future_occupancy_action_counterfactuals(
+                            _future_cf_step["current_v"][_cf_audit_mask],
+                            _future_cf_step["current_w"][_cf_audit_mask],
+                            _future_cf_step["actions"][_cf_audit_mask],
+                            _future_cf_step["obstacle_pos"][_cf_audit_mask],
+                            _future_cf_step["obstacle_vel"][_cf_audit_mask],
+                            num_bins=int(_cf_cfg.num_bins),
+                            dt=float(_action_term_ref._dt),
+                            max_linear_velocity=float(
+                                _cf_cfg.max_linear_velocity
+                            ),
+                            reverse_velocity_scale=float(
+                                _cf_cfg.reverse_velocity_scale
+                            ),
+                            max_linear_accel=float(
+                                _cf_cfg.max_linear_accel
+                            ),
+                            max_angular_velocity=float(
+                                _cf_cfg.max_angular_vel
+                            ),
+                            max_angular_accel=float(
+                                _cf_cfg.max_angular_accel
+                            ),
+                        )
+                    )
+                    _future_cf_update_bucket(
+                        _future_cf_stats["audited"], _cf_result
+                    )
+                    _future_cf_stats[
+                        "selected_risk_recompute_max_error"
+                    ] = torch.maximum(
+                        _future_cf_stats[
+                            "selected_risk_recompute_max_error"
+                        ],
+                        (
+                            _cf_result["selected_risk"]
+                            - _cf_selected_risk[_cf_audit_mask]
+                        )
+                        .abs()
+                        .max(),
+                    )
+                    _cf_collision_in_audit = _cf_dynamic_collision[
+                        _cf_audit_mask
+                    ]
+                    _future_cf_update_bucket(
+                        _future_cf_stats["dynamic_collision"],
+                        _cf_result,
+                        _cf_collision_in_audit,
+                    )
+                    _cf_best_any_full[_cf_audit_mask] = _cf_result[
+                        "best_any_risk"
+                    ]
+                    _cf_best_turn_full[_cf_audit_mask] = _cf_result[
+                        "best_turn_risk"
+                    ]
+                    _cf_best_brake_full[_cf_audit_mask] = _cf_result[
+                        "best_brake_risk"
+                    ]
+                _future_cf_lead_audit.record_step(
+                    selected_risk=_cf_selected_risk,
+                    best_any_risk=_cf_best_any_full,
+                    best_turn_risk=_cf_best_turn_full,
+                    best_brake_risk=_cf_best_brake_full,
+                    audited_mask=_cf_audit_mask,
+                    dynamic_collision=_cf_dynamic_collision,
+                    done=done,
+                )
         if _long_corridor_motion_last is not None:
             _corridor_dynamic_now = (
-                _play_behavior_scheduler.positions[:, 4:6].clone()
+                _play_behavior_scheduler.positions[
+                    :, _corridor_dynamic_slice
+                ].clone()
             )
             _corridor_dynamic_delta = (
                 _corridor_dynamic_now - _long_corridor_motion_last
@@ -4543,6 +5720,13 @@ def main():
                 _compare_hist_c = _compare_lidar_hist.clone()
                 _compare_hist_c[done_ids] = 0.0
                 _compare_lidar_hist = _compare_hist_c
+            # multi_expert:每專家 lidar_hist 對 done envs 歸零(比照單專家 _lh reset)
+            if _experts is not None and len(done_ids) > 0:
+                for _exp in _experts:
+                    if _exp["hist_dim"] > 0:
+                        _exp_hist_c = _exp["lidar_hist"].clone()
+                        _exp_hist_c[done_ids] = 0.0
+                        _exp["lidar_hist"] = _exp_hist_c
             episode_reward[done_ids] = 0.0
             episode_step[done_ids] = 0
             episode_speed_sum[done_ids] = 0.0
@@ -4772,19 +5956,53 @@ def main():
         _moving_slots = (
             _long_corridor_motion_max > 0.01
             if _long_corridor_motion_max is not None
-            else torch.zeros(raw_env.num_envs, 2, dtype=torch.bool, device=device)
+            else torch.zeros(
+                raw_env.num_envs,
+                _corridor_dynamic_obstacles,
+                dtype=torch.bool,
+                device=device,
+            )
         )
         _corridor_behavior = _play_behavior_scheduler.behavior_type
         _static_count = (_corridor_behavior == 1).sum(dim=1)
         _dynamic_count = (_corridor_behavior >= 2).sum(dim=1)
         _obstacle_mix_pass = bool(
-            ((_static_count == 4) & (_dynamic_count == 2)).all().item()
+            (
+                (_static_count == _corridor_static_obstacles)
+                & (_dynamic_count == _corridor_dynamic_obstacles)
+            ).all().item()
+        )
+        _movement_pass = bool(
+            _corridor_dynamic_obstacles == 0
+            or _moving_slots.all().item()
+        )
+        _dynamic_moved_fraction = (
+            float(_moving_slots.float().mean().item())
+            if _corridor_dynamic_obstacles > 0
+            else 1.0
         )
         _corridor_sr = stats_goal / stats_total if stats_total else 0.0
         _corridor_cr = (
             (stats_wall + stats_obs) / stats_total if stats_total else 0.0
         )
         _corridor_to = stats_timeout / stats_total if stats_total else 0.0
+        _corridor_action_metrics = summarize_corridor_actions(
+            (
+                torch.cat(_long_corridor_applied_actions, dim=0)
+                if _long_corridor_applied_actions
+                else torch.empty(0, 2, device=device)
+            )
+        )
+        _corridor_clear_metrics = {
+            f"clear_{key}": value
+            for key, value in summarize_corridor_actions(
+                (
+                    torch.cat(_long_corridor_clear_actions, dim=0)
+                    if _long_corridor_clear_actions
+                    else torch.empty(0, 2, device=device)
+                )
+            ).items()
+        }
         _corridor_report = {
             "episodes": int(stats_total),
             "success_rate": float(_corridor_sr),
@@ -4797,9 +6015,9 @@ def main():
             "active_env_fraction": float(
                 raw_env._long_corridor_active.float().mean().item()
             ),
-            "dynamic_slots_moved_fraction": float(
-                _moving_slots.float().mean().item()
-            ),
+            "configured_static_obstacles": _corridor_static_obstacles,
+            "configured_dynamic_obstacles": _corridor_dynamic_obstacles,
+            "dynamic_slots_moved_fraction": _dynamic_moved_fraction,
             "static_obstacles_per_env": float(_static_count.float().mean().item()),
             "dynamic_obstacles_per_env": float(_dynamic_count.float().mean().item()),
             "obstacle_mix_pass": _obstacle_mix_pass,
@@ -4808,7 +6026,10 @@ def main():
             ),
             "max_dynamic_step_displacement_m": float(
                 _long_corridor_motion_max.max().item()
-                if _long_corridor_motion_max is not None
+                if (
+                    _long_corridor_motion_max is not None
+                    and _long_corridor_motion_max.numel() > 0
+                )
                 else 0.0
             ),
             "geometry_pass": bool(
@@ -4823,12 +6044,21 @@ def main():
                     atol=1e-5,
                 )
             ),
-            "movement_pass": bool(_moving_slots.all().item()),
+            "movement_pass": _movement_pass,
+            "goal_command_max_error_m": _long_corridor_goal_error_max,
+            "local_goal_max_error_m": _long_corridor_local_goal_error_max,
+            "goal_alignment_pass": bool(
+                _long_corridor_goal_error_max <= 1e-5
+                and _long_corridor_local_goal_error_max <= 1e-5
+            ),
+            **_corridor_action_metrics,
+            **_corridor_clear_metrics,
         }
         _corridor_report["gate_pass"] = bool(
             _corridor_report["geometry_pass"]
             and _corridor_report["movement_pass"]
             and _corridor_report["obstacle_mix_pass"]
+            and _corridor_report["goal_alignment_pass"]
             and _corridor_report["constructive_unsolvable_count"] == 0
             and stats_total > 0
             and _corridor_sr >= 0.90
@@ -4842,6 +6072,11 @@ def main():
             f"width={_corridor_report['free_width_m_mean']:.3f}m "
             f"length={_corridor_report['length_m_mean']:.3f}m "
             f"dynamic_moved={_corridor_report['dynamic_slots_moved_fraction']:.1%} "
+            f"goal_err_max={_corridor_report['goal_command_max_error_m']:.2e}m "
+            f"|omega|p90={float(_corridor_report['angular_abs_p90_rad_s'] or 0.0):.3f} "
+            f"high_turn={float(_corridor_report['high_turn_fraction'] or 0.0):.1%} "
+            f"low_v_high_turn={float(_corridor_report['low_speed_high_turn_fraction'] or 0.0):.1%} "
+            f"clear_|omega|p90={float(_corridor_report['clear_angular_abs_p90_rad_s'] or 0.0):.3f} "
             f"PASS={_corridor_report['gate_pass']}",
             flush=True,
         )
@@ -4853,6 +6088,372 @@ def main():
                 encoding="utf-8",
             )
             print(f"[LONG-CORRIDOR-METRICS] JSON report: {_corridor_output}")
+    if _corridor_teacher_stats is not None:
+        def _teacher_float(value: torch.Tensor) -> float:
+            return float(value.detach().cpu().item())
+
+        _teacher_frames = _teacher_float(
+            _corridor_teacher_stats["frames"]
+        )
+        _teacher_feasible_frames = _teacher_float(
+            _corridor_teacher_stats["feasible_frames"]
+        )
+        _teacher_frame_denom = max(_teacher_frames, 1.0)
+        _teacher_feasible_denom = max(_teacher_feasible_frames, 1.0)
+        _teacher_report = {
+            "checkpoint_policy_observation_source": os.path.abspath(
+                ckpt_path
+            ),
+            "teacher_replaced_policy_actions": (
+                _corridor_teacher_override
+            ),
+            "teacher_mode": (
+                "override" if _corridor_teacher_override else "shadow"
+            ),
+            "frames": int(round(_teacher_frames)),
+            "feasible_frame_fraction": (
+                _teacher_feasible_frames / _teacher_frame_denom
+            ),
+            "mean_feasible_action_fraction": (
+                _teacher_float(
+                    _corridor_teacher_stats["feasible_fraction_sum"]
+                )
+                / _teacher_frame_denom
+            ),
+            "policy_teacher_agreement_both": (
+                _teacher_float(
+                    _corridor_teacher_stats["agreement_both"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "policy_teacher_agreement_linear": (
+                _teacher_float(
+                    _corridor_teacher_stats["agreement_linear"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "policy_teacher_agreement_angular": (
+                _teacher_float(
+                    _corridor_teacher_stats["agreement_angular"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "teacher_brake_fraction": (
+                _teacher_float(
+                    _corridor_teacher_stats["teacher_brake"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "teacher_strong_turn_fraction": (
+                _teacher_float(
+                    _corridor_teacher_stats["teacher_strong_turn"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "teacher_stop_command_fraction": (
+                _teacher_float(
+                    _corridor_teacher_stats["teacher_stop_command"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "teacher_left_turn_fraction": (
+                _teacher_float(
+                    _corridor_teacher_stats["teacher_left_turn"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "teacher_right_turn_fraction": (
+                _teacher_float(
+                    _corridor_teacher_stats["teacher_right_turn"]
+                )
+                / _teacher_feasible_denom
+            ),
+            "closed_loop_outcome": _corridor_report,
+        }
+        print(
+            "[CORRIDOR-TEACHER] "
+            f"feasible={_teacher_report['feasible_frame_fraction']:.1%} "
+            f"action_space={_teacher_report['mean_feasible_action_fraction']:.1%} "
+            f"agreement(both/v/w)="
+            f"{_teacher_report['policy_teacher_agreement_both']:.1%}/"
+            f"{_teacher_report['policy_teacher_agreement_linear']:.1%}/"
+            f"{_teacher_report['policy_teacher_agreement_angular']:.1%} "
+            f"brake={_teacher_report['teacher_brake_fraction']:.1%} "
+            f"stop={_teacher_report['teacher_stop_command_fraction']:.1%} "
+            f"strong_turn={_teacher_report['teacher_strong_turn_fraction']:.1%} "
+            f"left/right="
+            f"{_teacher_report['teacher_left_turn_fraction']:.1%}/"
+            f"{_teacher_report['teacher_right_turn_fraction']:.1%}",
+            flush=True,
+        )
+        if args_cli.privileged_corridor_teacher_output:
+            _teacher_output = Path(
+                args_cli.privileged_corridor_teacher_output
+            ).expanduser()
+            _teacher_output.parent.mkdir(parents=True, exist_ok=True)
+            _teacher_output.write_text(
+                json.dumps(_teacher_report, indent=2),
+                encoding="utf-8",
+            )
+            print(
+                f"[CORRIDOR-TEACHER] JSON report: {_teacher_output}"
+            )
+        if _corridor_teacher_probe is not None:
+            import numpy as _np_teacher_probe
+
+            _teacher_probe_output = Path(
+                args_cli.privileged_corridor_teacher_probe_output
+            ).expanduser()
+            _teacher_probe_output.parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            _teacher_probe_arrays = {
+                key: torch.cat(value, dim=0).numpy()
+                for key, value in _corridor_teacher_probe.items()
+            }
+            _np_teacher_probe.savez_compressed(
+                _teacher_probe_output,
+                **_teacher_probe_arrays,
+                metadata_json=_np_teacher_probe.asarray(
+                    json.dumps(
+                        {
+                            "policy_input_semantics": (
+                                "normalized 83D policy obs concatenated "
+                                "with frozen K8 CNN feature"
+                            ),
+                            "teacher_action_semantics": (
+                                "[linear_accel_index, angular_index]"
+                            ),
+                            "trajectory_source": (
+                                "privileged_teacher"
+                                if _corridor_teacher_override
+                                else "student_policy"
+                            ),
+                            "teacher_replaced_policy_actions": (
+                                _corridor_teacher_override
+                            ),
+                            "num_bins": int(
+                                _action_term_ref.cfg.num_bins
+                            ),
+                            "teacher_spec": {
+                                "horizon_s": (
+                                    _corridor_teacher_spec.horizon_s
+                                ),
+                                "samples": (
+                                    _corridor_teacher_spec.samples
+                                ),
+                                "hard_obstacle_clearance_m": (
+                                    _corridor_teacher_spec.hard_obstacle_clearance_m
+                                ),
+                                "allow_reverse": (
+                                    _corridor_teacher_spec.allow_reverse
+                                ),
+                            },
+                        }
+                    )
+                ),
+            )
+            print(
+                "[CORRIDOR-TEACHER-PROBE] "
+                f"frames={_teacher_probe_arrays['policy_input'].shape[0]} "
+                f"input_dim={_teacher_probe_arrays['policy_input'].shape[1]} "
+                f"output={_teacher_probe_output}",
+                flush=True,
+            )
+    if _future_cf_stats is not None:
+        def _future_cf_float(value: torch.Tensor) -> float:
+            return float(value.detach().cpu().item())
+
+        def _future_cf_bucket_report(
+            bucket: dict[str, torch.Tensor],
+        ) -> dict[str, float | int]:
+            frames = int(round(_future_cf_float(bucket["frames"])))
+            denom = float(max(frames, 1))
+            selected_mean = (
+                _future_cf_float(bucket["selected_risk_sum"]) / denom
+            )
+            report: dict[str, float | int] = {
+                "frames": frames,
+                "selected_risk_mean": selected_mean,
+            }
+            for label in ("any", "turn", "brake"):
+                best_mean = (
+                    _future_cf_float(
+                        bucket[f"best_{label}_risk_sum"]
+                    )
+                    / denom
+                )
+                report[f"best_{label}_risk_mean"] = best_mean
+                report[f"{label}_risk_reduction_mean"] = (
+                    selected_mean - best_mean
+                )
+                report[f"safe_{label}_fraction"] = (
+                    _future_cf_float(bucket[f"safe_{label}_count"])
+                    / denom
+                )
+                report[f"meaningful_{label}_fraction"] = (
+                    _future_cf_float(
+                        bucket[f"meaningful_{label}_count"]
+                    )
+                    / denom
+                )
+            return report
+
+        _future_cf_total = int(
+            round(_future_cf_float(_future_cf_stats["total_frames"]))
+        )
+        _future_cf_active = int(
+            round(_future_cf_float(_future_cf_stats["active_frames"]))
+        )
+        _future_cf_risky = int(
+            round(
+                _future_cf_float(
+                    _future_cf_stats["selected_risky_frames"]
+                )
+            )
+        )
+        _future_cf_collisions = int(
+            round(
+                _future_cf_float(
+                    _future_cf_stats["dynamic_collision_frames"]
+                )
+            )
+        )
+        _future_cf_report = {
+            "checkpoint": os.path.abspath(ckpt_path),
+            "definition": {
+                "turn_only": (
+                    "hold selected linear action index; vary angular index"
+                ),
+                "brake_only": (
+                    "hold selected angular action index; vary linear index"
+                ),
+                "best_any": "vary both indices over the 19x19 action grid",
+                "safe_risk_threshold": 0.01,
+                "meaningful_risk_reduction": 0.20,
+                "audit_selected_risk_threshold": float(
+                    args_cli.future_occupancy_counterfactual_risk_threshold
+                ),
+                "future_horizon_s": 1.5,
+                "future_samples": 8,
+                "future_safe_distance_m": 1.0,
+                "future_near_distance_m": 3.0,
+                "future_move_threshold_mps": 0.1,
+            },
+            "total_frames": _future_cf_total,
+            "active_frames": _future_cf_active,
+            "active_fraction": (
+                _future_cf_active / max(_future_cf_total, 1)
+            ),
+            "selected_risky_frames": _future_cf_risky,
+            "selected_risky_fraction_of_active": (
+                _future_cf_risky / max(_future_cf_active, 1)
+            ),
+            "dynamic_collision_frames": _future_cf_collisions,
+            "dynamic_collision_inactive_frames": int(
+                round(
+                    _future_cf_float(
+                        _future_cf_stats[
+                            "dynamic_collision_inactive_frames"
+                        ]
+                    )
+                )
+            ),
+            "audited": _future_cf_bucket_report(
+                _future_cf_stats["audited"]
+            ),
+            "dynamic_collision": _future_cf_bucket_report(
+                _future_cf_stats["dynamic_collision"]
+            ),
+            "self_check": {
+                "selected_risk_recompute_max_error": _future_cf_float(
+                    _future_cf_stats[
+                        "selected_risk_recompute_max_error"
+                    ]
+                ),
+                "decoded_linear_max_error_mps": _future_cf_float(
+                    _future_cf_stats[
+                        "decoded_linear_max_error_mps"
+                    ]
+                ),
+                "decoded_angular_max_error_rad_s": _future_cf_float(
+                    _future_cf_stats[
+                        "decoded_angular_max_error_rad_s"
+                    ]
+                ),
+            },
+        }
+        _future_cf_report["collision_lead_time"] = (
+            _future_cf_lead_audit.report(step_dt=float(step_dt))
+        )
+        _future_cf_audited = _future_cf_report["audited"]
+        _future_cf_collision = _future_cf_report["dynamic_collision"]
+        print(
+            "[FUTURE-CF-AUDIT] "
+            f"frames={_future_cf_audited['frames']} "
+            f"selected={_future_cf_audited['selected_risk_mean']:.3f} "
+            f"best_turn={_future_cf_audited['best_turn_risk_mean']:.3f} "
+            f"best_brake={_future_cf_audited['best_brake_risk_mean']:.3f} "
+            f"best_any={_future_cf_audited['best_any_risk_mean']:.3f} "
+            f"safe(turn/brake/any)="
+            f"{_future_cf_audited['safe_turn_fraction']:.1%}/"
+            f"{_future_cf_audited['safe_brake_fraction']:.1%}/"
+            f"{_future_cf_audited['safe_any_fraction']:.1%} "
+            f"meaningful(turn/brake/any)="
+            f"{_future_cf_audited['meaningful_turn_fraction']:.1%}/"
+            f"{_future_cf_audited['meaningful_brake_fraction']:.1%}/"
+            f"{_future_cf_audited['meaningful_any_fraction']:.1%}",
+            flush=True,
+        )
+        print(
+            "[FUTURE-CF-COLLISION] "
+            f"frames={_future_cf_collision['frames']}/"
+            f"{_future_cf_collisions} "
+            f"selected={_future_cf_collision['selected_risk_mean']:.3f} "
+            f"best_turn={_future_cf_collision['best_turn_risk_mean']:.3f} "
+            f"best_brake={_future_cf_collision['best_brake_risk_mean']:.3f} "
+            f"best_any={_future_cf_collision['best_any_risk_mean']:.3f} "
+            f"safe(turn/brake/any)="
+            f"{_future_cf_collision['safe_turn_fraction']:.1%}/"
+            f"{_future_cf_collision['safe_brake_fraction']:.1%}/"
+            f"{_future_cf_collision['safe_any_fraction']:.1%}",
+            flush=True,
+        )
+        print(
+            "[FUTURE-CF-SELF-CHECK] "
+            f"risk={_future_cf_report['self_check']['selected_risk_recompute_max_error']:.3e} "
+            f"v={_future_cf_report['self_check']['decoded_linear_max_error_mps']:.3e} "
+            f"omega={_future_cf_report['self_check']['decoded_angular_max_error_rad_s']:.3e}",
+            flush=True,
+        )
+        for _future_cf_lead in _future_cf_report[
+            "collision_lead_time"
+        ]:
+            print(
+                "[FUTURE-CF-LEAD] "
+                f"lead={_future_cf_lead['lead_seconds']:.1f}s "
+                f"eligible={_future_cf_lead['eligible_collision_events']} "
+                f"risky={_future_cf_lead['audited_risky_frames']} "
+                f"safe_turn/all_collisions="
+                f"{_future_cf_lead['safe_turn_fraction_of_collisions']:.1%} "
+                f"safe_any/all_collisions="
+                f"{_future_cf_lead['safe_any_fraction_of_collisions']:.1%} "
+                f"meaningful_turn/risky="
+                f"{_future_cf_lead['meaningful_turn_fraction_of_audited']:.1%}",
+                flush=True,
+            )
+        if args_cli.future_occupancy_counterfactual_output:
+            _future_cf_output = Path(
+                args_cli.future_occupancy_counterfactual_output
+            ).expanduser()
+            _future_cf_output.parent.mkdir(parents=True, exist_ok=True)
+            _future_cf_output.write_text(
+                json.dumps(_future_cf_report, indent=2),
+                encoding="utf-8",
+            )
+            print(
+                f"[FUTURE-CF-AUDIT] JSON report: {_future_cf_output}"
+            )
     if _narrow_gap_controller is not None:
         print(_narrow_gap_controller.summary_line())
     if _compare_extractor is not None:
@@ -4870,7 +6471,7 @@ def main():
             _count = _totals["frames"]
             if _count <= 0:
                 continue
-            _comparison_report["regions"][_region] = {
+            _region_report = {
                 key: (
                     int(value)
                     if key == "frames"
@@ -4878,6 +6479,19 @@ def main():
                 )
                 for key, value in _totals.items()
             }
+            for _head in ("linear", "angular"):
+                _disagreement_count = _totals[
+                    f"disagreement_{_head}"
+                ]
+                _conditional_key = (
+                    f"primary_margin_{_head}_on_disagreement"
+                )
+                _region_report[_conditional_key] = (
+                    float(_totals[_conditional_key] / _disagreement_count)
+                    if _disagreement_count > 0
+                    else None
+                )
+            _comparison_report["regions"][_region] = _region_report
         if (
             _narrow_gap_controller is not None
             and _narrow_gap_controller.completed_episodes > 0
@@ -4897,6 +6511,11 @@ def main():
                 f"{_metrics['kl_angular']:.5f}) "
                 f"agree=({_metrics['agreement_linear']:.1%},"
                 f"{_metrics['agreement_angular']:.1%}) "
+                f"teacher_margin=({_metrics['primary_margin_linear']:.4f},"
+                f"{_metrics['primary_margin_angular']:.4f}) "
+                f"margin_on_disagree=("
+                f"{_metrics['primary_margin_linear_on_disagreement']},"
+                f"{_metrics['primary_margin_angular_on_disagreement']}) "
                 f"brake=({_metrics['primary_brake']:.1%},"
                 f"{_metrics['compare_brake']:.1%}) "
                 f"strong_turn=({_metrics['primary_strong_turn']:.1%},"
