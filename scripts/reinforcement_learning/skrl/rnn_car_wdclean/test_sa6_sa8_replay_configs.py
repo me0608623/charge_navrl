@@ -27,6 +27,9 @@ from rnn_car_modular.configs.e2e_sa6_k8_obb_mixed_corridor_probe_from_c19200 imp
 from rnn_car_modular.configs.e2e_sa6_k8_obb_corridor_env_stratified_probe_from_c100 import (
     CONFIG as SA6_ENV_STRATIFIED_CORRIDOR_PROBE,
 )
+from rnn_car_modular.configs.e2e_sa6_k8_obb_corridor_weighted_stratified_d1_from_d0 import (
+    CONFIG as SA6_WEIGHTED_STRATIFIED_D1,
+)
 from rnn_car_modular.configs.e2e_sa6_k8_obb_c50_narrow_postkl_recovery import (
     CONFIG as SA6_C50_NARROW_POSTKL_RECOVERY,
 )
@@ -885,3 +888,57 @@ def test_sa6_gate2_recovery_keeps_corridor_and_narrow_replay() -> None:
         SA6_CORRIDOR_RUNG_3S1D_SA5_RECOVERY40.teacher_retention_weight
         == 0.30
     )
+
+
+# ---------------------------------------------------------------------------
+# D1 weighted env-stratified corridor replay
+# ---------------------------------------------------------------------------
+
+
+def test_d1_changes_only_the_motion_weights_versus_d0():
+    """D1 must be a single-variable change on top of D0.
+
+    Anything beyond metadata, the warm-start checkpoint and the new weights
+    would break the causal attribution of the D1 result.
+    """
+    d0 = SA6_ENV_STRATIFIED_CORRIDOR_PROBE
+    d1 = SA6_WEIGHTED_STRATIFIED_D1
+    allowed = {
+        "name",
+        "description",
+        "notes",
+        "tags",
+        "checkpoint",
+        "long_corridor_dynamic_motion_weights",
+    }
+    changed = {
+        field
+        for field in d0.__dataclass_fields__
+        if getattr(d0, field) != getattr(d1, field)
+    }
+    assert changed == allowed, f"unexpected D1 field changes: {changed - allowed}"
+
+
+def test_d1_run_shape_and_resume():
+    d1 = SA6_WEIGHTED_STRATIFIED_D1
+    assert d1.timesteps // d1.rollout_length == 30
+    assert d1.save_interval == 5
+    assert d1.no_resume_optimizer is False
+    assert d1.ppo_epochs > 0
+    assert d1.checkpoint.endswith(
+        "sa6_k8_obb_corridor_env_stratified_probe_c100_s42/checkpoint_3840.pt"
+    )
+
+
+def test_d1_weights_and_corridor_share():
+    d0 = SA6_ENV_STRATIFIED_CORRIDOR_PROBE
+    d1 = SA6_WEIGHTED_STRATIFIED_D1
+    assert d1.long_corridor_dynamic_motion_mode == "env_stratified"
+    assert d1.long_corridor_dynamic_motion_weights == (0.30, 0.10, 0.60)
+    # the corridor share itself must not move; only its internal mix does
+    assert d1.long_corridor_fraction == d0.long_corridor_fraction
+
+
+def test_baseline_configs_keep_weights_unset():
+    for config in (SA6, SA6_MIXED_CORRIDOR_PROBE, SA6_ENV_STRATIFIED_CORRIDOR_PROBE):
+        assert config.long_corridor_dynamic_motion_weights is None

@@ -3973,6 +3973,18 @@ def main():
     stats_timeout = 0    # 超時次數
     stats_other = 0      # 其他終止（翻倒、飛出等）
     stats_total = 0      # 總回合數
+    # D1：走廊 mixed 依「動態障礙走法配對」分組統計。motion type 必須在
+    # env.step() 之前快照，因為 ManagerBasedRLEnv 會在 step 內對 done 的 env
+    # auto-reset，屆時 motion type 已換成下一回合的家族。
+    _CORRIDOR_PAIR_NAMES = {
+        (0, 0): "lat+lat", (1, 1): "long+long", (2, 2): "random+random",
+        (0, 1): "lat+long", (0, 2): "lat+random", (1, 2): "long+random",
+    }
+    _corridor_pair_stats = {
+        name: {"episodes": 0, "goal": 0, "wall": 0, "obstacle": 0, "timeout": 0}
+        for name in _CORRIDOR_PAIR_NAMES.values()
+    }
+    _corridor_motion_snapshot = None
     stats_steps_list = []  # 每回合步數（用於計算平均）
 
     # --- Per-episode step-by-step velocity/position log (env 0) ---
@@ -5154,6 +5166,13 @@ def main():
             _near_wall_controller.advance()
         if _controlled_blocker_controller is not None:
             _controlled_blocker_controller.advance()
+        if args_cli.long_corridor_eval:
+            _snap_src = getattr(
+                raw_env, "_long_corridor_dynamic_motion_type", None
+            )
+            _corridor_motion_snapshot = (
+                _snap_src.clone() if _snap_src is not None else None
+            )
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
         if args_cli.long_corridor_eval:
             _corridor_applied = getattr(
@@ -5682,6 +5701,30 @@ def main():
                     stats_timeout += 1
                 else:
                     stats_other += 1
+                if (
+                    args_cli.long_corridor_eval
+                    and _corridor_motion_snapshot is not None
+                    and _corridor_dynamic_obstacles > 0
+                ):
+                    _types = _corridor_motion_snapshot[
+                        env_id, :_corridor_dynamic_obstacles
+                    ].tolist()
+                    if all(t >= 0 for t in _types):
+                        _key = tuple(sorted(int(t) for t in _types))[:2]
+                        if len(_key) == 1:
+                            _key = (_key[0], _key[0])
+                        _pair = _CORRIDOR_PAIR_NAMES.get(_key)
+                        if _pair is not None:
+                            _bucket = _corridor_pair_stats[_pair]
+                            _bucket["episodes"] += 1
+                            if c == 1:
+                                _bucket["goal"] += 1
+                            elif c == 2:
+                                _bucket["wall"] += 1
+                            elif c == 3:
+                                _bucket["obstacle"] += 1
+                            elif c == 4:
+                                _bucket["timeout"] += 1
                 print(
                     f"[回合 {stats_total:3d}] 環境={env_id} 原因={cause_name:7s} "
                     f"步數={ep_steps:4d} 獎勵={ep_rew:.1f} "
@@ -6123,6 +6166,28 @@ def main():
             "configured_dynamic_obstacles": _corridor_dynamic_obstacles,
             "dynamic_motion_mode": _corridor_motion_mode,
             "dynamic_motion_type_fractions": _motion_type_fractions,
+            "motion_pair_outcomes": {
+                name: {
+                    "episodes": int(b["episodes"]),
+                    "success_rate": (
+                        float(b["goal"] / b["episodes"]) if b["episodes"] else 0.0
+                    ),
+                    "collision_rate": (
+                        float((b["wall"] + b["obstacle"]) / b["episodes"])
+                        if b["episodes"] else 0.0
+                    ),
+                    "wall_collision_rate": (
+                        float(b["wall"] / b["episodes"]) if b["episodes"] else 0.0
+                    ),
+                    "obstacle_collision_rate": (
+                        float(b["obstacle"] / b["episodes"]) if b["episodes"] else 0.0
+                    ),
+                    "timeout_rate": (
+                        float(b["timeout"] / b["episodes"]) if b["episodes"] else 0.0
+                    ),
+                }
+                for name, b in _corridor_pair_stats.items()
+            },
             "dynamic_x_moved_fraction": _x_moved_fraction,
             "dynamic_y_moved_fraction": _y_moved_fraction,
             "motion_mode_pass": _motion_mode_pass,

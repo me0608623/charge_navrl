@@ -36,6 +36,8 @@ sample_obstacle_layout = _MOD.sample_obstacle_layout
 validate_dynamic_motion_mode = _MOD.validate_dynamic_motion_mode
 validate_spec = _MOD.validate_spec
 validate_obstacle_counts = _MOD.validate_obstacle_counts
+normalize_dynamic_motion_weights = _MOD.normalize_dynamic_motion_weights
+sample_motion_families = _MOD.sample_motion_families
 wall_geometry = _MOD.wall_geometry
 
 
@@ -188,3 +190,157 @@ def test_curriculum_obstacle_subsets_stay_within_frozen_capacity() -> None:
         raise AssertionError(
             f"invalid corridor obstacle subset accepted: {static}S+{dynamic}D"
         )
+
+
+# ---------------------------------------------------------------------------
+# Weighted env-level stratification (D1)
+# ---------------------------------------------------------------------------
+
+
+def test_motion_weights_normalize_to_one():
+    weights = normalize_dynamic_motion_weights((30.0, 10.0, 60.0), "env_stratified")
+    assert weights is not None
+    assert abs(sum(weights) - 1.0) < 1e-9
+    assert abs(weights[0] - 0.30) < 1e-9
+    assert abs(weights[2] - 0.60) < 1e-9
+
+
+def test_motion_weights_none_is_allowed_for_every_mode():
+    for mode in ("lateral", "longitudinal", "random_2d", "mixed", "env_stratified"):
+        assert normalize_dynamic_motion_weights(None, mode) is None
+
+
+def test_motion_weights_rejected_outside_env_stratified():
+    for mode in ("lateral", "longitudinal", "random_2d", "mixed"):
+        try:
+            normalize_dynamic_motion_weights((0.3, 0.1, 0.6), mode)
+        except ValueError:
+            continue
+        raise AssertionError(f"weights should be rejected for mode={mode}")
+
+
+def test_motion_weights_reject_malformed_values():
+    for bad in ((0.5, 0.5), (-1.0, 1.0, 1.0), (0.0, 0.0, 0.0), (float("nan"), 1.0, 1.0)):
+        try:
+            normalize_dynamic_motion_weights(bad, "env_stratified")
+        except ValueError:
+            continue
+        raise AssertionError(f"weights should be rejected: {bad}")
+
+
+def test_family_draw_sums_to_count_and_stays_within_one_env():
+    weights = normalize_dynamic_motion_weights((0.30, 0.10, 0.60), "env_stratified")
+    torch.manual_seed(0)
+    for count in (1, 2, 3, 5, 7, 10, 16, 84, 100, 1024):
+        for _ in range(50):
+            families = sample_motion_families(count, weights)
+            counts = torch.bincount(families, minlength=3)
+            assert int(counts.sum()) == count
+            for index, weight in enumerate(weights):
+                assert abs(int(counts[index]) - count * weight) < 1.0
+
+
+def test_single_env_resets_stay_unbiased_over_time():
+    """Regression: a deterministic quota starved longitudinal on small batches.
+
+    With weights 0.30/0.10/0.60 a largest-remainder quota returned [0, 0, 1] for
+    every single-env reset, so longitudinal never appeared. Reset batches are
+    usually small, so the long-run mix must hold at count == 1.
+    """
+    weights = normalize_dynamic_motion_weights((0.30, 0.10, 0.60), "env_stratified")
+    torch.manual_seed(1234)
+    totals = torch.zeros(3, dtype=torch.long)
+    for _ in range(8000):
+        totals += torch.bincount(sample_motion_families(1, weights), minlength=3)
+    observed = (totals.double() / int(totals.sum())).tolist()
+    for index, weight in enumerate(weights):
+        assert abs(observed[index] - weight) < 0.02
+
+
+def test_mixed_small_batches_stay_unbiased_over_time():
+    weights = normalize_dynamic_motion_weights((0.30, 0.10, 0.60), "env_stratified")
+    torch.manual_seed(99)
+    totals = torch.zeros(3, dtype=torch.long)
+    sizes = [1, 2, 3, 5, 7]
+    for step in range(4000):
+        totals += torch.bincount(
+            sample_motion_families(sizes[step % len(sizes)], weights), minlength=3
+        )
+    observed = (totals.double() / int(totals.sum())).tolist()
+    for index, weight in enumerate(weights):
+        assert abs(observed[index] - weight) < 0.02
+
+
+def test_zero_weight_family_is_never_drawn():
+    weights = normalize_dynamic_motion_weights((0.5, 0.0, 0.5), "env_stratified")
+    torch.manual_seed(7)
+    totals = torch.zeros(3, dtype=torch.long)
+    for _ in range(2000):
+        totals += torch.bincount(sample_motion_families(1, weights), minlength=3)
+    assert int(totals[1]) == 0
+    assert int(totals[0]) > 0 and int(totals[2]) > 0
+
+
+def test_env_stratified_weights_drive_family_counts():
+    spec = LongCorridorSpec()
+    count = 84
+    weights = normalize_dynamic_motion_weights((0.30, 0.10, 0.60), "env_stratified")
+    _, dynamic, waypoints = sample_obstacle_layout(count, spec, torch.device("cpu"))
+    _, _, motion_types, _ = sample_dynamic_trajectories(
+        dynamic, waypoints, spec, "env_stratified", (0.30, 0.10, 0.60)
+    )
+    # both obstacles of an env share one family
+    assert bool((motion_types[:, 0] == motion_types[:, 1]).all())
+    counts = torch.bincount(motion_types[:, 0], minlength=3).tolist()
+    assert sum(counts) == count
+    for index, weight in enumerate(weights):
+        assert abs(counts[index] - count * weight) < 1.0
+
+
+def test_env_stratified_without_weights_stays_balanced():
+    spec = LongCorridorSpec()
+    count = 84
+    _, dynamic, waypoints = sample_obstacle_layout(count, spec, torch.device("cpu"))
+    _, _, motion_types, _ = sample_dynamic_trajectories(
+        dynamic, waypoints, spec, "env_stratified"
+    )
+    counts = torch.bincount(motion_types[:, 0], minlength=3).tolist()
+    assert sum(counts) == count
+    assert max(counts) - min(counts) <= 1
+
+
+def test_cumulative_family_counters_match_long_run_weights():
+    """Simulate many small reset batches and check the cumulative audit.
+
+    This mirrors what the runtime counters accumulate: env-level counts, slot
+    counts (two obstacles per env) and pure-env count. Only a cumulative view
+    can reveal a small-batch sampling bias.
+    """
+    weights = normalize_dynamic_motion_weights((0.30, 0.10, 0.60), "env_stratified")
+    spec = LongCorridorSpec()
+    torch.manual_seed(2026)
+    env_counts_total = torch.zeros(3, dtype=torch.long)
+    slot_counts_total = torch.zeros(3, dtype=torch.long)
+    pure_env_total = 0
+    batches = [1, 1, 2, 1, 3, 1, 5, 2, 1, 7] * 60
+    for count in batches:
+        _, dynamic, waypoints = sample_obstacle_layout(
+            count, spec, torch.device("cpu")
+        )
+        _, _, motion_types, _ = sample_dynamic_trajectories(
+            dynamic, waypoints, spec, "env_stratified", (0.30, 0.10, 0.60)
+        )
+        active = motion_types[:, :2]
+        env_counts_total += torch.bincount(active[:, 0], minlength=3)
+        slot_counts_total += torch.bincount(active.flatten(), minlength=3)
+        pure_env_total += int((active == active[:, :1]).all(dim=1).sum())
+
+    total = int(env_counts_total.sum())
+    assert total == sum(batches)
+    # slots are exactly two per env because both obstacles share one family
+    assert torch.equal(slot_counts_total, env_counts_total * 2)
+    # every env is pure under env_stratified
+    assert pure_env_total == total
+    observed = (env_counts_total.double() / total).tolist()
+    for index, weight in enumerate(weights):
+        assert abs(observed[index] - weight) < 0.02

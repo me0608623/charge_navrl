@@ -10,6 +10,7 @@ from .long_corridor_replay_geometry import (
     LongCorridorSpec,
     layout_is_constructively_solvable,
     sample_dynamic_trajectories,
+    normalize_dynamic_motion_weights,
     sample_obstacle_layout,
     validate_dynamic_motion_mode,
     validate_obstacle_counts,
@@ -32,6 +33,7 @@ def configure_long_corridor_assets(
     dynamic_obstacles: int = 2,
     dynamic_speed_range: tuple[float, float] = (0.30, 0.60),
     dynamic_motion_mode: str = "lateral",
+    dynamic_motion_weights: tuple[float, float, float] | None = None,
 ) -> None:
     """Add dedicated corridor walls and configure the reset event."""
     from isaaclab.assets import RigidObjectCfg
@@ -41,6 +43,9 @@ def configure_long_corridor_assets(
     validate_spec(spec)
     validate_obstacle_counts(static_obstacles, dynamic_obstacles)
     motion_mode = validate_dynamic_motion_mode(dynamic_motion_mode)
+    motion_weights = normalize_dynamic_motion_weights(
+        dynamic_motion_weights, motion_mode
+    )
     speed_min, speed_max = map(float, dynamic_speed_range)
     if not (0.0 < speed_min <= speed_max):
         raise ValueError("dynamic corridor speed range must be positive and ordered")
@@ -83,6 +88,7 @@ def configure_long_corridor_assets(
             "dynamic_speed_min": speed_min,
             "dynamic_speed_max": speed_max,
             "dynamic_motion_mode": motion_mode,
+            "dynamic_motion_weights": motion_weights,
         }
     )
     print(
@@ -90,7 +96,8 @@ def configure_long_corridor_assets(
         f"fraction={fraction:.3f} free_width={spec.free_width:.2f}m "
         f"length={spec.length:.2f}m obstacles={static_obstacles}S+"
         f"{dynamic_obstacles}D speed=[{speed_min:.2f},{speed_max:.2f}]m/s "
-        f"motion={motion_mode} reward_unchanged=True",
+        f"motion={motion_mode} "
+        f"configured_motion_weights={motion_weights} reward_unchanged=True",
         flush=True,
     )
 
@@ -129,6 +136,17 @@ def _ensure_state(env) -> None:
         (env.num_envs, 2), -1, dtype=torch.long, device=env.device
     )
     env._long_corridor_motion_mode = "lateral"
+    env._long_corridor_motion_weights = None
+    # Cumulative motion-family audit across every successful install. The
+    # one-shot injector log only covers the first batch, which cannot reveal a
+    # sampling bias that only shows up over many small reset batches.
+    env._long_corridor_motion_env_counts_total = torch.zeros(
+        3, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_motion_slot_counts_total = torch.zeros(
+        3, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_pure_env_count_total = 0
     env._long_corridor_reset_count = 0
     env._long_corridor_injected_count = 0
     env._long_corridor_unsolvable_count = 0
@@ -198,6 +216,7 @@ def _install_obstacles(
     static_obstacles: int,
     dynamic_obstacles: int,
     dynamic_motion_mode: str,
+    dynamic_motion_weights: tuple[float, float, float] | None = None,
 ) -> bool:
     scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
     if scheduler is None:
@@ -223,6 +242,7 @@ def _install_obstacles(
             waypoints,
             spec,
             dynamic_motion_mode,
+            dynamic_motion_weights,
         )
     )
     valid = layout_is_constructively_solvable(static, dynamic, waypoints, spec)
@@ -254,6 +274,20 @@ def _install_obstacles(
         active_waypoints = waypoints[:, :dynamic_obstacles]
         active_motion_types = motion_types[:, :dynamic_obstacles]
         active_target_indices = target_indices[:, :dynamic_obstacles]
+        # Cumulative audit; counted here so a pending (deferred) install is not
+        # double counted when it later succeeds.
+        env._long_corridor_motion_env_counts_total += torch.bincount(
+            active_motion_types[:, 0], minlength=3
+        )
+        env._long_corridor_motion_slot_counts_total += torch.bincount(
+            active_motion_types.flatten(), minlength=3
+        )
+        env._long_corridor_pure_env_count_total += int(
+            (active_motion_types == active_motion_types[:, :1])
+            .all(dim=1)
+            .sum()
+            .item()
+        )
         speeds = torch.empty(
             count, dynamic_obstacles, device=env.device
         ).uniform_(float(speed_min), float(speed_max))
@@ -324,6 +358,7 @@ def setup_long_corridor_replay(
     dynamic_speed_min: float = 0.30,
     dynamic_speed_max: float = 0.60,
     dynamic_motion_mode: str = "lateral",
+    dynamic_motion_weights: tuple[float, float, float] | None = None,
     wall_z: float = 1.5,
 ) -> None:
     """Replace a fraction of resets with the frozen deployment corridor."""
@@ -337,6 +372,9 @@ def setup_long_corridor_replay(
     spec = LongCorridorSpec(free_width=float(free_width), length=float(length))
     validate_spec(spec)
     motion_mode = validate_dynamic_motion_mode(dynamic_motion_mode)
+    motion_weights = normalize_dynamic_motion_weights(
+        dynamic_motion_weights, motion_mode
+    )
     _ensure_state(env)
     env._long_corridor_fraction = float(fraction)
     env._long_corridor_spec = spec
@@ -345,6 +383,7 @@ def setup_long_corridor_replay(
         float(dynamic_speed_max),
     )
     env._long_corridor_motion_mode = motion_mode
+    env._long_corridor_motion_weights = motion_weights
     env._long_corridor_obstacle_counts = (
         int(static_obstacles),
         int(dynamic_obstacles),
@@ -416,6 +455,7 @@ def setup_long_corridor_replay(
         static_obstacles,
         dynamic_obstacles,
         motion_mode,
+        motion_weights,
     )
 
     env._long_corridor_injected_count += int(selected.numel())
@@ -437,8 +477,14 @@ def setup_long_corridor_replay(
                 .mean()
                 .item()
             )
+            env_counts = torch.bincount(
+                active_types[:, 0], minlength=3
+            ).tolist()
             motion_audit = (
-                f" motion_slot_counts={type_counts} "
+                f" configured_motion_weights="
+                f"{getattr(env, '_long_corridor_motion_weights', None)} "
+                f"motion_env_counts={env_counts} "
+                f"motion_slot_counts={type_counts} "
                 f"pure_env_fraction={pure_env_fraction:.3f}"
             )
         print(
@@ -479,5 +525,6 @@ def maintain_long_corridor_goal(env, env_ids=None) -> None:
             speed_max,
             *env._long_corridor_obstacle_counts,
             env._long_corridor_motion_mode,
+            getattr(env, "_long_corridor_motion_weights", None),
         )
     _write_goal(env, selected)

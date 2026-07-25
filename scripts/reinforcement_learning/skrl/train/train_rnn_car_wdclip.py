@@ -3179,6 +3179,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "lateral",
                 )
             ),
+            dynamic_motion_weights=getattr(
+                args_cli,
+                "long_corridor_dynamic_motion_weights",
+                None,
+            ),
         )
 
     # SA5 narrow-passage bridge: add two dedicated wall assets before gym.make
@@ -8437,6 +8442,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "narrow_bridge/stress_ratio":
                         float(getattr(_raw_env, "_narrow_bridge_last_stress_ratio", 0.0)),
                 })
+
+            # --- Deployment-corridor motion-family cumulative audit ---
+            if hasattr(_raw_env, "_long_corridor_motion_env_counts_total"):
+                _mc = _raw_env._long_corridor_motion_env_counts_total
+                _sc = _raw_env._long_corridor_motion_slot_counts_total
+                _assign_total = int(_mc.sum().item())
+                if _assign_total > 0:
+                    _mf = (_mc.double() / _assign_total).tolist()
+                    log_data.update({
+                        "long_corridor/motion_lateral_fraction_actual": float(_mf[0]),
+                        "long_corridor/motion_longitudinal_fraction_actual": float(_mf[1]),
+                        "long_corridor/motion_random_2d_fraction_actual": float(_mf[2]),
+                        "long_corridor/motion_assignments_total": _assign_total,
+                        "long_corridor/motion_slot_assignments_total":
+                            int(_sc.sum().item()),
+                        "long_corridor/pure_env_fraction_actual":
+                            float(_raw_env._long_corridor_pure_env_count_total)
+                            / _assign_total,
+                    })
 
             # --- Deployment-corridor goal ownership audit ---
             if hasattr(_raw_env, "_long_corridor_reset_count"):

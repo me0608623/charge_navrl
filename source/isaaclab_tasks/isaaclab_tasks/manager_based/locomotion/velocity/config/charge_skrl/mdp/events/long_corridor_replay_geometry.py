@@ -128,6 +128,67 @@ def validate_dynamic_motion_mode(mode: str) -> str:
     return normalized
 
 
+def normalize_dynamic_motion_weights(
+    weights, mode: str
+) -> tuple[float, float, float] | None:
+    """Validate optional per-family env weights for ``env_stratified``.
+
+    Weights are ``(lateral, longitudinal, random_2d)`` and are renormalized to
+    sum to one. ``None`` keeps the balanced 1:1:1 stratification. Supplying
+    weights for any other motion mode raises ``ValueError`` so that a
+    misconfigured experiment fails loudly instead of silently ignoring them.
+    """
+    if weights is None:
+        return None
+    normalized_mode = validate_dynamic_motion_mode(mode)
+    if normalized_mode != "env_stratified":
+        raise ValueError(
+            "corridor motion weights are only supported for "
+            f"mode='env_stratified', got mode={normalized_mode!r}"
+        )
+    values = tuple(float(w) for w in weights)
+    if len(values) != 3:
+        raise ValueError(
+            f"expected three corridor motion weights, got {len(values)}"
+        )
+    if any(not math.isfinite(w) or w < 0.0 for w in values):
+        raise ValueError(
+            f"corridor motion weights must be finite and non-negative, got {values}"
+        )
+    total = sum(values)
+    if total <= 0.0:
+        raise ValueError("corridor motion weights must sum to a positive value")
+    return tuple(w / total for w in values)
+
+
+def sample_motion_families(
+    count: int,
+    weights: tuple[float, float, float],
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Random-phase systematic stratification of ``count`` envs across families.
+
+    Resets arrive in small, variable batches, so a deterministic largest-
+    remainder quota would bias every batch the same way and systematically
+    starve low-weight families (with weights 0.30/0.10/0.60 a single-env reset
+    always produced random_2d, and longitudinal never appeared below seven
+    envs). Random-phase systematic sampling keeps the per-call allocation within
+    one env of ``count * weight`` while staying unbiased in expectation for any
+    batch size, including ``count == 1``. It is fully determined by the torch
+    RNG, so runs stay reproducible.
+    """
+    if count <= 0:
+        return torch.zeros(0, dtype=torch.long, device=device)
+    weights_tensor = torch.tensor(weights, dtype=torch.float64, device=device)
+    boundaries = torch.cumsum(weights_tensor, dim=0)[:-1]
+    phase = torch.rand((), dtype=torch.float64, device=device)
+    points = (
+        torch.arange(count, device=device, dtype=torch.float64) + phase
+    ) / count
+    families = torch.bucketize(points, boundaries, right=True)
+    return families[torch.randperm(count, device=device)].to(torch.long)
+
+
 def wall_geometry(
     count: int,
     spec: LongCorridorSpec,
@@ -191,6 +252,7 @@ def sample_dynamic_trajectories(
     lateral_waypoints: torch.Tensor,
     spec: LongCorridorSpec,
     mode: str,
+    motion_weights: tuple[float, float, float] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build controlled dynamic paths for one corridor motion family.
 
@@ -202,6 +264,7 @@ def sample_dynamic_trajectories(
     pure-family regression gates without removing heterogeneous mixed scenes.
     """
     normalized = validate_dynamic_motion_mode(mode)
+    weights = normalize_dynamic_motion_weights(motion_weights, normalized)
     if dynamic.ndim != 3 or dynamic.shape[1:] != (2, 2):
         raise ValueError(f"expected dynamic [N,2,2], got {tuple(dynamic.shape)}")
     if lateral_waypoints.shape != (dynamic.shape[0], 2, 2, 2):
@@ -288,12 +351,18 @@ def sample_dynamic_trajectories(
         motion_types = balanced[
             torch.randperm(flat_count, device=device)
         ].reshape(count, 2)
-    else:
+    elif weights is None:
         offset = int(torch.randint(0, 3, (1,), device=device).item())
         balanced = (
             torch.arange(count, device=device) + offset
         ) % (MOTION_RANDOM_2D + 1)
         env_motion_types = balanced[torch.randperm(count, device=device)]
+        motion_types = env_motion_types[:, None].expand(-1, 2).clone()
+    else:
+        # Weighted env-level stratification. Random-phase systematic sampling
+        # keeps small reset batches unbiased; both obstacles of an env share the
+        # drawn family.
+        env_motion_types = sample_motion_families(count, weights, device)
         motion_types = env_motion_types[:, None].expand(-1, 2).clone()
 
     starts = lateral_starts
