@@ -401,6 +401,7 @@ class EventCfgVLP16Curriculum:
             "dynamic_obstacles": 2,
             "dynamic_speed_min": 0.30,
             "dynamic_speed_max": 0.60,
+            "dynamic_motion_mode": "lateral",
             "wall_z": 1.5,
         },
     )

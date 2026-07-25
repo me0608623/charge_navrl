@@ -3172,6 +3172,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     (0.30, 0.60),
                 )
             ),
+            dynamic_motion_mode=str(
+                getattr(
+                    args_cli,
+                    "long_corridor_dynamic_motion_mode",
+                    "lateral",
+                )
+            ),
         )
 
     # SA5 narrow-passage bridge: add two dedicated wall assets before gym.make

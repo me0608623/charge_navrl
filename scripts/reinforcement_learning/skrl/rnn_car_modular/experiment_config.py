@@ -148,6 +148,7 @@ class ExperimentConfig:
     long_corridor_static_obstacles: int = 4
     long_corridor_dynamic_obstacles: int = 2
     long_corridor_dynamic_speed_range: tuple[float, float] = (0.30, 0.60)
+    long_corridor_dynamic_motion_mode: str = "lateral"
     # Frozen successful policy used only on narrow-passage replay frames.
     teacher_retention_checkpoint: str | None = None
     teacher_retention_weight: float = 0.0

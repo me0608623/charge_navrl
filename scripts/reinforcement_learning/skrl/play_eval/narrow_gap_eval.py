@@ -24,6 +24,11 @@ class NarrowGapSpec:
     start_x: float = -3.0
     goal_x: float = 3.0
     yaw_limit_deg: float = 2.52
+    control_dt_s: float = 0.2
+    direct_path_length_ratio_max: float = 1.35
+    direct_first_cross_time_s_max: float = 10.0
+    direct_max_pre_cross_abs_y_m: float = 1.0
+    direct_backtrack_distance_m_max: float = 0.5
 
     @property
     def boundary_inner_y(self) -> float:
@@ -99,11 +104,30 @@ class NarrowGapController:
         self.device = raw_env.device
         self.num_envs = raw_env.num_envs
         self.spec = spec or NarrowGapSpec()
-        self._previous_x = torch.full((self.num_envs,), self.spec.start_x, device=self.device)
+        self._previous_xy = torch.zeros(self.num_envs, 2, device=self.device)
+        self._previous_xy[:, 0] = self.spec.start_x
         self._crossed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._path_length_m = torch.zeros(self.num_envs, device=self.device)
+        self._elapsed_steps = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._first_cross_step = torch.full(
+            (self.num_envs,), -1, dtype=torch.long, device=self.device
+        )
+        self._max_pre_cross_abs_y_m = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._backtrack_distance_m = torch.zeros(
+            self.num_envs, device=self.device
+        )
         self.completed_episodes = 0
         self.crossed_episodes = 0
+        self.direct_crossed_episodes = 0
         self._yaw_samples: list[np.ndarray] = []
+        self._path_length_ratio_samples: list[np.ndarray] = []
+        self._first_cross_time_s_samples: list[np.ndarray] = []
+        self._max_pre_cross_abs_y_m_samples: list[np.ndarray] = []
+        self._backtrack_distance_m_samples: list[np.ndarray] = []
 
     def reset(self, env_ids=None) -> None:
         if env_ids is None:
@@ -114,10 +138,16 @@ class NarrowGapController:
             return
         self._place_robot_goal(env_ids)
         self._place_walls(env_ids)
-        self._previous_x[env_ids] = self.spec.start_x
+        self._previous_xy[env_ids] = 0.0
+        self._previous_xy[env_ids, 0] = self.spec.start_x
         self._crossed[env_ids] = False
+        self._path_length_m[env_ids] = 0.0
+        self._elapsed_steps[env_ids] = 0
+        self._first_cross_step[env_ids] = -1
+        self._max_pre_cross_abs_y_m[env_ids] = 0.0
+        self._backtrack_distance_m[env_ids] = 0.0
 
-    def observe(self) -> None:
+    def observe(self, done: torch.Tensor | None = None) -> None:
         robot = self.env.scene["robot"]
         pos = robot.data.root_pos_w[:, :2] - self.env.scene.env_origins[:, :2]
         quat = robot.data.root_quat_w
@@ -125,20 +155,94 @@ class NarrowGapController:
             2.0 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
             1.0 - 2.0 * (quat[:, 2] ** 2 + quat[:, 3] ** 2),
         )
+        if done is None:
+            active = torch.ones(
+                self.num_envs, dtype=torch.bool, device=self.device
+            )
+        else:
+            active = ~done.to(device=self.device, dtype=torch.bool).reshape(-1)
+        previous = self._previous_xy
+        not_crossed = active & ~self._crossed
+        step_distance = torch.linalg.vector_norm(pos - previous, dim=1)
+        self._path_length_m += torch.where(
+            active, step_distance, torch.zeros_like(step_distance)
+        )
+        self._elapsed_steps += active.long()
+        self._max_pre_cross_abs_y_m = torch.where(
+            not_crossed,
+            torch.maximum(self._max_pre_cross_abs_y_m, pos[:, 1].abs()),
+            self._max_pre_cross_abs_y_m,
+        )
+        self._backtrack_distance_m += torch.where(
+            not_crossed,
+            (previous[:, 0] - pos[:, 0]).clamp_min(0.0),
+            torch.zeros_like(pos[:, 0]),
+        )
         # Vehicle overlaps the barrier slab longitudinally. These are the frames
         # where alignment determines whether the configured opening is traversable.
-        throat = (pos[:, 0] - self.spec.barrier_x).abs() <= (0.5 * self.spec.wall_width + 0.35)
+        throat = active & (
+            (pos[:, 0] - self.spec.barrier_x).abs()
+            <= (0.5 * self.spec.wall_width + 0.35)
+        )
         if throat.any():
             yaw_abs_deg = torch.rad2deg(torch.atan2(torch.sin(yaw), torch.cos(yaw)).abs())
             self._yaw_samples.append(yaw_abs_deg[throat].detach().cpu().numpy())
 
-        crossed_now = (self._previous_x < self.spec.barrier_x) & (pos[:, 0] >= self.spec.barrier_x)
+        crossed_now = (
+            not_crossed
+            & (previous[:, 0] < self.spec.barrier_x)
+            & (pos[:, 0] >= self.spec.barrier_x)
+        )
+        self._first_cross_step[crossed_now] = self._elapsed_steps[crossed_now]
         self._crossed |= crossed_now
-        self._previous_x.copy_(pos[:, 0])
+        self._previous_xy[active] = pos[active]
 
     def finish_episodes(self, env_ids: torch.Tensor) -> None:
         self.completed_episodes += int(env_ids.numel())
-        self.crossed_episodes += int(self._crossed[env_ids].sum().item())
+        crossed = self._crossed[env_ids]
+        self.crossed_episodes += int(crossed.sum().item())
+        crossed_ids = env_ids[crossed]
+        if crossed_ids.numel() == 0:
+            return
+
+        straight_distance = abs(self.spec.goal_x - self.spec.start_x)
+        path_ratio = self._path_length_m[crossed_ids] / max(
+            straight_distance, 1e-6
+        )
+        first_cross_time_s = (
+            self._first_cross_step[crossed_ids].float()
+            * float(self.spec.control_dt_s)
+        )
+        max_pre_cross_y = self._max_pre_cross_abs_y_m[crossed_ids]
+        backtrack = self._backtrack_distance_m[crossed_ids]
+        direct = (
+            (path_ratio <= self.spec.direct_path_length_ratio_max)
+            & (
+                first_cross_time_s
+                <= self.spec.direct_first_cross_time_s_max
+            )
+            & (
+                max_pre_cross_y
+                <= self.spec.direct_max_pre_cross_abs_y_m
+            )
+            & (
+                backtrack
+                <= self.spec.direct_backtrack_distance_m_max
+            )
+        )
+        self.direct_crossed_episodes += int(direct.sum().item())
+        self._path_length_ratio_samples.append(
+            path_ratio.detach().cpu().numpy()
+        )
+        self._first_cross_time_s_samples.append(
+            first_cross_time_s.detach().cpu().numpy()
+        )
+        self._max_pre_cross_abs_y_m_samples.append(
+            max_pre_cross_y.detach().cpu().numpy()
+        )
+        self._backtrack_distance_m_samples.append(
+            backtrack.detach().cpu().numpy()
+        )
 
     def summary_line(self) -> str:
         yaw = np.concatenate(self._yaw_samples) if self._yaw_samples else np.empty(0, dtype=np.float32)
@@ -149,9 +253,59 @@ class NarrowGapController:
             p50 = p90 = p95 = float("nan")
             within = float("nan")
         crossing_rate = self.crossed_episodes / self.completed_episodes if self.completed_episodes else float("nan")
+        direct_crossing_rate = (
+            self.direct_crossed_episodes / self.completed_episodes
+            if self.completed_episodes
+            else float("nan")
+        )
+
+        def _percentiles(samples: list[np.ndarray]) -> tuple[float, float, float]:
+            values = (
+                np.concatenate(samples)
+                if samples
+                else np.empty(0, dtype=np.float32)
+            )
+            if not values.size:
+                return float("nan"), float("nan"), float("nan")
+            return tuple(float(x) for x in np.percentile(values, [50, 90, 95]))
+
+        path_p50, path_p90, path_p95 = _percentiles(
+            self._path_length_ratio_samples
+        )
+        time_p50, time_p90, time_p95 = _percentiles(
+            self._first_cross_time_s_samples
+        )
+        lateral_p50, lateral_p90, lateral_p95 = _percentiles(
+            self._max_pre_cross_abs_y_m_samples
+        )
+        backtrack_p50, backtrack_p90, backtrack_p95 = _percentiles(
+            self._backtrack_distance_m_samples
+        )
         return (
             f"[NARROW-GAP-METRICS] episodes={self.completed_episodes} "
             f"crossed={self.crossed_episodes} crossing_rate={crossing_rate:.6f} "
+            f"direct_crossed={self.direct_crossed_episodes} "
+            f"direct_crossing_rate={direct_crossing_rate:.6f} "
+            f"path_length_ratio_p50={path_p50:.4f} "
+            f"path_length_ratio_p90={path_p90:.4f} "
+            f"path_length_ratio_p95={path_p95:.4f} "
+            f"first_cross_time_s_p50={time_p50:.4f} "
+            f"first_cross_time_s_p90={time_p90:.4f} "
+            f"first_cross_time_s_p95={time_p95:.4f} "
+            f"max_pre_cross_abs_y_m_p50={lateral_p50:.4f} "
+            f"max_pre_cross_abs_y_m_p90={lateral_p90:.4f} "
+            f"max_pre_cross_abs_y_m_p95={lateral_p95:.4f} "
+            f"backtrack_distance_m_p50={backtrack_p50:.4f} "
+            f"backtrack_distance_m_p90={backtrack_p90:.4f} "
+            f"backtrack_distance_m_p95={backtrack_p95:.4f} "
+            f"direct_path_length_ratio_max="
+            f"{self.spec.direct_path_length_ratio_max:.4f} "
+            f"direct_first_cross_time_s_max="
+            f"{self.spec.direct_first_cross_time_s_max:.4f} "
+            f"direct_max_pre_cross_abs_y_m="
+            f"{self.spec.direct_max_pre_cross_abs_y_m:.4f} "
+            f"direct_backtrack_distance_m_max="
+            f"{self.spec.direct_backtrack_distance_m_max:.4f} "
             f"yaw_frames={yaw.size} yaw_abs_p50_deg={p50:.4f} "
             f"yaw_abs_p90_deg={p90:.4f} yaw_abs_p95_deg={p95:.4f} "
             f"yaw_within_{self.spec.yaw_limit_deg:.2f}deg={within:.6f}"

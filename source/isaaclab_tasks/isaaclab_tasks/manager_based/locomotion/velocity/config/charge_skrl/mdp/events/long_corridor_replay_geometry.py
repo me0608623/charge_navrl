@@ -8,6 +8,12 @@ import math
 import torch
 
 
+MOTION_LATERAL = 0
+MOTION_LONGITUDINAL = 1
+MOTION_RANDOM_2D = 2
+DYNAMIC_MOTION_MODES = ("lateral", "longitudinal", "random_2d", "mixed")
+
+
 @dataclass(frozen=True)
 class LongCorridorSpec:
     """Frozen geometry for a 4 m free-width, 10 m long corridor."""
@@ -105,6 +111,17 @@ def validate_obstacle_counts(
         raise ValueError("corridor dynamic obstacle count must be in [0, 2]")
 
 
+def validate_dynamic_motion_mode(mode: str) -> str:
+    """Return a normalized deployment-corridor dynamic motion mode."""
+    normalized = str(mode).strip().lower()
+    if normalized not in DYNAMIC_MOTION_MODES:
+        raise ValueError(
+            f"unsupported corridor motion mode {mode!r}; "
+            f"expected one of {DYNAMIC_MOTION_MODES}"
+        )
+    return normalized
+
+
 def wall_geometry(
     count: int,
     spec: LongCorridorSpec,
@@ -163,6 +180,130 @@ def sample_obstacle_layout(
     return static, dynamic, waypoints
 
 
+def sample_dynamic_trajectories(
+    dynamic: torch.Tensor,
+    lateral_waypoints: torch.Tensor,
+    spec: LongCorridorSpec,
+    mode: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build controlled dynamic paths for one corridor motion family.
+
+    Returns starts, two-point patrol paths, per-obstacle motion type IDs, and
+    the first target waypoint index. ``mixed`` samples the three controlled
+    families independently per obstacle and per environment.
+    """
+    normalized = validate_dynamic_motion_mode(mode)
+    if dynamic.ndim != 3 or dynamic.shape[1:] != (2, 2):
+        raise ValueError(f"expected dynamic [N,2,2], got {tuple(dynamic.shape)}")
+    if lateral_waypoints.shape != (dynamic.shape[0], 2, 2, 2):
+        raise ValueError(
+            "expected lateral_waypoints [N,2,2,2], got "
+            f"{tuple(lateral_waypoints.shape)}"
+        )
+
+    count = dynamic.shape[0]
+    device = dynamic.device
+    lateral_starts = dynamic.clone()
+    lateral_targets = (
+        torch.rand(count, 2, device=device) < 0.5
+    ).long()
+
+    # One lane approaches the robot while the other initially travels with it.
+    longitudinal_starts = torch.zeros_like(dynamic)
+    longitudinal_starts[:, 0, 0] = -0.40
+    longitudinal_starts[:, 0, 1] = abs(float(spec.dynamic_y[1]))
+    longitudinal_starts[:, 1, 0] = 0.40
+    longitudinal_starts[:, 1, 1] = -abs(float(spec.dynamic_y[0]))
+    longitudinal_waypoints = torch.zeros_like(lateral_waypoints)
+    longitudinal_y_limit = min(
+        3.4,
+        0.5 * spec.length - spec.obstacle_radius - spec.wall_clearance,
+    )
+    longitudinal_waypoints[:, :, 0, 1] = -longitudinal_y_limit
+    longitudinal_waypoints[:, :, 1, 1] = longitudinal_y_limit
+    longitudinal_waypoints[:, 0, :, 0] = -0.40
+    longitudinal_waypoints[:, 1, :, 0] = 0.40
+    longitudinal_targets = torch.tensor(
+        [0, 1], dtype=torch.long, device=device
+    ).expand(count, -1).clone()
+
+    # Randomized diagonal patrols stay in separate longitudinal bands and in
+    # the center strip, so they cannot tunnel through the static side obstacles.
+    random_waypoints = torch.zeros_like(lateral_waypoints)
+    x_left = torch.empty(count, 2, device=device).uniform_(-0.35, -0.15)
+    x_right = torch.empty(count, 2, device=device).uniform_(0.15, 0.35)
+    swap_x = torch.rand(count, 2, device=device) < 0.5
+    random_waypoints[:, :, 0, 0] = torch.where(
+        swap_x, x_right, x_left
+    )
+    random_waypoints[:, :, 1, 0] = torch.where(
+        swap_x, x_left, x_right
+    )
+    random_outer_y = min(
+        3.3,
+        0.5 * spec.length - spec.obstacle_radius - spec.wall_clearance,
+    )
+    random_waypoints[:, 0, 0, 1] = torch.empty(
+        count, device=device
+    ).uniform_(-random_outer_y, -2.1)
+    random_waypoints[:, 0, 1, 1] = torch.empty(
+        count, device=device
+    ).uniform_(-1.8, -0.8)
+    random_waypoints[:, 1, 0, 1] = torch.empty(
+        count, device=device
+    ).uniform_(0.8, 1.8)
+    random_waypoints[:, 1, 1, 1] = torch.empty(
+        count, device=device
+    ).uniform_(2.1, random_outer_y)
+    random_starts = random_waypoints[:, :, 0].clone()
+    random_targets = torch.ones(count, 2, dtype=torch.long, device=device)
+
+    if normalized == "lateral":
+        motion_types = torch.full(
+            (count, 2), MOTION_LATERAL, dtype=torch.long, device=device
+        )
+    elif normalized == "longitudinal":
+        motion_types = torch.full(
+            (count, 2), MOTION_LONGITUDINAL, dtype=torch.long, device=device
+        )
+    elif normalized == "random_2d":
+        motion_types = torch.full(
+            (count, 2), MOTION_RANDOM_2D, dtype=torch.long, device=device
+        )
+    else:
+        flat_count = count * 2
+        offset = int(torch.randint(0, 3, (1,), device=device).item())
+        balanced = (
+            torch.arange(flat_count, device=device) + offset
+        ) % (MOTION_RANDOM_2D + 1)
+        motion_types = balanced[
+            torch.randperm(flat_count, device=device)
+        ].reshape(count, 2)
+
+    starts = lateral_starts
+    waypoints = lateral_waypoints.clone()
+    target_indices = lateral_targets
+    longitudinal = motion_types == MOTION_LONGITUDINAL
+    random_2d = motion_types == MOTION_RANDOM_2D
+    starts = torch.where(
+        longitudinal[..., None], longitudinal_starts, starts
+    )
+    starts = torch.where(random_2d[..., None], random_starts, starts)
+    waypoints = torch.where(
+        longitudinal[..., None, None], longitudinal_waypoints, waypoints
+    )
+    waypoints = torch.where(
+        random_2d[..., None, None], random_waypoints, waypoints
+    )
+    target_indices = torch.where(
+        longitudinal, longitudinal_targets, target_indices
+    )
+    target_indices = torch.where(
+        random_2d, random_targets, target_indices
+    )
+    return starts, waypoints, motion_types, target_indices
+
+
 def layout_is_constructively_solvable(
     static: torch.Tensor,
     dynamic: torch.Tensor,
@@ -194,4 +335,21 @@ def layout_is_constructively_solvable(
         - spec.robot_conservative_radius
     )
     centerline_open = (centerline_clearance > 0.0).all(dim=1)
-    return inside & centerline_open
+
+    # Controlled patrol segments must not intersect the fixed side obstacles.
+    point = static[:, :, None, :]
+    segment_start = waypoints[:, None, :, 0, :]
+    segment_delta = (
+        waypoints[:, None, :, 1, :]
+        - segment_start
+    )
+    projection = (
+        ((point - segment_start) * segment_delta).sum(dim=-1)
+        / segment_delta.square().sum(dim=-1).clamp_min(1e-9)
+    ).clamp(0.0, 1.0)
+    closest = segment_start + projection[..., None] * segment_delta
+    dynamic_static_clear = (
+        torch.linalg.vector_norm(point - closest, dim=-1)
+        > (2.0 * spec.obstacle_radius)
+    ).all(dim=(1, 2))
+    return inside & centerline_open & dynamic_static_clear

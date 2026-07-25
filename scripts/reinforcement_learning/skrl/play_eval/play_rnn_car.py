@@ -311,6 +311,12 @@ parser.add_argument("--long_corridor_static_obstacles", type=int, default=4,
 parser.add_argument("--long_corridor_dynamic_obstacles", type=int, default=2,
                     help="走廊診斷用動態障礙數；正式 Gate 預設維持 2")
 parser.add_argument(
+    "--long_corridor_motion_mode",
+    choices=("lateral", "longitudinal", "random_2d", "mixed"),
+    default="lateral",
+    help="走廊動態軌跡：既有橫穿、沿走廊迎面/同向、受控2D巡邏或混合",
+)
+parser.add_argument(
     "--future_occupancy_counterfactual_audit",
     action="store_true",
     default=False,
@@ -2825,6 +2831,7 @@ def main():
         _corridor_dynamic_obstacles = int(
             args_cli.long_corridor_dynamic_obstacles
         )
+        _corridor_motion_mode = str(args_cli.long_corridor_motion_mode)
         configure_long_corridor_assets(
             env_cfg,
             fraction=1.0,
@@ -2833,6 +2840,7 @@ def main():
             static_obstacles=_corridor_static_obstacles,
             dynamic_obstacles=_corridor_dynamic_obstacles,
             dynamic_speed_range=(0.30, 0.60),
+            dynamic_motion_mode=_corridor_motion_mode,
         )
         # Dynamic corridor slots start at index 4. Keep four asset/scheduler
         # slots even on the 2S+0D diagnostic rung; unused slots are hidden.
@@ -2844,7 +2852,8 @@ def main():
         print(
             "[PLAY] Deployment corridor gate: free_width=4.00m length=10.00m "
             f"obstacles={_corridor_static_obstacles}S+"
-            f"{_corridor_dynamic_obstacles}D patrol=[0.30,0.60]m/s"
+            f"{_corridor_dynamic_obstacles}D motion={_corridor_motion_mode} "
+            "patrol=[0.30,0.60]m/s"
         )
 
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
@@ -3568,6 +3577,7 @@ def main():
 
     _long_corridor_motion_last = None
     _long_corridor_motion_max = None
+    _long_corridor_motion_axis_max = None
     _long_corridor_goal_error_max = 0.0
     _long_corridor_local_goal_error_max = 0.0
     _long_corridor_applied_actions: list[torch.Tensor] = []
@@ -3620,6 +3630,7 @@ def main():
             dynamic_obstacles=_corridor_dynamic_obstacles,
             dynamic_speed_min=0.30,
             dynamic_speed_max=0.60,
+            dynamic_motion_mode=_corridor_motion_mode,
         )
         _corridor_dynamic_slice = slice(
             4, 4 + _corridor_dynamic_obstacles
@@ -3631,6 +3642,12 @@ def main():
         )
         _long_corridor_motion_max = torch.zeros(
             raw_env.num_envs, _corridor_dynamic_obstacles, device=device
+        )
+        _long_corridor_motion_axis_max = torch.zeros(
+            raw_env.num_envs,
+            _corridor_dynamic_obstacles,
+            2,
+            device=device,
         )
         _audit_long_corridor_goal()
 
@@ -5169,8 +5186,15 @@ def main():
                         .detach()
                         .clone()
                     )
+        # ManagerBasedRLEnv auto-resets terminal envs inside env.step(). Compute
+        # done first so trajectory metrics do not count the reset jump as travel.
+        done = (
+            (terminated.squeeze(-1) | truncated.squeeze(-1))
+            if terminated.ndim > 1
+            else (terminated | truncated)
+        )
         if _narrow_gap_controller is not None:
-            _narrow_gap_controller.observe()
+            _narrow_gap_controller.observe(done)
         # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
         if (_play_behavior_scheduler is not None and _near_wall_controller is None
                 and _controlled_blocker_controller is None and _narrow_gap_controller is None):
@@ -5183,8 +5207,7 @@ def main():
         # RSGS-Lite: stuck detection + recovery goal injection
         if rsgs_filter is not None:
             rsgs_filter.step(obs_tensor)
-        # 合併 terminated + truncated 為 done 旗標
-        done = (terminated.squeeze(-1) | truncated.squeeze(-1)) if terminated.ndim > 1 else (terminated | truncated)
+        # terminated + truncated were merged above before trajectory accounting.
         if _future_cf_step is not None:
             with torch.no_grad():
                 _cf_active = _future_cf_step["active"]
@@ -5342,14 +5365,19 @@ def main():
                     :, _corridor_dynamic_slice
                 ].clone()
             )
-            _corridor_dynamic_delta = (
+            _corridor_dynamic_delta_xy = (
                 _corridor_dynamic_now - _long_corridor_motion_last
-            ).norm(dim=-1)
+            ).abs()
+            _corridor_dynamic_delta = _corridor_dynamic_delta_xy.norm(dim=-1)
             _valid_motion = ~done
             if bool(_valid_motion.any()):
                 _long_corridor_motion_max[_valid_motion] = torch.maximum(
                     _long_corridor_motion_max[_valid_motion],
                     _corridor_dynamic_delta[_valid_motion],
+                )
+                _long_corridor_motion_axis_max[_valid_motion] = torch.maximum(
+                    _long_corridor_motion_axis_max[_valid_motion],
+                    _corridor_dynamic_delta_xy[_valid_motion],
                 )
             _long_corridor_motion_last = _corridor_dynamic_now
         # oracle 探測：reset 的 env 把時間窗 age 歸零（避免窗口跨 episode）
@@ -5981,6 +6009,82 @@ def main():
             if _corridor_dynamic_obstacles > 0
             else 1.0
         )
+        _motion_types = raw_env._long_corridor_dynamic_motion_type[
+            :, :_corridor_dynamic_obstacles
+        ]
+        _motion_type_fractions = {
+            "lateral": (
+                float((_motion_types == 0).float().mean().item())
+                if _motion_types.numel()
+                else 0.0
+            ),
+            "longitudinal": (
+                float((_motion_types == 1).float().mean().item())
+                if _motion_types.numel()
+                else 0.0
+            ),
+            "random_2d": (
+                float((_motion_types == 2).float().mean().item())
+                if _motion_types.numel()
+                else 0.0
+            ),
+        }
+        _axis_moved = (
+            _long_corridor_motion_axis_max > 0.005
+            if _long_corridor_motion_axis_max is not None
+            else torch.zeros(
+                raw_env.num_envs,
+                _corridor_dynamic_obstacles,
+                2,
+                dtype=torch.bool,
+                device=device,
+            )
+        )
+        _axis_stationary = (
+            _long_corridor_motion_axis_max <= 1e-4
+            if _long_corridor_motion_axis_max is not None
+            else torch.ones(
+                raw_env.num_envs,
+                _corridor_dynamic_obstacles,
+                2,
+                dtype=torch.bool,
+                device=device,
+            )
+        )
+        _x_moved_fraction = (
+            float(_axis_moved[..., 0].float().mean().item())
+            if _axis_moved.numel()
+            else 1.0
+        )
+        _y_moved_fraction = (
+            float(_axis_moved[..., 1].float().mean().item())
+            if _axis_moved.numel()
+            else 1.0
+        )
+        if _corridor_dynamic_obstacles == 0:
+            _motion_mode_pass = True
+        elif _corridor_motion_mode == "lateral":
+            _motion_mode_pass = bool(
+                (_motion_types == 0).all().item()
+                and _axis_moved[..., 0].all().item()
+                and _axis_stationary[..., 1].all().item()
+            )
+        elif _corridor_motion_mode == "longitudinal":
+            _motion_mode_pass = bool(
+                (_motion_types == 1).all().item()
+                and _axis_moved[..., 1].all().item()
+                and _axis_stationary[..., 0].all().item()
+            )
+        elif _corridor_motion_mode == "random_2d":
+            _motion_mode_pass = bool(
+                (_motion_types == 2).all().item()
+                and _axis_moved.all(dim=-1).all().item()
+            )
+        else:
+            _motion_mode_pass = bool(
+                all(value > 0.0 for value in _motion_type_fractions.values())
+                and _moving_slots.all().item()
+            )
         _corridor_sr = stats_goal / stats_total if stats_total else 0.0
         _corridor_cr = (
             (stats_wall + stats_obs) / stats_total if stats_total else 0.0
@@ -6017,6 +6121,11 @@ def main():
             ),
             "configured_static_obstacles": _corridor_static_obstacles,
             "configured_dynamic_obstacles": _corridor_dynamic_obstacles,
+            "dynamic_motion_mode": _corridor_motion_mode,
+            "dynamic_motion_type_fractions": _motion_type_fractions,
+            "dynamic_x_moved_fraction": _x_moved_fraction,
+            "dynamic_y_moved_fraction": _y_moved_fraction,
+            "motion_mode_pass": _motion_mode_pass,
             "dynamic_slots_moved_fraction": _dynamic_moved_fraction,
             "static_obstacles_per_env": float(_static_count.float().mean().item()),
             "dynamic_obstacles_per_env": float(_dynamic_count.float().mean().item()),
@@ -6057,6 +6166,7 @@ def main():
         _corridor_report["gate_pass"] = bool(
             _corridor_report["geometry_pass"]
             and _corridor_report["movement_pass"]
+            and _corridor_report["motion_mode_pass"]
             and _corridor_report["obstacle_mix_pass"]
             and _corridor_report["goal_alignment_pass"]
             and _corridor_report["constructive_unsolvable_count"] == 0
@@ -6072,6 +6182,8 @@ def main():
             f"width={_corridor_report['free_width_m_mean']:.3f}m "
             f"length={_corridor_report['length_m_mean']:.3f}m "
             f"dynamic_moved={_corridor_report['dynamic_slots_moved_fraction']:.1%} "
+            f"motion={_corridor_report['dynamic_motion_mode']} "
+            f"motion_ok={_corridor_report['motion_mode_pass']} "
             f"goal_err_max={_corridor_report['goal_command_max_error_m']:.2e}m "
             f"|omega|p90={float(_corridor_report['angular_abs_p90_rad_s'] or 0.0):.3f} "
             f"high_turn={float(_corridor_report['high_turn_fraction'] or 0.0):.1%} "

@@ -55,7 +55,12 @@ FRONT_LO, FRONT_HI = 30, 43  # 前錐 bin36±6
 NARROW_DEPLOY_WIDTH_M = 1.2
 NARROW_STRESS_WIDTH_M = 1.0
 NARROW_DIAGNOSTIC_YAW_DEG = 10.0
-NARROW_DEPLOY_THRESH = dict(sr=0.90, cr=0.05, crossing=0.95)
+NARROW_DEPLOY_THRESH = dict(
+    sr=0.90,
+    cr=0.05,
+    crossing=0.95,
+    direct_crossing=0.95,
+)
 
 
 # ── log 解析 ─────────────────────────────────────────────
@@ -107,7 +112,7 @@ def parse_narrow_gap(path: str) -> dict | None:
 
 def narrow_gap_checks(metrics: dict) -> dict:
     """Build hard deployment checks; yaw remains a non-gating diagnostic."""
-    required = ("sr", "cr", "crossing_rate")
+    required = ("sr", "cr", "crossing_rate", "direct_crossing_rate")
     if any(metrics.get(key) is None for key in required):
         return {}
     return {
@@ -122,6 +127,12 @@ def narrow_gap_checks(metrics: dict) -> dict:
         "穿越率": (
             metrics["crossing_rate"] >= NARROW_DEPLOY_THRESH["crossing"],
             f"{metrics['crossing_rate']:.3f}≥{NARROW_DEPLOY_THRESH['crossing']}",
+        ),
+        "直接穿越率": (
+            metrics["direct_crossing_rate"]
+            >= NARROW_DEPLOY_THRESH["direct_crossing"],
+            f"{metrics['direct_crossing_rate']:.3f}"
+            f"≥{NARROW_DEPLOY_THRESH['direct_crossing']}",
         ),
     }
 
