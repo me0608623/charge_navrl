@@ -40,6 +40,7 @@ try:
         step_static, spawn_static,
         step_patrol, spawn_patrol,
         step_random_walk, spawn_random_walk,
+        resolve_static_conflicts,
         step_horizontal_crossing, spawn_horizontal_crossing,
         step_path_crossing, spawn_path_crossing,
         step_near_miss, spawn_near_miss,
@@ -52,6 +53,7 @@ except ImportError:
         step_static, spawn_static,
         step_patrol, spawn_patrol,
         step_random_walk, spawn_random_walk,
+        resolve_static_conflicts,
         step_horizontal_crossing, spawn_horizontal_crossing,
         step_path_crossing, spawn_path_crossing,
         step_near_miss, spawn_near_miss,
@@ -154,6 +156,10 @@ class BehaviorScheduler:
         self.patrol_wp_index = torch.zeros(E, N, dtype=torch.long, device=device)
         self.patrol_speed = torch.zeros(E, N, device=device)
         self.patrol_pause_remaining = torch.zeros(E, N, dtype=torch.long, device=device)
+        # Per-slot「抵達 waypoint 不暫停」旗標。並排同行的兩人若各自隨機暫停，
+        # 幾步之內就會散開 —— 隊形是互動契約的一部分，不能交給隨機暫停決定。
+        # 預設 False，既有行為完全不變。
+        self.patrol_no_pause = torch.zeros(E, N, dtype=torch.bool, device=device)
 
         # ══════════════════════════════════════════════════════════════════
         # Random Walk State
@@ -164,6 +170,24 @@ class BehaviorScheduler:
         self.rw_timer = torch.zeros(E, N, dtype=torch.long, device=device)
         self.rw_change_interval = torch.zeros(E, N, dtype=torch.long, device=device)
         self.rw_turn_remaining = torch.zeros(E, N, dtype=torch.long, device=device)
+        # Optional per-slot axis-aligned bounds for the random walk, as
+        # (x_min, x_max, y_min, y_max). Infinite by default, which reproduces
+        # the previous unbounded behaviour exactly. `step_random_walk`
+        # documented a boundary bounce it never implemented; finite bounds are
+        # what the deployment-corridor wander mode needs so an obstacle cannot
+        # walk straight through a 4 m corridor wall.
+        self.rw_bounds = torch.full(
+            (E, N, 4), float("inf"), device=device
+        )
+        self.rw_bounds[..., 0] = float("-inf")
+        self.rw_bounds[..., 2] = float("-inf")
+        # Per-slot clearance (metres, centre-to-centre) for the post-behavior
+        # static-conflict resolver. Zero disables the slot entirely — exact
+        # legacy behaviour. The corridor wander installer sets two obstacle
+        # radii so a wandering obstacle cannot pass through a static one;
+        # dynamic-dynamic overlap is deliberately NOT resolved (scripted
+        # pedestrians are independent; overlap is recorded by the eval audit).
+        self.pairwise_clearance = torch.zeros(E, N, device=device)
 
         # ══════════════════════════════════════════════════════════════════
         # Horizontal Crossing State
@@ -236,6 +260,11 @@ class BehaviorScheduler:
         self.positions[env_ids] = 0.0
         self.velocities[env_ids] = 0.0
         self.phase_timer[env_ids] = 0
+        self.rw_bounds[env_ids, :, 0] = float("-inf")
+        self.rw_bounds[env_ids, :, 1] = float("inf")
+        self.rw_bounds[env_ids, :, 2] = float("-inf")
+        self.rw_bounds[env_ids, :, 3] = float("inf")
+        self.pairwise_clearance[env_ids] = 0.0
 
         # 計算每種 behavior 分配幾個 slot
         counts = self._allocate_counts(self.behavior_mix, self.max_obstacles)
@@ -306,6 +335,14 @@ class BehaviorScheduler:
 
         # Dispatch
         step_static(self, static_mask, dt)
+        # Snapshot for the post-behavior static-conflict resolver: reverts
+        # need the pre-step positions, and behaviors themselves stay blind to
+        # each other by design.
+        _pairwise_prev = (
+            self.positions.clone()
+            if bool((self.pairwise_clearance > 0.0).any())
+            else None
+        )
         step_patrol(self, patrol_mask, dt)
         step_random_walk(self, rw_mask, dt)
         cc_mask = (self.behavior_type == BEHAVIOR_CORRIDOR_CROSSING)
@@ -325,6 +362,11 @@ class BehaviorScheduler:
 
         # 牆壁反彈 (含 T 走廊 fill blocks 等 boundary walls)
         self._wall_bounce(active_mask, env, dt)
+
+        # 動-靜衝突解算：所有 behavior + 反彈之後、寫入 sim 之前。
+        # 動-動互穿依裁決放行（由 eval 稽核記錄比例，不在此阻擋）。
+        if _pairwise_prev is not None:
+            resolve_static_conflicts(self, _pairwise_prev)
 
         # 遞增 phase timer
         self.phase_timer[active_mask] += 1

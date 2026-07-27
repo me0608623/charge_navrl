@@ -6,9 +6,38 @@ import math
 
 import torch
 
+from .corridor_density import (
+    CENTER_STRIP_X,
+    INTERACTION_NAMES,
+    INTERACTION_SIDE_BY_SIDE,
+    INTERACTION_CROSSING,
+    NO_PAIR,
+    apply_interaction_geometry,
+    assign_families_and_pairs,
+    audit_installed_pairs,
+    crossing_axis_and_side,
+    crossing_progress,
+    sample_interaction_types,
+    validate_pair_families,
+    MAX_CORRIDOR_DYNAMIC,
+    MAX_CORRIDOR_STATIC,
+    active_masks_from_counts,
+    dynamic_layout_for_families,
+    dynamic_waypoints_for_families,
+    sample_density_counts_systematic,
+    validate_density_mix,
+)
 from .long_corridor_replay_geometry import (
+    MIXED_MAX_DYNAMIC,
+    MIXED_MAX_STATIC,
+    MOTION_RANDOM_2D,
     LongCorridorSpec,
     layout_is_constructively_solvable,
+    apply_pause_override,
+    sample_conflict_free_layout,
+    corridor_penetration_masks,
+    corridor_wander_bounds,
+    validate_random_2d_kinematics,
     sample_dynamic_trajectories,
     normalize_dynamic_motion_weights,
     sample_obstacle_layout,
@@ -34,18 +63,28 @@ def configure_long_corridor_assets(
     dynamic_speed_range: tuple[float, float] = (0.30, 0.60),
     dynamic_motion_mode: str = "lateral",
     dynamic_motion_weights: tuple[float, float, float] | None = None,
+    random_2d_kinematics: str = "patrol",
+    obstacle_count_mix=None,
 ) -> None:
-    """Add dedicated corridor walls and configure the reset event."""
+    """Add dedicated corridor walls and configure the reset event.
+
+    ``obstacle_count_mix`` 不是 None 時走高密度混合場：每個 env 的 (S, D) 由
+    這組權重逐 env 抽，``static_obstacles`` / ``dynamic_obstacles`` 失效。
+    """
     from isaaclab.assets import RigidObjectCfg
     import isaaclab.sim as sim_utils
 
     spec = LongCorridorSpec(free_width=float(free_width), length=float(length))
     validate_spec(spec)
-    validate_obstacle_counts(static_obstacles, dynamic_obstacles)
+    if obstacle_count_mix is None:
+        validate_obstacle_counts(static_obstacles, dynamic_obstacles)
+    else:
+        validate_density_mix(obstacle_count_mix)
     motion_mode = validate_dynamic_motion_mode(dynamic_motion_mode)
     motion_weights = normalize_dynamic_motion_weights(
         dynamic_motion_weights, motion_mode
     )
+    kinematics = validate_random_2d_kinematics(random_2d_kinematics)
     speed_min, speed_max = map(float, dynamic_speed_range)
     if not (0.0 < speed_min <= speed_max):
         raise ValueError("dynamic corridor speed range must be positive and ordered")
@@ -89,17 +128,101 @@ def configure_long_corridor_assets(
             "dynamic_speed_max": speed_max,
             "dynamic_motion_mode": motion_mode,
             "dynamic_motion_weights": motion_weights,
+            # Must ride in the event params: the reset event re-invokes
+            # setup_long_corridor_replay on every auto-reset, and a missing
+            # key silently falls back to "patrol", overwriting the direct
+            # call's setting after the very first reset. That exact bug
+            # produced a "wander" gate whose episodes were patrol from the
+            # second reset onward.
+            "random_2d_kinematics": kinematics,
+            # 同上，必須隨 event params 走：auto-reset 會重跑 setup，
+            # 少了這個 key 會從第二次 reset 起悄悄掉回 legacy 密度。
+            "obstacle_count_mix": obstacle_count_mix,
         }
     )
+    # 密度描述必須反映**實際生效**的那一組：混合場一開，
+    # static_obstacles/dynamic_obstacles 就失效了，照印會讓 log 說謊。
+    if obstacle_count_mix is None:
+        density = f"{static_obstacles}S+{dynamic_obstacles}D"
+    else:
+        density = "mix[" + ",".join(
+            f"{s}S{d}D:{w:.2f}" for (s, d), w in obstacle_count_mix
+        ) + "]"
     print(
         "[LONG-CORRIDOR-CONFIG] "
         f"fraction={fraction:.3f} free_width={spec.free_width:.2f}m "
-        f"length={spec.length:.2f}m obstacles={static_obstacles}S+"
-        f"{dynamic_obstacles}D speed=[{speed_min:.2f},{speed_max:.2f}]m/s "
-        f"motion={motion_mode} "
+        f"length={spec.length:.2f}m obstacles={density} "
+        f"speed=[{speed_min:.2f},{speed_max:.2f}]m/s "
+        f"motion={motion_mode} random_2d_kinematics={kinematics} "
         f"configured_motion_weights={motion_weights} reward_unchanged=True",
         flush=True,
     )
+
+
+def _install_corridor_wander(
+    scheduler,
+    selected: torch.Tensor,
+    dynamic_slots: torch.Tensor,
+    wander_mask: torch.Tensor,
+    spec: LongCorridorSpec,
+    speeds: torch.Tensor,
+) -> None:
+    """Switch the masked dynamic slots from patrol to a bounded random walk."""
+    from .behavior_scheduler import BEHAVIOR_RANDOM_WALK
+
+    device = scheduler.device
+    # ``dynamic_slots`` is a slice into the obstacle axis; materialise it so the
+    # masked slots can be gathered as explicit [env, slot] index pairs.
+    slot_ids = torch.arange(
+        dynamic_slots.start, dynamic_slots.stop, device=device, dtype=torch.long
+    )
+    env_idx = selected[:, None].expand_as(wander_mask)[wander_mask]
+    slot_idx = slot_ids[None, :].expand_as(wander_mask)[wander_mask]
+    count = int(env_idx.numel())
+    if count == 0:
+        return
+
+    scheduler.behavior_type[env_idx, slot_idx] = BEHAVIOR_RANDOM_WALK
+    # Patrol state must be cleared, otherwise a stale waypoint could be read by
+    # any downstream consumer that keys off the slot rather than the behaviour.
+    scheduler.patrol_pause_remaining[env_idx, slot_idx] = 0
+    scheduler.patrol_num_waypoints[env_idx, slot_idx] = 0
+
+    x_min, x_max, y_min, y_max = corridor_wander_bounds(spec)
+    bounds = torch.tensor(
+        [x_min, x_max, y_min, y_max], device=device, dtype=scheduler.rw_bounds.dtype
+    )
+    scheduler.rw_bounds[env_idx, slot_idx] = bounds
+    # Static-conflict resolver participation: a blind wander penetrated a
+    # static obstacle in 16% of measured slot-frames. Two shared radii =
+    # centre distance at exact touch. Dynamic-dynamic overlap is deliberately
+    # not resolved (independent scripted pedestrians; audited, not blocked).
+    scheduler.pairwise_clearance[env_idx, slot_idx] = 2.0 * spec.obstacle_radius
+
+    heading = torch.rand(count, device=device) * 2.0 * math.pi
+    slot_speeds = speeds[wander_mask]
+    scheduler.rw_heading[env_idx, slot_idx] = heading
+    scheduler.rw_target_heading[env_idx, slot_idx] = heading
+    scheduler.rw_speed[env_idx, slot_idx] = slot_speeds
+    scheduler.rw_timer[env_idx, slot_idx] = 0
+    scheduler.rw_turn_remaining[env_idx, slot_idx] = 0
+    cfg = scheduler.cfg.random_walk
+    scheduler.rw_change_interval[env_idx, slot_idx] = torch.randint(
+        cfg.direction_change_interval_range[0],
+        cfg.direction_change_interval_range[1] + 1,
+        (count,),
+        device=device,
+    )
+    scheduler.velocities[env_idx, slot_idx, 0] = slot_speeds * torch.cos(heading)
+    scheduler.velocities[env_idx, slot_idx, 1] = slot_speeds * torch.sin(heading)
+    # Start inside the reflecting box so the very first step cannot begin out
+    # of bounds.
+    scheduler.positions[env_idx, slot_idx, 0] = scheduler.positions[
+        env_idx, slot_idx, 0
+    ].clamp(x_min, x_max)
+    scheduler.positions[env_idx, slot_idx, 1] = scheduler.positions[
+        env_idx, slot_idx, 1
+    ].clamp(y_min, y_max)
 
 
 def _as_env_ids(env, env_ids) -> torch.Tensor:
@@ -129,12 +252,70 @@ def _ensure_state(env) -> None:
         env.num_envs, dtype=torch.bool, device=env.device
     )
     env._long_corridor_goal_w = torch.zeros(env.num_envs, 3, device=env.device)
+    # 寬度取高密度上限；legacy 路徑一律用 ``[:, :dynamic_obstacles]`` 前綴，
+    # 多出來的欄位保持 0/-1，不影響既有數字。
     env._long_corridor_dynamic_start = torch.zeros(
-        env.num_envs, 2, 2, device=env.device
+        env.num_envs, MAX_CORRIDOR_DYNAMIC, 2, device=env.device
     )
     env._long_corridor_dynamic_motion_type = torch.full(
-        (env.num_envs, 2), -1, dtype=torch.long, device=env.device
+        (env.num_envs, MAX_CORRIDOR_DYNAMIC), -1, dtype=torch.long, device=env.device
     )
+    # per-env 狀態，不是「最後一批 reset」的快照。用全域欄位存 counts 的話，
+    # 每次 reset 都會被不同長度的張量整個蓋掉，事後無法按 global env ID
+    # 把 episode 歸因到它當時真正的密度/互動型態。
+    # 累計審計：首批 8 個 env 的比例毫無統計意義（裁決要求 >= 500 次指派）。
+    # 逐次 reset 累加，才看得出小批次反覆重置下的真實分佈。
+    env._long_corridor_density_combo_total = torch.zeros(
+        (MAX_CORRIDOR_STATIC + 1) * (MAX_CORRIDOR_DYNAMIC + 1),
+        dtype=torch.long, device=env.device,
+    )
+    env._long_corridor_interaction_total = torch.zeros(
+        3, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_interaction_by_d = torch.zeros(
+        MAX_CORRIDOR_DYNAMIC + 1, 3, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_interaction_geometry_ok = torch.zeros(
+        2, 2, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_wander_total = torch.zeros(
+        2, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_assignment_total = 0
+    env._long_corridor_density_counts = torch.zeros(
+        env.num_envs, 2, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_interaction_type = torch.full(
+        (env.num_envs,), -1, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_interaction_pair = torch.full(
+        (env.num_envs, 2), NO_PAIR, dtype=torch.long, device=env.device
+    )
+    # 實際 family 的累計比例，與互動比例**分開**輸出 —— 互動會強制吃掉
+    # longitudinal 額度，把兩者混在一起看不出配額是否仍然平衡。
+    env._long_corridor_actual_family_total = torch.zeros(
+        3, dtype=torch.long, device=env.device
+    )
+    # 跨步複驗：安裝當下正確不代表之後仍然正確。
+    env._long_corridor_pair_step_checks = torch.zeros(
+        2, 2, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_pair_step_breakdown = {}
+    # 跨批次記憶：密度 carry 降低短期變異；family debt 補回配對強制吃掉的
+    # longitudinal 額度（只在當批補償補不回來）。
+    env._long_corridor_density_carry = {}
+    env._long_corridor_family_debt = {}
+    # crossing 狀態機：固定交點 + 起始側別 + 各自是否已穿越。
+    env._long_corridor_cross_point = torch.zeros(env.num_envs, 2, device=env.device)
+    env._long_corridor_cross_side = torch.zeros(env.num_envs, 2, device=env.device)
+    env._long_corridor_cross_done = torch.zeros(
+        env.num_envs, 2, dtype=torch.bool, device=env.device
+    )
+    env._long_corridor_cross_completed_total = 0
+    env._long_corridor_cross_pairs_total = 0
+    # 已結束並結算的 crossing 配對數。這才是完成率的正確分母 ——
+    # 用「已安裝」當分母會把「尚未結束的回合」算成未完成，低估完成率。
+    env._long_corridor_cross_harvested_total = 0
     env._long_corridor_motion_mode = "lateral"
     env._long_corridor_motion_weights = None
     # Cumulative motion-family audit across every successful install. The
@@ -147,16 +328,37 @@ def _ensure_state(env) -> None:
         3, dtype=torch.long, device=env.device
     )
     env._long_corridor_pure_env_count_total = 0
+    # True only after _install_obstacles succeeded for the env. The activity
+    # flag flips True before installation, so audits keyed on it would count
+    # pre-install (non-corridor) frames.
+    env._long_corridor_obstacles_ready = torch.zeros(
+        env.num_envs, dtype=torch.bool, device=env.device
+    )
     env._long_corridor_reset_count = 0
     env._long_corridor_injected_count = 0
     env._long_corridor_unsolvable_count = 0
+
+
+def _clear_corridor_metadata(env, env_ids: torch.Tensor) -> None:
+    """Drop per-env density/interaction attribution when an env leaves the corridor.
+
+    留著舊值的話，之後在非走廊場景結束的 episode 會被歸因到上一次的密度與
+    互動型態 —— 分項指標會把不相干的結果算進某個 (S,D) 組合。
+    """
+    _harvest_completed_crossings(env, env_ids)
+    env._long_corridor_density_counts[env_ids] = 0
+    env._long_corridor_interaction_type[env_ids] = -1
+    env._long_corridor_interaction_pair[env_ids] = NO_PAIR
+    env._long_corridor_cross_done[env_ids] = False
 
 
 def _hide_corridor_walls(env, env_ids: torch.Tensor) -> None:
     env._long_corridor_wall_mask[env_ids] = False
     env._long_corridor_active[env_ids] = False
     env._long_corridor_pending_obstacles[env_ids] = False
+    env._long_corridor_obstacles_ready[env_ids] = False
     env._long_corridor_dynamic_motion_type[env_ids] = -1
+    _clear_corridor_metadata(env, env_ids)
     origins = env.scene.env_origins[env_ids]
     for name in _ASSET_NAMES:
         pose = torch.zeros(env_ids.numel(), 7, device=env.device)
@@ -207,6 +409,161 @@ def _hide_original_geometry(env, env_ids: torch.Tensor) -> None:
         )
 
 
+#: 高密度混合場的未啟用 slot 全留在原點 (0,0)，直接送去檢查會被誤判成
+#: 一堆互相穿透的障礙。兩種檢查要用**不同**的替身，因為它們問的事不同：
+#:
+#: * 重疊檢查問「有沒有兩個實體長在一起」-> 把未啟用的挪到走廊外最乾淨。
+#: * 可解性檢查問「還在牆內嗎、中央路線通不通」-> 挪到走廊外會被判出界，
+#:   所以改停在貼牆的界內停車位（不擋中央路線）。
+_INACTIVE_FAR_SENTINEL = 1.0e4
+#: 哨兵之間的間距，遠大於 2 * obstacle_radius = 0.7 m。
+_INACTIVE_SENTINEL_STRIDE = 10.0
+
+
+def _sample_mixed_density_layout(
+    count: int,
+    spec: LongCorridorSpec,
+    device,
+    count_mix,
+    max_tries: int = 20,
+    density_carry: dict | None = None,
+    family_debt: dict | None = None,
+):
+    """Sample a per-env variable-density corridor layout.
+
+    Returns ``(counts, families, static, dynamic, waypoints, targets,
+    static_mask, dynamic_mask)``.
+
+    數量、family 配額與 active mask 由 ``corridor_density`` 決定（policy），
+    位置與路徑由幾何層產生。未啟用的 slot 一律留在原點並標成 INACTIVE，
+    但**檢查時**先挪到哨兵位置，避免假重疊。
+    """
+    counts = sample_density_counts_systematic(
+        count, mix=count_mix, device=device, carry=density_carry
+    )
+    dynamic_counts = counts[:, 1]
+    # 順序不可調換：互動型態是契約，family 是為了實現它而指派的。
+    # 反過來（先 family 再問做得出什麼互動）只能默默降級，湊不出 60/20/20。
+    interaction_types = sample_interaction_types(
+        dynamic_counts=dynamic_counts, device=device
+    )
+    # 配對 slot 的 family 一開始就正確（crossing=lateral+longitudinal、
+    # side_by_side=longitudinal+longitudinal），random_2d 永不參與配對 ——
+    # wander 會重抽獨立 heading，會把擺好的互動幾何整個蓋掉。
+    families, pairs = assign_families_and_pairs(
+        dynamic_counts, interaction_types, device=device, family_debt=family_debt
+    )
+    problems = validate_pair_families(interaction_types, pairs, families)
+    if problems:
+        raise RuntimeError(
+            "corridor interaction pairing violated its family contract: "
+            + "; ".join(problems[:5])
+        )
+    static_mask, dynamic_mask = active_masks_from_counts(counts)
+
+    lateral_lanes = tuple(float(y) for y in spec.dynamic_y)
+    longitudinal_y_limit = min(
+        3.4, 0.5 * spec.length - spec.obstacle_radius - spec.wall_clearance
+    )
+
+    clean = None
+    speeds = None
+    for attempt in range(max_tries + 1):
+        static, _, _ = sample_obstacle_layout(
+            count, spec, device,
+            max_static=MIXED_MAX_STATIC, max_dynamic=MIXED_MAX_DYNAMIC,
+            permute_slots=True,
+        )
+        dynamic = dynamic_layout_for_families(
+            families,
+            lateral_lanes=lateral_lanes,
+            center_strip_x=CENTER_STRIP_X,
+            lateral_x_limit=spec.dynamic_x_limit,
+            device=device,
+        )
+        waypoints, targets = dynamic_waypoints_for_families(
+            families, dynamic,
+            lateral_x_limit=spec.dynamic_x_limit,
+            longitudinal_y_limit=longitudinal_y_limit,
+            center_strip_x=CENTER_STRIP_X,
+            device=device,
+        )
+        bounds_probe = _park_inactive(
+            static, dynamic, waypoints, static_mask, dynamic_mask, spec
+        )
+        solvable = layout_is_constructively_solvable(*bounds_probe, spec)
+        far_static, far_dynamic, _ = _banish_inactive(
+            static, dynamic, waypoints, static_mask, dynamic_mask
+        )
+        ds, dd = corridor_penetration_masks(
+            far_dynamic, far_static, spec.obstacle_radius
+        )
+        clean = solvable & ~ds.any(dim=1) & ~dd.any(dim=1)
+        if bool(clean.all()):
+            return (
+                counts, families, static, dynamic, waypoints, targets,
+                static_mask, dynamic_mask, interaction_types, pairs,
+            )
+        if attempt == max_tries:
+            break
+    raise RuntimeError(
+        "mixed-density corridor resampling failed to clear overlaps within "
+        f"{max_tries} tries for {int((~clean).sum().item())} envs; "
+        "refusing to install an overlapped scene"
+    )
+
+
+def _banish_inactive(static, dynamic, waypoints, static_mask, dynamic_mask):
+    """Move masked-off slots far outside the corridor (overlap probe).
+
+    每個 slot 的哨兵座標必須**互不相同**。全部塞同一點的話，未啟用的 slot 之間
+    距離為 0，重疊檢查會把空 slot 判成互相穿透 —— 密度越低反而越不合格。
+    靜態與動態也各自佔一個哨兵區，避免跨類假重疊。
+    """
+    far = _INACTIVE_FAR_SENTINEL
+    stride = _INACTIVE_SENTINEL_STRIDE
+
+    def banish(tensor, mask, sign):
+        slots = tensor.shape[1]
+        offsets = torch.arange(slots, device=tensor.device, dtype=tensor.dtype)
+        sentinel = torch.empty_like(tensor)
+        sentinel[..., 0] = sign * far
+        sentinel[..., 1] = far + offsets.reshape(
+            (1, slots) + (1,) * (tensor.ndim - 3)
+        ) * stride
+        expand = mask.reshape(mask.shape + (1,) * (tensor.ndim - mask.ndim))
+        return torch.where(expand, tensor, sentinel)
+
+    return (
+        banish(static, static_mask, 1.0),
+        banish(dynamic, dynamic_mask, -1.0),
+        banish(waypoints, dynamic_mask, -1.0),
+    )
+
+
+def _park_inactive(static, dynamic, waypoints, static_mask, dynamic_mask, spec):
+    """Park masked-off slots against the wall, in bounds (solvability probe).
+
+    停車位貼在走廊**末端**的左右兩角，靜態與動態各佔一角：
+
+    * 仍在牆內 -> 過得了邊界檢查。
+    * ``|x|`` 遠離中央線 -> 不會假性擋住建構路線。
+    * 離最近的真實靜態（y 最外一列 3.0 m）有 1.3 m -> 不會被巡邏線段的
+      「不得掠過靜態」檢查誤判。停在 ``y=0`` 只有 0.67 m，剛好低於
+      2 * 0.35 m 的門檻，會讓**每一個**有空 slot 的場景都判成不可解。
+    * 靜態與動態分佔左右 -> 兩邊的空 slot 之間也不會互相誤判。
+    """
+    park_x = spec.inner_half_width - spec.obstacle_radius - spec.wall_clearance
+    park_y = 0.5 * spec.length - spec.obstacle_radius - spec.wall_clearance - 0.15
+    static_park = torch.tensor([park_x, park_y], device=static.device)
+    dynamic_park = torch.tensor([-park_x, park_y], device=static.device)
+    return (
+        torch.where(static_mask[..., None], static, static_park),
+        torch.where(dynamic_mask[..., None], dynamic, dynamic_park),
+        torch.where(dynamic_mask[..., None, None], waypoints, dynamic_park),
+    )
+
+
 def _install_obstacles(
     env,
     selected: torch.Tensor,
@@ -217,11 +574,16 @@ def _install_obstacles(
     dynamic_obstacles: int,
     dynamic_motion_mode: str,
     dynamic_motion_weights: tuple[float, float, float] | None = None,
+    count_mix=None,
 ) -> bool:
     scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
     if scheduler is None:
         env._long_corridor_pending_obstacles[selected] = True
         return False
+    if count_mix is not None:
+        return _install_mixed_density_obstacles(
+            env, selected, spec, speed_min, speed_max, count_mix, scheduler
+        )
     validate_obstacle_counts(static_obstacles, dynamic_obstacles)
     if scheduler.max_obstacles < 4 + dynamic_obstacles:
         raise RuntimeError(
@@ -231,27 +593,26 @@ def _install_obstacles(
     from .behavior_scheduler import (
         BEHAVIOR_INACTIVE,
         BEHAVIOR_PATROL,
+        BEHAVIOR_RANDOM_WALK,
         BEHAVIOR_STATIC,
     )
 
     count = selected.numel()
-    static, dynamic, waypoints = sample_obstacle_layout(count, spec, env.device)
-    dynamic, waypoints, motion_types, target_indices = (
-        sample_dynamic_trajectories(
-            dynamic,
-            waypoints,
+    # Spawn-conflict-free sampling: two obstacles spawning inside each other
+    # merge into one, so overlapped draws are rejected and redrawn with their
+    # motion families held fixed; the sampler raises after max_tries instead
+    # of installing an overlapped scene (postcondition).
+    static, dynamic, waypoints, motion_types, target_indices = (
+        sample_conflict_free_layout(
+            count,
             spec,
+            env.device,
             dynamic_motion_mode,
             dynamic_motion_weights,
+            static_obstacles=static_obstacles,
+            dynamic_obstacles=dynamic_obstacles,
         )
     )
-    valid = layout_is_constructively_solvable(static, dynamic, waypoints, spec)
-    if not bool(valid.all()):
-        bad_count = int((~valid).sum().item())
-        env._long_corridor_unsolvable_count += bad_count
-        raise RuntimeError(
-            f"long corridor generated {bad_count} non-constructive layouts"
-        )
 
     scheduler.behavior_type[selected] = BEHAVIOR_INACTIVE
     scheduler.positions[selected] = 0.0
@@ -327,9 +688,393 @@ def _install_obstacles(
         scheduler.velocities[selected, dynamic_slots] = (
             direction * speeds[..., None]
         )
+
+        # Optional: give the random_2d family a genuine bounded random walk
+        # instead of a two-point patrol. The patrol reverses on a fixed ~1.5 m
+        # leg roughly every 3.3 s, which sits inside the 1.5 s future-occupancy
+        # horizon and makes a large share of predictions structurally wrong.
+        # A wander has no fixed turnaround point. Default is "patrol", so every
+        # historical gate is untouched.
+        if getattr(env, "_long_corridor_random_2d_kinematics", "patrol") == "wander":
+            wander = active_motion_types == MOTION_RANDOM_2D
+            if bool(wander.any()):
+                _install_corridor_wander(
+                    scheduler, selected, dynamic_slots, wander, spec, speeds
+                )
     env._long_corridor_pending_obstacles[selected] = False
+    env._long_corridor_obstacles_ready[selected] = True
     scheduler._write_positions_to_sim(env)
     return True
+
+
+def _install_mixed_density_obstacles(
+    env,
+    selected: torch.Tensor,
+    spec: LongCorridorSpec,
+    speed_min: float,
+    speed_max: float,
+    count_mix,
+    scheduler,
+) -> bool:
+    """Install a per-env variable-density corridor scene (2026-07-27 混合場).
+
+    與 legacy 路徑的關鍵差別：每個 env 的 (S, D) **不同**，所以 slot 佈局固定
+    在 ``[0, 5)`` 靜態 + ``[5, 10)`` 動態，靠 active mask 逐 env 關掉多餘的，
+    而不是靠 ``slice(0, S)`` / ``slice(4, 4 + D)`` 這種全批共用的前綴切片。
+    """
+    from .behavior_scheduler import (
+        BEHAVIOR_INACTIVE,
+        BEHAVIOR_PATROL,
+        BEHAVIOR_RANDOM_WALK,
+        BEHAVIOR_STATIC,
+    )
+
+    required = MAX_CORRIDOR_STATIC + MAX_CORRIDOR_DYNAMIC
+    if scheduler.max_obstacles < required:
+        raise RuntimeError(
+            f"mixed-density corridor needs {required} BehaviorScheduler obstacle "
+            f"slots, scheduler has {scheduler.max_obstacles}"
+        )
+
+    count = selected.numel()
+    (
+        counts, families, static, dynamic, waypoints, targets,
+        static_mask, dynamic_mask, interaction_types, pairs,
+    ) = _sample_mixed_density_layout(
+        count, spec, env.device, count_mix,
+        density_carry=getattr(env, "_long_corridor_density_carry", None),
+        family_debt=getattr(env, "_long_corridor_family_debt", None),
+    )
+
+    speeds = torch.empty(
+        count, MAX_CORRIDOR_DYNAMIC, device=env.device
+    ).uniform_(float(speed_min), float(speed_max)) * dynamic_mask
+
+    # 互動幾何必須在寫進 scheduler **之前**套用，而且要 fail-fast：
+    # 抽到 crossing 卻蓋不出 crossing 的話，指標會報 20% 交叉、場景裡卻是
+    # 各走各的。降級比缺功能更糟 —— 它讓錯誤的數字看起來是對的。
+    longitudinal_y_limit = min(
+        3.4, 0.5 * spec.length - spec.obstacle_radius - spec.wall_clearance
+    )
+    dynamic, waypoints, targets, speeds, realized = apply_interaction_geometry(
+        interaction_types, pairs, families,
+        dynamic, waypoints, targets, speeds,
+        longitudinal_y_limit=longitudinal_y_limit,
+        center_strip_x=CENTER_STRIP_X, device=env.device,
+    )
+    if not bool(realized.all()):
+        missing = (~realized).nonzero(as_tuple=False).flatten()
+        kinds = sorted(
+            {INTERACTION_NAMES[int(interaction_types[i])] for i in missing.tolist()}
+        )
+        raise RuntimeError(
+            f"corridor interaction sampling produced {missing.numel()} env(s) whose "
+            f"interaction could not be built ({kinds}); refusing to install a scene "
+            "whose reported interaction mix does not match its geometry"
+        )
+
+    scheduler.behavior_type[selected] = BEHAVIOR_INACTIVE
+    scheduler.positions[selected] = 0.0
+    scheduler.velocities[selected] = 0.0
+    scheduler.phase_timer[selected] = 0
+    scheduler.patrol_pause_remaining[selected] = 0
+    env._long_corridor_dynamic_start[selected] = 0.0
+    env._long_corridor_dynamic_motion_type[selected] = -1
+
+    static_slots = slice(0, MAX_CORRIDOR_STATIC)
+    dynamic_slots = slice(
+        MAX_CORRIDOR_STATIC, MAX_CORRIDOR_STATIC + MAX_CORRIDOR_DYNAMIC
+    )
+
+    scheduler.behavior_type[selected, static_slots] = torch.where(
+        static_mask,
+        torch.full_like(static_mask, BEHAVIOR_STATIC, dtype=torch.long),
+        torch.full_like(static_mask, BEHAVIOR_INACTIVE, dtype=torch.long),
+    ).to(scheduler.behavior_type.dtype)
+    scheduler.positions[selected, static_slots] = static * static_mask[..., None]
+
+    scheduler.behavior_type[selected, dynamic_slots] = torch.where(
+        dynamic_mask,
+        torch.full_like(dynamic_mask, BEHAVIOR_PATROL, dtype=torch.long),
+        torch.full_like(dynamic_mask, BEHAVIOR_INACTIVE, dtype=torch.long),
+    ).to(scheduler.behavior_type.dtype)
+    scheduler.positions[selected, dynamic_slots] = dynamic * dynamic_mask[..., None]
+    scheduler.patrol_num_waypoints[selected, dynamic_slots] = 2
+    scheduler.patrol_speed[selected, dynamic_slots] = speeds
+    scheduler.patrol_pause_remaining[selected, dynamic_slots] = 0
+    scheduler.patrol_wp_index[selected, dynamic_slots] = targets
+    scheduler.patrol_waypoints[selected, dynamic_slots, :2] = waypoints
+    scheduler.patrol_waypoints[selected, dynamic_slots, 2:] = 0.0
+
+    target_xy = torch.gather(
+        waypoints, 2, targets[..., None, None].expand(-1, -1, 1, 2)
+    ).squeeze(2)
+    direction = target_xy - dynamic
+    direction = direction / torch.linalg.vector_norm(
+        direction, dim=-1, keepdim=True
+    ).clamp_min(1e-6)
+    scheduler.velocities[selected, dynamic_slots] = (
+        direction * speeds[..., None] * dynamic_mask[..., None]
+    )
+
+    env._long_corridor_dynamic_start[selected] = dynamic * dynamic_mask[..., None]
+    env._long_corridor_dynamic_motion_type[selected] = torch.where(
+        dynamic_mask, families, torch.full_like(families, -1)
+    )
+    env._long_corridor_density_counts[selected] = counts
+    env._long_corridor_interaction_type[selected] = interaction_types
+    env._long_corridor_interaction_pair[selected] = pairs
+
+    # 並排 pair 不得隨機暫停 —— 兩人各自暫停幾步就散開了。
+    scheduler.patrol_no_pause[selected, dynamic_slots] = False
+    side_rows = (
+        interaction_types == INTERACTION_SIDE_BY_SIDE
+    ).nonzero(as_tuple=False).flatten()
+    if side_rows.numel() > 0:
+        base = MAX_CORRIDOR_STATIC
+        for row in side_rows.tolist():
+            env_id = int(selected[row])
+            for k in range(2):
+                scheduler.patrol_no_pause[env_id, base + int(pairs[row, k])] = True
+
+    point, side = crossing_axis_and_side(interaction_types, pairs, families, dynamic)
+    env._long_corridor_cross_point[selected] = point
+    env._long_corridor_cross_side[selected] = side
+    env._long_corridor_cross_done[selected] = False
+    env._long_corridor_cross_pairs_total += int(
+        (interaction_types == INTERACTION_CROSSING).sum()
+    )
+    env._long_corridor_actual_family_total += torch.bincount(
+        families[dynamic_mask], minlength=3
+    )
+
+    # legacy 路徑會把 random_2d 換成 wander，mixed 路徑漏掉就等於 banner 寫
+    # wander、實際卻全是 patrol —— 兩點巡邏每 ~3.3 s 在固定點折返，落在
+    # future-occupancy 的 1.5 s 視界內，正是 W1 要擺脫的東西。
+    if getattr(env, "_long_corridor_random_2d_kinematics", "patrol") == "wander":
+        wander = (families == MOTION_RANDOM_2D) & dynamic_mask
+        # 硬閘：被配對的 slot 絕不能變成 RANDOM_WALK —— wander 會重抽獨立
+        # heading，把互動幾何蓋掉，而 audit 若量安裝前的張量就會報假陽性。
+        paired_slots = torch.zeros_like(wander)
+        valid = pairs >= 0
+        if bool(valid.any()):
+            rows = valid.nonzero(as_tuple=False)
+            paired_slots[rows[:, 0], pairs[rows[:, 0], rows[:, 1]]] = True
+        if bool((wander & paired_slots).any()):
+            raise RuntimeError(
+                "corridor wander would overwrite an interaction pair slot; "
+                "paired slots must never be random_2d"
+            )
+        if bool(wander.any()):
+            _install_corridor_wander(
+                scheduler, selected, dynamic_slots, wander, spec, speeds
+            )
+
+    # ---- 累計審計 ----
+    env._long_corridor_assignment_total += int(count)
+    env._long_corridor_density_combo_total += torch.bincount(
+        counts[:, 0] * (MAX_CORRIDOR_DYNAMIC + 1) + counts[:, 1],
+        minlength=(MAX_CORRIDOR_STATIC + 1) * (MAX_CORRIDOR_DYNAMIC + 1),
+    )
+    env._long_corridor_interaction_total += torch.bincount(
+        interaction_types, minlength=3
+    )
+    for d in range(MAX_CORRIDOR_DYNAMIC + 1):
+        rows = counts[:, 1] == d
+        if bool(rows.any()):
+            env._long_corridor_interaction_by_d[d] += torch.bincount(
+                interaction_types[rows], minlength=3
+            )
+
+    # 複驗必須讀**安裝後**的 scheduler 狀態：wander 在幾何之後才覆寫 heading，
+    # 量安裝前的暫存張量會讓已被蓋掉的互動看起來完好（假陽性）。
+    env._long_corridor_interaction_audit = audit_installed_pairs(
+        behavior_type=scheduler.behavior_type[selected, dynamic_slots],
+        positions=scheduler.positions[selected, dynamic_slots],
+        velocities=scheduler.velocities[selected, dynamic_slots],
+        interaction_types=interaction_types,
+        pairs=pairs,
+        families=families,
+        random_walk_id=BEHAVIOR_RANDOM_WALK,
+    )
+    if env._long_corridor_interaction_audit["paired_is_random_walk"]:
+        raise RuntimeError(
+            "interaction pair slot was installed as RANDOM_WALK; the wander "
+            "override must never touch a paired slot"
+        )
+    # runtime 證明：random_2d 的 slot 在 wander 模式下必須真的是 RANDOM_WALK。
+    # 只看 min_speed > 0.1 證明不了 —— patrol 的速度一樣 > 0.1。
+    want_wander = (
+        getattr(env, "_long_corridor_random_2d_kinematics", "patrol") == "wander"
+    )
+    rnd = (families == MOTION_RANDOM_2D) & dynamic_mask
+    installed = scheduler.behavior_type[selected, dynamic_slots]
+    env._long_corridor_wander_audit = (
+        int(rnd.sum()),
+        int((installed[rnd] == BEHAVIOR_RANDOM_WALK).sum()) if bool(rnd.any()) else 0,
+        bool(want_wander),
+    )
+    env._long_corridor_wander_total[0] += int(rnd.sum())
+    env._long_corridor_wander_total[1] += (
+        int((installed[rnd] == BEHAVIOR_RANDOM_WALK).sum()) if bool(rnd.any()) else 0
+    )
+    audit = env._long_corridor_interaction_audit
+    env._long_corridor_interaction_geometry_ok += torch.tensor(
+        [
+            [audit["crossing_ok"], audit["crossing_n"]],
+            [audit["side_ok"], audit["side_n"]],
+        ],
+        dtype=torch.long, device=env.device,
+    )
+    # future-occupancy 只認 speed > 0.10 m/s 的障礙。高密度場多出來的
+    # slot 若速度為 0，會變成 reward 看不見的隱形障礙 —— 必須量，不能推論。
+    active_speed = speeds[dynamic_mask]
+    env._long_corridor_density_speed_audit = (
+        float(active_speed.min()) if active_speed.numel() else float("nan"),
+        int((active_speed <= 0.10).sum()),
+        int(active_speed.numel()),
+    )
+
+    _maybe_log_cumulative_density_audit(env)
+
+    env._long_corridor_pending_obstacles[selected] = False
+    env._long_corridor_obstacles_ready[selected] = True
+    scheduler._write_positions_to_sim(env)
+    return True
+
+
+#: 累計審計的回報門檻。裁決要求「累積至少 500 個 corridor assignments
+#: 後再驗比例，不只看首批 8 env」。
+_DENSITY_AUDIT_MIN_ASSIGNMENTS = 500
+
+
+def _verify_pairs_this_step(env, selected: torch.Tensor) -> None:
+    """Re-check interaction pair invariants against the **live** scheduler state.
+
+    安裝當下正確不代表之後仍然正確 —— 例如 wander 的 heading 重抽、或任何
+    下游改寫速度的邏輯，都只會在 episode 進行中才顯現。因此每一步重量一次，
+    累積通過率，而不是只在注入時量一次就宣告成功。
+    """
+    scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
+    if scheduler is None or selected.numel() == 0:
+        return
+    if getattr(env, "_long_corridor_obstacle_count_mix", None) is None:
+        return
+    from .behavior_scheduler import BEHAVIOR_RANDOM_WALK
+
+    ready = selected[env._long_corridor_obstacles_ready[selected]]
+    if ready.numel() == 0:
+        return
+    pairs = env._long_corridor_interaction_pair[ready]
+    has_pair = (pairs[:, 0] >= 0).nonzero(as_tuple=False).flatten()
+    if has_pair.numel() == 0:
+        return
+    rows = ready[has_pair]
+    dynamic_slots = slice(
+        MAX_CORRIDOR_STATIC, MAX_CORRIDOR_STATIC + MAX_CORRIDOR_DYNAMIC
+    )
+    audit = audit_installed_pairs(
+        behavior_type=scheduler.behavior_type[rows, dynamic_slots],
+        positions=scheduler.positions[rows, dynamic_slots],
+        velocities=scheduler.velocities[rows, dynamic_slots],
+        interaction_types=env._long_corridor_interaction_type[rows],
+        pairs=pairs[has_pair],
+        families=env._long_corridor_dynamic_motion_type[rows],
+        random_walk_id=BEHAVIOR_RANDOM_WALK,
+    )
+    # crossing 改記**事件**：兩人各自穿過固定交點一次就算完成。
+    # 逐幀要求朝交點走是錯的 —— 穿過去或在 waypoint 暫停都會自然不符合
+    # （實測 past_crossing 4665、zero_speed 1179 佔了失敗的絕大多數）。
+    env._long_corridor_cross_done[rows] = crossing_progress(
+        env._long_corridor_interaction_type[rows],
+        pairs[has_pair],
+        env._long_corridor_dynamic_motion_type[rows],
+        scheduler.positions[rows, dynamic_slots],
+        env._long_corridor_cross_point[rows],
+        env._long_corridor_cross_side[rows],
+        env._long_corridor_cross_done[rows],
+    )
+
+    env._long_corridor_pair_step_checks += torch.tensor(
+        [
+            [audit["crossing_ok"], audit["crossing_n"]],
+            [audit["side_ok"], audit["side_n"]],
+        ],
+        dtype=torch.long, device=env.device,
+    )
+    for key in (
+        "x_wrong_family", "x_zero_speed", "x_past_crossing",
+        "s_wrong_family", "s_spacing", "s_speed_delta", "s_opposite_phase",
+    ):
+        env._long_corridor_pair_step_breakdown[key] = (
+            env._long_corridor_pair_step_breakdown.get(key, 0) + audit[key]
+        )
+    if audit["paired_is_random_walk"]:
+        raise RuntimeError(
+            "an interaction pair slot became RANDOM_WALK mid-episode; the "
+            "wander override must never reach a paired slot"
+        )
+
+
+def _harvest_completed_crossings(env, env_ids: torch.Tensor) -> None:
+    """Count crossings that completed before the env leaves the corridor."""
+    done = env._long_corridor_cross_done[env_ids]
+    was_crossing = (
+        env._long_corridor_interaction_type[env_ids] == INTERACTION_CROSSING
+    )
+    env._long_corridor_cross_completed_total += int(
+        (done.all(dim=1) & was_crossing).sum()
+    )
+    env._long_corridor_cross_harvested_total += int(was_crossing.sum())
+
+
+def _maybe_log_cumulative_density_audit(env) -> None:
+    """Emit the cumulative density/interaction audit once it is statistically real."""
+    total = env._long_corridor_assignment_total
+    if total < _DENSITY_AUDIT_MIN_ASSIGNMENTS:
+        return
+    if getattr(env, "_long_corridor_density_audit_logged", False):
+        return
+    env._long_corridor_density_audit_logged = True
+
+    combo = env._long_corridor_density_combo_total
+    stride = MAX_CORRIDOR_DYNAMIC + 1
+    realized = {
+        f"{s}S{d}D": round(float(combo[s * stride + d]) / total, 4)
+        for s in range(MAX_CORRIDOR_STATIC + 1)
+        for d in range(stride)
+        if int(combo[s * stride + d]) > 0
+    }
+    names = [INTERACTION_NAMES[k] for k in range(3)]
+    overall = env._long_corridor_interaction_total
+    by_d = {
+        d: [round(float(v) / max(int(env._long_corridor_interaction_by_d[d].sum()), 1), 3)
+            for v in env._long_corridor_interaction_by_d[d]]
+        for d in range(stride)
+        if int(env._long_corridor_interaction_by_d[d].sum()) > 0
+    }
+    geom_ok = env._long_corridor_interaction_geometry_ok
+    wander = env._long_corridor_wander_total
+    fam_total = env._long_corridor_actual_family_total
+    step_checks = env._long_corridor_pair_step_checks
+    print(
+        "[LONG-CORRIDOR-AUDIT] "
+        f"assignments={total} density={realized} "
+        f"interaction_order={names} "
+        f"interaction_overall={[int(v) for v in overall]} "
+        f"interaction_by_dynamic_count={by_d} "
+        f"geometry_ok=crossing {int(geom_ok[0][0])}/{int(geom_ok[0][1])},"
+        f"side_by_side {int(geom_ok[1][0])}/{int(geom_ok[1][1])} "
+        f"random_2d_slots={int(wander[0])} "
+        f"installed_as_random_walk={int(wander[1])} "
+        f"actual_family_fractions={[round(float(v) / max(int(fam_total.sum()), 1), 4) for v in fam_total]} "
+        f"crossing_completed={int(env._long_corridor_cross_completed_total)}/"
+        f"{int(env._long_corridor_cross_harvested_total)}"
+        f"(installed={int(env._long_corridor_cross_pairs_total)}) "
+        f"side_formation_steps={int(step_checks[1][0])}/{int(step_checks[1][1])} "
+        f"pair_step_breakdown={getattr(env, '_long_corridor_pair_step_breakdown', {})}",
+        flush=True,
+    )
 
 
 def _write_goal(
@@ -359,12 +1104,27 @@ def setup_long_corridor_replay(
     dynamic_speed_max: float = 0.60,
     dynamic_motion_mode: str = "lateral",
     dynamic_motion_weights: tuple[float, float, float] | None = None,
+    dynamic_pause_steps_range: tuple[int, int] | None = None,
+    obstacle_count_mix=None,
+    random_2d_kinematics: str = "patrol",
     wall_z: float = 1.5,
 ) -> None:
-    """Replace a fraction of resets with the frozen deployment corridor."""
+    """Replace a fraction of resets with the frozen deployment corridor.
+
+    ``dynamic_pause_steps_range`` is an **eval-only** override for the patrol
+    waypoint pause. ``None`` (the default) leaves the scheduler configuration
+    untouched, so training and every historical gate keep the stock 0-5 step
+    behaviour. It exists so a pause-vs-no-pause A/B can isolate whether the
+    future-occupancy reward's blindness to stationary obstacles (velocity is
+    hard-zeroed on waypoint arrival, below the 0.1 m/s validity threshold)
+    drives the random_2d failure.
+    """
     if fraction <= 0.0:
         return
-    validate_obstacle_counts(static_obstacles, dynamic_obstacles)
+    if obstacle_count_mix is None:
+        validate_obstacle_counts(static_obstacles, dynamic_obstacles)
+    else:
+        validate_density_mix(obstacle_count_mix)
 
     ids = _as_env_ids(env, env_ids)
     if ids.numel() == 0:
@@ -384,6 +1144,11 @@ def setup_long_corridor_replay(
     )
     env._long_corridor_motion_mode = motion_mode
     env._long_corridor_motion_weights = motion_weights
+    env._long_corridor_obstacle_count_mix = obstacle_count_mix
+    env._long_corridor_pause_steps_range = apply_pause_override(env, dynamic_pause_steps_range)
+    env._long_corridor_random_2d_kinematics = validate_random_2d_kinematics(
+        random_2d_kinematics
+    )
     env._long_corridor_obstacle_counts = (
         int(static_obstacles),
         int(dynamic_obstacles),
@@ -456,6 +1221,7 @@ def setup_long_corridor_replay(
         dynamic_obstacles,
         motion_mode,
         motion_weights,
+        count_mix=obstacle_count_mix,
     )
 
     env._long_corridor_injected_count += int(selected.numel())
@@ -463,7 +1229,43 @@ def setup_long_corridor_replay(
         env._long_corridor_logged = True
         pending = 0 if installed else selected.numel()
         motion_audit = ""
-        if installed and dynamic_obstacles > 0:
+        if installed and obstacle_count_mix is not None:
+            # 只統計**這批真的裝進走廊**的 env。density_counts 現在是
+            # per-env 全域欄位，整片拿去 bincount 會把 56 個非走廊 env
+            # 算成一個叫「0S0D」的密度組合。
+            counts = env._long_corridor_density_counts[selected]
+            combo = torch.bincount(
+                counts[:, 0] * (MAX_CORRIDOR_DYNAMIC + 1) + counts[:, 1],
+                minlength=(MAX_CORRIDOR_STATIC + 1) * (MAX_CORRIDOR_DYNAMIC + 1),
+            )
+            realized = {
+                f"{s}S{d}D": int(combo[s * (MAX_CORRIDOR_DYNAMIC + 1) + d])
+                for s in range(MAX_CORRIDOR_STATIC + 1)
+                for d in range(MAX_CORRIDOR_DYNAMIC + 1)
+                if int(combo[s * (MAX_CORRIDOR_DYNAMIC + 1) + d]) > 0
+            }
+            slow_min, slow_n, slow_total = getattr(
+                env, "_long_corridor_density_speed_audit", (float("nan"), -1, -1)
+            )
+            interaction = getattr(env, "_long_corridor_interaction_audit", {})
+            rnd_n, rnd_walk, want_wander = getattr(
+                env, "_long_corridor_wander_audit", (0, 0, False)
+            )
+            motion_audit = (
+                f" density_mix_realized={realized}"
+                f" interaction_geometry_ok="
+                f"crossing {interaction.get('crossing_ok', 0)}/"
+                f"{interaction.get('crossing_n', 0)},"
+                f"side_by_side {interaction.get('side_ok', 0)}/"
+                f"{interaction.get('side_n', 0)}"
+                f" random_2d_slots={rnd_n}"
+                f" installed_as_random_walk={rnd_walk}"
+                f" wander_requested={want_wander}"
+                f" active_dynamic_slots={slow_total}"
+                f" min_speed={slow_min:.3f}m/s"
+                f" below_future_occupancy_threshold={slow_n}"
+            )
+        elif installed and dynamic_obstacles > 0:
             active_types = env._long_corridor_dynamic_motion_type[
                 selected, :dynamic_obstacles
             ]
@@ -492,7 +1294,8 @@ def setup_long_corridor_replay(
             f"{selected.numel()}/{ids.numel()} envs "
             f"free_width={spec.free_width:.2f}m length={spec.length:.2f}m "
             f"walls_x=+/-{spec.wall_center_offset:.2f}m "
-            f"obstacles={static_obstacles}S+{dynamic_obstacles}D "
+            f"obstacles="
+            f"{'per-env mix' if obstacle_count_mix is not None else f'{static_obstacles}S+{dynamic_obstacles}D'} "
             f"speed=[{dynamic_speed_min:.2f},"
             f"{dynamic_speed_max:.2f}]m/s motion={motion_mode} "
             f"pending_scheduler={pending} "
@@ -514,6 +1317,8 @@ def maintain_long_corridor_goal(env, env_ids=None) -> None:
     if selected.numel() == 0:
         return
 
+    _verify_pairs_this_step(env, selected)
+
     pending = selected[env._long_corridor_pending_obstacles[selected]]
     if pending.numel() > 0:
         speed_min, speed_max = env._long_corridor_speed_range
@@ -526,5 +1331,6 @@ def maintain_long_corridor_goal(env, env_ids=None) -> None:
             *env._long_corridor_obstacle_counts,
             env._long_corridor_motion_mode,
             getattr(env, "_long_corridor_motion_weights", None),
+            count_mix=getattr(env, "_long_corridor_obstacle_count_mix", None),
         )
     _write_goal(env, selected)

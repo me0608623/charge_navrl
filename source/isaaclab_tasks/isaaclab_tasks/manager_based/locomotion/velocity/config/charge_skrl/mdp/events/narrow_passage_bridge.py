@@ -6,7 +6,12 @@ import math
 
 import torch
 
-from .narrow_passage_bridge_geometry import schedule_at, validate_constructed_scene
+from .narrow_passage_bridge_geometry import (
+    DIRECTION_MODES,
+    schedule_at,
+    validate_closed_range,
+    validate_constructed_scene,
+)
 
 
 _ASSET_NAMES = ("narrow_bridge_wall_0", "narrow_bridge_wall_1")
@@ -25,11 +30,23 @@ def configure_narrow_passage_assets(
     fixed_yaw_limit_deg: float | None = None,
     exact_width: float | None = None,
     exact_width_ratio: float = 0.0,
+    gap_center_range: tuple[float, float] | None = None,
+    barrier_x_range: tuple[float, float] | None = None,
+    direction_mode: str | None = None,
+    start_goal_distance: float | None = None,
+    goal_distance: float | None = None,
+    goal_lateral_offset: float | None = None,
+    goal_distance_range: tuple[float, float] | None = None,
+    goal_lateral_offset_range: tuple[float, float] | None = None,
 ) -> None:
     """Add two bridge-only wall assets and configure the reset event.
 
     The assets are not part of the eight random wall slots. They remain hidden
     outside selected narrow-replay episodes.
+
+    The trailing layout arguments default to ``None``, which leaves the
+    EventTerm's own defaults (the training distribution) untouched. Only the
+    play-side manual-override path passes them.
     """
     from isaaclab.assets import RigidObjectCfg
     import isaaclab.sim as sim_utils
@@ -69,6 +86,19 @@ def configure_narrow_passage_assets(
             "exact_width_ratio": float(exact_width_ratio),
         }
     )
+    _layout_overrides = {
+        "gap_center_range": gap_center_range,
+        "barrier_x_range": barrier_x_range,
+        "direction_mode": direction_mode,
+        "start_goal_distance": start_goal_distance,
+        "goal_distance": goal_distance,
+        "goal_lateral_offset": goal_lateral_offset,
+        "goal_distance_range": goal_distance_range,
+        "goal_lateral_offset_range": goal_lateral_offset_range,
+    }
+    event.params.update(
+        {k: v for k, v in _layout_overrides.items() if v is not None}
+    )
     if not 0.0 <= float(exact_width_ratio) <= 1.0:
         raise ValueError(
             f"exact narrow-passage width ratio must be in [0, 1]: {exact_width_ratio}"
@@ -96,6 +126,7 @@ def configure_narrow_passage_assets(
         f"schedule_steps={schedule_steps} room_half={room_half_extent:.2f} "
         f"segment_length={segment_length:.2f} schedule={schedule_mode} "
         f"exact_width={exact_width} exact_ratio={float(exact_width_ratio):.3f} "
+        f"layout_overrides={ {k: v for k, v in _layout_overrides.items() if v is not None} } "
         "reward_unchanged=True",
         flush=True,
     )
@@ -121,6 +152,10 @@ def _ensure_wall_state(env) -> None:
         env.num_envs, dtype=torch.bool, device=env.device
     )
     env._narrow_bridge_goal_w = torch.zeros(env.num_envs, 3, device=env.device)
+    env._narrow_bridge_goal_distance_m = torch.zeros(env.num_envs, device=env.device)
+    env._narrow_bridge_goal_lateral_offset_m = torch.zeros(
+        env.num_envs, device=env.device
+    )
     env._narrow_bridge_reset_count = 0
     env._narrow_bridge_injected_count = 0
     env._narrow_bridge_unsolvable_count = 0
@@ -196,6 +231,13 @@ def setup_narrow_passage_bridge(
     gap_center_limit: float = 1.0,
     barrier_x_limit: float = 0.5,
     start_goal_distance: float = 3.0,
+    gap_center_range: tuple[float, float] | None = None,
+    barrier_x_range: tuple[float, float] | None = None,
+    direction_mode: str = "random",
+    goal_distance: float | None = None,
+    goal_lateral_offset: float = 0.0,
+    goal_distance_range: tuple[float, float] | None = None,
+    goal_lateral_offset_range: tuple[float, float] | None = None,
     final_stress_ratio: float = 0.25,
     fixed_width_range: tuple[float, float] | None = None,
     fixed_yaw_limit_deg: float | None = None,
@@ -272,19 +314,58 @@ def setup_narrow_passage_bridge(
     else:
         stress = torch.zeros(count, dtype=torch.bool, device=env.device)
 
-    gap_center = torch.empty(count, device=env.device).uniform_(
-        -gap_center_limit, gap_center_limit
+    # ``*_limit`` describes the symmetric training range; ``*_range`` is the
+    # play-side override that can also pin a single value (lo == hi).
+    gap_lo, gap_hi = (
+        (-float(gap_center_limit), float(gap_center_limit))
+        if gap_center_range is None
+        else (float(gap_center_range[0]), float(gap_center_range[1]))
     )
-    barrier_x = torch.empty(count, device=env.device).uniform_(
-        -barrier_x_limit, barrier_x_limit
+    barrier_lo, barrier_hi = (
+        (-float(barrier_x_limit), float(barrier_x_limit))
+        if barrier_x_range is None
+        else (float(barrier_x_range[0]), float(barrier_x_range[1]))
     )
-    direction = torch.where(
-        torch.rand(count, device=env.device) < 0.5,
-        torch.full((count,), -1.0, device=env.device),
-        torch.ones(count, device=env.device),
+    if direction_mode not in DIRECTION_MODES:
+        raise ValueError(
+            f"unknown narrow-replay direction_mode {direction_mode!r}; "
+            f"expected one of {DIRECTION_MODES}"
+        )
+    gap_center = torch.empty(count, device=env.device).uniform_(gap_lo, gap_hi)
+    barrier_x = torch.empty(count, device=env.device).uniform_(barrier_lo, barrier_hi)
+    if direction_mode == "forward":
+        direction = torch.ones(count, device=env.device)
+    elif direction_mode == "backward":
+        direction = torch.full((count,), -1.0, device=env.device)
+    else:
+        direction = torch.where(
+            torch.rand(count, device=env.device) < 0.5,
+            torch.full((count,), -1.0, device=env.device),
+            torch.ones(count, device=env.device),
+        )
+    legacy_goal_distance = (
+        float(start_goal_distance) if goal_distance is None else float(goal_distance)
+    )
+    goal_distance_lo, goal_distance_hi = validate_closed_range(
+        "goal_distance_range",
+        goal_distance_range,
+        fallback=legacy_goal_distance,
+        minimum=0.0,
+    )
+    goal_offset_lo, goal_offset_hi = validate_closed_range(
+        "goal_lateral_offset_range",
+        goal_lateral_offset_range,
+        fallback=float(goal_lateral_offset),
+    )
+    goal_gap_distance = torch.empty(count, device=env.device).uniform_(
+        goal_distance_lo, goal_distance_hi
+    )
+    goal_lateral_offsets = torch.empty(count, device=env.device).uniform_(
+        goal_offset_lo, goal_offset_hi
     )
     start_x = barrier_x - direction * float(start_goal_distance)
-    goal_x = barrier_x + direction * float(start_goal_distance)
+    goal_x = barrier_x + direction * goal_gap_distance
+    goal_y = gap_center + goal_lateral_offsets
 
     valid = []
     reasons = []
@@ -295,6 +376,7 @@ def setup_narrow_passage_bridge(
             barrier_x=float(barrier_x[i]),
             start_x=float(start_x[i]),
             goal_x=float(goal_x[i]),
+            goal_y=float(goal_y[i]),
             room_half_extent=room_half_extent,
             boundary_wall_width=boundary_wall_width,
             segment_length=segment_length,
@@ -360,7 +442,7 @@ def setup_narrow_passage_bridge(
 
     goal = torch.zeros(count, 3, device=env.device)
     goal[:, 0] = origins[:, 0] + goal_x
-    goal[:, 1] = origins[:, 1] + gap_center
+    goal[:, 1] = origins[:, 1] + goal_y
     goal_term = env.command_manager.get_term("goal_command")
     goal_term.goal_pos_w[selected] = goal
     if hasattr(goal_term, "all_goals_pos_w"):
@@ -368,6 +450,8 @@ def setup_narrow_passage_bridge(
     if hasattr(env, "_local_goal_world") and env._local_goal_world is not None:
         env._local_goal_world[selected, :2] = goal[:, :2]
     env._narrow_bridge_goal_w[selected] = goal
+    env._narrow_bridge_goal_distance_m[selected] = goal_gap_distance
+    env._narrow_bridge_goal_lateral_offset_m[selected] = goal_lateral_offsets
     env._narrow_bridge_active[selected] = True
 
     env._narrow_bridge_injected_count += int(count)
@@ -376,6 +460,10 @@ def setup_narrow_passage_bridge(
     env._narrow_bridge_last_width_max = float(gap_width.max())
     env._narrow_bridge_last_yaw_limit_deg = schedule.yaw_limit_deg
     env._narrow_bridge_last_stress_ratio = schedule.stress_ratio
+    env._narrow_bridge_last_goal_distance_min = float(goal_gap_distance.min())
+    env._narrow_bridge_last_goal_distance_max = float(goal_gap_distance.max())
+    env._narrow_bridge_last_goal_offset_min = float(goal_lateral_offsets.min())
+    env._narrow_bridge_last_goal_offset_max = float(goal_lateral_offsets.max())
 
     if not getattr(env, "_narrow_bridge_logged", False):
         env._narrow_bridge_logged = True
@@ -385,6 +473,10 @@ def setup_narrow_passage_bridge(
             f"gap=[{float(gap_width.min()):.3f},{float(gap_width.max()):.3f}]m "
             f"exact={int(exact_mask.sum())}/{count} "
             f"yaw=+/-{schedule.yaw_limit_deg:.1f}deg stress={int(stress.sum())}/{count} "
+            f"goal_dist=[{float(goal_gap_distance.min()):.2f},"
+            f"{float(goal_gap_distance.max()):.2f}]m "
+            f"goal_dy=[{float(goal_lateral_offsets.min()):+.2f},"
+            f"{float(goal_lateral_offsets.max()):+.2f}]m "
             f"constructive_solvability=100% mirror_left_right=True",
             flush=True,
         )

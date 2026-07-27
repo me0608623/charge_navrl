@@ -7,7 +7,22 @@ metadata:
   originSessionId: 3ce3483d-ce16-48c2-a4e6-11086ed2cc3e
 ---
 
-未來計劃把 LiDAR `r_min` 從 0.9m 改成 **0.2m**，需同步更新所有依賴此值的常數。
+# 2026-07-27 權威更新
+
+使用者再次確認：實車在距 LiDAR 約 **0.30m** 時仍有人體稀疏點雲。這進一步
+否決 hard `r_min=0.5` 作為部署感測模型。原先換算的 optical-center hard cutoff
+`0.25m` 保留為**待量測凍結的 provisional 值**；0.25--0.60m 不能當全有或全無，
+必須依 0.30/0.40/0.50/0.60/0.80m ROI 回波率做 per-ray 機率漏點。
+
+後續順序與訓練數值以
+`[[project_n1_nearfield_sidegap_actuator_roadmap]]` 為準：先完成不改 LiDAR 的 N1，
+再修近場模型，之後才做4m走廊側窄口/動態牆人窄口，最後 actuator-delay bridge。
+下方「所有舊 checkpoint 不可用、必須從頭重訓」是針對當時 0.9→0.25 的大幅切換；
+目前 0.5→實測 near-field 模型先走 accepted N1 checkpoint 的有界 observation bridge
+與完整 gates，不自動套用該歷史裁決。
+
+以下為 2026-06-08 的歷史計畫：把 LiDAR `r_min` 從 0.9m 改成 **0.2m**，
+並同步更新所有依賴此值的常數。
 
 **Why:** 用戶 2026-06-08 實測：VLP-16 從感測器**表面**到人物中心**最近可看到 0.2m**，目前 sim 用的 r_min=0.9 嚴重高估盲區。先前 2026-04 估算的 0.5m 也不夠低。差距 0.7m 會讓 sim policy 對近距離物體誤判（sim 認為 < 0.9m 全是 r_max 盲，policy 學會「~1.0 = 遠/盲」，但真實 LiDAR 0.2-0.9m 是真實值，policy 會以為突然出現一堆近障礙物 → 抽動反應）。
 

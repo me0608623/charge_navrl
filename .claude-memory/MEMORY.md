@@ -26,6 +26,12 @@
 - Internal maze walls: 6 segments (reduced from 10)
 - Mixed parallel: 50% empty / 30% static / 20% dynamic
 
+## Active / Open (2026-07-26) — Corridor random_2d root-cause audit
+- [finding_corridor_d1_random2d_pause_model_mismatch.md](finding_corridor_d1_random2d_pause_model_mismatch.md) — **目前權威裁決**：D1 `30/10/60` 永久封存，D0 `checkpoint_3840.pt` 保持主基準；c10 只作診斷。下一步先做 evaluator-only `pause=default vs zero` 三 seed A/B + motion-phase collision audit，未通過因果門檻前禁止改 reward、開 D2 或再掃 replay 權重。
+
+## Active / Open (2026-07-27) — N1 到部署的窄口主路線
+- [project_n1_nearfield_sidegap_actuator_roadmap.md](project_n1_nearfield_sidegap_actuator_roadmap.md) — **目前權威未來順序**：先完成不改 LiDAR 的 N1（固定牆 1.2–1.4m、goal 距牆 U[2,4]m/橫偏 U[-1.5,1.5]m、scripted teacher 學先穿縫再轉向；no-update shadow 已凍結 CE λ=0.067）→ 依實車 0.30m 稀疏點雲修 hard `r_min=0.5` → 4m 走廊 1.0–1.6m 靜態側窄口 → 動態牆人 pass/yield（1.0m 非必穿）→ 最後 actuator delay U{0,1,2} steps；`obs_delay_steps=(0,0)` 永遠維持關。
+
 ## Active / Open (2026-07-13) — SA3 deploy_dense 崩塌
 - [finding_sa3_deploy_dense_value_led_collapse_20260713.md](finding_sa3_deploy_dense_value_led_collapse_20260713.md) — **必讀**：tzq22v0w 二次崩（value-led）、①不通過、②暫停；主嫌 mean_only+A2C+進場 LR 非網路結構；Obsidian 全文見 vault `bug/2026-07-13_sa3_deploy_dense_二次崩塌_actor_critic訓練規則.md`
 - 下一刀建議：單變因 `adv_norm=full` 或鎖 LR 2e-4；**勿**先加 `penalty_speed_near_obs` 查崩因
@@ -47,7 +53,7 @@ See [v18_discovery_critical_bugs.md](v18_discovery_critical_bugs.md) for full de
 
 5. **Bug A: Kinematic obstacles + contact threshold 0.1N** — All collisions undercounted, CR ≈ 0% 即使物理穿透。修復: 加 `obstacle_collision_geometric` 純幾何碰撞 termination。
 6. **Bug B: LiDAR 內建 distractor (rate=0.002) + Unoise** — lidar.min 永遠 ≈ 0，policy 學到不信任 LiDAR。修復: 加 `--lidar_no_noise` flag + `r_min/z_filter` 參數。
-7. **真實 LiDAR 校準: min_range = 0.9m**（用戶實測）— sim 必須匹配此盲區。已加 `r_min=0.9` 預設。
+7. **歷史舊假設：LiDAR min_range = 0.9m（已作廢）** — 2026-07-27 使用者確認 0.30m 仍有稀疏人體點雲；未來近場模型以 [project_n1_nearfield_sidegap_actuator_roadmap.md](project_n1_nearfield_sidegap_actuator_roadmap.md) 為準。
 8. **所有 v17 之前的訓練都受 Bug A+B 影響** — 需要在修復後重訓 v20 baseline 才能作為對照組。
 
 ## Environment Details
@@ -137,6 +143,7 @@ See [v18_discovery_critical_bugs.md](v18_discovery_critical_bugs.md) for full de
 - [obs_agent_behavior_config_v2.md](obs_agent_behavior_config_v2.md) — 8 種 rule-based behavior + BehaviorScheduler + 6-stage curriculum + RNN aux 關聯
 
 ## Project Findings
+- [finding_corridor_d1_random2d_pause_model_mismatch.md](finding_corridor_d1_random2d_pause_model_mismatch.md) — D1 random_2d 加權曝光無效且傷害既有家族；mixed 非 IID 偏差不是主因；短軌跡、pause=0 velocity、future-occupancy move gate 與反向模型落差待有界 A/B 定因果
 - [v21_vo_shield_dead_end.md](v21_vo_shield_dead_end.md) — v21 VO Shield 實驗失敗紀錄，simplified VO heuristic 在 dense scene 的 ping-pong 問題
 - [v22_physx_oom_crash.md](v22_physx_oom_crash.md) — v22 在 6144 envs + 1h10min 觸發 PhysX CUDA 717 OOM；charge_skrl 安全 num_envs 上限為 4096
 - [research_findings_dense_dynamic.md](research_findings_dense_dynamic.md) — Dense dynamic 避障 SOTA 文獻 + NavRL ORCA 真相 + Top-5 改善方向 (HEIGHT/Bounded Rationality/Trajectory Prediction)

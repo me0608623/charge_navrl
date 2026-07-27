@@ -1,4 +1,26 @@
-"""Run fixed-seed Gate5 with direct-path diagnostics."""
+"""Run the fixed-seed narrow-gap gate with direct-path diagnostics.
+
+2026-07-27 正名。這支腳本歷來跑的是 **Gate5b：10 m 邊界死角壓測**，不是純窄縫閘。
+
+`NarrowGapSpec.arena_half_extent` 寫死 5.0 且 `--arena_size` 從未傳進去，
+所以中央牆永遠只長到 y=±4.5 m。本腳本又固定用 `--arena_size 10`，
+外牆內緣剛好也在 ±4.5 m —— 牆封死到外牆，牆端與外牆之間形成**死角**。
+
+實測（D0, gap 1.2 m）：
+
+| 場地 | 牆端側口 | direct crossing |
+|---|---|---|
+| 10 m（本腳本預設）| 0 m | **0.000**（撞牆 89.4%）|
+| 12 m | 1.0 m | 0.0042（繞牆端，橫偏中位 5.02 m）|
+| 14 m | 2.0 m | 1.000 |
+
+同一顆 D0 在**真正封死且尺寸相符**的 Gate5a（`--narrow_gap_mode sealed`）上是
+**direct 1.000 / 零碰撞 / 橫偏中位 0.052 m**（n=2304）。
+
+所以：
+* `--mode legacy`（預設，維持歷史行為）= **Gate5b**，量的是小場地邊界死角下的行為
+* `--mode sealed` = **Gate5a**，牆隨場地延伸到外牆，才是純測直穿能力
+"""
 
 from __future__ import annotations
 
@@ -74,7 +96,51 @@ def main() -> int:
         type=_parse_csv_ints,
         default=(404, 505, 606, 707, 808),
     )
+    parser.add_argument(
+        "--mode",
+        choices=("legacy", "sealed"),
+        default="legacy",
+        help="legacy=Gate5b 10m 邊界死角壓測（歷史行為，預設）；"
+             "sealed=Gate5a 牆隨場地封死到外牆，純測直穿能力",
+    )
+    parser.add_argument(
+        "--arena-size",
+        type=float,
+        default=10.0,
+        help="場地邊長 m（預設 10 對齊歷史 Gate5b；Gate5a 應改用訓練場地尺寸）",
+    )
+    parser.add_argument(
+        "--stage",
+        type=int,
+        default=5,
+        help="課程階段（預設 5 對齊歷史 Gate5b；Gate5a 應用該 checkpoint 的訓練階段，"
+             "例如 SA7 用 7）",
+    )
     args = parser.parse_args()
+
+    if args.mode == "sealed" and args.arena_size == 10.0:
+        print(
+            "[NARROW-PATH-SUITE] ⚠️ sealed 模式仍在用預設的 10 m 場地 —— "
+            "Gate5a 應使用該 checkpoint 的訓練場地尺寸（SA7=13、SA8=12），"
+            "否則量到的仍是場地錯配下的行為。",
+            flush=True,
+        )
+
+    gate_name = "Gate5a 純直穿" if args.mode == "sealed" else "Gate5b 10m邊界死角壓測"
+    side_opening = (
+        0.0 if args.mode == "sealed" else max(0.0, 0.5 * args.arena_size - 5.0)
+    )
+    print(
+        f"[NARROW-PATH-SUITE] {gate_name}｜arena={args.arena_size:.1f}m "
+        f"牆端側口={side_opening:.2f}m",
+        flush=True,
+    )
+    if side_opening > 1e-6:
+        print(
+            "[NARROW-PATH-SUITE] ⚠️ 側口 > 0：機器人可繞過中央缺口，"
+            "crossing 只代表越過牆的 x 平面。純直穿請用 --mode sealed。",
+            flush=True,
+        )
 
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
@@ -93,9 +159,11 @@ def main() -> int:
             steps=args.steps,
             extra=[
                 "--stage",
-                "5",
+                str(args.stage),
                 "--arena_size",
-                "10",
+                f"{args.arena_size:g}",
+                "--narrow_gap_mode",
+                args.mode,
                 "--num_static_obs",
                 "0",
                 "--num_dynamic_obs",

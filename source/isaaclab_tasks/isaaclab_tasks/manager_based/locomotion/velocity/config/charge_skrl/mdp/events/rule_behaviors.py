@@ -29,7 +29,7 @@ if _skrl_dir not in sys.path:
     sys.path.insert(0, os.path.abspath(_skrl_dir))
 
 from obstacle_agent.behavior_config import (
-    BEHAVIOR_STATIC, BEHAVIOR_PATROL, BEHAVIOR_RANDOM_WALK,
+    BEHAVIOR_INACTIVE, BEHAVIOR_STATIC, BEHAVIOR_PATROL, BEHAVIOR_RANDOM_WALK,
     BEHAVIOR_HORIZONTAL_CROSSING, BEHAVIOR_PATH_CROSSING,
     BEHAVIOR_NEAR_MISS, BEHAVIOR_CORRIDOR_CROSSING, BEHAVIOR_OCCLUSION,
     BEHAVIOR_HEAD_ON,
@@ -133,6 +133,12 @@ def step_patrol(sched: BehaviorScheduler, mask: Tensor, dt: float) -> None:
                 sched.cfg.patrol.pause_steps_range[0],
                 sched.cfg.patrol.pause_steps_range[1] + 1,
                 (reached.sum().item(),), device=sched.device,
+            )
+            # 被標記為不暫停的 slot（例如並排 pair）強制 pause=0。
+            pause_steps = torch.where(
+                sched.patrol_no_pause[r_env, r_obs],
+                torch.zeros_like(pause_steps),
+                pause_steps,
             )
             sched.patrol_pause_remaining[r_env, r_obs] = pause_steps
             sched.velocities[r_env, r_obs] = 0.0
@@ -240,6 +246,10 @@ def step_random_walk(sched: BehaviorScheduler, mask: Tensor, dt: float) -> None:
         sched.rw_turn_remaining[t_env, t_obs] -= 1
 
     # 移動: heading → velocity → position
+    # Pre-move positions: the obstacle-disc resolution below reverts to them,
+    # which is guaranteed penetration-free as long as spawns are (installers
+    # place wander slots clear of every other obstacle).
+    prev_pos = sched.positions[env_idx, obs_idx].clone()
     heading = sched.rw_heading[env_idx, obs_idx]  # [K]
     speed = sched.rw_speed[env_idx, obs_idx]      # [K]
     vx = speed * torch.cos(heading)
@@ -248,6 +258,126 @@ def step_random_walk(sched: BehaviorScheduler, mask: Tensor, dt: float) -> None:
     sched.velocities[env_idx, obs_idx, 1] = vy
     sched.positions[env_idx, obs_idx, 0] += vx * dt
     sched.positions[env_idx, obs_idx, 1] += vy * dt
+
+    # Boundary reflection. The docstring has always promised this; without it
+    # a bounded scene (e.g. the 4 m deployment corridor) lets the obstacle walk
+    # straight through a wall. Slots keep infinite bounds by default, so this
+    # is a no-op everywhere it was not explicitly requested.
+    bounds = sched.rw_bounds[env_idx, obs_idx]              # [K, 4]
+    if torch.isfinite(bounds).any():
+        px = sched.positions[env_idx, obs_idx, 0]
+        py = sched.positions[env_idx, obs_idx, 1]
+        h = sched.rw_heading[env_idx, obs_idx]
+        th = sched.rw_target_heading[env_idx, obs_idx]
+
+        # Mirror the heading about the wall normal and clamp back inside, so
+        # the obstacle leaves the wall instead of sliding along it. The target
+        # heading is mirrored too, otherwise an in-progress smooth turn would
+        # immediately steer back into the wall.
+        hit_x = (px < bounds[:, 0]) | (px > bounds[:, 1])
+        if hit_x.any():
+            h = torch.where(hit_x, math.pi - h, h)
+            th = torch.where(hit_x, math.pi - th, th)
+        hit_y = (py < bounds[:, 2]) | (py > bounds[:, 3])
+        if hit_y.any():
+            h = torch.where(hit_y, -h, h)
+            th = torch.where(hit_y, -th, th)
+
+        px = torch.clamp(px, min=bounds[:, 0], max=bounds[:, 1])
+        py = torch.clamp(py, min=bounds[:, 2], max=bounds[:, 3])
+        sched.positions[env_idx, obs_idx, 0] = px
+        sched.positions[env_idx, obs_idx, 1] = py
+        sched.rw_heading[env_idx, obs_idx] = h
+        sched.rw_target_heading[env_idx, obs_idx] = th
+        sched.velocities[env_idx, obs_idx, 0] = speed * torch.cos(h)
+        sched.velocities[env_idx, obs_idx, 1] = speed * torch.sin(h)
+
+
+
+
+def resolve_static_conflicts(sched: "BehaviorScheduler", prev_positions: Tensor) -> None:
+    """Keep managed dynamic obstacles out of static obstacles, post-behavior.
+
+    Scripted pedestrians are independent by ruling: dynamic-dynamic overlap is
+    *allowed* while moving (it is recorded by the eval audit, not blocked), so
+    no dynamic-vs-dynamic resolution happens here — an earlier capsule/yield
+    design created invisible walls that reshaped the motion distribution.
+    What stays forbidden is a dynamic obstacle passing through a *static*
+    obstacle (walls are already handled by the walk's own bounds bounce).
+
+    Slots with a positive ``pairwise_clearance`` are checked against every
+    ``BEHAVIOR_STATIC`` slot after all behaviors moved: a step ending inside
+    the clearance disc is reverted to its pre-step position (violation-free by
+    induction from the conflict-free spawn), and a reverted RANDOM_WALK slot
+    mirrors its heading off the contact normal so it stops pushing. The
+    violation test is the minimum distance from the *swept segment*
+    (pre-step -> post-step) to the static centre, not the endpoint distance:
+    an endpoint check passes a step whose ends are outside the clearance but
+    whose midpath grazes through it, and makes no guarantee at all for large
+    steps. The segment test rules out tunnelling for any step size, so no
+    step-length guard is needed. Running inside the scheduler step means
+    training and evaluation share the exact same obstacle rules.
+    """
+    part = sched.pairwise_clearance > 0.0                       # [E, N]
+    if not bool(part.any()):
+        return
+    env_idx, obs_idx = part.nonzero(as_tuple=True)              # [K]
+    device = sched.device
+    clearance = sched.pairwise_clearance[env_idx, obs_idx]      # [K]
+    prev = prev_positions[env_idx, obs_idx]                     # [K, 2]
+    now = sched.positions[env_idx, obs_idx]                     # [K, 2]
+
+    statics = sched.behavior_type[env_idx] == BEHAVIOR_STATIC   # [K, N]
+    others = sched.positions[env_idx]                           # [K, N, 2]
+    # Minimum distance from the swept segment prev->now to each static
+    # centre: project the centre onto the segment, clamp into [0, 1].
+    seg = now - prev                                             # [K, 2]
+    seg_len_sq = (seg * seg).sum(-1).clamp_min(1e-12)            # [K]
+    to_other = others - prev[:, None, :]                         # [K, N, 2]
+    seg_t = (
+        (to_other * seg[:, None, :]).sum(-1) / seg_len_sq[:, None]
+    ).clamp(0.0, 1.0)                                            # [K, N]
+    closest = prev[:, None, :] + seg_t[..., None] * seg[:, None, :]
+    dist = (others - closest).norm(dim=-1)                       # [K, N]
+    viol = (dist < clearance[:, None]) & statics
+    hit = viol.any(dim=1)
+    if not bool(hit.any()):
+        return
+    masked = torch.where(viol, dist, torch.full_like(dist, float("inf")))
+    nearest = masked.argmin(dim=1)
+    rows = torch.arange(env_idx.shape[0], device=device)
+    other_pos = others[rows, nearest]
+    # Reflection normal from the static centre toward the pre-step position:
+    # prev is the guaranteed-clear point, so this direction always points out
+    # of the disc even when the endpoint itself sits inside it.
+    normal = prev - other_pos
+    normal = normal / normal.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+    e = env_idx[hit]
+    o = obs_idx[hit]
+    sched.positions[e, o] = prev[hit]
+    walker = sched.behavior_type[e, o] == BEHAVIOR_RANDOM_WALK
+    if bool(walker.any()):
+        we, wo = e[walker], o[walker]
+        n = normal[hit][walker]
+        h = sched.rw_heading[we, wo]
+        v = torch.stack([torch.cos(h), torch.sin(h)], dim=-1)
+        approaching = (v * n).sum(dim=-1) < 0.0
+        v_ref = v - 2.0 * (v * n).sum(-1, keepdim=True) * n
+        h_new = torch.where(
+            approaching, torch.atan2(v_ref[..., 1], v_ref[..., 0]), h
+        )
+        th = sched.rw_target_heading[we, wo]
+        t = torch.stack([torch.cos(th), torch.sin(th)], dim=-1)
+        t_ref = t - 2.0 * (t * n).sum(-1, keepdim=True) * n
+        th_new = torch.where(
+            approaching, torch.atan2(t_ref[..., 1], t_ref[..., 0]), th
+        )
+        sched.rw_heading[we, wo] = h_new
+        sched.rw_target_heading[we, wo] = th_new
+        speed = sched.rw_speed[we, wo]
+        sched.velocities[we, wo, 0] = speed * torch.cos(h_new)
+        sched.velocities[we, wo, 1] = speed * torch.sin(h_new)
 
 
 def spawn_random_walk(

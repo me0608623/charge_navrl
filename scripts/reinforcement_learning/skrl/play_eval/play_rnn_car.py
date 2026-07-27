@@ -302,6 +302,48 @@ parser.add_argument("--narrow_gap_width", type=float, default=0.85,
                     help="Gate5 中央牆縫寬度 m（預設 0.85；GUI 診斷可覆寫）")
 parser.add_argument("--narrow_gap_yaw_limit_deg", type=float, default=2.52,
                     help="窄縫評估的 throat yaw 界內統計門檻（度）")
+parser.add_argument("--narrow_gap_mode", type=str, default="legacy",
+                    choices=["sealed", "legacy"],
+                    help="窄縫閘的場地語意（07-27 裁決拆分）。"
+                         "sealed=Gate5a：牆隨場地延伸到外牆、只留中央窄口，純測直穿；"
+                         "legacy=Gate5b：牆長固定按 10m 算不隨場地變，側口隨場地增加，"
+                         "專測房間尺度捷徑（＝歷史 Gate5 行為，10m 時兩者等價）")
+parser.add_argument("--narrow_gap_start_distance", type=float, default=None,
+                    help="窄縫評估起始點到中央牆的距離 m（預設 3.0；"
+                         "start_x=-距離，goal 不動。距離 sweep 診斷 close→far 用）")
+parser.add_argument("--narrow_scripted_teacher", action="store_true", default=False,
+                    help="窄縫評估：以 privileged scripted 直穿 teacher 取代 policy 動作"
+                         "（07-27 裁決分支 4；蒸餾前需三 seed direct≥0.99 驗證）")
+parser.add_argument("--narrow_replay_eval", action="store_true", default=False,
+                    help="正式隨機窄縫 replay 評測（fraction=1.0）：gap 中心 y∈[-1,1]、"
+                         "barrier x∈[-0.5,0.5]、左右方向各半。與固定 Gate5 互斥。")
+parser.add_argument("--narrow_replay_width_range", type=float, nargs=2, default=(1.2, 1.4),
+                    help="隨機 replay 的缺口寬度範圍 m（預設對齊訓練 12%% replay）")
+parser.add_argument("--narrow_replay_yaw_limit_deg", type=float, default=4.0,
+                    help="隨機 replay 的初始 yaw 誤差上限（度，預設對齊訓練）")
+# 以下七項預設值 == 訓練 EventTerm 預設（TRAINING_REPLAY_LAYOUT）。
+# 不帶任何一項 = 完整重現訓練窄縫分佈；lo==hi 可把該維度釘死做單一場景診斷。
+parser.add_argument("--narrow_replay_gap_center_range", type=float, nargs=2, default=(-1.0, 1.0),
+                    help="缺口中心 y 的取樣範圍 m（預設 -1 1 對齊訓練；填相同兩值=釘死）")
+parser.add_argument("--narrow_replay_barrier_x_range", type=float, nargs=2, default=(-0.5, 0.5),
+                    help="牆面 x 的取樣範圍 m（預設 -0.5 0.5 對齊訓練；填相同兩值=釘死）")
+parser.add_argument("--narrow_replay_direction", choices=("random", "forward", "backward"),
+                    default="random",
+                    help="穿越方向：random=左右各半（訓練預設）、forward=一律 +x、backward=一律 -x")
+parser.add_argument("--narrow_replay_start_distance", type=float, default=3.0,
+                    help="起點到牆面的距離 m（預設 3.0 對齊訓練）")
+parser.add_argument("--narrow_replay_goal_distance", type=float, default=3.0,
+                    help="牆面到目標的距離 m（預設 3.0 對齊訓練；與起點距離分開設定）")
+parser.add_argument("--narrow_replay_goal_lateral_offset", type=float, default=0.0,
+                    help="目標 y 相對缺口中心的橫向偏移 m（預設 0=正對缺口；"
+                         "非 0 時直穿不再最短，可測穿縫後轉向）")
+parser.add_argument("--narrow_replay_goal_distance_range", type=float, nargs=2, default=None,
+                    help="N1+ 牆後目標距離範圍 m；設定後取代單值 --narrow_replay_goal_distance")
+parser.add_argument("--narrow_replay_goal_lateral_offset_range", type=float, nargs=2, default=None,
+                    help="N1+ 目標相對缺口中心的橫向偏移範圍 m；設定後取代單值 "
+                         "--narrow_replay_goal_lateral_offset")
+parser.add_argument("--narrow_replay_segment_length", type=float, default=9.0,
+                    help="單段牆長 m（預設 9.0 對齊訓練；缺口偏移大時會自動加長）")
 parser.add_argument("--long_corridor_eval", action="store_true", default=False,
                     help="部署走廊 Gate：4m 自由寬、10m 長、4 靜態+2 動態障礙")
 parser.add_argument("--long_corridor_output", type=str, default="",
@@ -312,9 +354,46 @@ parser.add_argument("--long_corridor_dynamic_obstacles", type=int, default=2,
                     help="走廊診斷用動態障礙數；正式 Gate 預設維持 2")
 parser.add_argument(
     "--long_corridor_motion_mode",
-    choices=("lateral", "longitudinal", "random_2d", "mixed"),
+    choices=("lateral", "longitudinal", "random_2d", "mixed", "mixed_iid"),
     default="lateral",
-    help="走廊動態軌跡：既有橫穿、沿走廊迎面/同向、受控2D巡邏或混合",
+    help=(
+        "走廊動態軌跡：既有橫穿、沿走廊迎面/同向、受控2D巡邏或混合。"
+        "mixed 為 legacy regression gate（平衡發牌，count=1 時兩障礙必然相異）；"
+        "mixed_iid 才是逐障礙獨立均勻抽樣。預設仍為 lateral，四模式 suite 預設仍用 mixed。"
+    ),
+)
+parser.add_argument(
+    "--long_corridor_pause_mode",
+    choices=("default", "zero"),
+    default="default",
+    help=(
+        "eval-only 巡邏暫停旋鈕。default 保持既有 0-5 步行為（訓練與所有歷史 gate 皆此值）；"
+        "zero 僅在走廊 eval 將 pause range 設為 (0,0)，用於隔離『暫停時 future-occupancy "
+        "看不見障礙』是否為 random_2d 失敗主因。不改訓練 config、reward 或 scheduler 預設值。"
+    ),
+)
+parser.add_argument(
+    "--long_corridor_random_2d_kinematics",
+    choices=("patrol", "wander"),
+    default="patrol",
+    help=(
+        "random_2d 家族的運動實作。patrol=既有兩點乒乓(固定約1.5m後折返,所有歷史 gate 皆此值);"
+        "wander=有界隨機遊走,無固定折返點、不停頓,4m×10m 走廊內牆面反彈。預設 patrol。"
+    ),
+)
+parser.add_argument(
+    "--long_corridor_phase_audit",
+    action="store_true",
+    default=False,
+    help=(
+        "eval-only：輸出動態障礙 motion-phase 歸因（paused / post_switch_or_resume_1s / "
+        "pre_waypoint_1s / steady）的 frame exposure、collision count/fraction/enrichment。"
+        "不改碰撞判定，僅在 termination 額外保存 [env,slot] hit mask。"
+    ),
+)
+parser.add_argument(
+    "--long_corridor_phase_audit_output", type=str, default="",
+    help="motion-phase audit 的獨立 JSON 路徑（留空則併入主走廊 JSON）",
 )
 parser.add_argument(
     "--future_occupancy_counterfactual_audit",
@@ -740,6 +819,11 @@ from rnn_car_wdclean.privileged_corridor_teacher import (
     corridor_teacher_action_grid,
     predict_patrol_obstacle_paths,
     select_teacher_rollout_actions,
+)
+from rnn_car_wdclean.scripted_narrow_teacher import (
+    ScriptedNarrowTeacherSpec,
+    narrow_bridge_teacher_geometry,
+    scripted_narrow_gap_action_indices,
 )
 from rnn_car_wdclean.corridor_eval_metrics import (
     corridor_clear_mask,
@@ -2803,22 +2887,127 @@ def main():
             f"dynamic_ratio={args_cli.controlled_blocker_dynamic_ratio:.2f}"
         )
 
+    if args_cli.narrow_replay_eval:
+        # 正式隨機窄縫 replay（訓練用的同一個 event），fraction=1.0 讓每個 env 都裝。
+        if args_cli.narrow_gap_eval:
+            raise ValueError(
+                "--narrow_replay_eval 與固定場 --narrow_gap_eval 互斥"
+            )
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.narrow_passage_bridge import (  # noqa: E501
+            configure_narrow_passage_assets,
+        )
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.narrow_passage_bridge_geometry import (  # noqa: E501
+            resolve_replay_layout,
+        )
+
+        # 訓練用 room_size=7.0（半邊長）。play 沒有這個旗標，用 --arena_size 推導；
+        # 未指定時對齊訓練值，讓評測幾何與 12% replay 完全一致。
+        _replay_half_extent = (
+            0.5 * float(args_cli.arena_size)
+            if getattr(args_cli, "arena_size", None) is not None
+            else 7.0
+        )
+        # 手動覆寫可能落在房間外或貼住邊界。訓練端維持 fail-fast（injector 的
+        # RuntimeError 不動），play 端改成夾回合法值並印出實際採用值，避免開完
+        # Isaac Sim 才炸。
+        _replay_layout = resolve_replay_layout(
+            gap_center_range=args_cli.narrow_replay_gap_center_range,
+            barrier_x_range=args_cli.narrow_replay_barrier_x_range,
+            width_range=args_cli.narrow_replay_width_range,
+            start_distance=float(args_cli.narrow_replay_start_distance),
+            goal_distance=float(args_cli.narrow_replay_goal_distance),
+            goal_lateral_offset=float(args_cli.narrow_replay_goal_lateral_offset),
+            goal_distance_range=args_cli.narrow_replay_goal_distance_range,
+            goal_lateral_offset_range=(
+                args_cli.narrow_replay_goal_lateral_offset_range
+            ),
+            segment_length=float(args_cli.narrow_replay_segment_length),
+            direction_mode=args_cli.narrow_replay_direction,
+            room_half_extent=_replay_half_extent,
+        )
+        for _warning in _replay_layout.warnings:
+            print(f"[NARROW-REPLAY] ⚠ {_warning}")
+        _replay_width_range = _replay_layout.width_range
+        configure_narrow_passage_assets(
+            env_cfg,
+            fraction=1.0,
+            schedule_steps=1,          # 評測不走 curriculum，直接用最終分佈
+            room_half_extent=_replay_half_extent,
+            segment_length=_replay_layout.segment_length,
+            final_stress_ratio=0.0,    # 評測固定寬度區間，不混入壓力窄縫
+            fixed_width_range=_replay_width_range,
+            fixed_yaw_limit_deg=float(args_cli.narrow_replay_yaw_limit_deg),
+            gap_center_range=_replay_layout.gap_center_range,
+            barrier_x_range=_replay_layout.barrier_x_range,
+            direction_mode=_replay_layout.direction_mode,
+            start_goal_distance=_replay_layout.start_distance,
+            goal_distance=_replay_layout.goal_distance,
+            goal_lateral_offset=_replay_layout.goal_lateral_offset,
+            goal_distance_range=_replay_layout.goal_distance_range,
+            goal_lateral_offset_range=_replay_layout.goal_lateral_offset_range,
+        )
+        _direction_desc = {
+            "random": "左右方向各半",
+            "forward": "一律 +x 方向",
+            "backward": "一律 -x 方向",
+        }[_replay_layout.direction_mode]
+        print(
+            f"[PLAY] 隨機窄縫 replay 評測: width∈{_replay_width_range} m, "
+            f"gap_y∈{_replay_layout.gap_center_range} m, "
+            f"barrier_x∈{_replay_layout.barrier_x_range} m, "
+            f"start_dist={_replay_layout.start_distance:.2f}m, "
+            f"goal_dist∈{_replay_layout.goal_distance_range}m, "
+            f"goal_dy∈{_replay_layout.goal_lateral_offset_range}m, "
+            f"segment={_replay_layout.segment_length:.2f}m, "
+            f"yaw±{args_cli.narrow_replay_yaw_limit_deg:.1f}deg, {_direction_desc}, "
+            f"room_half_extent={_replay_half_extent:.1f}m"
+        )
+
     if args_cli.narrow_gap_eval:
-        from narrow_gap_eval import NarrowGapSpec, configure_narrow_gap_env
+        from narrow_gap_eval import (
+            LEGACY_ARENA_HALF_EXTENT,
+            configure_narrow_gap_env,
+            spec_for_arena,
+        )
         if args_cli.narrow_gap_width <= 0.0:
             raise ValueError("--narrow_gap_width must be positive")
         if args_cli.narrow_gap_yaw_limit_deg <= 0.0:
             raise ValueError("--narrow_gap_yaw_limit_deg must be positive")
-        _narrow_spec = NarrowGapSpec(
+        _narrow_spec_kwargs = {}
+        if args_cli.narrow_gap_start_distance is not None:
+            if args_cli.narrow_gap_start_distance <= 0.0:
+                raise ValueError("--narrow_gap_start_distance must be positive")
+            _narrow_spec_kwargs["start_x"] = -abs(args_cli.narrow_gap_start_distance)
+        # 07-27 裁決：窄縫閘拆成兩個語意不同的閘。歷史上 arena_size 從未傳進 spec，
+        # 牆永遠只長到 y=±4.5m；只有在 10m 場地時才剛好封死，其餘尺寸都留下側口。
+        _narrow_arena = float(
+            args_cli.arena_size if getattr(args_cli, "arena_size", None) is not None
+            else 2.0 * LEGACY_ARENA_HALF_EXTENT
+        )
+        _narrow_sealed = args_cli.narrow_gap_mode == "sealed"
+        _narrow_spec = spec_for_arena(
+            _narrow_arena,
             gap_width=args_cli.narrow_gap_width,
+            sealed=_narrow_sealed,
             yaw_limit_deg=args_cli.narrow_gap_yaw_limit_deg,
+            **_narrow_spec_kwargs,
         )
         configure_narrow_gap_env(env_cfg, scene_final, args_cli, _narrow_spec)
+        _narrow_side_opening = _narrow_spec.side_opening_m(_narrow_arena)
+        _narrow_gate_name = "Gate5a 純直穿" if _narrow_sealed else "Gate5b 房間尺度捷徑"
         print(
-            f"[PLAY] OBB narrow-gap gate: gap={_narrow_spec.gap_width:.2f}m, "
+            f"[PLAY] OBB narrow-gap gate [{_narrow_gate_name}]: "
+            f"gap={_narrow_spec.gap_width:.2f}m, arena={_narrow_arena:.1f}m, "
+            f"牆端側口={_narrow_side_opening:.2f}m, "
             f"start=({_narrow_spec.start_x:.1f},0), goal=({_narrow_spec.goal_x:.1f},0), "
             f"yaw_limit=±{_narrow_spec.yaw_limit_deg:.2f}deg"
         )
+        if _narrow_side_opening > 1e-6:
+            print(
+                f"[PLAY] ⚠️ 側口 {_narrow_side_opening:.2f}m > 0：機器人可繞過中央缺口，"
+                "crossing 只代表越過牆的 x 平面，不代表穿過縫。"
+                "純直穿能力請改用 --narrow_gap_mode sealed。"
+            )
 
     if args_cli.long_corridor_eval:
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.long_corridor_replay import (
@@ -2841,6 +3030,9 @@ def main():
             dynamic_obstacles=_corridor_dynamic_obstacles,
             dynamic_speed_range=(0.30, 0.60),
             dynamic_motion_mode=_corridor_motion_mode,
+            random_2d_kinematics=(
+                args_cli.long_corridor_random_2d_kinematics
+            ),
         )
         # Dynamic corridor slots start at index 4. Keep four asset/scheduler
         # slots even on the 2S+0D diagnostic rung; unused slots are hidden.
@@ -3631,9 +3823,37 @@ def main():
             dynamic_speed_min=0.30,
             dynamic_speed_max=0.60,
             dynamic_motion_mode=_corridor_motion_mode,
+            dynamic_pause_steps_range=(
+                (0, 0) if args_cli.long_corridor_pause_mode == "zero" else None
+            ),
+            random_2d_kinematics=args_cli.long_corridor_random_2d_kinematics,
         )
+        _corridor_pause_steps_range = getattr(
+            raw_env, "_long_corridor_pause_steps_range", None
+        )
+        print(
+            f"[PLAY] 走廊 pause_mode={args_cli.long_corridor_pause_mode} "
+            f"實際 pause_steps_range={_corridor_pause_steps_range}"
+        )
+        if args_cli.long_corridor_phase_audit:
+            # Termination allocates the [env, slot] hit mask only when this is
+            # set, so the training path is untouched.
+            raw_env._corridor_phase_audit_enabled = True
         _corridor_dynamic_slice = slice(
             4, 4 + _corridor_dynamic_obstacles
+        )
+        # Physical-penetration audit. Constructive solvability is checked at
+        # install time only; wander reflects off walls but is blind to the
+        # other obstacles, so overlap must be measured every frame, not
+        # assumed away. Counters accumulate active dynamic slot-frames.
+        _corridor_pen_frames = 0
+        _corridor_pen_dyn_static = 0
+        _corridor_pen_dyn_dyn = 0
+        _corridor_pen_not_ready = 0
+        _corridor_pen_steps = 0
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.long_corridor_replay_geometry import (  # noqa: E501
+            corridor_penetration_masks as _corridor_penetration_masks,
+            corridor_penetration_pass as _corridor_penetration_pass,
         )
         _long_corridor_motion_last = (
             _play_behavior_scheduler.positions[
@@ -3759,6 +3979,30 @@ def main():
         _controlled_blocker_controller.reset()
         obs = raw_env.observation_manager.compute()
         _play_goal_mover = None
+    _narrow_replay_metrics = None
+
+    def _narrow_replay_begin(env_ids):
+        """Latch the geometry the replay event just installed for these envs."""
+        if _narrow_replay_metrics is None:
+            return
+        geom = narrow_bridge_teacher_geometry(raw_env)
+        _narrow_replay_metrics.begin_episodes(
+            env_ids,
+            barrier_x_m=geom["barrier_x_m"],
+            gap_center_y_m=geom["gap_center_y_m"],
+            goal_xy_m=geom["goal_xy_m"],
+            active=geom["active"],
+        )
+
+    if args_cli.narrow_replay_eval:
+        from narrow_replay_metrics import NarrowReplayMetrics
+        _narrow_replay_metrics = NarrowReplayMetrics(
+            num_envs=raw_env.num_envs,
+            device=device,
+            control_dt_s=float(raw_env.step_dt),
+        )
+        _narrow_replay_begin(torch.arange(raw_env.num_envs, device=device))
+
     _narrow_gap_controller = None
     if args_cli.narrow_gap_eval:
         from narrow_gap_eval import NarrowGapController
@@ -3985,6 +4229,33 @@ def main():
         for name in _CORRIDOR_PAIR_NAMES.values()
     }
     _corridor_motion_snapshot = None
+    # Motion-phase audit state. Every tensor below is captured *before*
+    # env.step() for the same reason the pair snapshot is: auto-reset rewrites
+    # waypoint index and pause counter inside step, which would misattribute a
+    # collision to the next episode's phase.
+    _phase_accumulator = None
+    _phase_prev_wp = None
+    _phase_prev_pause = None
+    _phase_tracker = None
+    _phase_snapshot = None
+    if args_cli.long_corridor_eval and args_cli.long_corridor_phase_audit:
+        sys.path.insert(
+            0,
+            str(Path(__file__).resolve().parents[1] / "rnn_car_wdclean"),
+        )
+        from corridor_motion_phase_audit import (  # noqa: E402
+            PhaseAccumulator,
+            classify_phase_batch,
+            update_switch_tracker_batch,
+        )
+
+        _phase_accumulator = PhaseAccumulator(step_dt_s=float(raw_env.step_dt))
+        # Patrol-slot scoping: the phase state machine keys off patrol
+        # waypoint/pause state, so only BEHAVIOR_PATROL slots may enter it.
+        # Under the deployment profile the lateral/longitudinal families are
+        # still patrol while random_2d slots run the wander walk — a global
+        # kinematics flag can neither include nor exclude correctly.
+        _phase_excluded_wander_frames = 0
     stats_steps_list = []  # 每回合步數（用於計算平均）
 
     # --- Per-episode step-by-step velocity/position log (env 0) ---
@@ -5173,7 +5444,212 @@ def main():
             _corridor_motion_snapshot = (
                 _snap_src.clone() if _snap_src is not None else None
             )
+            if _play_behavior_scheduler is not None:
+                _pen_dyn = _play_behavior_scheduler.positions[
+                    :, _corridor_dynamic_slice
+                ]
+                _pen_static = _play_behavior_scheduler.positions[:, 0:4]
+                # Gate by _long_corridor_obstacles_ready, NOT the activity
+                # flag: activity flips True before installation, so an
+                # active-but-uninstalled env still carries generic spawns
+                # that are not the scene under validation. Frames in that
+                # window are counted separately and reported.
+                _pen_ready = getattr(
+                    raw_env, "_long_corridor_obstacles_ready", None
+                )
+                _pen_corridor = getattr(
+                    raw_env, "_long_corridor_active", None
+                )
+                _pen_active = (
+                    _play_behavior_scheduler.behavior_type[
+                        :, _corridor_dynamic_slice
+                    ]
+                    != 0
+                )
+                if _pen_corridor is not None and _pen_ready is not None:
+                    _corridor_pen_not_ready += int(
+                        (
+                            _pen_active
+                            & (_pen_corridor & ~_pen_ready)[:, None]
+                        ).sum().item()
+                    )
+                    _pen_active = _pen_active & _pen_ready[:, None]
+                _pen_ds, _pen_dd = _corridor_penetration_masks(
+                    _pen_dyn, _pen_static, 0.35
+                )
+                _corridor_pen_steps += 1
+                _corridor_pen_frames += int(_pen_active.sum().item())
+                _corridor_pen_dyn_static += int(
+                    (_pen_ds & _pen_active).sum().item()
+                )
+                _corridor_pen_dyn_dyn += int(
+                    (_pen_dd & _pen_active).sum().item()
+                )
+        if _phase_accumulator is not None and _play_behavior_scheduler is not None:
+            _sched = _play_behavior_scheduler
+            _sl = _corridor_dynamic_slice
+            _wp_idx = _sched.patrol_wp_index[:, _sl].clone()
+            _pause = _sched.patrol_pause_remaining[:, _sl].clone()
+            _pos = _sched.positions[:, _sl].clone()
+            _vel = _sched.velocities[:, _sl].clone()
+            _n_wp = _sched.patrol_num_waypoints[:, _sl].clamp(min=1)
+            _target = torch.gather(
+                _sched.patrol_waypoints[:, _sl],
+                2,
+                (_wp_idx % _n_wp).unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 2),
+            ).squeeze(2)
+            _dist = (_target - _pos).norm(dim=-1)
+            _speed = _vel.norm(dim=-1)
+            # Closing speed toward the robot: positive means approaching.
+            _robot_xy = torch.nan_to_num(
+                raw_env.scene["robot"].data.root_pos_w[:, :2], nan=0.0
+            )
+            _origins = raw_env.scene.env_origins[:, :2]
+            _to_robot = (_robot_xy - _origins).unsqueeze(1) - _pos
+            _to_robot_n = _to_robot / _to_robot.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+            _closing = (_vel * _to_robot_n).sum(dim=-1)
+            _robot_dist = _to_robot.norm(dim=-1)
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.behavior_scheduler import (  # noqa: E501
+                BEHAVIOR_PATROL as _BEHAVIOR_PATROL,
+            )
+            _bt = _sched.behavior_type[:, _sl]
+            _active_any = _bt != 0
+            _active = _bt == _BEHAVIOR_PATROL
+            _phase_excluded_wander_frames += int(
+                (_active_any & ~_active).sum().item()
+            )
+            if _phase_prev_wp is None:
+                _phase_prev_wp = torch.full_like(_wp_idx, -1)
+                _phase_prev_pause = torch.full_like(_pause, -1)
+                _phase_tracker = torch.full_like(_wp_idx, -1)
+            _phase_tracker = update_switch_tracker_batch(
+                _phase_tracker, _active, _wp_idx, _phase_prev_wp,
+                _pause, _phase_prev_pause,
+            )
+            _phase_snapshot = {
+                "codes": classify_phase_batch(
+                    _pause, _phase_tracker, _dist, _speed, float(raw_env.step_dt)
+                ),
+                "active": _active,
+                "waypoint_index": _wp_idx,
+                "pause_remaining": _pause,
+                "distance_to_waypoint_m": _dist,
+                "speed_mps": _speed,
+                "closing_speed_mps": _closing,
+                "robot_distance_m": _robot_dist,
+            }
+            _phase_prev_wp, _phase_prev_pause = _wp_idx, _pause
+            # Drop any stale mask so a wiring failure cannot be mistaken for a
+            # genuine "no collisions this step".
+            if hasattr(raw_env, "_obs_collision_slot_mask"):
+                del raw_env._obs_collision_slot_mask
+        if (
+            args_cli.narrow_scripted_teacher
+            and (_narrow_gap_controller is not None or _narrow_replay_metrics is not None)
+        ):
+            # 07-27 分支 4：scripted 直穿 teacher 完全接管動作（僅窄縫評估場）。
+            _snt_robot = raw_env.scene["robot"]
+            _snt_xy = (
+                _snt_robot.data.root_pos_w[:, :2]
+                - raw_env.scene.env_origins[:, :2]
+            )
+            _snt_q = _snt_robot.data.root_quat_w
+            _snt_yaw = torch.atan2(
+                2.0 * (_snt_q[:, 0] * _snt_q[:, 3] + _snt_q[:, 1] * _snt_q[:, 2]),
+                1.0 - 2.0 * (_snt_q[:, 2] ** 2 + _snt_q[:, 3] ** 2),
+            )
+            _snt_cfg = _action_term_ref.cfg
+            if _narrow_replay_metrics is not None:
+                # 隨機 replay：每個 env 的牆/縫/目標都不同，讀真實幾何。
+                _snt_geom = narrow_bridge_teacher_geometry(raw_env)
+            else:
+                # 固定 Gate5 場：幾何由 NarrowGapSpec 決定，缺口在軸上。
+                _snt_geom = {
+                    "barrier_x_m": torch.full(
+                        (raw_env.num_envs,),
+                        float(_narrow_spec.barrier_x),
+                        device=device,
+                    ),
+                    "gap_center_y_m": torch.zeros(raw_env.num_envs, device=device),
+                    "goal_xy_m": torch.stack(
+                        [
+                            torch.full(
+                                (raw_env.num_envs,),
+                                float(_narrow_spec.goal_x),
+                                device=device,
+                            ),
+                            torch.zeros(raw_env.num_envs, device=device),
+                        ],
+                        dim=1,
+                    ),
+                }
+            actions = scripted_narrow_gap_action_indices(
+                _snt_xy,
+                _snt_yaw,
+                _action_term_ref._current_velocity,
+                _action_term_ref._current_omega,
+                num_bins=int(_snt_cfg.num_bins),
+                dt=float(_action_term_ref._dt),
+                max_linear_velocity=float(_snt_cfg.max_linear_velocity),
+                reverse_velocity_scale=float(_snt_cfg.reverse_velocity_scale),
+                max_linear_accel=float(_snt_cfg.max_linear_accel),
+                max_angular_velocity=float(_snt_cfg.max_angular_vel),
+                max_angular_accel=float(_snt_cfg.max_angular_accel),
+                barrier_x_m=_snt_geom["barrier_x_m"],
+                gap_center_y_m=_snt_geom["gap_center_y_m"],
+                goal_xy_m=_snt_geom["goal_xy_m"],
+            ).float()
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
+        if _phase_accumulator is not None and _phase_snapshot is not None:
+            _slot_mask = getattr(raw_env, "_obs_collision_slot_mask", None)
+            if _slot_mask is None:
+                raise RuntimeError(
+                    "motion-phase audit is enabled but obstacle_collision_geometric "
+                    "did not publish _obs_collision_slot_mask this step; a silently "
+                    "all-zero hit mask would look like a clean run. Check that the "
+                    "termination term is active and that "
+                    "_corridor_phase_audit_enabled is set on the unwrapped env."
+                )
+            # Cross-check against the independently computed dynamic-collision
+            # mask. This must be a strict equality in BOTH directions: the
+            # previous one-sided form could not catch a slot mask that missed
+            # a hit the dynamic mask recorded (dyn=True, slots all False),
+            # which is exactly the silent under-count the audit exists to
+            # prevent. In the corridor eval the only dynamic slots are the
+            # corridor slice, so the two masks must agree exactly.
+            _dyn_mask = getattr(raw_env, "_obs_collision_dynamic_mask", None)
+            if _dyn_mask is None:
+                raise RuntimeError(
+                    "motion-phase audit needs _obs_collision_dynamic_mask for "
+                    "reconciliation but the termination did not publish it; "
+                    "refusing to continue with an unverifiable slot mask."
+                )
+            _hit = _slot_mask[:, _corridor_dynamic_slice]
+            if not torch.equal(_hit.any(dim=1), _dyn_mask):
+                raise RuntimeError(
+                    "motion-phase audit slot mask disagrees with the dynamic "
+                    "collision mask (missed or spurious slot hits); per-phase "
+                    "counts would not reconcile with the corridor JSON."
+                )
+            _phase_accumulator.record_batch(
+                _phase_snapshot["codes"],
+                _phase_snapshot["active"],
+                _hit,
+                waypoint_index=_phase_snapshot["waypoint_index"],
+                pause_remaining=_phase_snapshot["pause_remaining"],
+                distance_to_waypoint_m=_phase_snapshot["distance_to_waypoint_m"],
+                speed_mps=_phase_snapshot["speed_mps"],
+                closing_speed_mps=_phase_snapshot["closing_speed_mps"],
+                robot_distance_m=_phase_snapshot["robot_distance_m"],
+            )
+            # Auto-reset inside step() rewrites waypoint/pause state; drop the
+            # previous-frame reference for reset envs so the next frame cannot
+            # read a spurious switch.
+            _done_mask = (terminated | truncated).bool()
+            if bool(_done_mask.any()):
+                _phase_prev_wp[_done_mask] = -1
+                _phase_prev_pause[_done_mask] = -1
+                _phase_tracker[_done_mask] = -1
         if args_cli.long_corridor_eval:
             _corridor_applied = getattr(
                 _action_term_ref, "processed_actions", None
@@ -5214,6 +5690,12 @@ def main():
         )
         if _narrow_gap_controller is not None:
             _narrow_gap_controller.observe(done)
+        if _narrow_replay_metrics is not None:
+            _narrow_replay_metrics.observe(
+                raw_env.scene["robot"].data.root_pos_w[:, :2]
+                - raw_env.scene.env_origins[:, :2],
+                done=done,
+            )
         # BehaviorScheduler 每步移動障礙物（reset 後前 3 步暫停，防止動態 obs 衝入）
         if (_play_behavior_scheduler is not None and _near_wall_controller is None
                 and _controlled_blocker_controller is None and _narrow_gap_controller is None):
@@ -5647,6 +6129,10 @@ def main():
                     )
             if _narrow_gap_controller is not None:
                 _narrow_gap_controller.finish_episodes(done_ids)
+            if _narrow_replay_metrics is not None:
+                # 場景已於 step() 內 reset，先結算舊回合再latch新幾何。
+                _narrow_replay_metrics.finish_episodes(done_ids)
+                _narrow_replay_begin(done_ids)
 
             # 批次 GPU→CPU sync：把所有 done env 需要的 scalar 一次性 stack 後
             # .tolist()，取代原本每 env 12+ 次 .item() 個別 sync（12N 次 → 1 次）。
@@ -6165,6 +6651,17 @@ def main():
             "configured_static_obstacles": _corridor_static_obstacles,
             "configured_dynamic_obstacles": _corridor_dynamic_obstacles,
             "dynamic_motion_mode": _corridor_motion_mode,
+            # Record the pause range actually in force, not the requested mode,
+            # so a pause A/B stays auditable from the JSON alone.
+            "dynamic_pause_mode": str(args_cli.long_corridor_pause_mode),
+            "random_2d_kinematics": str(
+                args_cli.long_corridor_random_2d_kinematics
+            ),
+            "dynamic_pause_steps_range": (
+                list(_corridor_pause_steps_range)
+                if _corridor_pause_steps_range is not None
+                else None
+            ),
             "dynamic_motion_type_fractions": _motion_type_fractions,
             "motion_pair_outcomes": {
                 name: {
@@ -6188,6 +6685,66 @@ def main():
                 }
                 for name, b in _corridor_pair_stats.items()
             },
+            # Phase audit rides along in the main JSON so its slot-event counts
+            # can be reconciled against episodes/collisions above; it is also
+            # written standalone when --long_corridor_phase_audit_output is set.
+            # Frame fraction of active dynamic slots physically overlapping a
+            # static obstacle / the other dynamic obstacle. Must be 0 before a
+            # baseline may be frozen; a wander trajectory only avoids walls.
+            "dynamic_static_penetration_frame_fraction": (
+                _corridor_pen_dyn_static / _corridor_pen_frames
+                if _corridor_pen_frames else 0.0
+            ),
+            "dynamic_dynamic_penetration_frame_fraction": (
+                _corridor_pen_dyn_dyn / _corridor_pen_frames
+                if _corridor_pen_frames else 0.0
+            ),
+            "dynamic_static_penetration_count": int(_corridor_pen_dyn_static),
+            "dynamic_dynamic_penetration_count": int(_corridor_pen_dyn_dyn),
+            "penetration_audited_slot_frames": int(_corridor_pen_frames),
+            "penetration_expected_slot_frames": int(
+                _corridor_pen_steps
+                * raw_env.num_envs
+                * _corridor_dynamic_obstacles
+            ),
+            "corridor_active_not_ready_frames": int(_corridor_pen_not_ready),
+            # Hard gate: zero dynamic-vs-STATIC penetrations, a non-empty
+            # audit, zero not-ready frames AND full coverage (every audited
+            # step saw every dynamic slot active and ready) — an audit that
+            # silently skipped frames must fail, not pass. Dynamic-dynamic
+            # overlap is recorded above but allowed by ruling (independent
+            # scripted pedestrians may cross).
+            "penetration_pass": (
+                _corridor_penetration_pass(
+                    _corridor_pen_frames,
+                    _corridor_pen_dyn_static,
+                )
+                and _corridor_pen_not_ready == 0
+                and _corridor_pen_frames
+                == _corridor_pen_steps
+                * raw_env.num_envs
+                * _corridor_dynamic_obstacles
+            ),
+            "motion_phase_audit": (
+                {
+                    # Only BEHAVIOR_PATROL slots enter the accumulator; wander
+                    # slots have no waypoint/pause semantics and are counted
+                    # separately. A pure random_2d+wander run is fully N/A
+                    # (applicable=false via zero patrol frames); a deployment
+                    # profile run stays applicable for its patrol families.
+                    "scope": "patrol_slots_only",
+                    "applicable": _phase_accumulator.total_frames > 0,
+                    "applicable_patrol_slot_frames": (
+                        _phase_accumulator.total_frames
+                    ),
+                    "excluded_wander_slot_frames": int(
+                        _phase_excluded_wander_frames
+                    ),
+                    **_phase_accumulator.to_report(),
+                }
+                if _phase_accumulator is not None
+                else None
+            ),
             "dynamic_x_moved_fraction": _x_moved_fraction,
             "dynamic_y_moved_fraction": _y_moved_fraction,
             "motion_mode_pass": _motion_mode_pass,
@@ -6234,6 +6791,7 @@ def main():
             and _corridor_report["motion_mode_pass"]
             and _corridor_report["obstacle_mix_pass"]
             and _corridor_report["goal_alignment_pass"]
+            and _corridor_report["penetration_pass"]
             and _corridor_report["constructive_unsolvable_count"] == 0
             and stats_total > 0
             and _corridor_sr >= 0.90
@@ -6265,6 +6823,35 @@ def main():
                 encoding="utf-8",
             )
             print(f"[LONG-CORRIDOR-METRICS] JSON report: {_corridor_output}")
+        if args_cli.long_corridor_phase_audit_output and _phase_accumulator is not None:
+            _phase_output = Path(
+                args_cli.long_corridor_phase_audit_output
+            ).expanduser()
+            _phase_output.parent.mkdir(parents=True, exist_ok=True)
+            # Carry the reconciliation keys so the standalone file can be
+            # checked against the main corridor JSON without re-running.
+            _phase_report = dict(_phase_accumulator.to_report())
+            _phase_report.update({
+                "scope": "patrol_slots_only",
+                "applicable": _phase_accumulator.total_frames > 0,
+                "applicable_patrol_slot_frames": _phase_accumulator.total_frames,
+                "excluded_wander_slot_frames": int(_phase_excluded_wander_frames),
+                "dynamic_motion_mode": _corridor_motion_mode,
+                "dynamic_pause_mode": str(args_cli.long_corridor_pause_mode),
+                "dynamic_pause_steps_range": (
+                    list(_corridor_pause_steps_range)
+                    if _corridor_pause_steps_range is not None
+                    else None
+                ),
+                "episodes": int(stats_total),
+                "collision_episodes": int(stats_wall + stats_obs),
+                "obstacle_collision_episodes": int(stats_obs),
+                "configured_dynamic_obstacles": int(_corridor_dynamic_obstacles),
+            })
+            _phase_output.write_text(
+                json.dumps(_phase_report, indent=2), encoding="utf-8"
+            )
+            print(f"[LONG-CORRIDOR-PHASE-AUDIT] JSON report: {_phase_output}")
     if _corridor_teacher_stats is not None:
         def _teacher_float(value: torch.Tensor) -> float:
             return float(value.detach().cpu().item())
@@ -6631,6 +7218,8 @@ def main():
             print(
                 f"[FUTURE-CF-AUDIT] JSON report: {_future_cf_output}"
             )
+    if _narrow_replay_metrics is not None:
+        print(_narrow_replay_metrics.summary_line())
     if _narrow_gap_controller is not None:
         print(_narrow_gap_controller.summary_line())
     if _compare_extractor is not None:

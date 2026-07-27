@@ -322,6 +322,15 @@ def obstacle_collision_geometric(
     static_overlap = torch.zeros(N, dtype=torch.bool, device=device)
     dynamic_overlap = torch.zeros(N, dtype=torch.bool, device=device)
 
+    # Eval-only [env, slot] hit mask for the corridor motion-phase audit.
+    # Allocated only when the audit flag is set so the training path allocates
+    # nothing and behaves exactly as before.
+    _slot_hit_mask = None
+    if getattr(env, "_corridor_phase_audit_enabled", False):
+        _slot_hit_mask = torch.zeros(
+            N, max_obstacles, dtype=torch.bool, device=device
+        )
+
     # Per-env per-obstacle collision radii (from obs_size_rand randomization)
     has_per_obs_radii = hasattr(env, "_obstacle_radii")
 
@@ -390,6 +399,12 @@ def obstacle_collision_geometric(
 
         overlap = overlap | hit
 
+        # Eval-only: preserve the per-slot hit mask for the corridor motion-phase
+        # audit. Read-only bookkeeping — `hit` is already decided above and is
+        # not modified here, so collision determination is untouched.
+        if _slot_hit_mask is not None and i < _slot_hit_mask.shape[1]:
+            _slot_hit_mask[:, i] = hit
+
         # Attribute hit to static or dynamic per-env
         if hit.any() and _sched is not None and i < _sched.behavior_type.shape[1]:
             # rule_based: 逐 slot behavior_type 精確歸因 + 分項計數(哪種行為造成碰撞)
@@ -412,6 +427,8 @@ def obstacle_collision_geometric(
     # Store attribution for downstream metrics
     env._obs_collision_static_mask = static_overlap
     env._obs_collision_dynamic_mask = dynamic_overlap
+    if _slot_hit_mask is not None:
+        env._obs_collision_slot_mask = _slot_hit_mask
 
     # 一次性診斷（第 1 次呼叫，確認有抓到障礙物）
     _obs_collision_diag_count += 1

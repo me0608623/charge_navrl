@@ -363,14 +363,25 @@ def main():
 
     # OBB lineage extra gate: 1.2 m is the deployment hard gate. The 1.0 m
     # result is diagnostic only; 0.85 m remains a geometry-level test.
+    #
+    # 2026-07-27 正名：這個閘一律在 10 m 場地執行，而中央牆長度寫死按 10 m 算
+    # （`NarrowGapSpec.arena_half_extent` 未接 `--arena_size`），因此牆剛好封死到
+    # 外牆，牆端與外牆之間形成死角。實測 D0 在此死角撞牆 89.4% / direct 0.000，
+    # 但同一顆 checkpoint 在**真正封死且尺寸相符**的 Gate5a（`--narrow_gap_mode
+    # sealed`）上是 direct 1.000 / 零碰撞 / 橫偏中位 0.052 m。
+    # 故此閘量的是「小場地邊界死角下的行為」，**不能代表純窄縫直穿能力**。
+    # 純直穿請跑 Gate5a。此閘保留為壓測，不刪除。
     deploy_log = args.narrow_deploy_log or args.narrow_log
     if not advanced_gates:
-        print(f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] ↷ DEFERRED — 依協定自 SA5 起啟用")
+        print(
+            f"[Gate5a {NARROW_DEPLOY_WIDTH_M:.1f}m 封死窄縫·純直穿] "
+            "↷ DEFERRED — 依協定自 SA5 起啟用"
+        )
     elif deploy_log:
         ng = parse_narrow_gap(deploy_log)
         if not ng or ng.get("sr") is None:
             print(
-                f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] "
+                f"[Gate5a {NARROW_DEPLOY_WIDTH_M:.1f}m 封死窄縫·純直穿] "
                 "⚠ 缺摘要或 NARROW-GAP-METRICS"
             )
             g5 = None
@@ -378,7 +389,7 @@ def main():
             checks = narrow_gap_checks(ng)
             if not checks:
                 print(
-                    f"[Gate5 {NARROW_DEPLOY_WIDTH_M:.1f}m部署窄縫] "
+                    f"[Gate5a {NARROW_DEPLOY_WIDTH_M:.1f}m 封死窄縫·純直穿] "
                     "⚠ 缺 SR/CR/穿越指標"
                 )
                 g5 = None

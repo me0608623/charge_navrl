@@ -42,6 +42,65 @@ class NarrowGapSpec:
     def segment_center_y(self) -> float:
         return 0.5 * (self.boundary_inner_y + 0.5 * self.gap_width)
 
+    def side_opening_m(self, actual_arena_size: float) -> float:
+        """牆端到實際外牆內緣的空隙；>0 表示機器人可繞過中央缺口。
+
+        牆的頂端恆等於 `self.boundary_inner_y`（由 segment 幾何保證），所以
+        側口就是「實際場地的內緣」減去「spec 假設場地的內緣」。
+        """
+        return max(0.0, 0.5 * float(actual_arena_size) - self.arena_half_extent)
+
+
+# 歷史上所有 Gate5 都在 10 m 場地執行，spec 的 arena_half_extent 預設也是 5.0，
+# 兩者剛好重合 —— 這正是「--arena_size 沒有傳進 spec」這個錯配長期未被發現的原因。
+LEGACY_ARENA_HALF_EXTENT = 5.0
+
+
+def spec_for_arena(
+    arena_size: float | None,
+    *,
+    gap_width: float,
+    sealed: bool,
+    **kwargs,
+) -> NarrowGapSpec:
+    """依場地尺寸建立 spec；`sealed` 決定兩種語意完全不同的閘。
+
+    * ``sealed=True``（**Gate5a**）：牆隨場地延伸到外牆，只留中央窄口。
+      這才是「純測直穿能力」的閘。
+    * ``sealed=False``（**Gate5b**）：牆長固定按 10 m 場地算，不隨場地變，
+      側口隨場地線性增加。這是「房間尺度捷徑」壓測 —— 也是歷史 Gate5 的行為。
+
+    2026-07-27 實測（D0, gap 1.2 m）：legacy 在 10 m 側口 0 → direct 0%、撞牆 89.4%；
+    12 m 側口 1.0 m → direct 0.42%（幾乎全繞牆端，橫偏中位 5.02 m）；
+    14 m 側口 2.0 m → direct 100%。政策在中央通道餘裕 ~0.4 m、側口僅 ~0.2 m 的情況下
+    仍選側口，故非路徑最佳化，而是外牆距離造成的 LiDAR 情境捷徑。
+    """
+    if sealed and arena_size is None:
+        # sealed 的整個意義就是「牆隨場地延伸到外牆」。少了場地尺寸就退回
+        # 寫死的 5.0，那正是 2026-07-27 錯配的成因 —— 寧可炸掉也不要靜默算錯。
+        raise ValueError(
+            "sealed narrow-gap mode requires an explicit arena size; "
+            "falling back to the hard-coded 5.0 half extent is exactly the "
+            "2026-07-27 mismatch that made every Gate5 measure dead-corner "
+            "behaviour instead of direct crossing"
+        )
+    arena_size = (
+        2.0 * LEGACY_ARENA_HALF_EXTENT if arena_size is None else float(arena_size)
+    )
+    if arena_size <= 0.0:
+        raise ValueError("arena_size must be positive")
+    half = 0.5 * arena_size if sealed else LEGACY_ARENA_HALF_EXTENT
+    spec = NarrowGapSpec(
+        gap_width=gap_width,
+        arena_half_extent=half,
+        **kwargs,
+    )
+    if spec.segment_length <= 0.0:
+        raise ValueError(
+            f"gap {gap_width} m leaves no wall inside a {arena_size} m arena"
+        )
+    return spec
+
 
 def configure_narrow_gap_env(env_cfg, scene_final: dict, cli_args, spec=None) -> None:
     """Remove random geometry and reserve two exact barrier-wall segments."""

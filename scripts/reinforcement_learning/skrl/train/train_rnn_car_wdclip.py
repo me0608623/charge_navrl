@@ -271,6 +271,22 @@ parser.add_argument("--tbptt_len", type=int, default=0,
 parser.add_argument("--lr_decay", type=float, default=0.0,
                     help="Linear LR decay factor per iteration. 0=no decay. "
                          "WD: uses ParamScheduler")
+# --- N1 直穿模仿（07-27 裁決）---
+# --narrow_imitation_weight (λ)
+# - 用意：只在窄縫 replay 幀，對 scripted 直穿 teacher 的動作加 CE 模仿損失。
+#   total = PPO loss + λ × [CE(linear) + CE(angular)]
+# - 正常範圍：0（關閉）；>0 由 shadow rollout 的梯度比校準（目標 ≈ PPO actor 梯度 50%）
+# - 更改影響：λ 太大會壓過 PPO 而在非窄縫能力上退步；太小則直穿學不起來。
+# - 注意：teacher 只貼標籤、絕不代開車（無 rollout override），PPO 資料保持乾淨。
+parser.add_argument("--narrow_imitation_weight", type=float, default=0.0,
+                    help="λ for scripted direct-crossing CE on narrow-replay "
+                         "frames only. 0=off. Calibrate from shadow rollout.")
+# --narrow_imitation_shadow
+# - 用意：只量測不學習——照常算 teacher 標籤與 CE、記錄兩邊梯度範數，但 λ 視為 0。
+# - 用途：N1 步驟 3/4 的 λ 校準（不動參數地量 CE 梯度 vs PPO actor 梯度）。
+parser.add_argument("--narrow_imitation_shadow", action="store_true", default=False,
+                    help="Measure scripted-teacher CE and its gradient norm "
+                         "against the PPO actor gradient without applying it.")
 
 # --- Modular RNN ---
 # --charge_encoder_mode
@@ -1076,6 +1092,12 @@ from rnn_car_wdclean.privileged_corridor_teacher import (
     corridor_teacher_action_grid,
     predict_patrol_obstacle_paths,
 )
+from rnn_car_wdclean.scripted_narrow_teacher import (
+    ScriptedNarrowTeacherSpec,
+    narrow_bridge_teacher_geometry,
+    scripted_narrow_gap_action_indices,
+)
+from rnn_car_wdclean.narrow_imitation_loss import scripted_action_ce_loss
 from rnn_car_wdclean.reward_diagnostics import (
     add_long_corridor_reward_diagnostics,
 )
@@ -1301,7 +1323,8 @@ class ChargeRolloutBuffer:
                  privileged_dim: int = 0, predict_dim: int = 7,
                  encoder_input_dim: int = 0, teacher_logits_dim: int = 0,
                  previous_teacher_logits_dim: int = 0,
-                 store_corridor_mask: bool = False):
+                 store_corridor_mask: bool = False,
+                 store_narrow_teacher: bool = False):
         self.num_steps = num_steps
         self.num_envs = num_envs
         self.device = device
@@ -1345,6 +1368,15 @@ class ChargeRolloutBuffer:
             self.corridor_mask = torch.zeros(
                 num_steps, num_envs, dtype=torch.bool, device=device
             )
+        # N1: scripted 直穿 teacher 的硬標籤動作（只在窄縫 replay 幀有效）。
+        self._store_narrow_teacher = bool(store_narrow_teacher)
+        if self._store_narrow_teacher:
+            self.narrow_teacher_actions = torch.zeros(
+                num_steps, num_envs, 2, dtype=torch.long, device=device
+            )
+            self.narrow_imitation_mask = torch.zeros(
+                num_steps, num_envs, dtype=torch.bool, device=device
+            )
         # Asymmetric critic privileged obs
         self._privileged_dim = privileged_dim
         if privileged_dim > 0:
@@ -1355,7 +1387,8 @@ class ChargeRolloutBuffer:
             aux_target=None, privileged=None, terminated=None, encoder_input=None,
             teacher_logits=None, retention_mask=None,
             previous_teacher_logits=None, previous_retention_mask=None,
-            corridor_mask=None):
+            corridor_mask=None,
+            narrow_teacher_actions=None, narrow_imitation_mask=None):
         """儲存一個 rollout step 的所有資料。每次 env.step() 後呼叫。"""
         i = self.ptr
         self.rl_inputs[i] = rl_input
@@ -1398,6 +1431,14 @@ class ChargeRolloutBuffer:
                     "corridor adapter buffer requires a scene mask at every step"
                 )
             self.corridor_mask[i] = corridor_mask
+        if self._store_narrow_teacher:
+            if narrow_teacher_actions is None or narrow_imitation_mask is None:
+                raise RuntimeError(
+                    "narrow imitation buffer requires teacher actions and a "
+                    "scene mask at every step"
+                )
+            self.narrow_teacher_actions[i] = narrow_teacher_actions
+            self.narrow_imitation_mask[i] = narrow_imitation_mask
         self.ptr += 1
 
     def reset(self):
@@ -2994,6 +3035,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     random.seed(args_cli.seed)         # Python random 模組種子
 
     # --- Env config overrides：在 gym.make 之前修改 cfg ---
+    # ManagerBasedEnv.__init__ 會用 cfg.seed 重設「全域」torch/numpy/random RNG
+    # （manager_based_env.py: self.seed(self.cfg.seed)），發生在上面 manual_seed 之後。
+    # 不傳遞的話 --seed 會被 env 預設 42 整個洗掉（seed 複驗全變同一條軌跡）。
+    env_cfg.seed = args_cli.seed
+
     if args_cli.num_envs is not None:
         env_cfg.scene.num_envs = args_cli.num_envs  # 覆蓋 YAML 裡的 num_envs
 
@@ -3179,9 +3225,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "lateral",
                 )
             ),
+            random_2d_kinematics=str(
+                getattr(
+                    args_cli,
+                    "long_corridor_random_2d_kinematics",
+                    "patrol",
+                )
+            ),
             dynamic_motion_weights=getattr(
                 args_cli,
                 "long_corridor_dynamic_motion_weights",
+                None,
+            ),
+            obstacle_count_mix=getattr(
+                args_cli,
+                "long_corridor_obstacle_count_mix",
                 None,
             ),
         )
@@ -3219,6 +3277,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             ),
             exact_width_ratio=float(
                 getattr(args_cli, "narrow_passage_exact_width_ratio", 0.0)
+            ),
+            goal_distance_range=getattr(
+                args_cli, "narrow_passage_goal_distance_range", None
+            ),
+            goal_lateral_offset_range=getattr(
+                args_cli, "narrow_passage_goal_lateral_offset_range", None
             ),
         )
     _replay_fraction_total = (
@@ -4409,6 +4473,63 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _encoder_input_dim = (
         policy_obs_dim + (_K_stack - 1) * _LL if _e2e_frame_stack else 0
     )
+    # === N1 直穿模仿（07-27 裁決）：scripted teacher 只貼標籤，不參與控制 ===
+    # 舊 SA5 teacher KL 被取代——那顆 teacher 自己就繞路（3 seed n=2094,
+    # crossing 95.9% 但 direct 0.000、pre_y_p95 3.86m），KL 0.30 一直在蒸餾繞行。
+    _narrow_imitation_weight = float(
+        getattr(args_cli, "narrow_imitation_weight", 0.0)
+    )
+    _narrow_imitation_shadow = bool(
+        getattr(args_cli, "narrow_imitation_shadow", False)
+    )
+    if _narrow_imitation_weight < 0.0:
+        raise ValueError("narrow_imitation_weight must be non-negative")
+    _narrow_imitation_enabled = (
+        _narrow_imitation_weight > 0.0 or _narrow_imitation_shadow
+    )
+    if _narrow_imitation_shadow:
+        # Shadow is a measurement run, not a short PPO continuation. Keep all
+        # optimizer-owned parameters fixed while still building both gradient
+        # graphs below. This also prevents the auxiliary optimizer from moving
+        # the shared encoder between the two calibration iterations.
+        args_cli.disable_aux_training = True
+    _narrow_imitation_action_term = None
+    _narrow_imitation_spec = None
+    if _narrow_imitation_enabled:
+        if float(getattr(args_cli, "narrow_passage_fraction", 0.0)) <= 0.0:
+            raise ValueError(
+                "narrow imitation requires narrow_passage_fraction > 0"
+            )
+        if _teacher_retention_weight > 0.0:
+            raise ValueError(
+                "narrow imitation replaces the SA5 teacher KL (that teacher "
+                "detours: 3-seed direct=0). Set teacher_retention_weight=0."
+            )
+        _narrow_imitation_action_term = next(
+            (
+                term
+                for term in getattr(
+                    env.unwrapped.action_manager, "_terms", {}
+                ).values()
+                if hasattr(term, "_current_velocity")
+                and hasattr(term, "_current_omega")
+                and hasattr(term, "_dt")
+            ),
+            None,
+        )
+        if _narrow_imitation_action_term is None:
+            raise RuntimeError(
+                "narrow imitation could not find the discrete drive action term"
+            )
+        _narrow_imitation_spec = ScriptedNarrowTeacherSpec()
+        print(
+            "[N1-IMITATION] enabled: "
+            f"lambda={_narrow_imitation_weight:g} "
+            f"shadow={_narrow_imitation_shadow} "
+            "(scripted direct-crossing CE on narrow-replay frames only; "
+            "teacher labels but never drives)"
+        )
+
     charge_buf = ChargeRolloutBuffer(
         RL, num_envs, rl_input_dim, obs_dim, args_cli.hidden_dim, device,
         privileged_dim=_priv_dim, predict_dim=_predict_dim,
@@ -4418,6 +4539,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             2 * NUM_BINS if _previous_stage_teacher_enabled else 0
         ),
         store_corridor_mask=_corridor_adapter_enabled,
+        store_narrow_teacher=_narrow_imitation_enabled,
     )
     obs_buf = ObstacleRolloutBuffer(RL, num_envs, N_obs, OBS_POLICY_OBS_DIM, 2, device) if _obstacle_mode == "learned" else None
 
@@ -5764,6 +5886,50 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         dim=-1,
                     )
 
+            # --- N1: scripted 直穿 teacher 標籤（窄縫 replay 幀才有效）---
+            # 必須在 env.step 之前算：標籤要對應 policy 當下看到的狀態，才與同一
+            # buffer slot 的 rl_inputs/actions 對齊。step 之後讀會晚一步，且已終止
+            # 的 env 早被 reset（位姿與 _narrow_bridge_active 都屬於下一回合）。
+            # 只讀狀態、不改動作：PPO 仍用自己抽樣的 actions 與環境互動。
+            _narrow_teacher_actions_step = None
+            _narrow_imitation_mask_step = None
+            if _narrow_imitation_enabled:
+                with torch.no_grad():
+                    _ni_geom = narrow_bridge_teacher_geometry(env.unwrapped)
+                    _ni_robot = env.unwrapped.scene["robot"]
+                    _ni_xy = (
+                        _ni_robot.data.root_pos_w[:, :2]
+                        - env.unwrapped.scene.env_origins[:, :2]
+                    )
+                    _ni_q = _ni_robot.data.root_quat_w
+                    _ni_yaw = torch.atan2(
+                        2.0 * (_ni_q[:, 0] * _ni_q[:, 3] + _ni_q[:, 1] * _ni_q[:, 2]),
+                        1.0 - 2.0 * (_ni_q[:, 2] ** 2 + _ni_q[:, 3] ** 2),
+                    )
+                    _ni_cfg = _narrow_imitation_action_term.cfg
+                    _narrow_teacher_actions_step = (
+                        scripted_narrow_gap_action_indices(
+                            _ni_xy,
+                            _ni_yaw,
+                            _narrow_imitation_action_term._current_velocity,
+                            _narrow_imitation_action_term._current_omega,
+                            barrier_x_m=_ni_geom["barrier_x_m"],
+                            gap_center_y_m=_ni_geom["gap_center_y_m"],
+                            goal_xy_m=_ni_geom["goal_xy_m"],
+                            num_bins=int(_ni_cfg.num_bins),
+                            dt=float(_narrow_imitation_action_term._dt),
+                            max_linear_velocity=float(_ni_cfg.max_linear_velocity),
+                            reverse_velocity_scale=float(
+                                _ni_cfg.reverse_velocity_scale
+                            ),
+                            max_linear_accel=float(_ni_cfg.max_linear_accel),
+                            max_angular_velocity=float(_ni_cfg.max_angular_vel),
+                            max_angular_accel=float(_ni_cfg.max_angular_accel),
+                            spec=_narrow_imitation_spec,
+                        )
+                    )
+                    _narrow_imitation_mask_step = _ni_geom["active"].clone()
+
             # --- 2. Env step ---
             next_obs, reward, terminated, truncated, info = env.step(actions.float())
             _audit_long_corridor_goal()
@@ -6072,7 +6238,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                                _long_corridor_mask_step
                                if _corridor_adapter_enabled
                                else None
-                           ))
+                           ),
+                           narrow_teacher_actions=_narrow_teacher_actions_step,
+                           narrow_imitation_mask=_narrow_imitation_mask_step)
             if obs_buf is not None:
                 obs_buf.add(obs_flat, obs_act, obs_lp, obs_rew, obs_val, obs_done)
 
@@ -6180,6 +6348,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         charge_vf_loss = 0.0
         charge_entropy = 0.0
         aux_loss_val = 0.0
+        _narrow_imitation_stats = None
         if args_cli.play:
             # --play: 推論模式，只跑 rollout，不做任何優化
             train_charge = False
@@ -6557,6 +6726,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 charge_buf.previous_retention_mask[:RL].reshape(-1)
                 if _previous_stage_teacher_enabled else None
             )
+            flat_narrow_teacher_actions = (
+                charge_buf.narrow_teacher_actions[:RL].reshape(-1, 2)
+                if _narrow_imitation_enabled else None
+            )
+            flat_narrow_imitation_mask = (
+                charge_buf.narrow_imitation_mask[:RL].reshape(-1)
+                if _narrow_imitation_enabled else None
+            )
             flat_corridor_mask = (
                 charge_buf.corridor_mask[:RL].reshape(-1)
                 if _corridor_adapter_enabled else None
@@ -6714,6 +6891,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                             num_bins=NUM_BINS,
                             argmax_margin=_teacher_retention_argmax_margin,
                         )
+                    _narrow_imitation_result = None
+                    if _narrow_imitation_enabled:
+                        _narrow_imitation_result = scripted_action_ce_loss(
+                            nl,
+                            flat_narrow_teacher_actions[mb],
+                            flat_narrow_imitation_mask[mb],
+                            num_bins=NUM_BINS,
+                        )
                     _previous_retention_result = None
                     if _previous_stage_teacher_enabled:
                         _previous_retention_result = (
@@ -6798,6 +6983,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         if _previous_retention_result is not None
                         else torch.zeros((), device=device)
                     )
+                    # N1: scripted 直穿 teacher 的 CE，只作用在窄縫 replay 幀。
+                    # shadow 模式下係數為 0——照常算 CE 與梯度比但不影響更新。
+                    _narrow_imitation_term = (
+                        (0.0 if _narrow_imitation_shadow
+                         else _narrow_imitation_weight)
+                        * _narrow_imitation_result.loss
+                        if _narrow_imitation_result is not None
+                        else torch.zeros((), device=device)
+                    )
                     # Ordinary frames remain pure PPO. Only injected narrow
                     # frames are anchored to c20, and only previous-stage
                     # replay frames are independently anchored to c12.
@@ -6807,11 +7001,63 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         - entropy_loss
                         + _retention_term
                         + _previous_retention_term
+                        + _narrow_imitation_term
                         + (
                             _corridor_adapter_gate_loss_weight
                             * _adapter_gate_loss
                         )
                     )
+                    if (
+                        _narrow_imitation_result is not None
+                        and _narrow_imitation_result.active_count > 0
+                    ):
+                        _narrow_imitation_stats = {
+                            "ce": float(_narrow_imitation_result.loss.detach()),
+                            "ce_linear": float(
+                                _narrow_imitation_result.ce_linear.detach()
+                            ),
+                            "ce_angular": float(
+                                _narrow_imitation_result.ce_angular.detach()
+                            ),
+                            "agreement_linear":
+                                _narrow_imitation_result.agreement_linear,
+                            "agreement_angular":
+                                _narrow_imitation_result.agreement_angular,
+                            "active_frames": _narrow_imitation_result.active_count,
+                        }
+                        # N1 步驟 3/4：量「PPO actor 梯度」與「teacher CE 梯度」的
+                        # 範數比供 λ 校準（目標 CE ≈ actor 的 50%）。兩次額外反傳
+                        # 很貴，只在 shadow 校準模式下做——正式訓練不付這個成本。
+                        if _narrow_imitation_shadow:
+                            _ni_actor_params = [
+                                p for p in charge_params_actor if p.requires_grad
+                            ]
+                            _ni_g_ppo = torch.autograd.grad(
+                                pl_clamped, _ni_actor_params,
+                                retain_graph=True, allow_unused=True,
+                            )
+                            _ni_g_ce = torch.autograd.grad(
+                                _narrow_imitation_result.loss, _ni_actor_params,
+                                retain_graph=True, allow_unused=True,
+                            )
+
+                            def _gnorm(grads):
+                                total = 0.0
+                                for g in grads:
+                                    if g is not None:
+                                        total += float(g.detach().pow(2).sum())
+                                return total ** 0.5
+
+                            _ni_ratio = _gnorm(_ni_g_ce) / max(
+                                _gnorm(_ni_g_ppo), 1e-12
+                            )
+                            _narrow_imitation_stats.update({
+                                "grad_ppo_actor": _gnorm(_ni_g_ppo),
+                                "grad_ce_unweighted": _gnorm(_ni_g_ce),
+                                "grad_ratio_at_lambda1": _ni_ratio,
+                                # 讓 CE 梯度 = PPO actor 梯度 50% 所需的 λ。
+                                "lambda_for_half_ppo": 0.5 / max(_ni_ratio, 1e-12),
+                            })
                     actor_before = _snapshot_params(charge_params_actor)
                     critic_before = _snapshot_params(charge_params_critic)
 
@@ -6862,14 +7108,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _actor_grad_post = _grad_l2_norm(charge_params_actor)
                     _critic_grad_post = _grad_l2_norm(charge_params_critic)
 
-                    charge_opt_rl.step()
-                    _ppo_update_count += 1
-                    if charge_opt_rnn_rl is not None:
-                        # RNN 走 RL 梯度:clip 後 step(防 spike)
-                        _rnn_rl_gn = nn.utils.clip_grad_norm_(
-                            [p for g in charge_opt_rnn_rl.param_groups for p in g["params"]],
-                            _current_max_grad_norm)
-                        charge_opt_rnn_rl.step()
+                    if not _narrow_imitation_shadow:
+                        charge_opt_rl.step()
+                        _ppo_update_count += 1
+                        if charge_opt_rnn_rl is not None:
+                            # RNN 走 RL 梯度:clip 後 step(防 spike)
+                            _rnn_rl_gn = nn.utils.clip_grad_norm_(
+                                [p for g in charge_opt_rnn_rl.param_groups for p in g["params"]],
+                                _current_max_grad_norm)
+                            charge_opt_rnn_rl.step()
+                    else:
+                        # Leave no stale gradients that could be mistaken for
+                        # an update by later diagnostics or future code.
+                        charge_opt_rl.zero_grad(set_to_none=True)
+                        if charge_opt_rnn_rl is not None:
+                            charge_opt_rnn_rl.zero_grad(set_to_none=True)
 
                     # --- post-update policy diagnostics ---
                     with torch.no_grad():
@@ -8441,6 +8694,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         float(getattr(_raw_env, "_narrow_bridge_last_yaw_limit_deg", 0.0)),
                     "narrow_bridge/stress_ratio":
                         float(getattr(_raw_env, "_narrow_bridge_last_stress_ratio", 0.0)),
+                    "narrow_bridge/goal_distance_min_m":
+                        float(getattr(
+                            _raw_env, "_narrow_bridge_last_goal_distance_min", 0.0
+                        )),
+                    "narrow_bridge/goal_distance_max_m":
+                        float(getattr(
+                            _raw_env, "_narrow_bridge_last_goal_distance_max", 0.0
+                        )),
+                    "narrow_bridge/goal_lateral_offset_min_m":
+                        float(getattr(
+                            _raw_env, "_narrow_bridge_last_goal_offset_min", 0.0
+                        )),
+                    "narrow_bridge/goal_lateral_offset_max_m":
+                        float(getattr(
+                            _raw_env, "_narrow_bridge_last_goal_offset_max", 0.0
+                        )),
                 })
 
             # --- Deployment-corridor motion-family cumulative audit ---
@@ -8531,6 +8800,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 if _arc_ep_n > 0:
                     log_data["r_arc/ep_penalty_mean"] = _arc_ep_sum / _arc_ep_n   # 每集累積 arc penalty 平均
 
+            # --- 真實 LR：直接讀 optimizer param_group（非 CONFIG.lr）。
+            # lr_decay / phase override / resume 蓋回 都以這裡為準（W2 protocol）。
+            log_data["train/lr_rl_actual"] = float(charge_opt_rl.param_groups[0]["lr"])
+            log_data["train/lr_aux_rnn_actual"] = float(charge_opt_aux.param_groups[0]["lr"])
+
+            # --- N1 直穿模仿：CE、動作一致率與 λ 校準用的梯度比 ---
+            if _narrow_imitation_stats is not None:
+                for _ni_key, _ni_val in _narrow_imitation_stats.items():
+                    log_data[f"narrow_imitation/{_ni_key}"] = _ni_val
+
             wandb_run.log(log_data, step=total_steps)
 
         # Local, structured metrics let the cron supervisor make convergence
@@ -8543,6 +8822,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "sr": float(wd.get("charge/goal_reach_rate", 0.0)),
             "cr": float(wd.get("charge/hit_probability", 0.0)),
             "timeout": float(_timeout_rate),
+            "lr_rl_actual": float(charge_opt_rl.param_groups[0]["lr"]),
+            "narrow_imitation": _narrow_imitation_stats,
+            "narrow_imitation_shadow": _narrow_imitation_shadow,
+            "ppo_update_count": float(
+                wd_update_monitor.get("rl/ppo_update_count", 0.0)
+            ),
+            "actor_param_delta_norm": float(
+                wd_update_monitor.get(
+                    "wd_update_actor/param_delta_norm", 0.0
+                )
+            ),
+            "critic_param_delta_norm": float(
+                wd_update_monitor.get(
+                    "wd_update_critic/param_delta_norm", 0.0
+                )
+            ),
             "policy_loss": float(charge_ppo_loss),
             "vf": float(charge_vf_loss),
             "entropy": float(charge_entropy),

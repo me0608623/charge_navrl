@@ -66,6 +66,12 @@ class ExperimentConfig:
     tbptt_len: int = 0
     lr_decay: float = 0.0
 
+    # N1 直穿模仿（07-27 裁決）：只在窄縫 replay 幀對 scripted 直穿 teacher 的
+    # 動作加 CE。舊 SA5 teacher KL 自己就繞路（3 seed direct=0），已由此取代。
+    # teacher 只貼標籤、不代開車，PPO 資料保持乾淨。
+    narrow_imitation_weight: float = 0.0
+    narrow_imitation_shadow: bool = False
+
     # PPO-specific (ignored when algorithm="a2c")
     ppo_epochs: int = 2
     mini_batches: int = 16
@@ -141,16 +147,31 @@ class ExperimentConfig:
     narrow_passage_fixed_yaw_limit_deg: float | None = None
     narrow_passage_exact_width: float | None = None
     narrow_passage_exact_width_ratio: float = 0.0
+    # Optional N1+ goal randomization. ``None`` preserves every historical
+    # bridge run: goal remains 3.0 m behind and centered on the opening.
+    narrow_passage_goal_distance_range: tuple[float, float] | None = None
+    narrow_passage_goal_lateral_offset_range: tuple[float, float] | None = None
     # Deployment corridor replay is disjoint from narrow-passage replay.
     long_corridor_fraction: float = 0.0
     long_corridor_free_width: float = 4.0
     long_corridor_length: float = 10.0
     long_corridor_static_obstacles: int = 4
     long_corridor_dynamic_obstacles: int = 2
+    # 2026-07-27：走廊 replay 內部的障礙數量分布。``None`` 必須完整保持歷史
+    # 固定 4S+2D 行為 —— 既有 gate 與 SA1–SA6 血緣都靠這點維持可比，不需重訓。
+    # 格式 ``(((static, dynamic), weight), ...)``，權重和為 1，上限 5S+5D。
+    # SA7: 25% 3S1D / 35% 4S2D / 20% 4S3D / 15% 5S3D / 5% 5S5D
+    # SA8: 15% 3S1D / 25% 4S2D / 20% 4S3D / 20% 5S3D / 10% 5S4D / 10% 5S5D
+    # 階段語意留在 config，機制在 mdp/events/corridor_density.py。
+    long_corridor_obstacle_count_mix: tuple[tuple[tuple[int, int], float], ...] | None = None
     long_corridor_dynamic_speed_range: tuple[float, float] = (0.30, 0.60)
     long_corridor_dynamic_motion_mode: str = "lateral"
     # Optional (lateral, longitudinal, random_2d) env weights; env_stratified only.
     long_corridor_dynamic_motion_weights: tuple[float, float, float] | None = None
+    # random_2d motion implementation. "patrol" is the frozen two-point
+    # ping-pong every historical gate used; "wander" is the bounded random
+    # walk with no fixed turnaround point (deployment kinematics, W1+).
+    long_corridor_random_2d_kinematics: str = "patrol"
     # Frozen successful policy used only on narrow-passage replay frames.
     teacher_retention_checkpoint: str | None = None
     teacher_retention_weight: float = 0.0

@@ -420,6 +420,16 @@ class EventCfgVLP16Curriculum:
             "gap_center_limit": 1.0,
             "barrier_x_limit": 0.5,
             "start_goal_distance": 3.0,
+            # Play-side manual overrides. None/defaults here == the training
+            # distribution; only --narrow_replay_* on play_rnn_car.py sets them.
+            "gap_center_range": None,
+            "barrier_x_range": None,
+            "direction_mode": "random",
+            "goal_distance": None,
+            "goal_lateral_offset": 0.0,
+            # N1+ may override these ranges. None preserves historical replay.
+            "goal_distance_range": None,
+            "goal_lateral_offset_range": None,
             "final_stress_ratio": 0.25,
             "fixed_width_range": None,
             "fixed_yaw_limit_deg": None,

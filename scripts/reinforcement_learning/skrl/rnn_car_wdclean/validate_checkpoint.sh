@@ -126,15 +126,27 @@ fi
 # Gate #5: OBB-lineage checkpoints must pass the deployment-representative
 # 1.2 m opening. The 1.0 m opening is a stress diagnostic and cannot fail
 # advancement by itself. The 0.85 m case remains a geometry test, not a policy gate.
+#
+# 2026-07-27 修正。此閘原本寫死 `--arena_size 10`，而 `NarrowGapSpec` 的牆長也寫死
+# 按 10 m 算 —— 兩者剛好一致，牆封死到外牆並在牆端形成死角，量到的是「小場地邊界
+# 死角行為」而非直穿能力。實測 D0 在該設定 direct 0.000 / 撞牆 89.4%，但在真正封死
+# 且尺寸相符的閘上是 direct 1.000 / 零碰撞（n=2304、橫偏中位 0.052 m）。
+#
+# 現在改為 **Gate5a**：場地用該 stage 的訓練尺寸 $A，並帶 `--narrow_gap_mode sealed`
+# 讓牆隨場地延伸到外牆，只留中央窄縫可穿 —— 這才是「純測直穿」。
+# 舊行為保留為 Gate5b（10 m 邊界死角壓測），由 run_narrow_path_suite.py --mode legacy
+# 單獨執行，不再參與晉級判定。
 NARROW_ARGS=()
 if [ "$USE_OBB" = "1" ] && [ "$RUN_ADVANCED_GATES" = "1" ]; then
   _play "$OUT/narrow_deploy_1p2.log" \
-    --stage "$STAGE" --arena_size 10 --num_static_obs 0 --num_dynamic_obs 0 \
-    --obs_near_goal_count 0 --narrow_gap_eval --narrow_gap_width 1.2 \
+    --stage "$STAGE" --arena_size "$A" --num_static_obs 0 --num_dynamic_obs 0 \
+    --obs_near_goal_count 0 --narrow_gap_eval --narrow_gap_mode sealed \
+    --narrow_gap_width 1.2 \
     --narrow_gap_yaw_limit_deg 10 --seed 404
   _play "$OUT/narrow_stress_1p0.log" \
-    --stage "$STAGE" --arena_size 10 --num_static_obs 0 --num_dynamic_obs 0 \
-    --obs_near_goal_count 0 --narrow_gap_eval --narrow_gap_width 1.0 \
+    --stage "$STAGE" --arena_size "$A" --num_static_obs 0 --num_dynamic_obs 0 \
+    --obs_near_goal_count 0 --narrow_gap_eval --narrow_gap_mode sealed \
+    --narrow_gap_width 1.0 \
     --narrow_gap_yaw_limit_deg 10 --seed 405
   NARROW_ARGS=(
     --narrow_deploy_log "$OUT/narrow_deploy_1p2.log"

@@ -26,6 +26,7 @@ if (
     os.environ["_PLAY_LAUNCHER_SYSPY"] = "1"
     os.execv(_SYSTEM_PYTHON, [_SYSTEM_PYTHON] + sys.argv)
 
+import re
 import subprocess
 import tkinter as tk
 import tkinter.font as tkfont
@@ -46,6 +47,58 @@ PLAY_SCRIPT = (
     / "play_eval"
     / "play_rnn_car.py"
 )
+
+
+def _load_narrow_geometry():
+    """Import the pure narrow-passage geometry helpers, or None if unavailable.
+
+    The module has no torch/Isaac dependency on purpose, so this GUI (which runs
+    under the *system* python3, not the conda env) can reuse the exact same
+    clamping rules that play_rnn_car.py applies at launch time.
+    """
+    import importlib.util
+
+    path = (
+        REPO_ROOT
+        / "source" / "isaaclab_tasks" / "isaaclab_tasks" / "manager_based"
+        / "locomotion" / "velocity" / "config" / "charge_skrl" / "mdp" / "events"
+        / "narrow_passage_bridge_geometry.py"
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("_npb_geometry", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        # dataclasses resolves KW_ONLY via sys.modules[cls.__module__]; without
+        # this registration @dataclass raises during exec_module.
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        sys.modules.pop("_npb_geometry", None)
+        return None
+
+
+NARROW_GEOMETRY = _load_narrow_geometry()
+
+# Fallback mirrors the EventTerm defaults so the GUI still opens if the source
+# tree moved; the launched command stays correct either way.
+NARROW_TRAINING_DEFAULTS = getattr(
+    NARROW_GEOMETRY,
+    "TRAINING_REPLAY_LAYOUT",
+    {
+        "gap_center_range": (-1.0, 1.0),
+        "barrier_x_range": (-0.5, 0.5),
+        "start_distance": 3.0,
+        "goal_distance": 3.0,
+        "goal_lateral_offset": 0.0,
+        "segment_length": 9.0,
+        "direction_mode": "random",
+    },
+)
+# Width/yaw come from the 12% replay schedule, not the EventTerm.
+NARROW_TRAINING_WIDTH_RANGE = (1.2, 1.4)
+NARROW_TRAINING_YAW_DEG = 4.0
 
 TASKS = [
     "Isaac-Navigation-Charge-VLP16-Curriculum-WD",
@@ -70,6 +123,7 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "sec_scene": ("Scene & Environment", "場景 & 環境"),
     "sec_vis": ("Visualization & Flags", "視覺化 & 選項"),
     "sec_orca": ("ORCA / RVO2 Safety Filter", "ORCA / RVO2 安全過濾"),
+    "sec_narrow": ("Narrow-Gap Replay (training scene)", "窄縫 Replay (訓練場景重現)"),
     "sec_advanced": ("Advanced", "進階"),
     "sec_preview": ("Command Preview", "指令預覽"),
 
@@ -103,6 +157,49 @@ _STRINGS: dict[str, tuple[str, str]] = {
     "obs_near_goal": ("Obs near goal:", "目標旁障礙:"),
     "near_goal_r": ("Near goal radius:", "目標旁半徑:"),
     "extra_args": ("Extra args:", "額外參數:"),
+
+    # Narrow-gap replay
+    "narrow_replay_enable": (
+        "Reproduce training narrow-gap replay (--narrow_replay_eval)",
+        "重現訓練窄縫 replay (--narrow_replay_eval)",
+    ),
+    "narrow_replay_params": ("Narrow replay geometry", "窄縫 replay 幾何"),
+    "narrow_replay_hint": (
+        "Defaults = the training distribution. Set min = max to pin a dimension.",
+        "預設值 = 訓練分佈。把上下限設成相同值即可釘死該維度。",
+    ),
+    "narrow_reset_defaults": ("Reset to training defaults", "回復訓練預設"),
+    "nr_width": ("Gap width (min, max) m:", "縫寬 (下限, 上限) m:"),
+    "nr_gap_center": ("Gap center y (min, max) m:", "縫位置 y (下限, 上限) m:"),
+    "nr_barrier_x": ("Wall x (min, max) m:", "牆位置 x (下限, 上限) m:"),
+    "nr_direction": ("Crossing direction:", "穿越方向:"),
+    "nr_start_dist": ("Start distance m:", "起點距離 m:"),
+    "nr_goal_dist": ("Goal distance m:", "目標距離 m:"),
+    "nr_goal_dy": ("Goal lateral offset m:", "目標橫向偏移 m:"),
+    "nr_yaw": ("Initial yaw error ±deg:", "初始 yaw 誤差 ±度:"),
+    "nr_segment": ("Wall segment length m:", "單段牆長 m:"),
+    "nr_ok": ("Geometry OK — every sampled scene is solvable.", "幾何合法 — 取樣到的每個場景都可解。"),
+    "nr_clamped": ("Will be clamped on launch:", "啟動時將被夾住:"),
+    "nr_direction_hint": (
+        "random = mirrored 50/50 (training)",
+        "random = 左右各半鏡像 (訓練)",
+    ),
+    "nr_arena_forced": (
+        "Arena set to 14 (= 2 x SA6 room_size 7.0, matches training).",
+        "Arena 已自動設為 14 (= 2 × SA6 room_size 7.0，對齊訓練)。",
+    ),
+    "nr_runs_filtered": (
+        "Run list filtered to the {n} narrow-replay lineage runs (sa5-8 ... k8_obb).",
+        "Run 清單已篩選為 {n} 個窄縫血緣 run (sa5-8 … k8_obb)。",
+    ),
+    "nr_ckpt_ok": (
+        "Checkpoint lineage OK — this run trained with the 12% narrow replay.",
+        "Checkpoint 血緣正確 — 此 run 訓練時有 12% 窄縫 replay。",
+    ),
+    "nr_ckpt_bad": (
+        "This run is NOT from the narrow-replay lineage; it never saw this scene in training.",
+        "此 run 不屬於窄縫血緣，訓練時沒看過這個場景。",
+    ),
 
     # Checkbuttons
     "deterministic": ("Deterministic", "確定性推論"),
@@ -138,29 +235,6 @@ _STRINGS: dict[str, tuple[str, str]] = {
         "Enable RVO2 ORCA Filter (--use_rvo2_filter)",
         "使用 RVO2 ORCA 過濾 (--use_rvo2_filter)",
     ),
-
-    # RSGS-Lite
-    "sec_rsgs": (
-        "RSGS-Lite (Stuck Recovery)",
-        "RSGS-Lite (卡住自動脫困)",
-    ),
-    "enable_rsgs": (
-        "Enable RSGS-Lite — detect stuck, find safe gap, set intermediate goal (--use_rsgs)",
-        "啟用 RSGS-Lite — 偵測卡住後從 LiDAR 找安全通道，設中間目標繞行 (--use_rsgs)",
-    ),
-    "rsgs_desc": (
-        "Stuck detect -> LiDAR gap search -> recovery goal -> resume original goal",
-        "卡住偵測 -> LiDAR 通道搜尋 -> 設脫困中間目標 -> 脫困後回到原目標",
-    ),
-    "rsgs_params": ("RSGS Parameters", "RSGS 脫困參數"),
-    "rsgs_stuck_window": ("Detect window (steps):", "偵測窗口 (步) N步沒動=卡:"),
-    "rsgs_stuck_thresh": ("Min displacement (m):", "最低位移 (m) 低於=卡住:"),
-    "rsgs_gap_width": ("Min gap width (bins):", "最小通道寬 (bins):"),
-    "rsgs_gap_clear": ("Gap clear value:", "通道淨空值 (LiDAR):"),
-    "rsgs_recovery_dist": ("Subgoal dist (m):", "中間目標距離 (m):"),
-    "rsgs_max_steps": ("Max recovery steps:", "最長脫困步數:"),
-    "rsgs_exit_disp": ("Success dist (m):", "脫困成功距離 (m):"),
-    "rsgs_goal_bias": ("Goal dir bias [0-1]:", "目標方向偏好 [0-1]:"),
 
     # ORCA parameters
     "orca_params": ("ORCA Parameters", "ORCA 參數"),
@@ -293,6 +367,59 @@ def scan_run_dirs() -> list[str]:
         if run_dir.is_dir() and any(run_dir.glob("checkpoint_*.pt")):
             dirs.append(run_dir.name)
     return dirs
+
+
+# Runs whose lineage actually trained with the 12% narrow replay. Every
+# `narrow_passage_fraction=0.12` config in rnn_car_modular/configs/ descends
+# from e2e_sa{5,6,7,8}_k8_obb, and those runs are named accordingly.
+_NARROW_LINEAGE_RE = re.compile(r"^sa[5-8].*k8_obb")
+
+# --arena_size is the full side length; training SA6 used room_size=7.0
+# (half-extent), so the narrow replay only matches training at 14 x 14.
+NARROW_TRAINING_ARENA_SIZE = "14"
+
+
+def is_narrow_lineage_run(run_name: str) -> bool:
+    """Whether a run trained with the narrow-passage replay event."""
+    return bool(_NARROW_LINEAGE_RE.match(run_name or ""))
+
+
+def list_checkpoints(run_name: str) -> list[str]:
+    """Repo-relative checkpoint paths for a run, highest step first.
+
+    Sorted by the numeric step, not lexicographically: plain string order puts
+    checkpoint_768 ahead of checkpoint_2560 and would mislabel it "latest".
+    """
+    run_dir = LOGS_DIR / run_name
+    if not run_dir.is_dir():
+        return []
+
+    def _step(path: Path) -> int:
+        try:
+            return int(path.stem.split("_")[-1])
+        except ValueError:
+            return -1
+
+    pts = sorted(run_dir.glob("checkpoint_*.pt"), key=_step, reverse=True)
+    return [str(p.relative_to(REPO_ROOT)) for p in pts]
+
+
+def scan_narrow_lineage_runs() -> list[str]:
+    """Run dirs from the narrow-replay lineage, most recently trained first.
+
+    Sorted by mtime rather than by name: the actively-trained arm is what you
+    almost always want to evaluate, and name order would surface an arbitrary
+    old side-experiment instead.
+    """
+    runs = [name for name in scan_run_dirs() if is_narrow_lineage_run(name)]
+
+    def _mtime(name: str) -> float:
+        try:
+            return (LOGS_DIR / name).stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(runs, key=_mtime, reverse=True)
 
 
 # ============================================================================
@@ -448,9 +575,9 @@ class PlayLauncherApp:
         )
         run_dirs = scan_run_dirs()
         self.run_var = tk.StringVar(value=run_dirs[0] if run_dirs else "")
-        run_cb = ttk.Combobox(f, textvariable=self.run_var, values=run_dirs, width=55)
-        run_cb.grid(row=row, column=1, columnspan=3, sticky="w", padx=5)
-        run_cb.bind("<<ComboboxSelected>>", self._on_run_selected)
+        self.run_cb = ttk.Combobox(f, textvariable=self.run_var, values=run_dirs, width=55)
+        self.run_cb.grid(row=row, column=1, columnspan=3, sticky="w", padx=5)
+        self.run_cb.bind("<<ComboboxSelected>>", self._on_run_selected)
         row += 1
 
         self._reg(ttk.Label(f, text=self._t("checkpoint")), "checkpoint").grid(
@@ -561,7 +688,10 @@ class PlayLauncherApp:
             row=row, column=0, sticky="w", padx=5
         )
         self._arena_default_label = self._t("arena_size_default")
-        _arena_choices = [self._arena_default_label, "16", "12", "10", "8", "6"]
+        # 14 = 2 x SA6 room_size 7.0 → the only value that matches the narrow
+        # replay's training geometry.
+        _arena_choices = [self._arena_default_label, "16", NARROW_TRAINING_ARENA_SIZE,
+                          "12", "10", "8", "6"]
         self.arena_size_var = tk.StringVar(value=_arena_choices[0])
 
         def _on_arena_select(_event=None):
@@ -577,7 +707,11 @@ class PlayLauncherApp:
                 self._usd_custom_path.set("")
             # 場景尺寸變了 → 立即依「邊長 − 1」重新夾限目標距離
             self._clamp_goal_distances()
+            self._narrow_refresh()   # 夾限上限跟著房間大小走
             self._preview_cmd()
+
+        # 窄縫區塊要能重用同一套 USD 互斥調和，故存成 method。
+        self._on_arena_select = _on_arena_select
 
         self._arena_combo = ttk.Combobox(
             f, textvariable=self.arena_size_var,
@@ -753,6 +887,10 @@ class PlayLauncherApp:
             row=row, column=3, sticky="w", padx=5
         )
         row += 1
+
+        # ── Narrow-Gap Replay ──
+        row = self._separator(f, row, "sec_narrow")
+        row = self._build_narrow_replay(f, row)
 
         # ── Visualization & Flags ──
         row = self._separator(f, row, "sec_vis")
@@ -1030,88 +1168,6 @@ class PlayLauncherApp:
         self._toggle_rvo2()
         row += 1
 
-        # ── RSGS-Lite ──
-        row = self._separator(f, row, "sec_rsgs")
-
-        self.rsgs_var = tk.BooleanVar(value=False)
-        self._reg(
-            ttk.Checkbutton(f, text=self._t("enable_rsgs"),
-                            variable=self.rsgs_var, command=self._toggle_rsgs),
-            "enable_rsgs",
-        ).grid(row=row, column=0, columnspan=4, sticky="w", padx=5)
-        row += 1
-
-        # 流程說明
-        self._reg(
-            ttk.Label(f, text=self._t("rsgs_desc"), foreground="gray"),
-            "rsgs_desc",
-        ).grid(row=row, column=0, columnspan=4, sticky="w", padx=20)
-        row += 1
-
-        self.rsgs_frame = ttk.LabelFrame(f, text=self._t("rsgs_params"))
-        self._i18n_widgets.append((self.rsgs_frame, "rsgs_params"))
-        self.rsgs_frame.grid(row=row, column=0, columnspan=4, sticky="ew", padx=5, pady=3)
-        sf = self.rsgs_frame
-
-        rr = 0
-        self._reg(ttk.Label(sf, text=self._t("rsgs_stuck_window")), "rsgs_stuck_window").grid(
-            row=rr, column=0, sticky="w", padx=5)
-        self.rsgs_stuck_window_var = tk.IntVar(value=15)
-        ttk.Spinbox(sf, from_=5, to=60, increment=1,
-                     textvariable=self.rsgs_stuck_window_var, width=6).grid(
-            row=rr, column=1, sticky="w", padx=2)
-        self._reg(ttk.Label(sf, text=self._t("rsgs_stuck_thresh")), "rsgs_stuck_thresh").grid(
-            row=rr, column=2, sticky="w", padx=5)
-        self.rsgs_stuck_thresh_var = tk.DoubleVar(value=0.3)
-        ttk.Spinbox(sf, from_=0.05, to=2.0, increment=0.05,
-                     textvariable=self.rsgs_stuck_thresh_var, width=6).grid(
-            row=rr, column=3, sticky="w", padx=2)
-        rr += 1
-
-        self._reg(ttk.Label(sf, text=self._t("rsgs_gap_width")), "rsgs_gap_width").grid(
-            row=rr, column=0, sticky="w", padx=5)
-        self.rsgs_gap_width_var = tk.IntVar(value=3)
-        ttk.Spinbox(sf, from_=1, to=36, increment=1,
-                     textvariable=self.rsgs_gap_width_var, width=6).grid(
-            row=rr, column=1, sticky="w", padx=2)
-        self._reg(ttk.Label(sf, text=self._t("rsgs_gap_clear")), "rsgs_gap_clear").grid(
-            row=rr, column=2, sticky="w", padx=5)
-        self.rsgs_gap_clear_var = tk.DoubleVar(value=0.10)
-        ttk.Spinbox(sf, from_=0.01, to=1.0, increment=0.01,
-                     textvariable=self.rsgs_gap_clear_var, width=6).grid(
-            row=rr, column=3, sticky="w", padx=2)
-        rr += 1
-
-        self._reg(ttk.Label(sf, text=self._t("rsgs_recovery_dist")), "rsgs_recovery_dist").grid(
-            row=rr, column=0, sticky="w", padx=5)
-        self.rsgs_recovery_dist_var = tk.DoubleVar(value=2.0)
-        ttk.Spinbox(sf, from_=0.5, to=10.0, increment=0.5,
-                     textvariable=self.rsgs_recovery_dist_var, width=6).grid(
-            row=rr, column=1, sticky="w", padx=2)
-        self._reg(ttk.Label(sf, text=self._t("rsgs_max_steps")), "rsgs_max_steps").grid(
-            row=rr, column=2, sticky="w", padx=5)
-        self.rsgs_max_steps_var = tk.IntVar(value=50)
-        ttk.Spinbox(sf, from_=10, to=200, increment=5,
-                     textvariable=self.rsgs_max_steps_var, width=6).grid(
-            row=rr, column=3, sticky="w", padx=2)
-        rr += 1
-
-        self._reg(ttk.Label(sf, text=self._t("rsgs_exit_disp")), "rsgs_exit_disp").grid(
-            row=rr, column=0, sticky="w", padx=5)
-        self.rsgs_exit_disp_var = tk.DoubleVar(value=1.0)
-        ttk.Spinbox(sf, from_=0.1, to=5.0, increment=0.1,
-                     textvariable=self.rsgs_exit_disp_var, width=6).grid(
-            row=rr, column=1, sticky="w", padx=2)
-        self._reg(ttk.Label(sf, text=self._t("rsgs_goal_bias")), "rsgs_goal_bias").grid(
-            row=rr, column=2, sticky="w", padx=5)
-        self.rsgs_goal_bias_var = tk.DoubleVar(value=0.3)
-        ttk.Spinbox(sf, from_=0.0, to=1.0, increment=0.05,
-                     textvariable=self.rsgs_goal_bias_var, width=6).grid(
-            row=rr, column=3, sticky="w", padx=2)
-
-        self._toggle_rsgs()
-        row += 1
-
         # ── Advanced ──
         row = self._separator(f, row, "sec_advanced")
 
@@ -1185,19 +1241,271 @@ class PlayLauncherApp:
         ).grid(row=row, column=0, columnspan=4, sticky="w", padx=5, pady=(0, 5))
         return row + 1
 
+    # ------------------------------------------------------------------
+    # Narrow-gap replay section
+    # ------------------------------------------------------------------
+
+    def _build_narrow_replay(self, f, row: int) -> int:
+        """Build the narrow-gap replay controls; returns the next free row."""
+        d = NARROW_TRAINING_DEFAULTS
+
+        self.narrow_replay_var = tk.BooleanVar(value=False)
+        self._reg(
+            ttk.Checkbutton(f, text=self._t("narrow_replay_enable"),
+                            variable=self.narrow_replay_var,
+                            command=self._on_narrow_toggled),
+            "narrow_replay_enable",
+        ).grid(row=row, column=0, columnspan=3, sticky="w", padx=5)
+        self._reg(
+            ttk.Button(f, text=self._t("narrow_reset_defaults"),
+                       command=self._narrow_reset_defaults),
+            "narrow_reset_defaults",
+        ).grid(row=row, column=3, sticky="w", padx=5)
+        row += 1
+
+        self.narrow_frame = ttk.LabelFrame(f, text=self._t("narrow_replay_params"))
+        self._i18n_widgets.append((self.narrow_frame, "narrow_replay_params"))
+        self.narrow_frame.grid(row=row, column=0, columnspan=4, sticky="ew", padx=5, pady=3)
+        nf = self.narrow_frame
+        nr = 0
+
+        self._reg(ttk.Label(nf, text=self._t("narrow_replay_hint"), foreground="gray"),
+                  "narrow_replay_hint").grid(
+            row=nr, column=0, columnspan=4, sticky="w", padx=5, pady=(2, 4)
+        )
+        nr += 1
+
+        def _pair(label_key, lo_default, hi_default, lo_from, hi_to, increment):
+            """One 'label: [min] [max]' row. Returns the two vars."""
+            nonlocal nr
+            self._reg(ttk.Label(nf, text=self._t(label_key)), label_key).grid(
+                row=nr, column=0, sticky="w", padx=5
+            )
+            lo_var = tk.DoubleVar(value=lo_default)
+            hi_var = tk.DoubleVar(value=hi_default)
+            for col, var in ((1, lo_var), (2, hi_var)):
+                ttk.Spinbox(
+                    nf, from_=lo_from, to=hi_to, increment=increment,
+                    textvariable=var, width=8, command=self._narrow_refresh,
+                ).grid(row=nr, column=col, sticky="w", padx=5)
+                var.trace_add("write", lambda *_: self._narrow_refresh())
+            nr += 1
+            return lo_var, hi_var
+
+        def _single(label_key, default, from_, to, increment, column=0):
+            nonlocal nr
+            self._reg(ttk.Label(nf, text=self._t(label_key)), label_key).grid(
+                row=nr, column=column, sticky="w", padx=5
+            )
+            var = tk.DoubleVar(value=default)
+            ttk.Spinbox(
+                nf, from_=from_, to=to, increment=increment,
+                textvariable=var, width=8, command=self._narrow_refresh,
+            ).grid(row=nr, column=column + 1, sticky="w", padx=5)
+            var.trace_add("write", lambda *_: self._narrow_refresh())
+            if column != 0:
+                nr += 1
+            return var
+
+        self.nr_width_lo_var, self.nr_width_hi_var = _pair(
+            "nr_width", NARROW_TRAINING_WIDTH_RANGE[0], NARROW_TRAINING_WIDTH_RANGE[1],
+            0.5, 4.0, 0.05,
+        )
+        self.nr_gap_lo_var, self.nr_gap_hi_var = _pair(
+            "nr_gap_center", d["gap_center_range"][0], d["gap_center_range"][1],
+            -6.0, 6.0, 0.1,
+        )
+        self.nr_bx_lo_var, self.nr_bx_hi_var = _pair(
+            "nr_barrier_x", d["barrier_x_range"][0], d["barrier_x_range"][1],
+            -5.0, 5.0, 0.1,
+        )
+
+        # Distances: start / goal on one row, lateral offset + yaw on the next.
+        self.nr_start_dist_var = _single("nr_start_dist", d["start_distance"], 0.5, 8.0, 0.1)
+        self.nr_goal_dist_var = _single("nr_goal_dist", d["goal_distance"], 0.5, 8.0, 0.1, column=2)
+        self.nr_goal_dy_var = _single(
+            "nr_goal_dy", d["goal_lateral_offset"], -6.0, 6.0, 0.1
+        )
+        self.nr_yaw_var = _single("nr_yaw", NARROW_TRAINING_YAW_DEG, 0.5, 45.0, 0.5, column=2)
+        self.nr_segment_var = _single("nr_segment", d["segment_length"], 2.0, 20.0, 0.5)
+
+        self._reg(ttk.Label(nf, text=self._t("nr_direction")), "nr_direction").grid(
+            row=nr, column=2, sticky="w", padx=5
+        )
+        self.nr_direction_var = tk.StringVar(value=d["direction_mode"])
+        _dir_cb = ttk.Combobox(
+            nf, textvariable=self.nr_direction_var, width=10, state="readonly",
+            values=("random", "forward", "backward"),
+        )
+        _dir_cb.grid(row=nr, column=3, sticky="w", padx=5)
+        _dir_cb.bind("<<ComboboxSelected>>", lambda _e: self._narrow_refresh())
+        nr += 1
+
+        self._reg(ttk.Label(nf, text=self._t("nr_direction_hint"), foreground="gray"),
+                  "nr_direction_hint").grid(
+            row=nr, column=0, columnspan=4, sticky="w", padx=5
+        )
+        nr += 1
+
+        self.nr_setup_label = ttk.Label(nf, text="", wraplength=560, justify="left")
+        self.nr_setup_label.grid(row=nr, column=0, columnspan=4, sticky="w", padx=5, pady=(4, 0))
+        nr += 1
+
+        self.nr_ckpt_label = ttk.Label(nf, text="", wraplength=560, justify="left")
+        self.nr_ckpt_label.grid(row=nr, column=0, columnspan=4, sticky="w", padx=5)
+        nr += 1
+
+        self.nr_status_label = ttk.Label(nf, text="", wraplength=560, justify="left")
+        self.nr_status_label.grid(row=nr, column=0, columnspan=4, sticky="w", padx=5, pady=(0, 2))
+
+        self._toggle_narrow_replay()
+        return row + 1
+
+    def _on_narrow_toggled(self):
+        """User clicked the enable box: align the scene setup, then refresh.
+
+        Only the explicit click retunes arena/run list. ``_toggle_narrow_replay``
+        stays a pure state-sync so restoring saved settings never rewrites the
+        user's arena choice behind their back.
+        """
+        if self.narrow_replay_var.get():
+            self._apply_narrow_scene_setup()
+        else:
+            self._restore_full_run_list()
+        self._toggle_narrow_replay()
+
+    def _apply_narrow_scene_setup(self):
+        """Force the arena to 14 and narrow the run list to the right lineage."""
+        if self.arena_size_var.get().strip() != NARROW_TRAINING_ARENA_SIZE:
+            self.arena_size_var.set(NARROW_TRAINING_ARENA_SIZE)
+            # Reuse the combobox handler so USD/arena mutual exclusion and the
+            # goal-distance clamp stay consistent with a manual selection.
+            if hasattr(self, "_on_arena_select"):
+                self._on_arena_select()
+
+        runs = scan_narrow_lineage_runs()
+        if not runs:
+            return
+        self.run_cb["values"] = runs
+        if self.run_var.get() not in runs:
+            self.run_var.set(runs[0])
+            self._on_run_selected(None)
+
+    def _restore_full_run_list(self):
+        current = self.run_var.get()
+        runs = scan_run_dirs()
+        self.run_cb["values"] = runs
+        if current in runs:
+            self.run_var.set(current)
+
+    def _narrow_reset_defaults(self):
+        """Restore every narrow-replay field to the training distribution."""
+        d = NARROW_TRAINING_DEFAULTS
+        self.nr_width_lo_var.set(NARROW_TRAINING_WIDTH_RANGE[0])
+        self.nr_width_hi_var.set(NARROW_TRAINING_WIDTH_RANGE[1])
+        self.nr_gap_lo_var.set(d["gap_center_range"][0])
+        self.nr_gap_hi_var.set(d["gap_center_range"][1])
+        self.nr_bx_lo_var.set(d["barrier_x_range"][0])
+        self.nr_bx_hi_var.set(d["barrier_x_range"][1])
+        self.nr_start_dist_var.set(d["start_distance"])
+        self.nr_goal_dist_var.set(d["goal_distance"])
+        self.nr_goal_dy_var.set(d["goal_lateral_offset"])
+        self.nr_segment_var.set(d["segment_length"])
+        self.nr_direction_var.set(d["direction_mode"])
+        self.nr_yaw_var.set(NARROW_TRAINING_YAW_DEG)
+        self._narrow_refresh()
+
+    def _toggle_narrow_replay(self):
+        state = "normal" if self.narrow_replay_var.get() else "disabled"
+        for child in self.narrow_frame.winfo_children():
+            try:
+                child.configure(state=state)
+            except tk.TclError:
+                pass  # Labels have no state option
+        self._narrow_refresh()
+
+    def _narrow_replay_half_extent(self) -> float:
+        """Mirror play_rnn_car.py: 7.0 unless --arena_size is actually sent."""
+        arena = self._effective_arena_size()
+        _usd_active = self._resolve_usd_scene_arg() is not None
+        raw = self.arena_size_var.get().strip()
+        try:
+            explicit = float(raw)
+        except (TypeError, ValueError):
+            explicit = None
+        if explicit is not None and explicit > 0 and not _usd_active and arena is not None:
+            return 0.5 * explicit
+        return 7.0
+
+    def _narrow_layout(self):
+        """Resolve the current fields through the shared clamping rules."""
+        if NARROW_GEOMETRY is None:
+            return None
+        try:
+            return NARROW_GEOMETRY.resolve_replay_layout(
+                gap_center_range=(self.nr_gap_lo_var.get(), self.nr_gap_hi_var.get()),
+                barrier_x_range=(self.nr_bx_lo_var.get(), self.nr_bx_hi_var.get()),
+                width_range=(self.nr_width_lo_var.get(), self.nr_width_hi_var.get()),
+                start_distance=self.nr_start_dist_var.get(),
+                goal_distance=self.nr_goal_dist_var.get(),
+                goal_lateral_offset=self.nr_goal_dy_var.get(),
+                segment_length=self.nr_segment_var.get(),
+                direction_mode=self.nr_direction_var.get(),
+                room_half_extent=self._narrow_replay_half_extent(),
+            )
+        except (ValueError, tk.TclError):
+            # A half-typed spinbox value; the next keystroke re-runs this.
+            return None
+
+    def _narrow_refresh(self, *_args):
+        """Live-preview the clamping so mistakes surface before Isaac Sim boots."""
+        if not hasattr(self, "nr_status_label"):
+            return
+        if not self.narrow_replay_var.get():
+            for label in (self.nr_status_label, self.nr_setup_label, self.nr_ckpt_label):
+                label.configure(text="", foreground="gray")
+            self._preview_cmd()
+            return
+
+        # Scene setup: arena + how many runs the list was narrowed to.
+        setup = []
+        if self.arena_size_var.get().strip() == NARROW_TRAINING_ARENA_SIZE:
+            setup.append(self._t("nr_arena_forced"))
+        n_runs = len(self.run_cb["values"] or ())
+        setup.append(self._t("nr_runs_filtered").format(n=n_runs))
+        self.nr_setup_label.configure(text=" ".join(setup), foreground="gray")
+
+        # Whether the selected checkpoint's run ever saw this scene.
+        run_name = self.run_var.get()
+        if is_narrow_lineage_run(run_name):
+            self.nr_ckpt_label.configure(text=f"✓ {self._t('nr_ckpt_ok')}", foreground="#1a7f37")
+        else:
+            self.nr_ckpt_label.configure(text=f"⚠ {self._t('nr_ckpt_bad')}", foreground="#b06000")
+
+        layout = self._narrow_layout()
+        if layout is None:
+            self.nr_status_label.configure(text="", foreground="gray")
+        elif layout.warnings:
+            body = "\n".join(f"  ⚠ {w}" for w in layout.warnings)
+            self.nr_status_label.configure(
+                text=f"{self._t('nr_clamped')}\n{body}", foreground="#b06000"
+            )
+        else:
+            self.nr_status_label.configure(text=self._t("nr_ok"), foreground="#1a7f37")
+        self._preview_cmd()
+
     def _on_run_selected(self, event):
         run_name = self.run_var.get()
-        run_dir = LOGS_DIR / run_name
-        if run_dir.exists():
-            pts = sorted(run_dir.glob("checkpoint_*.pt"), reverse=True)
-            ckpt_list = [str(p.relative_to(REPO_ROOT)) for p in pts]
+        ckpt_list = list_checkpoints(run_name)
+        if ckpt_list:
             self.ckpt_cb["values"] = ckpt_list
-            if ckpt_list:
-                self.ckpt_var.set(ckpt_list[0])
+            self.ckpt_var.set(ckpt_list[0])
         # Auto-detect task from run name
         guessed = guess_task_from_run(run_name)
         if guessed:
             self.task_var.set(guessed)
+        # 換 run → 重判窄縫血緣標示
+        self._narrow_refresh()
 
     def _browse_ckpt(self):
         path = filedialog.askopenfilename(
@@ -1302,12 +1610,6 @@ class PlayLauncherApp:
     def _toggle_rvo2(self):
         state = "normal" if self.rvo2_var.get() else "disabled"
         for child in self.rvo2_frame.winfo_children():
-            if isinstance(child, (ttk.Spinbox, ttk.Entry)):
-                child.configure(state=state)
-
-    def _toggle_rsgs(self):
-        state = "normal" if self.rsgs_var.get() else "disabled"
-        for child in self.rsgs_frame.winfo_children():
             if isinstance(child, (ttk.Spinbox, ttk.Entry)):
                 child.configure(state=state)
 
@@ -1499,17 +1801,30 @@ class PlayLauncherApp:
             parts.append(f"--rvo2_disp_threshold {self.rvo2_disp_th_var.get()}")
             parts.append(f"--rvo2_disp_window {self.rvo2_disp_win_var.get()}")
 
-        # RSGS-Lite
-        if self.rsgs_var.get():
-            parts.append("--use_rsgs")
-            parts.append(f"--rsgs_stuck_window {self.rsgs_stuck_window_var.get()}")
-            parts.append(f"--rsgs_stuck_threshold {self.rsgs_stuck_thresh_var.get()}")
-            parts.append(f"--rsgs_gap_min_width {self.rsgs_gap_width_var.get()}")
-            parts.append(f"--rsgs_gap_clear_threshold {self.rsgs_gap_clear_var.get()}")
-            parts.append(f"--rsgs_recovery_distance {self.rsgs_recovery_dist_var.get()}")
-            parts.append(f"--rsgs_max_recovery_steps {self.rsgs_max_steps_var.get()}")
-            parts.append(f"--rsgs_exit_displacement {self.rsgs_exit_disp_var.get()}")
-            parts.append(f"--rsgs_goal_bias {self.rsgs_goal_bias_var.get()}")
+        # Narrow-gap replay — emit every dimension explicitly so the printed
+        # command fully documents the scene it reproduces.
+        if getattr(self, "narrow_replay_var", None) is not None and self.narrow_replay_var.get():
+            parts.append("--narrow_replay_eval")
+            parts.append(
+                f"--narrow_replay_width_range {self.nr_width_lo_var.get():g} "
+                f"{self.nr_width_hi_var.get():g}"
+            )
+            parts.append(
+                f"--narrow_replay_gap_center_range {self.nr_gap_lo_var.get():g} "
+                f"{self.nr_gap_hi_var.get():g}"
+            )
+            parts.append(
+                f"--narrow_replay_barrier_x_range {self.nr_bx_lo_var.get():g} "
+                f"{self.nr_bx_hi_var.get():g}"
+            )
+            parts.append(f"--narrow_replay_direction {self.nr_direction_var.get()}")
+            parts.append(f"--narrow_replay_start_distance {self.nr_start_dist_var.get():g}")
+            parts.append(f"--narrow_replay_goal_distance {self.nr_goal_dist_var.get():g}")
+            parts.append(
+                f"--narrow_replay_goal_lateral_offset {self.nr_goal_dy_var.get():g}"
+            )
+            parts.append(f"--narrow_replay_yaw_limit_deg {self.nr_yaw_var.get():g}")
+            parts.append(f"--narrow_replay_segment_length {self.nr_segment_var.get():g}")
 
         # Extra args
         extra = self.extra_args_var.get().strip()
@@ -1519,6 +1834,10 @@ class PlayLauncherApp:
         return " \\\n  ".join(parts)
 
     def _preview_cmd(self):
+        # Field callbacks can fire while the UI is still being built, before the
+        # preview box exists.
+        if not hasattr(self, "cmd_text"):
+            return
         cmd = self._build_command()
         self.cmd_text.delete("1.0", tk.END)
         self.cmd_text.insert("1.0", cmd)
@@ -1717,16 +2036,20 @@ class PlayLauncherApp:
         ("rvo2_disp_win_var", "int"),
         ("rvo2_obs_inflation_var", "float"),
         ("rvo2_tactical_var", "bool"),
-        # RSGS-Lite
-        ("rsgs_var", "bool"),
-        ("rsgs_stuck_window_var", "int"),
-        ("rsgs_stuck_thresh_var", "float"),
-        ("rsgs_gap_width_var", "int"),
-        ("rsgs_gap_clear_var", "float"),
-        ("rsgs_recovery_dist_var", "float"),
-        ("rsgs_max_steps_var", "int"),
-        ("rsgs_exit_disp_var", "float"),
-        ("rsgs_goal_bias_var", "float"),
+        # Narrow-gap replay
+        ("narrow_replay_var", "bool"),
+        ("nr_width_lo_var", "float"),
+        ("nr_width_hi_var", "float"),
+        ("nr_gap_lo_var", "float"),
+        ("nr_gap_hi_var", "float"),
+        ("nr_bx_lo_var", "float"),
+        ("nr_bx_hi_var", "float"),
+        ("nr_direction_var", "str"),
+        ("nr_start_dist_var", "float"),
+        ("nr_goal_dist_var", "float"),
+        ("nr_goal_dy_var", "float"),
+        ("nr_yaw_var", "float"),
+        ("nr_segment_var", "float"),
         # Advanced
         ("extra_args_var", "str"),
     ]
@@ -1842,11 +2165,18 @@ class PlayLauncherApp:
         # 載入 run 後刷新 checkpoint 列表
         run_name = data.get("run_var", "")
         if run_name:
-            run_dir = LOGS_DIR / run_name
-            if run_dir.exists():
-                pts = sorted(run_dir.glob("checkpoint_*.pt"), reverse=True)
-                ckpt_list = [str(p.relative_to(REPO_ROOT)) for p in pts]
+            ckpt_list = list_checkpoints(run_name)
+            if ckpt_list:
                 self.ckpt_cb["values"] = ckpt_list
+
+        # 還原後重新套用窄縫區塊的啟用狀態與夾限預覽。只還原 run 清單篩選
+        # （純顯示），不重設 arena — 存檔後若刻意改過場景大小不該被蓋掉。
+        if hasattr(self, "narrow_replay_var"):
+            if self.narrow_replay_var.get():
+                narrow_runs = scan_narrow_lineage_runs()
+                if narrow_runs:
+                    self.run_cb["values"] = narrow_runs
+            self._toggle_narrow_replay()
 
 
 # ============================================================================

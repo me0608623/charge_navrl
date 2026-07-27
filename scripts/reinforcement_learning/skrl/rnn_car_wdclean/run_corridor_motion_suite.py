@@ -12,7 +12,73 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_sa5_joint_retention_gates import _run_play  # noqa: E402
 
 
+#: Default suite. ``mixed`` is the legacy balanced-deal gate and stays the
+#: default so historical numbers remain comparable; ``mixed_iid`` is the
+#: unbiased per-obstacle variant and must be requested explicitly via --modes.
 MODES = ("lateral", "longitudinal", "random_2d", "mixed")
+SELECTABLE_MODES = MODES + ("mixed_iid",)
+
+#: Named suite profiles. The bare defaults stay the legacy patrol gate so no
+#: historical invocation changes meaning; the deployment profile must be
+#: requested explicitly, which prevents accidentally grading a candidate on
+#: the wrong kinematics in either direction.
+PROFILES = {
+    "legacy_patrol_v1": {
+        "modes": MODES,
+        "random_2d_kinematics": "patrol",
+    },
+    # Deployment definition per the wander ruling: random_2d runs the bounded
+    # random walk, and mixed is the unbiased per-obstacle mixture whose random
+    # legs are also wander.
+    "deployment_wander_v1": {
+        "modes": ("lateral", "longitudinal", "random_2d", "mixed_iid"),
+        "random_2d_kinematics": "wander",
+    },
+}
+
+
+def resolve_profile(name, modes, kinematics):
+    """Resolve a named profile into (modes, kinematics, profile_complete).
+
+    A profile is a frozen contract, not a set of defaults:
+
+    * A kinematics override that contradicts the profile is an error — a JSON
+      stamped ``deployment_wander_v1`` must never contain patrol episodes.
+    * ``--modes`` may select a *subset* of the profile's modes (sentinel
+      runs); anything outside the profile is an error.
+    * ``profile_complete`` is True only when every profile mode ran, so a
+      subset run can never be mistaken for a full deployment JOINT PASS.
+
+    Without a profile the caller's values pass through untouched and
+    ``profile_complete`` is None (the concept does not apply).
+    """
+    if name is None:
+        return modes, kinematics, None
+    profile = PROFILES[name]
+    if (
+        kinematics is not None
+        and kinematics != profile["random_2d_kinematics"]
+    ):
+        raise ValueError(
+            f"profile {name!r} pins random_2d_kinematics="
+            f"{profile['random_2d_kinematics']!r}; explicit "
+            f"--random-2d-kinematics {kinematics!r} contradicts it. Drop the "
+            "flag or drop the profile."
+        )
+    if modes is not None:
+        invalid = set(modes) - set(profile["modes"])
+        if invalid:
+            raise ValueError(
+                f"modes {sorted(invalid)} are not part of profile {name!r} "
+                f"(allowed: {profile['modes']})"
+            )
+        resolved_modes = tuple(modes)
+    else:
+        resolved_modes = tuple(profile["modes"])
+    complete = set(resolved_modes) == set(profile["modes"])
+    return resolved_modes, profile["random_2d_kinematics"], complete
+
+
 SR_MIN = 0.90
 CR_MAX = 0.10
 TO_MAX = 0.05
@@ -27,10 +93,10 @@ def _parse_csv_ints(value: str) -> tuple[int, ...]:
 
 def _parse_modes(value: str) -> tuple[str, ...]:
     modes = tuple(item.strip() for item in value.split(",") if item.strip())
-    invalid = set(modes) - set(MODES)
+    invalid = set(modes) - set(SELECTABLE_MODES)
     if not modes or invalid:
         raise argparse.ArgumentTypeError(
-            f"modes must be a subset of {MODES}; invalid={sorted(invalid)}"
+            f"modes must be a subset of {SELECTABLE_MODES}; invalid={sorted(invalid)}"
         )
     return modes
 
@@ -59,6 +125,43 @@ def _aggregate(reports: list[dict]) -> dict:
     }
 
 
+def summarize_verdict(all_pass, profile_complete):
+    """Fold selected-mode results and profile coverage into one verdict.
+
+    PASS semantics must not outrun coverage: a sentinel running a subset of a
+    profile may pass *its selected modes*, but its output must never be
+    readable — by a human or a supervisor grepping ``ALL=PASS`` — as a full
+    deployment JOINT PASS. The banner for a subset run therefore uses
+    ``SELECTED=``/``JOINT=N/A`` and never contains the ``ALL=`` token.
+    """
+    joint = (
+        (bool(all_pass) and profile_complete)
+        if profile_complete is not None
+        else None
+    )
+    verdict = {
+        "all_selected_modes_pass": bool(all_pass),
+        "profile_joint_pass": joint,
+        # Back-compat key: True only when the result may be read as complete.
+        # A deliberate subset (profile_complete is False) can never set it.
+        "all_modes_pass": bool(all_pass) and profile_complete is not False,
+    }
+    if profile_complete is False:
+        banner = (
+            f"SELECTED={'PASS' if all_pass else 'FAIL'} "
+            "PROFILE_COMPLETE=false JOINT=N/A"
+        )
+    elif profile_complete is True:
+        banner = (
+            f"ALL={'PASS' if all_pass else 'FAIL'} "
+            f"JOINT={'PASS' if joint else 'FAIL'}"
+        )
+    else:
+        banner = f"ALL={'PASS' if all_pass else 'FAIL'}"
+    verdict["banner"] = banner
+    return verdict
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint", type=Path)
@@ -68,8 +171,52 @@ def main() -> int:
     parser.add_argument(
         "--seeds", type=_parse_csv_ints, default=(515, 616, 717)
     )
-    parser.add_argument("--modes", type=_parse_modes, default=MODES)
+    parser.add_argument("--modes", type=_parse_modes, default=None)
+    parser.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        default=None,
+        help=(
+            "named gate profile; deployment_wander_v1 = lateral/longitudinal/"
+            "random_2d(wander)/mixed_iid(wander). Explicit --modes or "
+            "--random-2d-kinematics override the profile field-by-field."
+        ),
+    )
+    parser.add_argument(
+        "--pause-mode",
+        choices=("default", "zero"),
+        default="default",
+        help=(
+            "eval-only patrol pause override. 'default' keeps the stock 0-5 step "
+            "behaviour used by training and every historical gate."
+        ),
+    )
+    parser.add_argument(
+        "--random-2d-kinematics",
+        choices=("patrol", "wander"),
+        default=None,
+        help="random_2d motion implementation; 'patrol' is the frozen default",
+    )
+    parser.add_argument(
+        "--phase-audit",
+        action="store_true",
+        default=False,
+        help="emit per-mode motion-phase attribution JSON alongside each run",
+    )
     args = parser.parse_args()
+
+    try:
+        modes, kinematics, profile_complete = resolve_profile(
+            args.profile, args.modes, args.random_2d_kinematics
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    if modes is None:
+        modes = MODES
+    if kinematics is None:
+        kinematics = "patrol"
+    args.modes = modes
+    args.random_2d_kinematics = kinematics
 
     checkpoint = args.checkpoint.expanduser().resolve()
     if not checkpoint.is_file():
@@ -80,6 +227,13 @@ def main() -> int:
     suite: dict[str, object] = {
         "checkpoint": str(checkpoint),
         "seeds": list(args.seeds),
+        "pause_mode": args.pause_mode,
+        "profile": args.profile,
+        # False = deliberate subset run (sentinel); such a run must never be
+        # read as a full deployment JOINT PASS. None = no profile requested.
+        "profile_complete": profile_complete,
+        "random_2d_kinematics": args.random_2d_kinematics,
+        "phase_audit": bool(args.phase_audit),
         "thresholds": {
             "success_rate_min": SR_MIN,
             "collision_rate_max": CR_MAX,
@@ -119,6 +273,19 @@ def main() -> int:
                     mode,
                     "--long_corridor_output",
                     str(json_path),
+                    "--long_corridor_pause_mode",
+                    args.pause_mode,
+                    "--long_corridor_random_2d_kinematics",
+                    args.random_2d_kinematics,
+                    *(
+                        [
+                            "--long_corridor_phase_audit",
+                            "--long_corridor_phase_audit_output",
+                            str(output / f"{stem}_phase.json"),
+                        ]
+                        if args.phase_audit
+                        else []
+                    ),
                     "--seed",
                     str(seed),
                 ],
@@ -135,6 +302,7 @@ def main() -> int:
             and bool(report.get("obstacle_mix_pass"))
             and bool(report.get("goal_alignment_pass"))
             and int(report.get("constructive_unsolvable_count", -1)) == 0
+            and bool(report.get("penetration_pass"))
             for report in reports
         )
         performance_pass = bool(
@@ -162,15 +330,17 @@ def main() -> int:
             flush=True,
         )
 
-    suite["all_modes_pass"] = all_pass
+    verdict = summarize_verdict(all_pass, profile_complete)
+    suite["all_selected_modes_pass"] = verdict["all_selected_modes_pass"]
+    suite["profile_joint_pass"] = verdict["profile_joint_pass"]
+    suite["all_modes_pass"] = verdict["all_modes_pass"]
     report_path = output / "corridor_motion_suite.json"
     report_path.write_text(
         json.dumps(suite, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     print(
-        f"[CORRIDOR-SUITE] ALL={'PASS' if all_pass else 'FAIL'} "
-        f"report={report_path}",
+        f"[CORRIDOR-SUITE] {verdict['banner']} report={report_path}",
         flush=True,
     )
     return 0 if all_pass else 1

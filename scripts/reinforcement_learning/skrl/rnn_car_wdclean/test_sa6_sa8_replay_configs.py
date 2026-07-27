@@ -30,6 +30,15 @@ from rnn_car_modular.configs.e2e_sa6_k8_obb_corridor_env_stratified_probe_from_c
 from rnn_car_modular.configs.e2e_sa6_k8_obb_corridor_weighted_stratified_d1_from_d0 import (
     CONFIG as SA6_WEIGHTED_STRATIFIED_D1,
 )
+from rnn_car_modular.configs.e2e_sa6_w1_wander_from_d0 import (
+    CONFIG as SA6_W1_WANDER,
+)
+from rnn_car_modular.configs.e2e_sa6_w2_wander_lrdecay_from_d0 import (
+    CONFIG as SA6_W2_WANDER_LRDECAY,
+)
+from rnn_car_modular.configs.e2e_sa6_n1_direct_imitation_from_d0 import (
+    CONFIG as SA6_N1_DIRECT_IMITATION,
+)
 from rnn_car_modular.configs.e2e_sa6_k8_obb_c50_narrow_postkl_recovery import (
     CONFIG as SA6_C50_NARROW_POSTKL_RECOVERY,
 )
@@ -942,3 +951,435 @@ def test_d1_weights_and_corridor_share():
 def test_baseline_configs_keep_weights_unset():
     for config in (SA6, SA6_MIXED_CORRIDOR_PROBE, SA6_ENV_STRATIFIED_CORRIDOR_PROBE):
         assert config.long_corridor_dynamic_motion_weights is None
+
+
+# ---------------------------------------------------------------------------
+# W1 wander corridor kinematics arm
+# ---------------------------------------------------------------------------
+
+
+def test_w1_changes_only_the_random_2d_kinematics_versus_d0():
+    """W1 must be a single-variable change on top of D0 — permanently.
+
+    D1 taught that reweighting the corridor mix costs the down-weighted
+    families without helping the target one; W1 therefore keeps the balanced
+    1:1:1 stratification and changes only the random_2d kinematics. Any field
+    beyond metadata, the warm-start checkpoint and the kinematics switch
+    breaks the causal attribution of the W1 result and must fail here.
+    """
+    d0 = SA6_ENV_STRATIFIED_CORRIDOR_PROBE
+    w1 = SA6_W1_WANDER
+    allowed = {
+        "name",
+        "description",
+        "notes",
+        "tags",
+        "checkpoint",
+        "long_corridor_random_2d_kinematics",
+    }
+    changed = {
+        field
+        for field in d0.__dataclass_fields__
+        if getattr(d0, field) != getattr(w1, field)
+    }
+    assert changed == allowed, f"unexpected W1 field changes: {changed ^ allowed}"
+
+
+def test_w1_run_shape_resume_and_kinematics():
+    w1 = SA6_W1_WANDER
+    assert w1.long_corridor_random_2d_kinematics == "wander"
+    assert w1.timesteps // w1.rollout_length == 30
+    assert w1.save_interval == 5
+    assert w1.no_resume_optimizer is False
+    assert w1.checkpoint.endswith(
+        "sa6_k8_obb_corridor_env_stratified_probe_c100_s42/checkpoint_3840.pt"
+    )
+    # Sampling stays balanced: no weights, env_stratified mode, 10% share.
+    assert w1.long_corridor_dynamic_motion_weights is None
+    assert w1.long_corridor_dynamic_motion_mode == "env_stratified"
+    assert w1.long_corridor_fraction == SA6_ENV_STRATIFIED_CORRIDOR_PROBE.long_corridor_fraction
+
+
+# ---------------------------------------------------------------------------
+# W2 learning-rate-decay arm
+# ---------------------------------------------------------------------------
+
+
+def test_w2_changes_only_the_optimizer_schedule_versus_w1():
+    """W2 must differ from W1 only in the optimizer schedule — permanently.
+
+    W1 and D1 both peaked around iter 10 under a constant LR from a mature
+    checkpoint; the ruled follow-up is a single-variable LR-decay arm, NOT a
+    recipe change. Any diff beyond metadata, the shorter 20-iteration budget,
+    the denser save cadence and lr_decay itself would break the causal
+    attribution of the W2 result and must fail here. In particular the 12%
+    narrow-gap replay, teacher KL and the 10% corridor share are inherited
+    from W1 untouched.
+    """
+    w1 = SA6_W1_WANDER
+    w2 = SA6_W2_WANDER_LRDECAY
+    allowed = {
+        "name",
+        "description",
+        "notes",
+        "tags",
+        "timesteps",
+        "save_interval",
+        "lr_decay",
+    }
+    changed = {
+        field
+        for field in w1.__dataclass_fields__
+        if getattr(w1, field) != getattr(w2, field)
+    }
+    assert changed == allowed, f"unexpected W2 field changes: {changed ^ allowed}"
+
+
+def test_w2_run_shape_decay_and_inheritance():
+    w2 = SA6_W2_WANDER_LRDECAY
+    # Codex-ruled run shape: D0 warm start, seed 42, 20 iters, ckpt every 2.
+    assert w2.checkpoint == SA6_W1_WANDER.checkpoint
+    assert w2.checkpoint.endswith(
+        "sa6_k8_obb_corridor_env_stratified_probe_c100_s42/checkpoint_3840.pt"
+    )
+    assert w2.seed == 42
+    assert w2.timesteps // w2.rollout_length == 20
+    assert w2.save_interval == 2
+    assert w2.no_resume_optimizer is False
+    # The one new training variable: linear LR decay 0.05/iter
+    # (2e-4 -> 1e-4 @ iter10 -> ~0 @ iter20, floor 1% via trainer clamp).
+    assert w2.lr_decay == 0.05
+    # Inherited W1 recipe: wander kinematics, balanced 1:1:1, 10% corridor.
+    assert w2.long_corridor_random_2d_kinematics == "wander"
+    assert w2.long_corridor_dynamic_motion_weights is None
+    assert w2.long_corridor_dynamic_motion_mode == "env_stratified"
+    assert w2.long_corridor_fraction == SA6_W1_WANDER.long_corridor_fraction
+
+
+# ---------------------------------------------------------------------------
+# N1 direct-crossing imitation arm
+# ---------------------------------------------------------------------------
+
+
+def test_n1_changes_only_the_narrow_supervision_versus_w1():
+    """N1 must swap the narrow supervision and nothing else — permanently.
+
+    W2 established that LR decay is not reproducible across seeds and was
+    archived as a diagnostic. N1 goes back to the W1 recipe and changes one
+    thing: the SA5 narrow teacher KL (that teacher detours — 3 seeds
+    n=2094, crossing 95.9% but direct 0.000) is removed and replaced by a
+    cross-entropy against the scripted direct-crossing teacher, applied only
+    on narrow-replay frames. Reward, network, PPO, replay mix, corridor
+    share and LR schedule must all stay exactly as W1.
+    """
+    w1 = SA6_W1_WANDER
+    n1 = SA6_N1_DIRECT_IMITATION
+    allowed = {
+        "name",
+        "description",
+        "notes",
+        "tags",
+        "timesteps",
+        "save_interval",
+        "teacher_retention_weight",
+        "narrow_imitation_weight",
+        "narrow_passage_goal_distance_range",
+        "narrow_passage_goal_lateral_offset_range",
+    }
+    changed = {
+        field
+        for field in w1.__dataclass_fields__
+        if getattr(w1, field) != getattr(n1, field)
+    }
+    assert changed == allowed, f"unexpected N1 field changes: {changed ^ allowed}"
+
+
+def test_n1_removes_the_detouring_teacher_and_keeps_rollouts_clean():
+    n1 = SA6_N1_DIRECT_IMITATION
+    # The detouring SA5 teacher KL must be gone, not merely down-weighted.
+    assert n1.teacher_retention_weight == 0.0
+    # Imitation is on, and shadow mode is off (shadow is for lambda calibration).
+    assert n1.narrow_imitation_weight > 0.0
+    assert n1.narrow_imitation_shadow is False
+    # The teacher must never drive: no rollout override anywhere.
+    assert n1.teacher_retention_rollout_override is False
+    assert n1.corridor_teacher_intervention_only is False
+    assert n1.corridor_teacher_distill_epochs == 0
+
+
+def test_n1_run_shape_and_inherited_recipe():
+    n1 = SA6_N1_DIRECT_IMITATION
+    assert n1.checkpoint == SA6_W1_WANDER.checkpoint
+    assert n1.checkpoint.endswith(
+        "sa6_k8_obb_corridor_env_stratified_probe_c100_s42/checkpoint_3840.pt"
+    )
+    assert n1.seed == 42
+    assert n1.timesteps // n1.rollout_length == 10
+    assert n1.save_interval == 2
+    assert n1.no_resume_optimizer is False
+    # W2's LR decay is archived — N1 runs at the constant W1 learning rate.
+    assert n1.lr_decay == 0.0
+    # Inherited W1 recipe: wander kinematics, balanced 1:1:1, 10% corridor,
+    # and the 12% narrow replay whose frames the imitation term acts on.
+    assert n1.long_corridor_random_2d_kinematics == "wander"
+    assert n1.long_corridor_dynamic_motion_weights is None
+    assert n1.long_corridor_dynamic_motion_mode == "env_stratified"
+    assert n1.long_corridor_fraction == SA6_W1_WANDER.long_corridor_fraction
+    assert n1.narrow_passage_fraction == SA6_W1_WANDER.narrow_passage_fraction
+    assert n1.narrow_passage_goal_distance_range == (2.0, 4.0)
+    assert n1.narrow_passage_goal_lateral_offset_range == (-1.5, 1.5)
+    assert SA6_W1_WANDER.narrow_passage_goal_distance_range is None
+    assert SA6_W1_WANDER.narrow_passage_goal_lateral_offset_range is None
+
+
+def test_sa7_keeps_narrow_and_corridor_replay_on():
+    """SA7 must keep replaying narrow gaps and corridors — permanently.
+
+    The 2026-07-27 roadmap is explicit: these cannot be a one-off remedial
+    block, because the denser SA7/SA8 scenes wash the capability out
+    otherwise. The 68/10/12/10 mix is therefore inherited untouched from
+    e2e_sa7_k8_obb, and this test fails if a future edit trims either share.
+    """
+    from rnn_car_modular.configs.e2e_sa7_k8_obb import CONFIG as sa7_base
+    from rnn_car_modular.configs.e2e_sa7_wander_from_w1c10 import (
+        CONFIG as sa7_wander,
+    )
+
+    assert sa7_wander.narrow_passage_fraction == 0.12
+    assert sa7_wander.long_corridor_fraction == 0.10
+    assert sa7_wander.previous_stage_replay_fraction == 0.10
+    # Inherited, not re-specified — a drift in the base must surface here too.
+    assert sa7_wander.narrow_passage_fraction == sa7_base.narrow_passage_fraction
+    assert sa7_wander.long_corridor_fraction == sa7_base.long_corridor_fraction
+
+
+def test_sa7_changes_only_warm_start_corridor_kinematics_and_density():
+    """SA7 must differ from its historical base in exactly three ways.
+
+    第三項是 2026-07-27 裁決的高密度混合分佈（逐 env 抽 (S, D)，上限
+    5S+5D）。清單是**鎖**：任何沒被裁決核准的欄位變動都必須讓這個測試紅掉。
+    """
+    from rnn_car_modular.configs.e2e_sa7_k8_obb import CONFIG as sa7_base
+    from rnn_car_modular.configs.e2e_sa7_wander_from_w1c10 import (
+        CONFIG as sa7_wander,
+    )
+
+    allowed = {
+        "name",
+        "description",
+        "notes",
+        "tags",
+        "checkpoint",
+        "long_corridor_random_2d_kinematics",
+        "long_corridor_dynamic_motion_mode",
+        "long_corridor_obstacle_count_mix",
+    }
+    changed = {
+        field
+        for field in sa7_base.__dataclass_fields__
+        if getattr(sa7_base, field) != getattr(sa7_wander, field)
+    }
+    assert changed == allowed, f"unexpected SA7 field changes: {changed ^ allowed}"
+
+
+def test_sa7_runs_at_the_thirteen_metre_arena():
+    from rnn_car_modular.configs.e2e_sa7_wander_from_w1c10 import (
+        CONFIG as sa7_wander,
+    )
+
+    assert sa7_wander.initial_stage == 7
+    # room_size is the half extent: 6.5 -> a 13 x 13 m arena.
+    assert sa7_wander.room_size == 6.5
+    assert sa7_wander.long_corridor_random_2d_kinematics == "wander"
+    assert sa7_wander.checkpoint.endswith(
+        "sa6_k8_obb_corridor_w1_wander_s42/checkpoint_1280.pt"
+    )
+
+
+def test_n1_is_blocked_because_its_premise_was_refuted():
+    """N1 must stay unlaunchable until the SA8/12m question is answered.
+
+    The premise ("the policy cannot cross a narrow gap straight") was an
+    evaluation artefact: `NarrowGapSpec.arena_half_extent` was hard-coded to
+    5.0 and `--arena_size` was never passed in, so the barrier only sealed at
+    a 10 m arena. With it genuinely sealed at the training arena size, D0
+    scores direct 1.000 over 2304 episodes, 0% collisions, 0.052 m median
+    pre-cross lateral. Unsetting either flag below silently re-enables an arm
+    that teaches a behaviour the policy already performs perfectly.
+    """
+    from rnn_car_modular.configs import e2e_sa6_n1_direct_imitation_from_d0 as n1_mod
+
+    assert n1_mod._ARM_IS_BLOCKED, (
+        "N1's premise was refuted on 2026-07-27; unblock only together with a "
+        "fresh 12 m shadow calibration"
+    )
+    assert n1_mod._BLOCKED_REASON, "a blocked arm must state why"
+    # The SA6/14m measurement is void for the SA8/12m setting it was deferred to.
+    assert not n1_mod._LAMBDA_IS_CALIBRATED, (
+        "0.067 belongs to SA6/14m; re-derive it against the 12 m recipe"
+    )
+    # Kept on record so the re-derivation has a documented baseline.
+    assert n1_mod._LAMBDA == 0.067
+    assert n1_mod.CONFIG.narrow_imitation_weight == n1_mod._LAMBDA
+
+
+def test_n1_does_not_add_a_d0_anchor_or_actuator_delay():
+    """Both were explicitly deferred until direct crossing is solved."""
+    n1 = SA6_N1_DIRECT_IMITATION
+    assert n1.previous_stage_teacher_checkpoint is None
+    assert n1.previous_stage_teacher_retention_weight == 0.0
+
+
+def test_pre_n1_configs_keep_imitation_off():
+    for config in (
+        SA6,
+        SA6_ENV_STRATIFIED_CORRIDOR_PROBE,
+        SA6_WEIGHTED_STRATIFIED_D1,
+        SA6_W1_WANDER,
+        SA6_W2_WANDER_LRDECAY,
+    ):
+        assert config.narrow_imitation_weight == 0.0, config.name
+        assert config.narrow_imitation_shadow is False, config.name
+        assert config.narrow_passage_goal_distance_range is None, config.name
+        assert config.narrow_passage_goal_lateral_offset_range is None, config.name
+
+
+def test_every_pre_w1_config_keeps_patrol_kinematics():
+    """Historical configs must stay on the frozen patrol kinematics."""
+    for config in (
+        SA6,
+        SA6_MIXED_CORRIDOR_PROBE,
+        SA6_ENV_STRATIFIED_CORRIDOR_PROBE,
+        SA6_WEIGHTED_STRATIFIED_D1,
+    ):
+        assert config.long_corridor_random_2d_kinematics == "patrol", config.name
+
+
+# ---------------------------------------------------------------------------
+# Suite profiles: the deployment gate must be explicit, defaults must stay
+# legacy patrol.
+# ---------------------------------------------------------------------------
+
+
+def test_suite_profiles_lock_deployment_and_legacy_definitions():
+    import importlib.util
+    from pathlib import Path
+
+    suite_path = Path(__file__).resolve().parent / "run_corridor_motion_suite.py"
+    spec = importlib.util.spec_from_file_location("_suite_for_test", suite_path)
+    suite = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(suite)
+
+    deploy = suite.PROFILES["deployment_wander_v1"]
+    assert deploy["modes"] == ("lateral", "longitudinal", "random_2d", "mixed_iid")
+    assert deploy["random_2d_kinematics"] == "wander"
+    legacy = suite.PROFILES["legacy_patrol_v1"]
+    assert legacy["modes"] == suite.MODES
+    assert legacy["random_2d_kinematics"] == "patrol"
+
+    # No profile + no overrides -> historical behaviour exactly.
+    modes, kin, complete = suite.resolve_profile(None, None, None)
+    assert modes is None and kin is None and complete is None
+    # Full profile run.
+    modes, kin, complete = suite.resolve_profile(
+        "deployment_wander_v1", None, None
+    )
+    assert modes == deploy["modes"] and kin == "wander" and complete is True
+    # Subset is allowed for sentinels but flagged incomplete.
+    modes, kin, complete = suite.resolve_profile(
+        "deployment_wander_v1", ("random_2d",), None
+    )
+    assert modes == ("random_2d",) and kin == "wander" and complete is False
+    # The profile is a frozen contract: a contradicting kinematics flag and a
+    # mode outside the profile must both fail loudly, never silently mislabel.
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        suite.resolve_profile("deployment_wander_v1", None, "patrol")
+    with _pytest.raises(ValueError):
+        suite.resolve_profile("deployment_wander_v1", ("mixed",), None)
+    # Matching explicit kinematics is redundant but not contradictory.
+    _, kin, _ = suite.resolve_profile("deployment_wander_v1", None, "wander")
+    assert kin == "wander"
+
+
+def test_suite_verdict_semantics_lock_subset_vs_full_profile():
+    """PASS semantics must not outrun coverage (Codex second-review finding).
+
+    Three locked cases: full profile, subset PASS, subset FAIL. A subset run
+    must never emit the ALL= token nor set all_modes_pass, so a supervisor
+    grepping ALL=PASS cannot mistake a sentinel for a deployment JOINT PASS.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    suite_path = Path(__file__).resolve().parent / "run_corridor_motion_suite.py"
+    spec = importlib.util.spec_from_file_location("_suite_verdict_test", suite_path)
+    suite = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(suite)
+
+    # Full profile, all modes pass -> genuine JOINT PASS.
+    v = suite.summarize_verdict(True, True)
+    assert v["all_modes_pass"] is True
+    assert v["profile_joint_pass"] is True
+    assert "ALL=PASS" in v["banner"] and "JOINT=PASS" in v["banner"]
+
+    # Full profile, a mode failed.
+    v = suite.summarize_verdict(False, True)
+    assert v["all_modes_pass"] is False
+    assert v["profile_joint_pass"] is False
+    assert "ALL=FAIL" in v["banner"] and "JOINT=FAIL" in v["banner"]
+
+    # Subset sentinel PASS: exit-0 semantics allowed, but never ALL=PASS,
+    # never all_modes_pass, JOINT is N/A.
+    v = suite.summarize_verdict(True, False)
+    assert v["all_selected_modes_pass"] is True
+    assert v["all_modes_pass"] is False
+    assert v["profile_joint_pass"] is False
+    assert "ALL=" not in v["banner"]
+    assert "SELECTED=PASS" in v["banner"] and "JOINT=N/A" in v["banner"]
+
+    # Subset sentinel FAIL.
+    v = suite.summarize_verdict(False, False)
+    assert v["all_selected_modes_pass"] is False
+    assert v["all_modes_pass"] is False
+    assert "SELECTED=FAIL" in v["banner"] and "ALL=" not in v["banner"]
+
+    # No profile -> historical banner exactly.
+    v = suite.summarize_verdict(True, None)
+    assert v["all_modes_pass"] is True
+    assert v["profile_joint_pass"] is None
+    assert v["banner"] == "ALL=PASS"
+    v = suite.summarize_verdict(False, None)
+    assert v["banner"] == "ALL=FAIL"
+
+
+def test_sa7_density_mix_matches_the_approved_distribution():
+    """高密度分佈必須逐項等於裁決數字，且權重合計為 1。"""
+    from rnn_car_modular.configs.e2e_sa7_wander_from_w1c10 import (
+        CONFIG as sa7_wander,
+    )
+
+    # ── CANONICAL LOCK ──────────────────────────────────────────────────
+    # 這是 SA7 密度分佈的**唯一**字面值來源，逐字對齊
+    # experiment_config.py:163 的凍結規格：
+    #   25% 3S1D / 35% 4S2D / 20% 4S3D / 15% 5S3D / 5% 5S5D
+    # 其他任何測試都必須 import SA7_DENSITY_MIX，不得自行重打一張表。
+    assert sa7_wander.long_corridor_obstacle_count_mix == (
+        ((3, 1), 0.25),
+        ((4, 2), 0.35),
+        ((4, 3), 0.20),
+        ((5, 3), 0.15),
+        ((5, 5), 0.05),
+    )
+    # 平均動態數 2.25 —— 這是 retention replay 的量級。高於它就變成高密壓測，
+    # policy 會學成遇到人就停車。
+    mean_dynamic = sum(d * w for (_, d), w in sa7_wander.long_corridor_obstacle_count_mix)
+    assert abs(mean_dynamic - 2.25) < 1e-9, mean_dynamic
+    # D1/D2 必須存在：移除低密度等於讓 policy 沒看過稀疏走廊。
+    present = {d for (_, d), _ in sa7_wander.long_corridor_obstacle_count_mix}
+    assert 1 in present and 2 in present, present
+    weights = [w for _, w in sa7_wander.long_corridor_obstacle_count_mix]
+    assert abs(sum(weights) - 1.0) < 1e-9
+    # 上限 5S+5D —— 超過就代表有人偷偷放寬了走廊容量。
+    for (static, dynamic), _ in sa7_wander.long_corridor_obstacle_count_mix:
+        assert 0 <= static <= 5 and 0 <= dynamic <= 5
