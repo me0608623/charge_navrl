@@ -8,6 +8,7 @@ import torch
 
 from .corridor_density import (
     CENTER_STRIP_X,
+    INTERACTION_INDEPENDENT,
     INTERACTION_NAMES,
     INTERACTION_SIDE_BY_SIDE,
     INTERACTION_CROSSING,
@@ -48,8 +49,31 @@ from .long_corridor_replay_geometry import (
 )
 
 
+#: 正式 Gate 的題型：固定 4 靜態 + 2 動態，四個模式各自純化（不混 family）。
+_GATE_ALIGNED_STATIC = 4
+_GATE_ALIGNED_DYNAMIC = 2
+_GATE_ALIGNED_MODES = ("lateral", "longitudinal", "random_2d", "mixed_iid")
+
 _ASSET_NAMES = ("long_corridor_wall_0", "long_corridor_wall_1")
 _HIDDEN_Z = -10.0
+_INTERACTION_OVERRIDE_IDS = {
+    "independent": INTERACTION_INDEPENDENT,
+    "crossing": INTERACTION_CROSSING,
+    "side_by_side": INTERACTION_SIDE_BY_SIDE,
+}
+
+
+def _normalize_interaction_override(value: str | None) -> int | None:
+    """Translate the eval-only interaction override into its sampler ID."""
+    if value is None or str(value).strip() in ("", "sample"):
+        return None
+    normalized = str(value).strip().lower()
+    if normalized not in _INTERACTION_OVERRIDE_IDS:
+        raise ValueError(
+            "interaction_override must be sample, independent, crossing, or "
+            f"side_by_side; got {value!r}"
+        )
+    return _INTERACTION_OVERRIDE_IDS[normalized]
 
 
 def configure_long_corridor_assets(
@@ -65,6 +89,8 @@ def configure_long_corridor_assets(
     dynamic_motion_weights: tuple[float, float, float] | None = None,
     random_2d_kinematics: str = "patrol",
     obstacle_count_mix=None,
+    interaction_override: str | None = None,
+    gate_aligned_share: float = 0.0,
 ) -> None:
     """Add dedicated corridor walls and configure the reset event.
 
@@ -78,16 +104,36 @@ def configure_long_corridor_assets(
     validate_spec(spec)
     if obstacle_count_mix is None:
         validate_obstacle_counts(static_obstacles, dynamic_obstacles)
+        required_scheduler_capacity = max(
+            int(static_obstacles), 4 + int(dynamic_obstacles)
+        )
     else:
         validate_density_mix(obstacle_count_mix)
+        required_scheduler_capacity = (
+            MAX_CORRIDOR_STATIC + MAX_CORRIDOR_DYNAMIC
+        )
     motion_mode = validate_dynamic_motion_mode(dynamic_motion_mode)
     motion_weights = normalize_dynamic_motion_weights(
         dynamic_motion_weights, motion_mode
     )
     kinematics = validate_random_2d_kinematics(random_2d_kinematics)
+    override_id = _normalize_interaction_override(interaction_override)
+    if override_id is not None and obstacle_count_mix is None:
+        raise ValueError("interaction_override requires obstacle_count_mix")
     speed_min, speed_max = map(float, dynamic_speed_range)
     if not (0.0 < speed_min <= speed_max):
         raise ValueError("dynamic corridor speed range must be positive and ordered")
+
+    # BehaviorScheduler historically sized its tensors to the current stage's
+    # active obstacle count. SA1 has only two active slots, while corridor
+    # replay can require ten. Reserve tensor capacity without changing how many
+    # obstacles the native stage activates.
+    current_capacity = int(
+        getattr(env_cfg, "behavior_scheduler_capacity", 0) or 0
+    )
+    env_cfg.behavior_scheduler_capacity = max(
+        current_capacity, required_scheduler_capacity
+    )
 
     rigid_props = sim_utils.RigidBodyPropertiesCfg(
         kinematic_enabled=True, disable_gravity=True
@@ -138,6 +184,10 @@ def configure_long_corridor_assets(
             # 同上，必須隨 event params 走：auto-reset 會重跑 setup，
             # 少了這個 key 會從第二次 reset 起悄悄掉回 legacy 密度。
             "obstacle_count_mix": obstacle_count_mix,
+            # 同上，必須隨 event params 走：auto-reset 會重跑 setup。
+            "gate_aligned_share": float(gate_aligned_share),
+            # Eval/GUI only. None keeps the production 60/20/20 sampler.
+            "interaction_override": interaction_override,
         }
     )
     # 密度描述必須反映**實際生效**的那一組：混合場一開，
@@ -154,6 +204,8 @@ def configure_long_corridor_assets(
         f"length={spec.length:.2f}m obstacles={density} "
         f"speed=[{speed_min:.2f},{speed_max:.2f}]m/s "
         f"motion={motion_mode} random_2d_kinematics={kinematics} "
+        f"interaction_override={interaction_override or 'sample'} "
+        f"scheduler_capacity={env_cfg.behavior_scheduler_capacity} "
         f"configured_motion_weights={motion_weights} reward_unchanged=True",
         flush=True,
     )
@@ -282,6 +334,9 @@ def _ensure_state(env) -> None:
         2, dtype=torch.long, device=env.device
     )
     env._long_corridor_assignment_total = 0
+    # gate-aligned 分流的曝光審計：四模式各自被指派幾次，以及 count-mix 有幾次。
+    env._long_corridor_gate_aligned_counts = [0] * len(_GATE_ALIGNED_MODES)
+    env._long_corridor_mixed_env_total = 0
     env._long_corridor_density_counts = torch.zeros(
         env.num_envs, 2, dtype=torch.long, device=env.device
     )
@@ -428,6 +483,8 @@ def _sample_mixed_density_layout(
     max_tries: int = 20,
     density_carry: dict | None = None,
     family_debt: dict | None = None,
+    global_env_ids: torch.Tensor | None = None,
+    interaction_override: str | None = None,
 ):
     """Sample a per-env variable-density corridor layout.
 
@@ -444,14 +501,27 @@ def _sample_mixed_density_layout(
     dynamic_counts = counts[:, 1]
     # 順序不可調換：互動型態是契約，family 是為了實現它而指派的。
     # 反過來（先 family 再問做得出什麼互動）只能默默降級，湊不出 60/20/20。
-    interaction_types = sample_interaction_types(
-        dynamic_counts=dynamic_counts, device=device
-    )
+    override_id = _normalize_interaction_override(interaction_override)
+    if override_id is None:
+        interaction_types = sample_interaction_types(
+            dynamic_counts=dynamic_counts, device=device
+        )
+    else:
+        if override_id != INTERACTION_INDEPENDENT and bool((dynamic_counts < 2).any()):
+            raise ValueError(
+                f"{interaction_override} interaction requires at least 2 dynamic "
+                "obstacles in every sampled environment"
+            )
+        interaction_types = torch.full_like(dynamic_counts, override_id)
     # 配對 slot 的 family 一開始就正確（crossing=lateral+longitudinal、
     # side_by_side=longitudinal+longitudinal），random_2d 永不參與配對 ——
     # wander 會重抽獨立 heading，會把擺好的互動幾何整個蓋掉。
     families, pairs = assign_families_and_pairs(
-        dynamic_counts, interaction_types, device=device, family_debt=family_debt
+        dynamic_counts, interaction_types, device=device,
+        family_debt=family_debt,
+        # global env ID 必須傳下去 —— 沒有它，dump 出來的 batch-local 索引
+        # 無法對回是哪些環境，重現時只能猜。
+        global_env_ids=global_env_ids,
     )
     problems = validate_pair_families(interaction_types, pairs, families)
     if problems:
@@ -575,6 +645,7 @@ def _install_obstacles(
     dynamic_motion_mode: str,
     dynamic_motion_weights: tuple[float, float, float] | None = None,
     count_mix=None,
+    interaction_override: str | None = None,
 ) -> bool:
     scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
     if scheduler is None:
@@ -582,7 +653,8 @@ def _install_obstacles(
         return False
     if count_mix is not None:
         return _install_mixed_density_obstacles(
-            env, selected, spec, speed_min, speed_max, count_mix, scheduler
+            env, selected, spec, speed_min, speed_max, count_mix, scheduler,
+            interaction_override=interaction_override,
         )
     validate_obstacle_counts(static_obstacles, dynamic_obstacles)
     if scheduler.max_obstacles < 4 + dynamic_obstacles:
@@ -715,6 +787,7 @@ def _install_mixed_density_obstacles(
     speed_max: float,
     count_mix,
     scheduler,
+    interaction_override: str | None = None,
 ) -> bool:
     """Install a per-env variable-density corridor scene (2026-07-27 混合場).
 
@@ -744,6 +817,8 @@ def _install_mixed_density_obstacles(
         count, spec, env.device, count_mix,
         density_carry=getattr(env, "_long_corridor_density_carry", None),
         family_debt=getattr(env, "_long_corridor_family_debt", None),
+        global_env_ids=selected,
+        interaction_override=interaction_override,
     )
 
     speeds = torch.empty(
@@ -1106,7 +1181,9 @@ def setup_long_corridor_replay(
     dynamic_motion_weights: tuple[float, float, float] | None = None,
     dynamic_pause_steps_range: tuple[int, int] | None = None,
     obstacle_count_mix=None,
+    gate_aligned_share: float = 0.0,
     random_2d_kinematics: str = "patrol",
+    interaction_override: str | None = None,
     wall_z: float = 1.5,
 ) -> None:
     """Replace a fraction of resets with the frozen deployment corridor.
@@ -1145,6 +1222,10 @@ def setup_long_corridor_replay(
     env._long_corridor_motion_mode = motion_mode
     env._long_corridor_motion_weights = motion_weights
     env._long_corridor_obstacle_count_mix = obstacle_count_mix
+    _normalize_interaction_override(interaction_override)
+    if interaction_override not in (None, "", "sample") and obstacle_count_mix is None:
+        raise ValueError("interaction_override requires obstacle_count_mix")
+    env._long_corridor_interaction_override = interaction_override
     env._long_corridor_pause_steps_range = apply_pause_override(env, dynamic_pause_steps_range)
     env._long_corridor_random_2d_kinematics = validate_random_2d_kinematics(
         random_2d_kinematics
@@ -1211,18 +1292,62 @@ def setup_long_corridor_replay(
     env._long_corridor_goal_w[selected] = goal
     env._long_corridor_active[selected] = True
     _write_goal(env, selected, update_markers=True)
-    installed = _install_obstacles(
-        env,
-        selected,
-        spec,
-        dynamic_speed_min,
-        dynamic_speed_max,
-        static_obstacles,
-        dynamic_obstacles,
-        motion_mode,
-        motion_weights,
-        count_mix=obstacle_count_mix,
-    )
+    # gate-aligned 分流：SA7 的診斷顯示訓練走 count-mix（逐 env 抽 D=1..5、
+    # 每 env 混三種 family、24.6% 有強制配對），而正式 Gate 是**固定 4S+2D
+    # 且四個模式各自純化** —— 兩者是不同題型，訓練分佈幾乎不含 Gate 的場景。
+    # `gate_aligned_share` 把一部分走廊 env 換成 Gate 題型，四模式均衡輪派。
+    _gate_share = float(gate_aligned_share or 0.0)
+    #: count-mix 取樣器的審計母體。Gate 題型是固定 4S+2D，混進來會讓
+    #: 「取樣器有沒有重現凍結表」這個問題失去意義（4S2D 會被灌爆）。
+    mix_selected = selected
+    if _gate_share > 0.0 and obstacle_count_mix is not None and selected.numel() > 0:
+        is_gate = torch.rand(selected.numel(), device=env.device) < _gate_share
+        gate_ids = selected[is_gate]
+        mix_ids = selected[~is_gate]
+        mix_selected = mix_ids
+        installed = True
+        if gate_ids.numel() > 0:
+            # Gate 題型走 legacy install，不經過 count-mix 取樣器，所以它不會
+            # 寫 `_long_corridor_density_counts`。若放著不管，這些 env 會以
+            # (0,0) 留在帳本裡，被 per-env 歸因與首發審計讀成一個不存在的
+            # 「0S0D」密度組合 —— 跟先前「56 個非走廊 env 被算成 0S0D」
+            # 完全同型的帳本脫節。這裡直接寫入它們真正的固定密度。
+            env._long_corridor_density_counts[gate_ids, 0] = _GATE_ALIGNED_STATIC
+            env._long_corridor_density_counts[gate_ids, 1] = _GATE_ALIGNED_DYNAMIC
+            order = torch.randperm(gate_ids.numel(), device=env.device)
+            for k, gate_mode in enumerate(_GATE_ALIGNED_MODES):
+                sub = gate_ids[order[k::len(_GATE_ALIGNED_MODES)]]
+                if sub.numel() == 0:
+                    continue
+                installed &= bool(_install_obstacles(
+                    env, sub, spec, dynamic_speed_min, dynamic_speed_max,
+                    _GATE_ALIGNED_STATIC, _GATE_ALIGNED_DYNAMIC,
+                    gate_mode, None, count_mix=None,
+                    interaction_override=None,
+                ))
+                env._long_corridor_gate_aligned_counts[k] += int(sub.numel())
+        if mix_ids.numel() > 0:
+            installed &= bool(_install_obstacles(
+                env, mix_ids, spec, dynamic_speed_min, dynamic_speed_max,
+                static_obstacles, dynamic_obstacles, motion_mode, motion_weights,
+                count_mix=obstacle_count_mix,
+                interaction_override=interaction_override,
+            ))
+            env._long_corridor_mixed_env_total += int(mix_ids.numel())
+    else:
+        installed = _install_obstacles(
+            env,
+            selected,
+            spec,
+            dynamic_speed_min,
+            dynamic_speed_max,
+            static_obstacles,
+            dynamic_obstacles,
+            motion_mode,
+            motion_weights,
+            count_mix=obstacle_count_mix,
+            interaction_override=interaction_override,
+        )
 
     env._long_corridor_injected_count += int(selected.numel())
     if not getattr(env, "_long_corridor_logged", False):
@@ -1233,7 +1358,7 @@ def setup_long_corridor_replay(
             # 只統計**這批真的裝進走廊**的 env。density_counts 現在是
             # per-env 全域欄位，整片拿去 bincount 會把 56 個非走廊 env
             # 算成一個叫「0S0D」的密度組合。
-            counts = env._long_corridor_density_counts[selected]
+            counts = env._long_corridor_density_counts[mix_selected]
             combo = torch.bincount(
                 counts[:, 0] * (MAX_CORRIDOR_DYNAMIC + 1) + counts[:, 1],
                 minlength=(MAX_CORRIDOR_STATIC + 1) * (MAX_CORRIDOR_DYNAMIC + 1),
@@ -1251,7 +1376,21 @@ def setup_long_corridor_replay(
             rnd_n, rnd_walk, want_wander = getattr(
                 env, "_long_corridor_wander_audit", (0, 0, False)
             )
+            gate_audit = ""
+            if _gate_share > 0.0:
+                gate_audit = (
+                    " gate_aligned="
+                    + ",".join(
+                        f"{mode} {n}"
+                        for mode, n in zip(
+                            _GATE_ALIGNED_MODES,
+                            env._long_corridor_gate_aligned_counts,
+                        )
+                    )
+                    + f" mix_envs={int(mix_selected.numel())}"
+                )
             motion_audit = (
+                f"{gate_audit}"
                 f" density_mix_realized={realized}"
                 f" interaction_geometry_ok="
                 f"crossing {interaction.get('crossing_ok', 0)}/"
@@ -1332,5 +1471,8 @@ def maintain_long_corridor_goal(env, env_ids=None) -> None:
             env._long_corridor_motion_mode,
             getattr(env, "_long_corridor_motion_weights", None),
             count_mix=getattr(env, "_long_corridor_obstacle_count_mix", None),
+            interaction_override=getattr(
+                env, "_long_corridor_interaction_override", None
+            ),
         )
     _write_goal(env, selected)

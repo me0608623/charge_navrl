@@ -1962,7 +1962,7 @@ def discrete_applied_action_history(
     a_max: float = 0.2,
     omega_max: float = math.pi / 15.0,
 ) -> torch.Tensor:
-    """讀取最近 stack_size 步的 applied actions 並堆疊成時序矩陣。
+    """讀取最近 stack_size 步的 issued actions 並堆疊成時序矩陣。
 
     動機 (v3c anti-jitter):
         Vanilla RNN64 容量有限 (139D obs → 64D hidden) 難以同時過濾 LiDAR 噪聲
@@ -1976,7 +1976,7 @@ def discrete_applied_action_history(
 
     機制：
         - 維護 env._action_history_buffer (deque maxlen=stack_size)
-        - 每次 step 結束後讀取 term.applied_accelerations 並 push
+        - 每次 step 結束後讀取 term.commanded_accelerations 並 push
         - episode reset 時對應 env 的歷史清零
         - 首次 call 用 zeros 初始化（policy 看到 [0, 0, 0, 0] 沒問題）
 
@@ -1991,8 +1991,11 @@ def discrete_applied_action_history(
     """
     term = list(env.action_manager._terms.values())[0]
 
-    # 讀當前 applied actions（與 discrete_applied_action 相同源）
-    if hasattr(term, "applied_accelerations"):
+    # 延遲 MDP 需要的是最近發出的命令 queue，而不是已延遲執行的輸出。
+    # 無 actuator DR 時 commanded == applied，既有 83D checkpoint 行為不變。
+    if hasattr(term, "commanded_accelerations"):
+        pa = term.commanded_accelerations  # [N, 2] = [issued_a, issued_omega]
+    elif hasattr(term, "applied_accelerations"):
         pa = term.applied_accelerations  # [N, 2] = [applied_a, ω]
     else:
         pa = term.processed_actions

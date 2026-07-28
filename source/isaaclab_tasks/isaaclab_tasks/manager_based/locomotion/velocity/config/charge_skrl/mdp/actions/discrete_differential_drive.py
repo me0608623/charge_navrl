@@ -62,6 +62,9 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         self._processed_actions = torch.zeros(N, 2, device=self.device)
         # applied_accelerations: [actual_accel, actual_omega] — 供觀測函數讀取
         self._applied_accelerations = torch.zeros(N, 2, device=self.device)
+        # commanded_accelerations: [issued_accel, issued_omega] — 最近送入致動器
+        # queue 的命令。83D action history 使用這個值，與車端 policy_node 對齊。
+        self._commanded_accelerations = torch.zeros(N, 2, device=self.device)
         # v3d: actuator tracking error [err_v_norm, err_w_norm] — 指令(pre-DR) − 實際(post-DR)
         #   = 致動延遲/馬達響應的「沒跟上」量。actuator DR 關閉或 delay=0 時恆為 0。
         #   供 obs action_error 模式讀取（顯式延遲簽名，訓練端建模延遲，論文 §34）。
@@ -71,6 +74,9 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         self._current_velocity = torch.zeros(N, device=self.device)
         # 角速度狀態（用於 α slew clamp）
         self._current_omega = torch.zeros(N, device=self.device)
+        # 上一筆已發出的角速度命令。啟用 actuator lag 後，它與實際角速度不同；
+        # action-side slew 必須沿命令序列計算，才能對齊車端 decoder。
+        self._commanded_omega = torch.zeros(N, device=self.device)
 
         # 正規化狀態輸出（供 s_t^ego 的 ā_t, ω̄_t）
         self._a_bar = torch.zeros(N, device=self.device)
@@ -115,6 +121,15 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         return self._applied_accelerations
 
     @property
+    def commanded_accelerations(self) -> torch.Tensor:
+        """[num_envs, 2]: issued [linear_accel, angular_velocity] commands.
+
+        These are post-decode/post-slew but pre-delay commands. The last two
+        entries form the pending-action queue exposed by the 83D observation.
+        """
+        return self._commanded_accelerations
+
+    @property
     def actuator_tracking_error(self) -> torch.Tensor:
         """[num_envs, 2]: [err_v_norm, err_w_norm] — 致動延遲 tracking error。
 
@@ -142,13 +157,8 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         Args:
             actions: [num_envs, 2] float — NN 輸出的 [accel_idx, omega_idx]
         """
-        # --- Actuator DR Step 1: action delay (before decoding) ---
-        if self.cfg.enable_actuator_dr:
-            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.domain_randomization.actuator_dr import (
-                apply_action_delay,
-            )
-            actions = apply_action_delay(self._env, actions, self.cfg.actuator_delay_range)
-
+        # Keep the policy-issued indices. Actuator delay is applied after decode
+        # to the physical (v, omega) command, matching the real cmd_vel pipeline.
         self._raw_actions[:] = actions
 
         # ── 第一步：直接取兩個獨立索引 ──
@@ -204,8 +214,8 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         # 防止 policy 瞬間翻轉 ±ω_max 造成舞龍舞獅
         target_angular_vel = ratio_angular * self.cfg.max_angular_vel  # [N] rad/s
         max_dw = self.cfg.max_angular_accel * dt                       # 每步最大 Δω
-        actual_angular_vel = self._current_omega + torch.clamp(
-            target_angular_vel - self._current_omega,
+        actual_angular_vel = self._commanded_omega + torch.clamp(
+            target_angular_vel - self._commanded_omega,
             -max_dw, max_dw,
         )
         actual_angular_vel = actual_angular_vel.clamp(
@@ -220,24 +230,40 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         _v_intended = next_velocity.clone()
         _w_intended = actual_angular_vel.clone()
 
-        # --- Actuator DR Step 2 & 3: velocity scaling + motor lag ---
-        # Applied to target velocity (next_velocity, actual_angular_vel) before being written to sim
+        # Preserve the issued-command history before actuator delay. For delay
+        # d<=2 this is exactly the pending-action queue required by the augmented
+        # state s_tilde=(s_t,a_{t-1},a_{t-2}).
+        self._commanded_accelerations[:, 0] = actual_linear_accel
+        self._commanded_accelerations[:, 1] = actual_angular_vel
+        self._commanded_omega[:] = actual_angular_vel
+
+        target_vel = torch.stack([next_velocity, actual_angular_vel], dim=1)
+
+        # Actuator DR is downstream of policy decoding, like the real cmd_vel
+        # path: decoded command -> delay -> velocity scaling -> motor lag.
         if self.cfg.enable_actuator_dr:
             from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.domain_randomization.actuator_dr import (
-                apply_velocity_scaling,
-                apply_motor_response_lag,
+                apply_actuator_dynamics,
             )
-            # Stack [N, 2] = (v, ω)
-            target_vel = torch.stack([next_velocity, actual_angular_vel], dim=1)
-            target_vel = apply_velocity_scaling(self._env, target_vel, self.cfg.actuator_velocity_scale)
-            target_vel = apply_motor_response_lag(self._env, target_vel, self.cfg.actuator_motor_lag)
-            next_velocity = target_vel[:, 0].clamp(-v_max_neg, +v_max_pos)
-            actual_angular_vel = target_vel[:, 1].clamp(
-                -self.cfg.max_angular_vel, self.cfg.max_angular_vel
+            lag_alpha = self.cfg.actuator_motor_lag_by_channel
+            if lag_alpha is None:
+                lag_alpha = self.cfg.actuator_motor_lag
+            target_vel = apply_actuator_dynamics(
+                self._env,
+                target_vel,
+                self.cfg.actuator_delay_range,
+                self.cfg.actuator_velocity_scale,
+                lag_alpha,
             )
 
+        next_velocity = target_vel[:, 0].clamp(-v_max_neg, +v_max_pos)
+        actual_angular_vel = target_vel[:, 1].clamp(
+            -self.cfg.max_angular_vel, self.cfg.max_angular_vel
+        )
+        applied_linear_accel = (next_velocity - v) / dt
+
         # ── 第七步：正規化 → ā_t, ω̄_t ──
-        self._a_bar[:] = actual_linear_accel / a_max
+        self._a_bar[:] = applied_linear_accel / a_max
         self._omega_bar[:] = ratio_angular  # 本身就是 [-1, 1]
 
         # v3d: actuator tracking error = (意圖 pre-DR) − (實際 post-DR)，正規化到 ~[-1,1]
@@ -250,7 +276,7 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         ).clamp(-1.0, 1.0)
 
         # ── 儲存 ──
-        self._applied_accelerations[:, 0] = actual_linear_accel
+        self._applied_accelerations[:, 0] = applied_linear_accel
         self._applied_accelerations[:, 1] = actual_angular_vel
         self._processed_actions[:, 0] = next_velocity
         self._processed_actions[:, 1] = actual_angular_vel
@@ -270,8 +296,10 @@ class DiscreteDifferentialDriveAction(ActionTerm):
 
         self._current_velocity[ids] = 0.0
         self._current_omega[ids] = 0.0
+        self._commanded_omega[ids] = 0.0
         self._processed_actions[ids] = 0.0
         self._applied_accelerations[ids] = 0.0
+        self._commanded_accelerations[ids] = 0.0
         self._actuator_tracking_error[ids] = 0.0
         self._a_bar[ids] = 0.0
         self._omega_bar[ids] = 0.0
@@ -385,3 +413,4 @@ class DiscreteDifferentialDriveActionCfg(ActionTermCfg):
     actuator_delay_range: tuple[int, int] = (0, 2)         # [lo, hi] action delay steps (per-env, per-episode)
     actuator_velocity_scale: tuple[float, float] = (0.9, 1.1)  # per-episode velocity scale per (v, ω)
     actuator_motor_lag: float = 0.3                         # 1st-order low-pass α (0=no response, 1=instant)
+    actuator_motor_lag_by_channel: tuple[float, float] | None = None  # optional (alpha_v, alpha_omega)

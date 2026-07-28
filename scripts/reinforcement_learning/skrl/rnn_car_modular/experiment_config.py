@@ -164,6 +164,10 @@ class ExperimentConfig:
     # SA8: 15% 3S1D / 25% 4S2D / 20% 4S3D / 20% 5S3D / 10% 5S4D / 10% 5S5D
     # 階段語意留在 config，機制在 mdp/events/corridor_density.py。
     long_corridor_obstacle_count_mix: tuple[tuple[tuple[int, int], float], ...] | None = None
+    # 走廊 env 中改用「正式 Gate 題型」（固定 4S+2D、四模式各自純化）的比例。
+    # SA7 診斷：訓練走 count-mix、Gate 是固定 4S2D 純模式 —— 兩者是不同題型，
+    # 訓練分佈幾乎不含 Gate 場景。0.0 = 既有行為。
+    long_corridor_gate_aligned_share: float = 0.0
     long_corridor_dynamic_speed_range: tuple[float, float] = (0.30, 0.60)
     long_corridor_dynamic_motion_mode: str = "lateral"
     # Optional (lateral, longitudinal, random_2d) env weights; env_stratified only.
@@ -217,6 +221,10 @@ class ExperimentConfig:
     # Observation layout must be fixed before isaaclab_tasks is imported.
     # None preserves the process environment for legacy configs.
     use_action_history: bool | None = None
+    # Optional issued-action history normalization. None preserves the legacy
+    # 0.2 m/s^2 and pi/15 rad/s function defaults for old checkpoints.
+    action_history_accel_normalizer: float | None = None
+    action_history_omega_normalizer: float | None = None
 
     # v3d: act_hist dropout（訓練時隨機 mask 4D 動作歷史，弱化 "copy 上一步" shortcut）
     # 0.0 = 不啟用（v3c 行為）。配合 CHARGE_ACT_HIST_MODE=delta 一起斷 sin 波抽動。
@@ -314,6 +322,9 @@ class ExperimentConfig:
     actuator_delay_range: tuple[int, int] = (0, 2)       # action delay (steps)
     actuator_velocity_scale: tuple[float, float] = (0.9, 1.1)  # velocity scaling
     actuator_motor_lag: float = 0.3                        # first-order lag α
+    # Optional channel-specific first-order lag. When set, this overrides the
+    # legacy scalar above as (alpha_v, alpha_omega).
+    actuator_motor_lag_by_channel: tuple[float, float] | None = None
 
     # Observation latency DR (simulate sensor pipeline delay)
     obs_delay_steps: tuple[int, int] = (0, 0)            # per-env random delay [lo, hi] steps

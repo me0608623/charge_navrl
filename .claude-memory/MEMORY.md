@@ -6,6 +6,13 @@
 - Vector Store: `~/.claude-mem/chroma/` (Semantic search)
 - Worker: `localhost:37777` (auto-launched)
 
+## 🔬 走廊密度混合與行人互動 (07-27)
+- [finding_sa7_corridor_ceiling_gate_results.md](finding_sa7_corridor_ceiling_gate_results.md) — ★★★SA7-r3四候選正式gate全FAIL(SA8未啟動);窄縫Gate5a 100%但走廊卡住;最弱是longitudinal非random_2d;訓練SR最低的c90走廊最強
+- [project_sa7_corridor_density_mix.md](project_sa7_corridor_density_mix.md) — ★★SA7已啟動(1024env/s42):走廊改逐env密度混合(平均動態2.25,retention非壓測)+行人互動;commit 5a7acb2e600
+- [finding_interaction_sampling_order.md](finding_interaction_sampling_order.md) — ⭐⭐互動先抽、family服從;random_2d不得配對(會被wander覆寫成假陽性);crossing量事件非相位;並排速差須實作為0
+- [finding_ledger_desync_early_return.md](finding_ledger_desync_early_return.md) — ⭐⭐提早return跳過記帳→補償對著假帳本調節;診斷法=內部帳本與實際計數並列;測試範圍須涵蓋生產實際值
+- [feedback_no_append_plus_replace_same_file.md](feedback_no_append_plus_replace_same_file.md) — ⭐同檔混用cat>>與replace造成9個重複定義,舊版靜默生效且測試全綠;replace須先assert;AST守門要含AnnAssign
+
 ## Project Structure
 - Custom robot nav RL training in Isaac Lab with SKRL/SB3
 - Main task config: `source/isaaclab_tasks/.../charge_skrl/` (SKRL version)

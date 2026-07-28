@@ -9,6 +9,12 @@ import sys
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixed_actuator_eval import (  # noqa: E402
+    ACTUATOR_PROFILES,
+    fixed_actuator_cli_args,
+    fixed_actuator_metadata,
+    verify_fixed_actuator_runtime,
+)
 from run_sa5_joint_retention_gates import _run_play  # noqa: E402
 
 
@@ -203,6 +209,25 @@ def main() -> int:
         default=False,
         help="emit per-mode motion-phase attribution JSON alongside each run",
     )
+    parser.add_argument(
+        "--actuator-delay-steps",
+        type=int,
+        choices=(0, 1, 2),
+        default=None,
+        help=(
+            "fixed action delay: 0/1/2 steps = 0/200/400 ms; velocity scale "
+            "remains U(0.9,1.1) per episode and motor lag remains alpha=0.3"
+        ),
+    )
+    parser.add_argument(
+        "--actuator-profile",
+        choices=ACTUATOR_PROFILES,
+        default="bridge",
+        help=(
+            "bridge keeps historical U(0.9,1.1)+alpha=0.3; "
+            "sa1_delay_only keeps scale/lag neutral"
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -223,10 +248,17 @@ def main() -> int:
         raise FileNotFoundError(checkpoint)
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+    actuator_args = fixed_actuator_cli_args(
+        args.actuator_delay_steps, args.actuator_profile
+    )
+    actuator_metadata = fixed_actuator_metadata(
+        args.actuator_delay_steps, args.actuator_profile
+    )
 
     suite: dict[str, object] = {
         "checkpoint": str(checkpoint),
         "seeds": list(args.seeds),
+        "actuator_eval": actuator_metadata,
         "pause_mode": args.pause_mode,
         "profile": args.profile,
         # False = deliberate subset run (sentinel); such a run must never be
@@ -288,10 +320,21 @@ def main() -> int:
                     ),
                     "--seed",
                     str(seed),
+                    *actuator_args,
                 ],
+            )
+            verify_fixed_actuator_runtime(
+                log_path,
+                args.actuator_delay_steps,
+                args.actuator_profile,
             )
             report = json.loads(json_path.read_text(encoding="utf-8"))
             report["seed"] = seed
+            report["actuator_eval"] = actuator_metadata
+            json_path.write_text(
+                json.dumps(report, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
             reports.append(report)
 
         aggregate = _aggregate(reports)

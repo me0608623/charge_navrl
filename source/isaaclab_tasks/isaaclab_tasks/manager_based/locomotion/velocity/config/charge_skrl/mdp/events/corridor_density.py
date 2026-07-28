@@ -418,6 +418,65 @@ class CorridorDensityStats:
         return out
 
 
+#: 最後一次 allocator 的輸入。幾何層在後面才拋出，那時已拿不到這些輸入，
+#: 但重現必須要有它們。
+_LAST_ALLOCATION: dict = {}
+
+
+def dump_corridor_allocation_state(
+    families,
+    *,
+    reason: str,
+    env_idx: int | None = None,
+    counts=None,
+    interaction_types=None,
+    pairs=None,
+    family_debt=None,
+    global_env_ids=None,
+    extra: dict | None = None,
+) -> None:
+    """Persist the full allocator state so a failure can be replayed exactly.
+
+    只 dump `families` 是不夠的 —— 重現需要輸入（counts、interaction_types）、
+    配對（pairs）、跨批次狀態（family_debt）與 **global env ID**（否則無法
+    對回是哪些環境）。
+    """
+    import json
+    import os
+
+    path = os.environ.get(
+        "CORRIDOR_OVERFLOW_DUMP", "/tmp/corridor_lateral_overflow.json"
+    )
+
+    def as_list(x):
+        return None if x is None else (
+            x.tolist() if hasattr(x, "tolist") else x
+        )
+
+    try:
+        payload = {
+            "reason": reason,
+            "env_idx": None if env_idx is None else int(env_idx),
+            "families": as_list(families),
+            "lateral_per_env": (families == MOTION_LATERAL).sum(dim=1).tolist(),
+            "counts": as_list(counts),
+            "interaction_types": as_list(interaction_types),
+            "pairs": as_list(pairs),
+            "global_env_ids": as_list(global_env_ids),
+            "family_debt": None if family_debt is None else {
+                "emitted": as_list(family_debt.get("emitted")),
+                "total": float(family_debt.get("total", 0.0)),
+            },
+        }
+        if extra:
+            payload.update(extra)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        print(f"[CORRIDOR-OVERFLOW] state dumped to {path}", flush=True)
+    except Exception as exc:                     # dump 失敗不得掩蓋原始錯誤
+        print(f"[CORRIDOR-OVERFLOW] dump failed: {exc}", flush=True)
+
+
 def dynamic_layout_for_families(
     families: torch.Tensor,
     *,
@@ -445,6 +504,17 @@ def dynamic_layout_for_families(
 
     lanes = torch.tensor(lateral_lanes, dtype=torch.float32, device=device)
     n_lanes = lanes.numel()
+    # 每個 env 都獨立打散橫排。否則 crossing 固定使用 slot 0/1 時，
+    # 第一個 lateral 永遠落在 lateral_lanes[0]，交點 y 每回合都相同。
+    lane_order = torch.argsort(torch.rand(envs, n_lanes, device=device), dim=1)
+
+    # 中央帶共有 2 側 x 3 個 y band。逐 env 打散後再依序取用，既保留
+    # 格位的最小間距保證，也避免第一個 longitudinal 永遠出現在
+    # (-center_strip_x, CENTER_STRIP_BANDS[0])。
+    center_cell_count = 2 * len(CENTER_STRIP_BANDS)
+    center_cell_order = torch.argsort(
+        torch.rand(envs, center_cell_count, device=device), dim=1
+    )
 
     for env_idx in range(envs):
         used_lane = 0
@@ -457,21 +527,39 @@ def dynamic_layout_for_families(
                 continue
             if family == MOTION_LATERAL:
                 if used_lane >= n_lanes:
+                    # 2026-07-27 SA7 曾在 iter 10 之後因此炸掉整個訓練，而事後
+                    # 用四種方式都重現不了觸發條件。把當下的完整狀態 dump 出來，
+                    # 萬一再發生就有重現素材，不必再靠猜。
+                    dump_corridor_allocation_state(
+                        families,
+                        reason="lateral_lane_overflow_at_geometry",
+                        env_idx=env_idx,
+                        counts=_LAST_ALLOCATION.get("counts"),
+                        interaction_types=_LAST_ALLOCATION.get(
+                            "interaction_types"
+                        ),
+                        pairs=_LAST_ALLOCATION.get("pairs"),
+                        family_debt=_LAST_ALLOCATION.get("family_debt"),
+                        global_env_ids=_LAST_ALLOCATION.get("global_env_ids"),
+                        extra={"n_lanes": int(n_lanes)},
+                    )
                     raise ValueError(
                         f"lateral obstacles exceed the {n_lanes} available lanes; "
-                        "the motion quota must cap lateral at the lane count"
+                        f"env {env_idx} families={families[env_idx].tolist()}; "
+                        "state dumped for reproduction"
                     )
                 layout[env_idx, slot, 0] = (
                     torch.rand(1, device=device) * 2.0 - 1.0
                 ) * lateral_x_limit
-                layout[env_idx, slot, 1] = lanes[used_lane]
+                lane_idx = int(lane_order[env_idx, used_lane])
+                layout[env_idx, slot, 1] = lanes[lane_idx]
                 used_lane += 1
             else:
                 # 中央帶用**固定格位**，不是自由亂數。自由亂數會讓中央帶的人
                 # 落在橫排 y=±1.8 附近，而橫向的人 x 掃遍整條走廊 ——
                 # 實測 53% 的 draw 一出生就疊在一起。格位保證任兩人
                 # 中心距 > 2 * 0.35 m，且離最壞情況的橫排仍有 0.74 m。
-                cell = used_center_cells
+                cell = int(center_cell_order[env_idx, used_center_cells])
                 layout[env_idx, slot, 0] = (
                     -1.0 if cell % 2 == 0 else 1.0
                 ) * center_strip_x
@@ -915,6 +1003,7 @@ def assign_families_and_pairs(
     *,
     device,
     family_debt: dict | None = None,
+    global_env_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """指派 family 並固定互動配對，回傳 ``(families [E,5], pairs [E,2])``。
 
@@ -1010,17 +1099,139 @@ def assign_families_and_pairs(
         remainder -= 1
     share = base.long()
 
-    labels = torch.repeat_interleave(
-        torch.arange(_FAMILY_COUNT, device=device), share
-    )[:n_free]
-    labels = labels[torch.randperm(n_free, device=device)]
-    families[free_idx[:, 0], free_idx[:, 1]] = labels
-
-    # ── 3. 修掉「一個 env 超過兩個橫向」──────────────────────────────
-    # 走廊只有兩條橫排；第三個橫向沒有排可站。交換而非重抽，整批總數不變。
-    families = _repair_lateral_overflow(families, active, free, device)
+    # ── 3. 在分配時就守住「每個 env 最多兩個橫向」──────────────────
+    # 走廊只有兩條橫排，第三個橫向沒有排可站，`dynamic_layout_for_families`
+    # 會直接 raise。先前用**事後修補**（把超額的橫向與別的 env 交換），
+    # 但找不到接收方時會帶著未解的超額退出 —— 64 env 的 smoke 從未觸發，
+    # 1024 env 一跑就在 iter 10 之後炸掉整個訓練。
+    # 現在改成分配前先算出容量並把超額名額改配給別的 family，
+    # 超額在結構上無法產生。
+    _LAST_ALLOCATION.clear()
+    _LAST_ALLOCATION.update(
+        counts=counts, interaction_types=interaction_types, pairs=pairs,
+        family_debt=(
+            None if family_debt is None
+            else {"emitted": family_debt.get("emitted"),
+                  "total": family_debt.get("total", 0.0)}
+        ),
+        global_env_ids=global_env_ids,
+    )
+    families = _assign_free_slots_within_lateral_cap(
+        families, free, free_idx, active, share, deficit64, device,
+        counts=counts, interaction_types=interaction_types, pairs=pairs,
+        family_debt=family_debt, global_env_ids=global_env_ids,
+    )
     _record_family_debt(family_debt, emitted, seen, families, active, total)
     return families, pairs
+
+
+def _assign_free_slots_within_lateral_cap(
+    families: torch.Tensor,
+    free: torch.Tensor,
+    free_idx: torch.Tensor,
+    active: torch.Tensor,
+    share: torch.Tensor,
+    deficit: torch.Tensor,
+    device,
+    *,
+    counts: torch.Tensor | None = None,
+    interaction_types: torch.Tensor | None = None,
+    pairs: torch.Tensor | None = None,
+    family_debt: dict | None = None,
+    global_env_ids: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fill the free slots, never letting an env exceed the lateral lane count.
+
+    橫向名額若超過整批的容納量，多出來的改配給缺口較大的另一個 family ——
+    寧可讓整批 family 比例稍微偏離，也不能產出一個蓋不出來的場景。
+    """
+    share = share.clone()
+    free_per_env = free.sum(dim=1)
+    forced_lateral = ((families == MOTION_LATERAL) & ~free & active).sum(dim=1)
+    capacity = torch.minimum(
+        (MAX_PER_FAMILY - forced_lateral).clamp_min(0), free_per_env
+    )
+    total_capacity = int(capacity.sum())
+
+    excess = int(share[MOTION_LATERAL]) - total_capacity
+    if excess > 0:
+        share[MOTION_LATERAL] = total_capacity
+        others = [MOTION_LONGITUDINAL, MOTION_RANDOM_2D]
+        for _ in range(excess):
+            # 給當下缺口較大的那一個，維持整批平衡的意圖。
+            pick = max(others, key=lambda f: float(deficit[f]) - float(share[f]))
+            share[pick] += 1
+
+    lateral_pool = int(share[MOTION_LATERAL])
+    other_pool: list[int] = []
+    for family in (MOTION_LONGITUDINAL, MOTION_RANDOM_2D):
+        other_pool.extend([family] * int(share[family]))
+    perm = torch.randperm(len(other_pool), device=device).tolist()
+    other_pool = [other_pool[i] for i in perm]
+
+    slots_by_env: dict[int, list[int]] = {}
+    for row in range(free_idx.shape[0]):
+        env_id = int(free_idx[row, 0])
+        slots_by_env.setdefault(env_id, []).append(int(free_idx[row, 1]))
+
+    # env 與 slot 的走訪順序都必須隨機化。照 row 順序填的話，橫向名額會被
+    # 前面的 env 先吃光 —— 實測 1000 個 D=5 env：env 0-499 各拿 2 個橫向、
+    # env 900-999 各拿 0 個，**整批比例卻完美**，所以 aggregate 審計看不出來。
+    env_ids = list(slots_by_env.keys())
+    order = torch.randperm(len(env_ids), device=device).tolist()
+    env_ids = [env_ids[i] for i in order]
+
+    def fail(reason: str, message: str):
+        dump_corridor_allocation_state(
+            families, reason=reason, counts=counts,
+            interaction_types=interaction_types, pairs=pairs,
+            family_debt=family_debt, global_env_ids=global_env_ids,
+        )
+        raise RuntimeError(message)
+
+    cursor = 0
+    for env_id in env_ids:
+        slots = slots_by_env[env_id]
+        if len(slots) > 1:
+            shuffle = torch.randperm(len(slots), device=device).tolist()
+            slots = [slots[i] for i in shuffle]
+        take = min(int(capacity[env_id]), lateral_pool, len(slots))
+        for k, slot in enumerate(slots):
+            if k < take:
+                families[env_id, slot] = MOTION_LATERAL
+            else:
+                if cursor >= len(other_pool):
+                    # 名額不足時直接索引會 IndexError，那會**繞過**下面的
+                    # postcondition，真的失配時反而拿不到 dump。
+                    fail(
+                        "label_pool_exhausted",
+                        f"corridor allocation ran out of labels at env {env_id} "
+                        f"slot {slot} (pool={len(other_pool)}, "
+                        f"lateral_pool={lateral_pool})",
+                    )
+                families[env_id, slot] = other_pool[cursor]
+                cursor += 1
+        lateral_pool -= take
+
+    # Postcondition：分配器出口就驗，不要等到幾何層才炸。
+    if lateral_pool != 0 or cursor != len(other_pool):
+        fail(
+            "label_pool_mismatch",
+            f"corridor free-slot allocation left {lateral_pool} lateral and "
+            f"{len(other_pool) - cursor} other labels unplaced",
+        )
+    if bool((families[active] < 0).any()):
+        fail(
+            "unassigned_active_slot",
+            "corridor allocation left an active slot unassigned",
+        )
+    over = ((families == MOTION_LATERAL) & active).sum(dim=1)
+    if int(over.max()) > MAX_PER_FAMILY:
+        fail("lateral_cap_breached_at_allocator", (
+            f"corridor allocation produced {int(over.max())} lateral obstacles "
+            f"in one env (cap {MAX_PER_FAMILY})"
+        ))
+    return families
 
 
 def _record_family_debt(family_debt, emitted, seen, families, active, total) -> None:
@@ -1035,50 +1246,3 @@ def _record_family_debt(family_debt, emitted, seen, families, active, total) -> 
         families[active], minlength=_FAMILY_COUNT
     ).to(torch.float64)
     family_debt["total"] = seen + total
-
-
-def _repair_lateral_overflow(
-    families: torch.Tensor,
-    active: torch.Tensor,
-    free: torch.Tensor,
-    device,
-) -> torch.Tensor:
-    """Swap surplus lateral slots with non-lateral ones in other envs."""
-    def unique_by_env(rows: torch.Tensor) -> torch.Tensor:
-        """每個 env 只取一列 —— 同一輪對同一個 env 換兩次會再次超額。"""
-        seen: set[int] = set()
-        keep = []
-        for k in range(rows.shape[0]):
-            env_id = int(rows[k, 0])
-            if env_id in seen:
-                continue
-            seen.add(env_id)
-            keep.append(k)
-        return rows[keep] if keep else rows[:0]
-
-    # 每輪最多把每個超額 env 的一個橫向換掉，並重算計數再進下一輪。
-    for _ in range(4 * MAX_CORRIDOR_DYNAMIC):
-        lateral = (families == MOTION_LATERAL) & active
-        counts = lateral.sum(dim=1)
-        overflow = counts > MAX_PER_FAMILY
-        if not bool(overflow.any()):
-            break
-        # 只動未配對的 slot —— 配對 slot 的 family 是互動契約的一部分。
-        donors = unique_by_env(
-            (lateral & free & overflow[:, None]).nonzero(as_tuple=False)
-        )
-        # 接收方必須換完仍 <= 2，且不能是本輪的捐出方。
-        room = counts < MAX_PER_FAMILY
-        receivers = unique_by_env(
-            (free & ~lateral & room[:, None] & ~overflow[:, None])
-            .nonzero(as_tuple=False)
-        )
-        if donors.shape[0] == 0 or receivers.shape[0] == 0:
-            break
-        for k in range(min(donors.shape[0], receivers.shape[0])):
-            d, r = donors[k], receivers[k]
-            families[d[0], d[1]], families[r[0], r[1]] = (
-                families[r[0], r[1]].clone(),
-                families[d[0], d[1]].clone(),
-            )
-    return families

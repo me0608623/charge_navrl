@@ -229,6 +229,15 @@ parser.add_argument("--deterministic", action="store_true", default=DETERMINISTI
 parser.add_argument("--jitter_eval", action="store_true", default=False,
                     help="量測 deterministic policy 的角度 ratio 正負號翻轉率 (per-env p95) + |ω| std，"
                          "用來去掉訓練探索噪聲後判斷 sin 波抽動是否真的存在")
+parser.add_argument(
+    "--jitter_eval_output",
+    type=str,
+    default=None,
+    help=(
+        "write deterministic action-stability metrics as JSON; setting this "
+        "also enables --jitter_eval"
+    ),
+)
 parser.add_argument("--seed", type=int, default=None,
                     help="環境隨機種子（控制 obstacle/goal 生成順序，None=使用 env config 預設 42）")
 parser.add_argument("--real_time", action="store_true", default=REAL_TIME,
@@ -353,8 +362,25 @@ parser.add_argument("--long_corridor_static_obstacles", type=int, default=4,
 parser.add_argument("--long_corridor_dynamic_obstacles", type=int, default=2,
                     help="走廊診斷用動態障礙數；正式 Gate 預設維持 2")
 parser.add_argument(
+    "--long_corridor_count_mix", type=str, default="",
+    help="真實混合走廊：逐 env 抽 (靜態,動態)。格式 '3,1:0.25;4,2:0.35;...'。"
+         "給定時 --long_corridor_static/dynamic_obstacles 失效，改走 count-mix "
+         "生產路徑（含 crossing / side_by_side 互動與 5S5D）。"
+         "空字串維持既有固定 4S+2D 的正式 Gate 行為。",
+)
+parser.add_argument(
+    "--long_corridor_interaction_override",
+    choices=("sample", "independent", "crossing", "side_by_side"),
+    default="sample",
+    help=(
+        "GUI/診斷專用：count-mix 場景強制互動型態。sample 保持生產的隨機分佈；"
+        "crossing/side_by_side 可用單一 env 直接目視。"
+    ),
+)
+parser.add_argument(
     "--long_corridor_motion_mode",
-    choices=("lateral", "longitudinal", "random_2d", "mixed", "mixed_iid"),
+    choices=("lateral", "longitudinal", "random_2d", "mixed", "mixed_iid",
+        "env_stratified"),
     default="lateral",
     help=(
         "走廊動態軌跡：既有橫穿、沿走廊迎面/同向、受控2D巡邏或混合。"
@@ -573,6 +599,18 @@ parser.add_argument("--path_blocker_distance", type=float, default=1.8,
 # --- LiDAR 設定 ---
 parser.add_argument("--lidar_no_noise", action="store_true", default=LIDAR_NO_NOISE,
                     help="關閉 LiDAR 雜訊（distractor + Unoise）")
+parser.add_argument(
+    "--action_history_accel_normalizer",
+    type=float,
+    default=None,
+    help="83D issued-action history acceleration divisor; defaults to checkpoint metadata.",
+)
+parser.add_argument(
+    "--action_history_omega_normalizer",
+    type=float,
+    default=None,
+    help="83D issued-action history omega divisor; defaults to checkpoint metadata.",
+)
 # 2026-07-03 fix(審計5-A1): play 原本完全沒有此參數也不從 ckpt 繼承 → 以 full_material
 # 訓練的 policy 在「近乾淨 LiDAR」下評估(silent、偏樂觀)。預設 None=自動從 ckpt 繼承。
 parser.add_argument("--vlp16_noise_mode", type=str, default=None,
@@ -638,7 +676,15 @@ parser.add_argument("--actuator_delay_range", type=int, nargs=2, default=None,
 parser.add_argument("--actuator_velocity_scale", type=float, nargs=2, default=None,
                     metavar=("LO", "HI"), help="per-episode 速度縮放範圍 [lo,hi]")
 parser.add_argument("--actuator_motor_lag", type=float, default=None,
-                    help="一階低通 α（0=無響應, 1=瞬間），訓練值 0.5")
+                    help="一階低通 α（0=無響應, 1=瞬間），bridge 凍結值 0.3")
+parser.add_argument(
+    "--actuator_motor_lag_by_channel",
+    type=float,
+    nargs=2,
+    default=None,
+    metavar=("ALPHA_V", "ALPHA_OMEGA"),
+    help="分通道一階低通 (alpha_v, alpha_omega)，設定時覆寫 scalar alpha",
+)
 
 # --- BEV 俯視圖 ---
 parser.add_argument("--bev_vis", action="store_true", default=BEV_VIS,
@@ -675,6 +721,8 @@ parser.add_argument("--rsgs_goal_bias", type=float, default=0.3,
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 args_cli.stage_parameter = STAGE_PARAMETER  # 只由檔案上方設定區控制，不做 CLI 參數
+if args_cli.jitter_eval_output:
+    args_cli.jitter_eval = True
 
 # 非 headless 模式需要啟用攝影機
 if not getattr(args_cli, "headless", False):
@@ -2799,6 +2847,19 @@ def main():
         print("[PLAY] 自動啟用 --use_obb_collision（從 checkpoint 讀取）")
         args_cli.use_obb_collision = True
 
+    for _name in (
+        "action_history_accel_normalizer",
+        "action_history_omega_normalizer",
+    ):
+        if getattr(args_cli, _name, None) is None:
+            _saved = _ckpt_args.get(_name)
+            if _saved is not None:
+                setattr(args_cli, _name, float(_saved))
+                print(
+                    f"[PLAY] 自動設定 --{_name}={float(_saved)}"
+                    "（從 checkpoint 讀取）"
+                )
+
     # 自動繼承 vlp16_noise_mode（2026-07-03 fix 審計5-A1：對齊訓練時的實測雜訊分佈，
     # 否則 full_material 訓的 policy 會在近乾淨 LiDAR 下評估 → SR/CR 偏樂觀）
     if getattr(args_cli, "vlp16_noise_mode", None) is None:
@@ -3021,6 +3082,25 @@ def main():
             args_cli.long_corridor_dynamic_obstacles
         )
         _corridor_motion_mode = str(args_cli.long_corridor_motion_mode)
+        # 真實混合走廊：解析 '3,1:0.25;4,2:0.35;...' 成生產路徑的 count-mix。
+        # 給定時走與訓練**同一條** `_install_mixed_density_obstacles` 路徑，
+        # 因此含 5S5D、crossing、side_by_side —— 固定 4S+2D 的正式 Gate 沒有這些。
+        _corridor_count_mix = None
+        _raw_mix = str(getattr(args_cli, "long_corridor_count_mix", "") or "").strip()
+        if _raw_mix:
+            entries = []
+            for chunk in _raw_mix.split(";"):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                counts, weight = chunk.split(":")
+                s, d = (int(v) for v in counts.split(","))
+                entries.append(((s, d), float(weight)))
+            _corridor_count_mix = tuple(entries)
+            print(
+                f"[PLAY] 走廊 count-mix: {_corridor_count_mix}",
+                flush=True,
+            )
         configure_long_corridor_assets(
             env_cfg,
             fraction=1.0,
@@ -3033,11 +3113,18 @@ def main():
             random_2d_kinematics=(
                 args_cli.long_corridor_random_2d_kinematics
             ),
+            obstacle_count_mix=_corridor_count_mix,
+            interaction_override=args_cli.long_corridor_interaction_override,
         )
         # Dynamic corridor slots start at index 4. Keep four asset/scheduler
         # slots even on the 2S+0D diagnostic rung; unused slots are hidden.
         scene_final["num_static"] = 4
-        scene_final["num_dynamic"] = _corridor_dynamic_obstacles
+        # count-mix 最多 5 靜態 + 5 動態，slot 佈局是 [0,5) 靜態 + [5,10) 動態。
+        if _corridor_count_mix is not None:
+            scene_final["num_static"] = 5
+            scene_final["num_dynamic"] = 5
+        else:
+            scene_final["num_dynamic"] = _corridor_dynamic_obstacles
         args_cli.obstacle_behavior = "patrol"
         args_cli.obs_near_goal_count = 0
         args_cli.path_blocker_count = 0
@@ -3827,6 +3914,8 @@ def main():
                 (0, 0) if args_cli.long_corridor_pause_mode == "zero" else None
             ),
             random_2d_kinematics=args_cli.long_corridor_random_2d_kinematics,
+            obstacle_count_mix=_corridor_count_mix,
+            interaction_override=args_cli.long_corridor_interaction_override,
         )
         _corridor_pause_steps_range = getattr(
             raw_env, "_long_corridor_pause_steps_range", None
@@ -3839,9 +3928,27 @@ def main():
             # Termination allocates the [env, slot] hit mask only when this is
             # set, so the training path is untouched.
             raw_env._corridor_phase_audit_enabled = True
-        _corridor_dynamic_slice = slice(
-            4, 4 + _corridor_dynamic_obstacles
-        )
+        if _corridor_count_mix is None:
+            _corridor_static_slice = slice(0, _corridor_static_obstacles)
+            _corridor_dynamic_slot_count = _corridor_dynamic_obstacles
+            _corridor_dynamic_slice = slice(
+                4, 4 + _corridor_dynamic_slot_count
+            )
+        else:
+            # Count-mix production layout reserves [0,5) for static and [5,10)
+            # for dynamic slots. Reusing the legacy base=4 makes the GUI color
+            # one static obstacle red and omits the final dynamic slot.
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.corridor_density import (
+                MAX_CORRIDOR_DYNAMIC,
+                MAX_CORRIDOR_STATIC,
+            )
+
+            _corridor_static_slice = slice(0, MAX_CORRIDOR_STATIC)
+            _corridor_dynamic_slot_count = MAX_CORRIDOR_DYNAMIC
+            _corridor_dynamic_slice = slice(
+                MAX_CORRIDOR_STATIC,
+                MAX_CORRIDOR_STATIC + MAX_CORRIDOR_DYNAMIC,
+            )
         # Physical-penetration audit. Constructive solvability is checked at
         # install time only; wander reflects off walls but is blind to the
         # other obstacles, so overlap must be measured every frame, not
@@ -3861,11 +3968,11 @@ def main():
             ].clone()
         )
         _long_corridor_motion_max = torch.zeros(
-            raw_env.num_envs, _corridor_dynamic_obstacles, device=device
+            raw_env.num_envs, _corridor_dynamic_slot_count, device=device
         )
         _long_corridor_motion_axis_max = torch.zeros(
             raw_env.num_envs,
-            _corridor_dynamic_obstacles,
+            _corridor_dynamic_slot_count,
             2,
             device=device,
         )
@@ -4613,11 +4720,17 @@ def main():
     _perf_count = 0
     _PERF_INTERVAL = 100  # 每 N 步印一次效能摘要
 
-    # --- jitter_eval 累積器（per-env 角度 ratio sign-flip 率 + |ω| std）---
+    # --- jitter_eval 累積器（policy turn flips + actual omega stability）---
     _jit_prev_sign = None
     _jit_flips = torch.zeros(raw_env.num_envs, device=raw_env.device)
     _jit_steps = torch.zeros(raw_env.num_envs, device=raw_env.device)
-    _jit_omega_list = []  # 每步 |ω_actual| [N]
+    _jit_same_sign_run = torch.zeros(
+        raw_env.num_envs, dtype=torch.long, device=raw_env.device
+    )
+    _jit_max_same_sign_run = torch.zeros_like(_jit_same_sign_run)
+    _jit_full_steer_count = 0
+    _jit_sample_count = 0
+    _jit_omega_list = []  # signed post-actuator omega, each [N]
 
     # --- 優雅停止：SIGINT（launcher「停止模擬」按鈕 / 終端機 Ctrl+C）設 flag，
     #     讓迴圈跑完當步後正常退出 → 走到結尾「PLAY 統計摘要」(SR/CR/TO + 靜/動/牆碰撞)。
@@ -5448,7 +5561,9 @@ def main():
                 _pen_dyn = _play_behavior_scheduler.positions[
                     :, _corridor_dynamic_slice
                 ]
-                _pen_static = _play_behavior_scheduler.positions[:, 0:4]
+                _pen_static = _play_behavior_scheduler.positions[
+                    :, _corridor_static_slice
+                ]
                 # Gate by _long_corridor_obstacles_ready, NOT the activity
                 # flag: activity flips True before installation, so an
                 # active-but-uninstalled env still carries generic spawns
@@ -5997,8 +6112,36 @@ def main():
                 _flip = ((_sign != _jit_prev_sign) & (_sign != 0) & (_jit_prev_sign != 0)).float()
                 _jit_flips += _flip
                 _jit_steps += 1.0
+                _same = (_sign != 0) & (_sign == _jit_prev_sign)
+                _jit_same_sign_run = torch.where(
+                    _sign == 0,
+                    torch.zeros_like(_jit_same_sign_run),
+                    torch.where(
+                        _same,
+                        _jit_same_sign_run + 1,
+                        torch.ones_like(_jit_same_sign_run),
+                    ),
+                )
+            else:
+                _jit_same_sign_run = torch.where(
+                    _sign == 0,
+                    torch.zeros_like(_jit_same_sign_run),
+                    torch.ones_like(_jit_same_sign_run),
+                )
+            _jit_max_same_sign_run = torch.maximum(
+                _jit_max_same_sign_run, _jit_same_sign_run
+            )
             _jit_prev_sign = torch.where(done, torch.zeros_like(_sign), _sign)  # done 後不跨回合計 flip
-            _jit_omega_list.append(_omega_actual_cmd.abs().detach().cpu())
+            _jit_same_sign_run = torch.where(
+                done,
+                torch.zeros_like(_jit_same_sign_run),
+                _jit_same_sign_run,
+            )
+            _jit_full_steer_count += int(
+                ((_omega_idx <= 0) | (_omega_idx >= 18)).sum().item()
+            )
+            _jit_sample_count += int(_omega_idx.numel())
+            _jit_omega_list.append(_omega_actual_cmd.detach().cpu())
         _slew_delta = (_omega_target - _omega_actual_cmd).abs()
         episode_omega_target_sum += _omega_target.abs()
         episode_omega_target_max = torch.maximum(episode_omega_target_max, _omega_target.abs())
@@ -7358,8 +7501,106 @@ def main():
     if args_cli.jitter_eval and _jit_steps.max().item() > 0:
         import numpy as _np
         _rate = (_jit_flips / _jit_steps.clamp(min=1)).detach().cpu().numpy()
-        _omega = torch.stack(_jit_omega_list)           # [T, N]
-        _omega_std = _omega.std(dim=0).numpy()          # per-env |ω| std
+        _omega = torch.stack(_jit_omega_list).float()    # signed [T, N]
+        _omega_abs = _omega.abs()
+        _omega_std = _omega_abs.std(dim=0).numpy()
+        _omega_sq_mean = float(_omega.square().mean().item())
+        _omega_rms = float(_omega_sq_mean ** 0.5)
+        _same_sign_s = (
+            _jit_max_same_sign_run.detach().cpu().numpy() * float(step_dt)
+        )
+
+        # Dominant frequency of signed post-actuator omega. Demeaning removes
+        # the DC turn bias; near-constant traces are reported as 0 Hz.
+        _omega_np = _omega.numpy()
+        _centered = _omega_np - _omega_np.mean(axis=0, keepdims=True)
+        _power = _np.abs(_np.fft.rfft(_centered, axis=0)) ** 2
+        _freqs = _np.fft.rfftfreq(_omega_np.shape[0], d=float(step_dt))
+        if _power.shape[0] > 1:
+            _power[0, :] = 0.0
+            _dominant_idx = _power.argmax(axis=0)
+            _dominant_hz = _freqs[_dominant_idx]
+            _dominant_hz[_centered.var(axis=0) < 1e-8] = 0.0
+        else:
+            _dominant_hz = _np.zeros(_omega_np.shape[1], dtype=float)
+        _full_steer_fraction = (
+            _jit_full_steer_count / max(_jit_sample_count, 1)
+        )
+        _jitter_report = {
+            "checkpoint": os.path.abspath(ckpt_path),
+            "seed": args_cli.seed,
+            "deterministic": bool(args_cli.deterministic),
+            "control_dt_s": float(step_dt),
+            "rollout_steps": int(_omega.shape[0]),
+            "num_envs": int(_omega.shape[1]),
+            "samples": int(_omega.numel()),
+            "ratio_flip_rate_mean": float(_rate.mean()),
+            "ratio_flip_rate_p50": float(_np.percentile(_rate, 50)),
+            "ratio_flip_rate_p95": float(_np.percentile(_rate, 95)),
+            "ratio_flip_rate_max": float(_rate.max()),
+            "omega_abs_std_mean_rad_s": float(_omega_std.mean()),
+            "omega_abs_std_p95_rad_s": float(
+                _np.percentile(_omega_std, 95)
+            ),
+            "omega_squared_mean_rad2_s2": _omega_sq_mean,
+            "omega_rms_rad_s": _omega_rms,
+            "dominant_frequency_median_hz": float(
+                _np.percentile(_dominant_hz, 50)
+            ),
+            "dominant_frequency_p95_hz": float(
+                _np.percentile(_dominant_hz, 95)
+            ),
+            "max_same_sign_turn_p95_s": float(
+                _np.percentile(_same_sign_s, 95)
+            ),
+            "max_same_sign_turn_max_s": float(_same_sign_s.max()),
+            "full_steer_fraction": float(_full_steer_fraction),
+            "actuator": {
+                "enabled": bool(
+                    getattr(_action_term_ref.cfg, "enable_actuator_dr", False)
+                ),
+                "delay_range": list(
+                    getattr(
+                        _action_term_ref.cfg,
+                        "actuator_delay_range",
+                        (0, 0),
+                    )
+                ),
+                "velocity_scale_range": list(
+                    getattr(
+                        _action_term_ref.cfg,
+                        "actuator_velocity_scale",
+                        (1.0, 1.0),
+                    )
+                ),
+                "motor_lag_alpha": (
+                    list(_action_term_ref.cfg.actuator_motor_lag_by_channel)
+                    if getattr(
+                        _action_term_ref.cfg,
+                        "actuator_motor_lag_by_channel",
+                        None,
+                    )
+                    is not None
+                    else float(
+                        getattr(
+                            _action_term_ref.cfg,
+                            "actuator_motor_lag",
+                            1.0,
+                        )
+                    )
+                ),
+                "motor_lag_alpha_by_channel": (
+                    list(_action_term_ref.cfg.actuator_motor_lag_by_channel)
+                    if getattr(
+                        _action_term_ref.cfg,
+                        "actuator_motor_lag_by_channel",
+                        None,
+                    )
+                    is not None
+                    else None
+                ),
+            },
+        }
         print("\n" + "=" * 60)
         print(f"JITTER-EVAL（deterministic={args_cli.deterministic}）")
         print("=" * 60)
@@ -7367,7 +7608,28 @@ def main():
         print(f"  ratio_flip_rate  : mean={_rate.mean():.3f}  p50={_np.percentile(_rate,50):.3f}  "
               f"p95={_np.percentile(_rate,95):.3f}  max={_rate.max():.3f}")
         print(f"  |omega|_std (rad/s): mean={_omega_std.mean():.3f}  p95={_np.percentile(_omega_std,95):.3f}")
+        print(
+            f"  omega_rms={_omega_rms:.3f} rad/s  "
+            f"dominant_hz(p50/p95)="
+            f"{_jitter_report['dominant_frequency_median_hz']:.3f}/"
+            f"{_jitter_report['dominant_frequency_p95_hz']:.3f}  "
+            f"same_sign_p95={_jitter_report['max_same_sign_turn_p95_s']:.2f}s  "
+            f"full_steer={_full_steer_fraction:.3f}"
+        )
         print(f"  解讀: p95_flip < 0.15 ≈ 視覺直行乾淨 / 0.15-0.30 輕微擺動 / >0.30 仍 sin 波")
+        if args_cli.jitter_eval_output:
+            _jitter_output = Path(args_cli.jitter_eval_output).expanduser()
+            _jitter_output.parent.mkdir(parents=True, exist_ok=True)
+            _jitter_output.write_text(
+                json.dumps(_jitter_report, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            print(f"[JITTER-EVAL] JSON report: {_jitter_output}")
+    elif args_cli.jitter_eval_output:
+        raise RuntimeError(
+            "--jitter_eval_output requested but the rollout produced no "
+            "action-stability samples"
+        )
 
     # --- RVO2 Safety Filter 統計 ---
     if rvo2_filter is not None:

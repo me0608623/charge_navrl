@@ -82,17 +82,29 @@ class BehaviorScheduler:
         device: str,
         boundary: float | tuple[float, float] = 8.5,
         spawn_zones: list[tuple[float, float, float, float]] | None = None,
+        active_obstacles: int | None = None,
     ):
         """
         Args:
             stage_config: curriculum stage dict, 必須包含 "behavior_mix" 欄位
             num_envs: 並行環境數
-            max_obstacles: 每個 env 最大 obstacle slots
+            max_obstacles: 每個 env 的 tensor / asset slot 容量
+            active_obstacles: native stage reset 實際啟用數量。None 保持舊
+                行為，等於 max_obstacles。Replay 可保留較大容量而不加難
+                native stage。
             device: "cuda:0" 等
             boundary: obstacle 活動邊界 (m)，scalar 或 (bx, by) tuple
         """
         self.num_envs = num_envs
         self.max_obstacles = max_obstacles
+        self.active_obstacles = (
+            max_obstacles if active_obstacles is None else int(active_obstacles)
+        )
+        if not 0 <= self.active_obstacles <= self.max_obstacles:
+            raise ValueError(
+                "active_obstacles must be within scheduler capacity: "
+                f"active={self.active_obstacles}, capacity={self.max_obstacles}"
+            )
         self.device = device
         # 支援 scalar 或 (bx, by) tuple boundary
         if isinstance(boundary, (list, tuple)):
@@ -267,7 +279,9 @@ class BehaviorScheduler:
         self.pairwise_clearance[env_ids] = 0.0
 
         # 計算每種 behavior 分配幾個 slot
-        counts = self._allocate_counts(self.behavior_mix, self.max_obstacles)
+        counts = self._allocate_counts(
+            self.behavior_mix, self.active_obstacles
+        )
 
         # 依序分配 slot — static 排前面，與 mixed_parallel 一致
         # （robot_state.py 用 i < num_static_mixed 判斷 static vs dynamic）
@@ -307,7 +321,8 @@ class BehaviorScheduler:
         active_count = (self.behavior_type[env_ids] != BEHAVIOR_INACTIVE).sum().item()
         if N_envs <= 4:  # play 模式少 env 才印
             print(f"[BehaviorScheduler] reset {N_envs} envs → {active_count} active obstacles "
-                  f"(max_slots={self.max_obstacles}, mix={self.behavior_mix}, "
+                  f"(active_slots={self.active_obstacles}, "
+                  f"capacity={self.max_obstacles}, mix={self.behavior_mix}, "
                   f"near_goal={self.obs_near_goal_count})")
 
     def step(self, env: ManagerBasedRLEnv, dt: float = 0.2) -> None:
@@ -422,6 +437,23 @@ class BehaviorScheduler:
 
     def update_stage(self, stage_config: dict) -> None:
         """Curriculum 升階時呼叫，更新 behavior_mix 和 overrides。"""
+        if (
+            "num_obstacles_static" in stage_config
+            or "num_obstacles_dynamic" in stage_config
+        ):
+            active_obstacles = int(
+                stage_config.get("num_obstacles_static", 0)
+                + stage_config.get("num_obstacles_dynamic", 0)
+            )
+        else:
+            active_obstacles = self.active_obstacles
+        if active_obstacles > self.max_obstacles:
+            raise RuntimeError(
+                "curriculum stage needs more active obstacles than the "
+                "reserved BehaviorScheduler capacity: "
+                f"active={active_obstacles}, capacity={self.max_obstacles}"
+            )
+        self.active_obstacles = active_obstacles
         self.behavior_mix = stage_config.get("behavior_mix", self.behavior_mix)
         speed_overrides = stage_config.get("speed_overrides", {})
         safety_overrides = stage_config.get("safety_overrides", {})
@@ -695,8 +727,8 @@ class BehaviorScheduler:
 
         for pair_idx in range(self.narrow_gap_max_pairs):
             # 兩個 slot 編號（從尾端取）
-            slot_a = self.max_obstacles - 1 - 2 * pair_idx
-            slot_b = self.max_obstacles - 2 - 2 * pair_idx
+            slot_a = self.active_obstacles - 1 - 2 * pair_idx
+            slot_b = self.active_obstacles - 2 - 2 * pair_idx
             if slot_a < 0 or slot_b < 0:
                 break  # slot 不夠
 

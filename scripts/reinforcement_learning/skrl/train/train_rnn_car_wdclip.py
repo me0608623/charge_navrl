@@ -617,6 +617,18 @@ parser.add_argument("--curriculum_version", type=str, default="warp_drive_single
 # - 正常範圍：布林旗標（預設 False = 有噪聲）。
 # - 更改影響：啟用後 LiDAR 資訊更乾淨，policy 更容易信任 LiDAR，但 sim-to-real gap 可能增大。
 parser.add_argument("--lidar_no_noise", action="store_true", default=False)
+parser.add_argument(
+    "--action_history_accel_normalizer",
+    type=float,
+    default=None,
+    help="Issued linear-acceleration history divisor; None keeps legacy behavior.",
+)
+parser.add_argument(
+    "--action_history_omega_normalizer",
+    type=float,
+    default=None,
+    help="Issued angular-velocity history divisor; None keeps legacy behavior.",
+)
 # --vlp16_noise_mode
 # - 用意：VLP-16 實測經驗雜訊 ablation 開關（README §5）。設定後覆蓋 lidar_* 細項參數，
 #   以「實測固定值」注入（無 DR）。None = 用 YAML 的細項參數。
@@ -3121,12 +3133,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 統一由 charge_env_overrides 處理，YAML 設定經 ExperimentConfig → args_cli 傳入。
     # lidar_no_noise=True → 全部歸零（legacy）；False → 使用 YAML 中的 per-param 值。
     from charge_env_overrides import (
+        _apply_action_history_normalization,
         _apply_obb_collision_config,
         _apply_lidar_noise_config,
+        _apply_actuator_dr_config,
         _apply_dr_param_overrides,
     )
+    _apply_action_history_normalization(env_cfg, args_cli)
     _apply_obb_collision_config(env_cfg, args_cli)
     _apply_lidar_noise_config(env_cfg, args_cli)
+    # 致動器 DR（動作延遲 / 速度縮放 / 馬達一階滯後）寫進 actions.diff_drive。
+    # 2026-07-28 修復：這一行原本漏掉，導致 `enable_actuator_dr=True` 的 config
+    # 會**靜默地在無延遲下訓練** —— args_cli 拿到了旗標、`_apply_actuator_dr_config`
+    # 本身也正確，但沒有任何呼叫端，於是 action term 的欄位永遠是預設值，
+    # log 連 `[SIM2REAL] Actuator DR` 那行都不會出現。
+    # play_rnn_car.py 走 `apply_charge_env_overrides`（內含此項），所以修復前
+    # 訓練與評測的致動器行為是不一致的。
+    # 註：`_apply_dr_param_overrides` 在 no_domain_randomization=True 時會提早
+    # return，但那關的是 events 那條 DR；action-term 的致動器 DR 不受影響，
+    # 所以本行必須排在它之前且不共用那個開關。
+    _apply_actuator_dr_config(env_cfg, args_cli)
     _apply_dr_param_overrides(env_cfg, args_cli)
 
     # Fixed SA5 general-scene replay for SA6+. No extra assets are needed:
@@ -3242,6 +3268,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "long_corridor_obstacle_count_mix",
                 None,
             ),
+            gate_aligned_share=float(getattr(
+                args_cli, "long_corridor_gate_aligned_share", 0.0
+            ) or 0.0),
         )
 
     # SA5 narrow-passage bridge: add two dedicated wall assets before gym.make

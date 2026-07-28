@@ -140,23 +140,53 @@ def apply_velocity_scaling(
 def apply_motor_response_lag(
     env: ManagerBasedRLEnv,
     target_velocity: torch.Tensor,
-    alpha: float = 0.3,
+    alpha: float | tuple[float, float] = 0.3,
 ) -> torch.Tensor:
     """馬達回應滯後 — 一階低通濾波。
 
     物理意義: 真實馬達不能瞬間達到目標速度。
     機械慣性和電氣時間常數導致實際速度漸進追蹤指令。
-    一階濾波: v_actual = alpha × v_target + (1 - alpha) × v_prev
-    alpha=0.3 模擬約 0.7s 的 90% 上升時間。
+    一階濾波: y_t = alpha * u_t + (1 - alpha) * y_{t-1}
+    在 control_dt=0.2 s 時，alpha=0.3 的等效時間常數為
+    tau=-dt/log(1-alpha)=0.56 s，90% 上升時間約 2.303*tau=1.29 s。
+    這個數值必須由實車 step response 校準，不能只由通訊 dead time 推定。
+    ``alpha`` 可為 legacy scalar，或 ``(alpha_v, alpha_omega)``。線速度與
+    角速度的底盤響應通常不同，新的 sim-to-real 血緣應使用分通道校準值。
 
     Args:
         env: 環境實例
         target_velocity: [num_envs, 2] 目標速度 (v, omega)
-        alpha: 濾波係數 (0=完全滯後, 1=無滯後)
+        alpha: scalar 或 (alpha_v, alpha_omega)，各值皆須落在 [0, 1]
 
     Returns:
         [num_envs, 2] 濾波後的實際速度
     """
+    if target_velocity.ndim != 2 or target_velocity.shape[1] != 2:
+        raise ValueError(
+            "target_velocity must have shape [num_envs, 2] for (v, omega), "
+            f"got {tuple(target_velocity.shape)}"
+        )
+
+    if isinstance(alpha, (int, float)):
+        alpha_values = (float(alpha), float(alpha))
+    else:
+        try:
+            alpha_values = tuple(float(value) for value in alpha)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "alpha must be a scalar or (alpha_v, alpha_omega)"
+            ) from exc
+        if len(alpha_values) != 2:
+            raise ValueError(
+                "channel-specific alpha must contain exactly "
+                f"(alpha_v, alpha_omega), got {alpha_values}"
+            )
+
+    if any(value < 0.0 or value > 1.0 for value in alpha_values):
+        raise ValueError(
+            f"motor lag alpha values must stay in [0, 1], got {alpha_values}"
+        )
+
     if not hasattr(env, "_prev_actual_velocity"):
         env._prev_actual_velocity = torch.zeros_like(target_velocity)
 
@@ -166,14 +196,39 @@ def apply_motor_response_lag(
         env._prev_actual_velocity[just_reset] = 0.0
 
     # 一階低通濾波
-    actual = alpha * target_velocity + (1.0 - alpha) * env._prev_actual_velocity
+    alpha_tensor = target_velocity.new_tensor(alpha_values).view(1, 2)
+    actual = (
+        alpha_tensor * target_velocity
+        + (1.0 - alpha_tensor) * env._prev_actual_velocity
+    )
     env._prev_actual_velocity = actual.clone()
 
     return actual
+
+
+def apply_actuator_dynamics(
+    env: ManagerBasedRLEnv,
+    target_velocity: torch.Tensor,
+    delay_steps: tuple[int, int] = (0, 2),
+    scale_range: tuple[float, float] = (0.9, 1.1),
+    response_lag_alpha: float | tuple[float, float] = 0.3,
+) -> torch.Tensor:
+    """Apply the frozen actuator-DR pipeline to decoded ``(v, omega)`` commands.
+
+    The real vehicle decodes policy logits before publishing ``cmd_vel``; the
+    communication/actuator delay therefore acts on the decoded velocity command,
+    not on a categorical action index. Keeping this order also lets the policy
+    observation retain the issued-command queue needed to make a delayed MDP
+    Markov.
+    """
+    delayed = apply_action_delay(env, target_velocity, delay_steps)
+    scaled = apply_velocity_scaling(env, delayed, scale_range)
+    return apply_motor_response_lag(env, scaled, response_lag_alpha)
 
 
 __all__ = [
     "apply_action_delay",
     "apply_velocity_scaling",
     "apply_motor_response_lag",
+    "apply_actuator_dynamics",
 ]

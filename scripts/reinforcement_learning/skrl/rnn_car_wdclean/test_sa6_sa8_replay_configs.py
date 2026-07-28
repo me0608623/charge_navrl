@@ -1383,3 +1383,209 @@ def test_sa7_density_mix_matches_the_approved_distribution():
     # 上限 5S+5D —— 超過就代表有人偷偷放寬了走廊容量。
     for (static, dynamic), _ in sa7_wander.long_corridor_obstacle_count_mix:
         assert 0 <= static <= 5 and 0 <= dynamic <= 5
+
+
+def test_sa71_changes_only_the_corridor_split_and_nothing_else():
+    """SA7.1 相對 SA7 只准差一件事：走廊 10% -> 20% + 一半換成 Gate 題型。
+
+    reward / network / LR / seed / 窄縫比例 / 前階段 replay 全部必須逐項相同。
+    這條測試的價值在於：SA7.1 若沒過閘，我們要能斷言「差別只有題型分佈」，
+    否則就沒有可歸因的實驗。
+    """
+    from rnn_car_modular.configs.e2e_sa7_wander_from_w1c10 import (
+        CONFIG as sa7,
+        SA7_DENSITY_MIX,
+    )
+    from rnn_car_modular.configs.e2e_sa71_gate_aligned_from_w1c10 import CONFIG as sa71
+
+    # 允許差異：走廊總量與 gate 分流。
+    assert sa7.long_corridor_fraction == 0.10
+    assert sa71.long_corridor_fraction == 0.20
+    assert sa7.long_corridor_gate_aligned_share == 0.0
+    assert sa71.long_corridor_gate_aligned_share == 0.5
+
+    # 全域曝光：真實混合 10%、Gate 題型 10%、native 58%。
+    gate_global = sa71.long_corridor_fraction * sa71.long_corridor_gate_aligned_share
+    mixed_global = sa71.long_corridor_fraction - gate_global
+    native = 1.0 - (
+        sa71.previous_stage_replay_fraction
+        + sa71.narrow_passage_fraction
+        + sa71.long_corridor_fraction
+    )
+    assert abs(gate_global - 0.10) < 1e-9, gate_global
+    assert abs(mixed_global - 0.10) < 1e-9, mixed_global
+    assert abs(native - 0.58) < 1e-9, native
+
+    # 密度分佈仍是同一個凍結表物件 —— 不得為 SA7.1 另開一張。
+    assert sa71.long_corridor_obstacle_count_mix is SA7_DENSITY_MIX
+
+    # 其餘所有欄位逐項相同。
+    from dataclasses import fields
+
+    allowed = {
+        "name",
+        "description",
+        "notes",
+        "tags",
+        "long_corridor_fraction",
+        "long_corridor_gate_aligned_share",
+    }
+    for f in fields(sa7):
+        if f.name in allowed:
+            continue
+        assert getattr(sa7, f.name) == getattr(sa71, f.name), f.name
+
+    # 暖啟動點必須跟 SA7 同一顆 W1-c10（診斷結論：SA7 沒產出更好的 ckpt）。
+    assert sa71.checkpoint == sa7.checkpoint
+    assert sa71.checkpoint.endswith("sa6_k8_obb_corridor_w1_wander_s42/checkpoint_1280.pt")
+    assert sa71.no_resume_optimizer is True
+
+
+def test_actuator_delay_bridge_diff_vs_w1_parent_is_exactly_the_allowed_set():
+    """Actuator-delay bridge 相對 W1 parent 的差異必須**全欄位**受控。
+
+    這條用 `dataclasses.fields` 逐欄比對，而不是手挑幾個欄位斷言 ——
+    手挑只能證明「我檢查的那幾項沒變」，證明不了「其他欄位也沒變」。
+    bridge 的整個價值就在於 actuator DR bundle 是唯一新增的行為因子；
+    這個 bundle 由 delay、velocity scale、motor lag 組成，不是 delay-only
+    消融。只要另有第二個 config 因子悄悄跟著改，橋接失敗時就無法歸因
+    （SA7.1 的 `long_corridor_fraction`
+    一個欄位承載兩個因子，正是這種錯誤的代價）。
+    """
+    from dataclasses import fields
+
+    from rnn_car_modular.configs.e2e_sa6_w1_wander_from_d0 import CONFIG as w1
+    from rnn_car_modular.configs.e2e_deploy_bridge_actuator_delay_from_w1c10 import (
+        CONFIG as bridge,
+        W1_C10_CHECKPOINT,
+        BRIDGE_TIMESTEPS,
+        BRIDGE_SAVE_INTERVAL,
+        ACTUATOR_DELAY_RANGE,
+        ACTUATOR_VELOCITY_SCALE,
+        ACTUATOR_MOTOR_LAG,
+    )
+
+    metadata = {"name", "description", "tags", "notes"}
+    #: 允許差異的**行為**欄位。actuator_* 與 obs_delay_steps 雖然在 config 裡
+    #: 明寫，實際與 parent 同值（見下方逐項斷言），列在這裡是允許而非要求。
+    allowed_behavioural = {
+        "checkpoint",
+        "timesteps",
+        "save_interval",
+        "no_resume_optimizer",
+        "enable_actuator_dr",
+        "actuator_delay_range",
+        "actuator_velocity_scale",
+        "actuator_motor_lag",
+        "obs_delay_steps",
+    }
+    allowed = metadata | allowed_behavioural
+
+    differing = {
+        f.name
+        for f in fields(w1)
+        if getattr(w1, f.name) != getattr(bridge, f.name)
+    }
+    unexpected = differing - allowed
+    assert not unexpected, f"bridge 動到了未核准的欄位: {sorted(unexpected)}"
+
+    # 唯一新增的行為因子必須是致動器 DR bundle 開關 + 暖啟動/預算 metadata。
+    assert differing - metadata == {
+        "checkpoint",
+        "timesteps",
+        "save_interval",
+        "enable_actuator_dr",
+    }, sorted(differing - metadata)
+
+    # ── 致動器規格（歷史規格，凍結）────────────────────────────────
+    assert bridge.enable_actuator_dr is True
+    assert bridge.actuator_delay_range == (0, 2) == ACTUATOR_DELAY_RANGE
+    # U{0,1,2}：兩端 inclusive，control_dt 0.2 s -> 0/200/400 ms。
+    lo, hi = bridge.actuator_delay_range
+    assert [round(d * 0.2 * 1000) for d in range(lo, hi + 1)] == [0, 200, 400]
+    # 不得塌縮成固定延遲。
+    assert lo != hi, "delay 被改成固定值；歷史規格是 U{0,1,2}"
+    assert bridge.actuator_velocity_scale == (0.9, 1.1) == ACTUATOR_VELOCITY_SCALE
+    assert bridge.actuator_motor_lag == 0.3 == ACTUATOR_MOTOR_LAG
+
+    # ── 觀測延遲永遠關 ─────────────────────────────────────────────
+    # 觀測延遲曾被誤植為「馬達延遲」，並被單變因隔離證實是 stage3
+    # deterministic 滿舵塌縮的兇手。致動延遲保留，觀測延遲永遠關。
+    assert bridge.obs_delay_steps == (0, 0)
+    assert w1.obs_delay_steps == (0, 0), "parent 前提改變"
+
+    # ── OBB lineage 的 action history 必須原封不動 ─────────────────
+    assert bridge.use_action_history is True
+    assert bridge.use_action_history == w1.use_action_history
+
+    # ── 暖啟動與預算 ───────────────────────────────────────────────
+    assert bridge.checkpoint == W1_C10_CHECKPOINT
+    assert bridge.checkpoint.endswith(
+        "sa6_k8_obb_corridor_w1_wander_s42/checkpoint_1280.pt"
+    )
+    # 不得誤用未過閘的 SA7 / SA7.1 checkpoint。
+    assert "sa7" not in bridge.checkpoint.lower()
+    assert bridge.timesteps == BRIDGE_TIMESTEPS == 1280      # 10 iter × 128 步
+    assert bridge.save_interval == BRIDGE_SAVE_INTERVAL == 2
+    assert bridge.timesteps // 128 == 10
+
+    # model + Adam 都續用：10 個 iteration 的預算付不起動量重置。
+    assert bridge.no_resume_optimizer is False
+
+    # ── 其餘關鍵欄位逐項等同 parent ────────────────────────────────
+    for name in ("num_envs", "seed", "no_domain_randomization"):
+        assert getattr(bridge, name) == getattr(w1, name), name
+    assert bridge.num_envs == 1024
+    assert bridge.seed == 42
+
+    # ── 標成診斷/預部署，不得被誤讀為 final accepted policy ────────
+    assert "pre_deployment" in bridge.tags
+    assert "diagnostic" in bridge.tags
+
+
+def test_actuator_bridge_continuation_only_changes_resume_metadata_and_budget():
+    """c10 continuation must not introduce a second behavioural factor."""
+    from dataclasses import fields
+
+    from rnn_car_modular.configs.e2e_deploy_bridge_actuator_delay_from_w1c10 import (
+        CONFIG as bridge,
+    )
+    from rnn_car_modular.configs.e2e_deploy_bridge_actuator_delay_continue_c10 import (
+        BRIDGE_C10_CHECKPOINT,
+        CONFIG as continuation,
+        CONTINUATION_SAVE_INTERVAL,
+        CONTINUATION_TIMESTEPS,
+    )
+
+    allowed = {
+        "name",
+        "description",
+        "tags",
+        "notes",
+        "checkpoint",
+        "timesteps",
+        "save_interval",
+    }
+    differing = {
+        field.name
+        for field in fields(bridge)
+        if getattr(bridge, field.name) != getattr(continuation, field.name)
+    }
+    assert differing <= allowed, sorted(differing - allowed)
+    assert differing == allowed
+
+    assert continuation.checkpoint == BRIDGE_C10_CHECKPOINT
+    assert continuation.checkpoint.endswith(
+        "bridge_actdelay_w1c10_s42_r2_cmdqueue/checkpoint_1280.pt"
+    )
+    assert continuation.timesteps == CONTINUATION_TIMESTEPS == 640
+    assert continuation.timesteps // 128 == 5
+    assert continuation.save_interval == CONTINUATION_SAVE_INTERVAL == 1
+    assert continuation.no_resume_optimizer is False
+
+    for field in fields(bridge):
+        if field.name in allowed:
+            continue
+        assert getattr(bridge, field.name) == getattr(
+            continuation, field.name
+        ), field.name

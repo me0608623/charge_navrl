@@ -30,9 +30,51 @@ def _apply_obb_collision_config(env_cfg, args_cli) -> bool:
     return True
 
 
+def _apply_action_history_normalization(env_cfg, args_cli) -> bool:
+    """Apply an explicit issued-action history contract to policy and critic."""
+    accel = getattr(args_cli, "action_history_accel_normalizer", None)
+    omega = getattr(args_cli, "action_history_omega_normalizer", None)
+    if accel is None and omega is None:
+        return False
+    if accel is None or omega is None:
+        raise ValueError(
+            "action-history accel and omega normalizers must be configured together"
+        )
+    accel = float(accel)
+    omega = float(omega)
+    if accel <= 0.0 or omega <= 0.0:
+        raise ValueError(
+            "action-history normalizers must be positive: "
+            f"accel={accel}, omega={omega}"
+        )
+
+    obs_root = getattr(env_cfg, "observations", None)
+    updated = []
+    for group_name in ("policy", "critic"):
+        group = getattr(obs_root, group_name, None)
+        term = getattr(group, "past_actions", None)
+        if term is None or not hasattr(term, "params"):
+            continue
+        term.params["a_max"] = accel
+        term.params["omega_max"] = omega
+        updated.append(group_name)
+    if not updated:
+        raise RuntimeError(
+            "action-history normalization requested but no past_actions "
+            "observation term is active"
+        )
+    print(
+        "[OBS] issued-action history normalization: "
+        f"accel={accel:.3f}m/s^2 omega={omega:.3f}rad/s "
+        f"groups={','.join(updated)}"
+    )
+    return True
+
+
 def apply_charge_env_overrides(env_cfg, args_cli):
     """Apply CLI-driven reward/action/curriculum overrides to env_cfg."""
     _apply_obb_collision_config(env_cfg, args_cli)
+    _apply_action_history_normalization(env_cfg, args_cli)
     rewards = getattr(env_cfg, "rewards", None)
     if rewards is None:
         return
@@ -814,18 +856,26 @@ def _apply_actuator_dr_config(env_cfg, args_cli):
     """Wire actuator DR (action delay, velocity scaling, motor lag) into ActionsCfg.
 
     Reads enable_actuator_dr / actuator_delay_range / actuator_velocity_scale /
-    actuator_motor_lag from args_cli and sets them on env_cfg.actions.diff_drive.
-    Safe no-op if action term does not expose these fields (legacy configs).
+    actuator_motor_lag / actuator_motor_lag_by_channel from args_cli and sets
+    them on env_cfg.actions.diff_drive.
+    Disabled configs are a no-op. Explicitly enabled configs fail closed if the
+    selected action term cannot implement actuator DR; silently continuing would
+    produce a checkpoint trained without the requested delay.
     """
     if not getattr(args_cli, "enable_actuator_dr", False):
         return
 
     actions = getattr(env_cfg, "actions", None)
     if actions is None:
-        return
+        raise RuntimeError(
+            "enable_actuator_dr=True but env_cfg has no actions configuration"
+        )
     diff = getattr(actions, "diff_drive", None)
     if diff is None or not hasattr(diff, "enable_actuator_dr"):
-        return  # action term doesn't support actuator DR (e.g. legacy continuous drive)
+        raise RuntimeError(
+            "enable_actuator_dr=True but env_cfg.actions.diff_drive does not "
+            "support actuator DR"
+        )
 
     diff.enable_actuator_dr = True
     delay_range = getattr(args_cli, "actuator_delay_range", None)
@@ -837,12 +887,43 @@ def _apply_actuator_dr_config(env_cfg, args_cli):
     motor_lag = getattr(args_cli, "actuator_motor_lag", None)
     if motor_lag is not None:
         diff.actuator_motor_lag = float(motor_lag)
+    motor_lag_by_channel = getattr(
+        args_cli, "actuator_motor_lag_by_channel", None
+    )
+    if motor_lag_by_channel is not None:
+        if not hasattr(diff, "actuator_motor_lag_by_channel"):
+            raise RuntimeError(
+                "actuator_motor_lag_by_channel was requested but "
+                "env_cfg.actions.diff_drive does not support it"
+            )
+        if len(motor_lag_by_channel) != 2:
+            raise ValueError(
+                "actuator_motor_lag_by_channel must be "
+                "(alpha_v, alpha_omega)"
+            )
+        lag_pair = tuple(float(value) for value in motor_lag_by_channel)
+        if any(value < 0.0 or value > 1.0 for value in lag_pair):
+            raise ValueError(
+                "actuator_motor_lag_by_channel values must stay in [0, 1], "
+                f"got {lag_pair}"
+            )
+        diff.actuator_motor_lag_by_channel = lag_pair
+
+    effective_lag = getattr(diff, "actuator_motor_lag_by_channel", None)
+    if effective_lag is None:
+        lag_marker = str(diff.actuator_motor_lag)
+    else:
+        lag_marker = (
+            f"(v={effective_lag[0]}, omega={effective_lag[1]})"
+        )
 
     print(
         f"[SIM2REAL] Actuator DR: "
         f"delay={diff.actuator_delay_range} steps, "
         f"vel_scale={diff.actuator_velocity_scale}, "
-        f"motor_lag α={diff.actuator_motor_lag}"
+        f"motor_lag alpha={lag_marker}, "
+        "pipeline=decode->delay->scale->lag, "
+        "history=issued_command_queue"
     )
 
 

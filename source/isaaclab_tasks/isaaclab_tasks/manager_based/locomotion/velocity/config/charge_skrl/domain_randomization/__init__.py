@@ -32,6 +32,7 @@ try:
         apply_action_delay,
         apply_velocity_scaling,
         apply_motor_response_lag,
+        apply_actuator_dynamics,
     )
 except ImportError:
     pass

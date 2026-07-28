@@ -1928,7 +1928,14 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
             from ..mdp.events.behavior_scheduler import BehaviorScheduler
             if getattr(env, '_behavior_scheduler', None) is None:
                 # 首次建立
-                max_obs = cfg.get("num_obstacles_static", 0) + cfg.get("num_obstacles_dynamic", 5)
+                active_obs = (
+                    cfg.get("num_obstacles_static", 0)
+                    + cfg.get("num_obstacles_dynamic", 5)
+                )
+                reserved_capacity = int(
+                    getattr(env.cfg, "behavior_scheduler_capacity", 0) or 0
+                )
+                max_obs = max(active_obs, reserved_capacity)
                 _bnd = cfg.get("boundary", getattr(env, '_room_boundary', 8.5))
                 # 不覆蓋 tuple _room_boundary（T 走廊等非對稱場景由 init_perenv_walls 設定）
                 _existing_rb = getattr(env, '_room_boundary', None)
@@ -1942,24 +1949,32 @@ def _apply_stage(env: ManagerBasedRLEnv, stage: int):
                     max_obstacles=max_obs,
                     device=str(env.device),
                     boundary=_sched_bnd,
+                    active_obstacles=active_obs,
                 )
-                # 同步 _num_obstacles（goal_movement.py 的 _gather_obstacle_positions 需要）
-                env._num_obstacles = max_obs
+                # Native stage remains at active_obs. Replay installers address
+                # the reserved scheduler slots directly and pin their goals.
+                env._num_obstacles = active_obs
                 # 同步碰撞歸類所需的 metadata（robot_state.py 用來區分 static/dynamic）
                 import torch as _torch
                 env._env_difficulty = _torch.full(
                     (env.num_envs,), 3, device=env.device, dtype=_torch.long
                 )  # 3 = mixed (static + dynamic 同場)
                 # static slot 數量 = BehaviorScheduler 分配的 static count
-                _counts = env._behavior_scheduler._allocate_counts(behavior_mix, max_obs)
+                _counts = env._behavior_scheduler._allocate_counts(
+                    behavior_mix, active_obs
+                )
                 env._num_obstacles_static_mixed = _counts.get("static", 0)
-                print(f"[Curriculum] BehaviorScheduler created: {max_obs} slots, mix={behavior_mix}", flush=True)
+                print(
+                    "[Curriculum] BehaviorScheduler created: "
+                    f"active={active_obs} capacity={max_obs}, mix={behavior_mix}",
+                    flush=True,
+                )
             else:
                 # 升階時更新
                 env._behavior_scheduler.update_stage(cfg)
                 _counts = env._behavior_scheduler._allocate_counts(
                     env._behavior_scheduler.behavior_mix,
-                    env._behavior_scheduler.max_obstacles,
+                    env._behavior_scheduler.active_obstacles,
                 )
                 env._num_obstacles_static_mixed = _counts.get("static", 0)
                 print(f"[Curriculum] BehaviorScheduler updated: mix={behavior_mix}", flush=True)
