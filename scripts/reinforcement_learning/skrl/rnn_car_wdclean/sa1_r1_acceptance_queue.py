@@ -1,6 +1,7 @@
-"""Fail-closed acceptance queue for the SA1 sim2real_v1 R1 run.
+"""Fail-closed Nav20 acceptance queue for the SA1 sim2real_v1 R1 run.
 
-Frozen specification: ``docs/freeze/sa1_r1_acceptance_matrix_20260729.md``.
+Current specification:
+``docs/freeze/sa1_r1_nav20_acceptance_matrix_20260729.md``.
 
 The queue does not launch GPU work until the training service is inactive, the
 completion marker is present, the exact final checkpoint is readable, the
@@ -35,7 +36,7 @@ RUN_DIR = REPO / "logs" / "rnn_car" / RUN_NAME
 TRAIN_LOG = REPO / "logs" / f"{RUN_NAME}.log"
 TRAIN_PROCESS_PATTERN = "train_rnn_car_wdclip.py"
 
-SCHEMA = "sa1_r1_acceptance/v2"
+SCHEMA = "sa1_r1_acceptance/v3"
 
 # Frozen R1 completion contract.
 FINAL_ITERATIONS = 2109
@@ -64,11 +65,6 @@ SCREEN_DELAY = "d1"
 OFF_REGRESSION_SEED = 515
 ACTUATOR_PROFILE = "sa1_delay_only"
 EXPECTED_VLP16_MODE = "full"
-NARROW_MODE = "sealed"
-NARROW_STAGE = 5
-NARROW_ARENA = 10.0
-CORRIDOR_KINEMATICS = "wander"
-
 # Deployment acceptance is exactly d=0/1/2. Actuator-off is a separate,
 # single-seed diagnostic because enabling the d=0 action term consumes RNG and
 # therefore is not a trajectory-paired identity arm.
@@ -81,20 +77,51 @@ _DELAY_STEPS: dict[str, int | None] = {
     "d2": 2,
 }
 
-CORRIDOR_MODES: tuple[str, ...] = (
-    "lateral",
-    "longitudinal",
-    "random_2d",
-    "mixed_iid",
-)
-SCENARIOS: tuple[str, ...] = ("gate2", "narrow_sealed") + tuple(
-    f"corridor_{mode}" for mode in CORRIDOR_MODES
-)
+BLOCKING_SCENARIOS: tuple[str, ...] = ("nav20_clean",)
+ADVISORY_SCENARIOS: tuple[str, ...] = ("nav20_native",)
+SCENARIOS: tuple[str, ...] = BLOCKING_SCENARIOS + ADVISORY_SCENARIOS
 SCREEN_CHECKPOINT_ITERATIONS: tuple[int, ...] = (1500, 1700, 1900, 2109)
 
+_SCENE_CONTRACTS = {
+    "nav20_clean": {
+        "mode": "clean",
+        "blocking": True,
+        "arena_size_m": 20.0,
+        "goals": 1,
+        "goal_movement": False,
+        "goal_distance_range_m": [2.0, 9.0],
+        "static_obstacles": 0,
+        "dynamic_obstacles": 0,
+        "internal_walls": 0,
+    },
+    "nav20_native": {
+        "mode": "native",
+        "blocking": False,
+        "arena_size_m": 20.0,
+        "goals": 1,
+        "goal_movement": False,
+        "goal_distance_range_m": [2.0, 9.0],
+        "static_obstacles": 2,
+        "dynamic_obstacles": 0,
+        "internal_walls": 0,
+    },
+}
+_THRESHOLDS = {
+    "nav20_clean": {
+        "success_rate_min": 0.98,
+        "collision_rate_max": 0.015,
+        "timeout_rate_max": 0.005,
+    },
+    "nav20_native": {
+        "success_rate_min": 0.90,
+        "collision_rate_max": 0.08,
+        "timeout_rate_max": 0.03,
+    },
+}
+
 _REPORT_NAMES = {
-    "gate2": "gate2_suite.json",
-    "narrow_sealed": "narrow_path_suite.json",
+    "nav20_clean": "nav20_clean_suite.json",
+    "nav20_native": "nav20_native_suite.json",
 }
 
 
@@ -133,25 +160,16 @@ def _actuator_args(delay_condition: str) -> list[str]:
 
 
 def runner_name(scenario: str) -> str:
-    if scenario == "gate2":
-        return "run_gate2_suite.py"
-    if scenario == "narrow_sealed":
-        return "run_narrow_path_suite.py"
-    if scenario.startswith("corridor_"):
-        mode = scenario.removeprefix("corridor_")
-        if mode in CORRIDOR_MODES:
-            return "run_corridor_motion_suite.py"
+    if scenario in SCENARIOS:
+        return "run_sa1_nav20_suite.py"
     raise ValueError(f"unknown scenario {scenario!r}")
 
 
 def report_name(scenario: str) -> str:
-    if scenario in _REPORT_NAMES:
+    try:
         return _REPORT_NAMES[scenario]
-    if scenario.startswith("corridor_"):
-        mode = scenario.removeprefix("corridor_")
-        if mode in CORRIDOR_MODES:
-            return "corridor_motion_suite.json"
-    raise ValueError(f"unknown scenario {scenario!r}")
+    except KeyError as exc:
+        raise ValueError(f"unknown scenario {scenario!r}") from exc
 
 
 def build_command(cell: Cell, output_dir: Path) -> list[str]:
@@ -169,29 +187,9 @@ def build_command(cell: Cell, output_dir: Path) -> list[str]:
         *_actuator_args(cell.delay_condition),
     ]
 
-    if cell.scenario == "gate2":
-        extra: list[str] = []
-    elif cell.scenario == "narrow_sealed":
-        extra = [
-            "--mode",
-            NARROW_MODE,
-            "--stage",
-            str(NARROW_STAGE),
-            "--arena-size",
-            str(NARROW_ARENA),
-        ]
-    elif cell.scenario.startswith("corridor_"):
-        mode = cell.scenario.removeprefix("corridor_")
-        if mode not in CORRIDOR_MODES:
-            raise ValueError(f"unknown corridor mode {mode!r}")
-        extra = [
-            "--modes",
-            mode,
-            "--random-2d-kinematics",
-            CORRIDOR_KINEMATICS,
-        ]
-    else:
+    if cell.scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario {cell.scenario!r}")
+    extra = ["--mode", cell.scenario.removeprefix("nav20_")]
 
     return [str(ISAAC_PYTHON), str(RUNNER_DIR / runner_name(cell.scenario)), *common, *extra]
 
@@ -205,7 +203,7 @@ def screening_matrix(checkpoints: Sequence[Path]) -> list[Cell]:
 
 
 def acceptance_matrix(checkpoints: Sequence[Path]) -> list[Cell]:
-    """Official fixed-delay matrix: 6 scenarios x 3 delays x 3 seeds."""
+    """Fixed-delay matrix: blocking clean plus advisory native Nav20."""
     return [
         Cell(checkpoint, scenario, delay, seed, stage="B")
         for checkpoint in checkpoints
@@ -247,6 +245,7 @@ REQUIRED_RESULT_KEYS = (
     "stage",
     "checkpoint",
     "scenario",
+    "blocking",
     "delay_condition",
     "actuator_profile",
     "seed",
@@ -339,49 +338,57 @@ def _source_report_data(cell: Cell, report: dict) -> dict:
                 )
 
     try:
-        if cell.scenario == "gate2":
-            aggregate = report["aggregate"]
-            extracted = {
-                "episodes_completed": aggregate["n"],
-                "sr": aggregate["sr"],
-                "cr": aggregate["cr"],
-                "timeout": aggregate["to"],
-                "gate_pass": report["pass"],
-                "structural_pass": True,
-                "thresholds": report["thresholds"],
-                "action_stability": report["action_stability"],
-            }
-        elif cell.scenario == "narrow_sealed":
-            aggregate = report["aggregate"]
-            extracted = {
-                "episodes_completed": aggregate["episodes"],
-                "sr": aggregate["sr"],
-                "cr": aggregate["cr"],
-                "timeout": aggregate["to"],
-                "gate_pass": report["pass"],
-                "structural_pass": True,
-                "thresholds": report["thresholds"],
-                "action_stability": None,
-            }
+        mode = cell.scenario.removeprefix("nav20_")
+        if report["mode"] != mode:
+            problems.append(
+                f"source Nav20 mode {report['mode']!r}, expected {mode!r}"
+            )
+        expected_blocking = cell.scenario in BLOCKING_SCENARIOS
+        if report["blocking"] is not expected_blocking:
+            problems.append(
+                f"source blocking={report['blocking']!r}, "
+                f"expected {expected_blocking!r}"
+            )
+        scene_contract = report["scene_contract"]
+        expected_contract = _SCENE_CONTRACTS[cell.scenario]
+        if not isinstance(scene_contract, dict):
+            problems.append("source Nav20 scene_contract is not an object")
         else:
-            mode = cell.scenario.removeprefix("corridor_")
-            modes = report["modes"]
-            if set(modes) != {mode}:
-                problems.append(
-                    f"source corridor modes {sorted(modes)!r}, expected [{mode!r}]"
-                )
-            mode_report = modes[mode]
-            aggregate = mode_report["aggregate"]
-            extracted = {
-                "episodes_completed": aggregate["episodes"],
-                "sr": aggregate["success_rate"],
-                "cr": aggregate["collision_rate"],
-                "timeout": aggregate["timeout_rate"],
-                "gate_pass": mode_report["pass"],
-                "structural_pass": mode_report["structural_pass"],
-                "thresholds": report["thresholds"],
-                "action_stability": None,
-            }
+            for key, expected in expected_contract.items():
+                if scene_contract.get(key) != expected:
+                    problems.append(
+                        f"source scene_contract.{key}="
+                        f"{scene_contract.get(key)!r}, expected {expected!r}"
+                    )
+        aggregate = report["aggregate"]
+        thresholds = report["thresholds"]
+        expected_thresholds = _THRESHOLDS[cell.scenario]
+        if thresholds != expected_thresholds:
+            problems.append(
+                f"source thresholds={thresholds!r}, "
+                f"expected {expected_thresholds!r}"
+            )
+        expected_pass = bool(
+            aggregate["sr"] is not None
+            and aggregate["sr"] >= expected_thresholds["success_rate_min"]
+            and aggregate["cr"] <= expected_thresholds["collision_rate_max"]
+            and aggregate["to"] <= expected_thresholds["timeout_rate_max"]
+        )
+        if report["pass"] is not expected_pass:
+            problems.append(
+                f"source pass={report['pass']!r}, expected {expected_pass!r} "
+                "from frozen thresholds"
+            )
+        extracted = {
+            "episodes_completed": aggregate["n"],
+            "sr": aggregate["sr"],
+            "cr": aggregate["cr"],
+            "timeout": aggregate["to"],
+            "gate_pass": report["pass"],
+            "structural_pass": True,
+            "thresholds": thresholds,
+            "action_stability": report["action_stability"],
+        }
     except (KeyError, TypeError) as exc:
         problems.append(f"source report schema incomplete: {exc}")
         extracted = {
@@ -402,18 +409,12 @@ def _source_report_data(cell: Cell, report: dict) -> dict:
 
 
 def _log_paths(cell: Cell, output_dir: Path, report: dict) -> list[Path]:
-    if cell.scenario == "gate2":
-        raw_paths = report.get("logs")
-        if not isinstance(raw_paths, list) or len(raw_paths) != 1:
-            raise PreconditionError(
-                f"{cell.cell_id}: gate2 source report must contain one log"
-            )
-        paths = [Path(str(item)) for item in raw_paths]
-    elif cell.scenario == "narrow_sealed":
-        paths = [output_dir / f"narrow_s{cell.seed}.log"]
-    else:
-        mode = cell.scenario.removeprefix("corridor_")
-        paths = [output_dir / f"{mode}_s{cell.seed}.log"]
+    raw_paths = report.get("logs")
+    if not isinstance(raw_paths, list) or len(raw_paths) != 1:
+        raise PreconditionError(
+            f"{cell.cell_id}: Nav20 source report must contain one log"
+        )
+    paths = [Path(str(item)) for item in raw_paths]
 
     root = output_dir.resolve()
     resolved: list[Path] = []
@@ -484,6 +485,7 @@ def canonicalize_runner_result(
         "stage": cell.stage,
         "checkpoint": str(cell.checkpoint.expanduser().resolve()),
         "scenario": cell.scenario,
+        "blocking": cell.scenario in BLOCKING_SCENARIOS,
         "delay_condition": cell.delay_condition,
         "actuator_profile": ACTUATOR_PROFILE,
         "seed": cell.seed,
@@ -518,6 +520,16 @@ def validate_result(payload: dict, cell: Cell | None = None) -> list[str]:
         problems.append(f"num_envs={payload.get('num_envs')!r}, expected {NUM_ENVS}")
     if payload.get("steps") != STEPS:
         problems.append(f"steps={payload.get('steps')!r}, expected {STEPS}")
+    scenario = payload.get("scenario")
+    if scenario not in SCENARIOS:
+        problems.append(f"unknown scenario={scenario!r}")
+    else:
+        expected_blocking = scenario in BLOCKING_SCENARIOS
+        if payload.get("blocking") is not expected_blocking:
+            problems.append(
+                f"blocking={payload.get('blocking')!r}, "
+                f"expected {expected_blocking!r}"
+            )
 
     episodes = payload.get("episodes_completed")
     if isinstance(episodes, bool) or not isinstance(episodes, int) or episodes <= 0:
@@ -613,13 +625,13 @@ def validate_result(payload: dict, cell: Cell | None = None) -> list[str]:
         problems.append("started_at/finished_at must be populated")
 
     action_stability = payload.get("action_stability")
-    if payload.get("scenario") == "gate2":
+    if payload.get("scenario") in SCENARIOS:
         if not isinstance(action_stability, dict):
-            problems.append("Gate2 action_stability is missing or not an object")
+            problems.append("Nav20 action_stability is missing or not an object")
         else:
             aggregate = action_stability.get("aggregate")
             if not isinstance(aggregate, dict):
-                problems.append("Gate2 action_stability.aggregate is missing")
+                problems.append("Nav20 action_stability.aggregate is missing")
             else:
                 samples = aggregate.get("samples")
                 if (
@@ -655,7 +667,7 @@ def validate_result(payload: dict, cell: Cell | None = None) -> list[str]:
                             f"within [0, 1], got {value!r}"
                         )
     elif action_stability is not None:
-        problems.append("action_stability must be null outside Gate2")
+        problems.append("action_stability must be null outside Nav20")
 
     if cell is not None:
         expected = {
@@ -940,31 +952,66 @@ def _execute_cell(
 
 def summarize_results(payloads: Sequence[dict], stage: str) -> dict:
     """Create a non-deployment summary without averaging delay conditions."""
+    if stage in ("A", "O"):
+        expected_per_scenario = 1
+    elif stage == "B":
+        expected_per_scenario = len(DELAY_CONDITIONS) * len(SEEDS)
+    else:
+        raise ValueError(f"unknown stage {stage!r}")
+
     by_checkpoint: dict[str, list[dict]] = {}
     for payload in payloads:
         by_checkpoint.setdefault(str(payload["checkpoint"]), []).append(payload)
 
     candidates: list[dict] = []
     for checkpoint, records in by_checkpoint.items():
+        blocking_records = [
+            item
+            for item in records
+            if item["scenario"] in BLOCKING_SCENARIOS
+        ]
+        advisory_records = [
+            item
+            for item in records
+            if item["scenario"] in ADVISORY_SCENARIOS
+        ]
+        blocking_complete = (
+            len(blocking_records)
+            == expected_per_scenario * len(BLOCKING_SCENARIOS)
+        )
+        advisory_complete = (
+            len(advisory_records)
+            == expected_per_scenario * len(ADVISORY_SCENARIOS)
+        )
         candidate = {
             "checkpoint": checkpoint,
             "cells": len(records),
+            "expected_cells": expected_per_scenario * len(SCENARIOS),
+            "matrix_complete": blocking_complete and advisory_complete,
+            "blocking_cells_complete": blocking_complete,
+            "advisory_cells_complete": advisory_complete,
             "gate_passes": sum(bool(item["gate_pass"]) for item in records),
             "all_recorded_gates_pass": all(
                 bool(item["gate_pass"]) for item in records
             ),
+            "all_blocking_gates_pass": blocking_complete
+            and all(bool(item["gate_pass"]) for item in blocking_records),
+            "advisory_failures": sum(
+                not bool(item["gate_pass"]) for item in advisory_records
+            ),
         }
         if stage == "A":
-            candidate["worst_scenario_sr"] = min(
-                float(item["sr"]) for item in records
+            candidate["blocking_nav20_clean_sr"] = min(
+                float(item["sr"]) for item in blocking_records
             )
         candidates.append(candidate)
 
     if stage == "A":
         candidates.sort(
             key=lambda item: (
-                int(item["gate_passes"]),
-                float(item["worst_scenario_sr"]),
+                int(item["all_blocking_gates_pass"]),
+                float(item["blocking_nav20_clean_sr"]),
+                -int(item["advisory_failures"]),
                 int(Path(item["checkpoint"]).stem.split("_")[-1]),
             ),
             reverse=True,

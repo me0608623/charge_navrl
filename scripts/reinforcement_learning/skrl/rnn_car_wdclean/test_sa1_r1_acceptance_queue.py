@@ -19,7 +19,7 @@ OUT = Path("/tmp/out")
 
 
 def _cell(
-    scenario: str = "gate2",
+    scenario: str = "nav20_clean",
     delay: str = "d1",
     seed: int = 515,
     checkpoint: Path = CKPT,
@@ -43,23 +43,18 @@ def test_fixed_delay_commands_pin_the_neutral_profile(scenario, delay):
 
 
 def test_off_diagnostic_omits_only_the_delay_flag():
-    cmd = _cmd("gate2", q.OFF_CONDITION)
+    cmd = _cmd("nav20_clean", q.OFF_CONDITION)
     assert "--actuator-delay-steps" not in cmd
     assert cmd[cmd.index("--actuator-profile") + 1] == "sa1_delay_only"
 
 
-def test_narrow_and_corridor_contracts_are_explicit():
-    narrow = _cmd("narrow_sealed")
-    assert narrow[narrow.index("--mode") + 1] == "sealed"
-    assert narrow[narrow.index("--stage") + 1] == "5"
-    assert narrow[narrow.index("--arena-size") + 1] == "10.0"
-
-    random_2d = _cmd("corridor_random_2d")
-    assert random_2d[random_2d.index("--modes") + 1] == "random_2d"
-    assert (
-        random_2d[random_2d.index("--random-2d-kinematics") + 1]
-        == "wander"
-    )
+def test_clean_and_native_modes_are_explicit():
+    clean = _cmd("nav20_clean")
+    native = _cmd("nav20_native")
+    assert clean[clean.index("--mode") + 1] == "clean"
+    assert native[native.index("--mode") + 1] == "native"
+    assert clean[1].endswith("run_sa1_nav20_suite.py")
+    assert native[1].endswith("run_sa1_nav20_suite.py")
 
 
 def test_every_command_pins_seed_explicitly():
@@ -69,12 +64,12 @@ def test_every_command_pins_seed_explicitly():
 
 
 def test_matrix_shapes_keep_off_out_of_official_acceptance():
-    assert len(q.screening_matrix([CKPT])) == 6
+    assert len(q.screening_matrix([CKPT])) == 2
     acceptance = q.acceptance_matrix([CKPT])
-    assert len(acceptance) == 6 * 3 * 3 == 54
+    assert len(acceptance) == 2 * 3 * 3 == 18
     assert {cell.delay_condition for cell in acceptance} == {"d0", "d1", "d2"}
     off = q.off_regression_matrix([CKPT])
-    assert len(off) == 6
+    assert len(off) == 2
     assert {cell.delay_condition for cell in off} == {"off"}
     assert {cell.seed for cell in off} == {515}
 
@@ -96,28 +91,25 @@ def _ok_payload(
 ) -> dict:
     cell = cell or _cell()
     delay_steps = q._DELAY_STEPS[cell.delay_condition]
-    stability = (
-        {
-            "aggregate": {
-                "samples": 1024,
-                "omega_rms_rad_s": 0.2,
-                "full_steer_fraction": 0.01,
-                "ratio_flip_rate_mean": 0.03,
-                "worst_seed_ratio_flip_rate_p95": 0.10,
-                "worst_seed_omega_abs_std_p95_rad_s": 0.15,
-                "worst_seed_dominant_frequency_p95_hz": 0.5,
-                "worst_seed_max_same_sign_turn_p95_s": 1.2,
-            }
+    stability = {
+        "aggregate": {
+            "samples": 1024,
+            "omega_rms_rad_s": 0.2,
+            "full_steer_fraction": 0.01,
+            "ratio_flip_rate_mean": 0.03,
+            "worst_seed_ratio_flip_rate_p95": 0.10,
+            "worst_seed_omega_abs_std_p95_rad_s": 0.15,
+            "worst_seed_dominant_frequency_p95_hz": 0.5,
+            "worst_seed_max_same_sign_turn_p95_s": 1.2,
         }
-        if cell.scenario == "gate2"
-        else None
-    )
+    }
     return {
         "schema": q.SCHEMA,
         "cell_id": cell.cell_id,
         "stage": cell.stage,
         "checkpoint": str(cell.checkpoint.resolve()),
         "scenario": cell.scenario,
+        "blocking": cell.scenario in q.BLOCKING_SCENARIOS,
         "delay_condition": cell.delay_condition,
         "actuator_profile": q.ACTUATOR_PROFILE,
         "seed": cell.seed,
@@ -182,7 +174,7 @@ def test_runtime_markers_are_strict_for_fixed_delay_and_vlp():
     assert any("VLP16" in problem for problem in problems)
 
 
-def test_gate2_action_stability_fields_are_required():
+def test_nav20_action_stability_fields_are_required():
     payload = _ok_payload()
     del payload["action_stability"]["aggregate"]["omega_rms_rad_s"]
     assert any(
@@ -223,53 +215,24 @@ def _write_runtime_log(path: Path, delay: int = 1) -> None:
 
 def _source_report(cell: q.Cell, output: Path, gate_pass: bool) -> dict:
     actuator = q._expected_actuator_metadata(cell.delay_condition)
+    mode = cell.scenario.removeprefix("nav20_")
+    blocking = cell.scenario in q.BLOCKING_SCENARIOS
+    log = output / f"{mode}_s{cell.seed}.log"
+    _write_runtime_log(log, q._DELAY_STEPS[cell.delay_condition] or 0)
     common = {
         "checkpoint": str(cell.checkpoint.resolve()),
+        "mode": mode,
+        "blocking": blocking,
         "seeds": [cell.seed],
         "actuator_eval": actuator,
-        "thresholds": {},
+        "thresholds": dict(q._THRESHOLDS[cell.scenario]),
+        "scene_contract": dict(q._SCENE_CONTRACTS[cell.scenario]),
     }
-    if cell.scenario == "gate2":
-        log = output / f"det_s{cell.seed}.log"
-        _write_runtime_log(log, q._DELAY_STEPS[cell.delay_condition] or 0)
-        return common | {
-            "aggregate": {"n": 100, "sr": 0.8, "cr": 0.2, "to": 0.0},
-            "action_stability": _ok_payload(cell=cell)["action_stability"],
-            "pass": gate_pass,
-            "logs": [str(log)],
-        }
-    if cell.scenario == "narrow_sealed":
-        _write_runtime_log(
-            output / f"narrow_s{cell.seed}.log",
-            q._DELAY_STEPS[cell.delay_condition] or 0,
-        )
-        return common | {
-            "aggregate": {
-                "episodes": 100,
-                "sr": 0.8,
-                "cr": 0.2,
-                "to": 0.0,
-            },
-            "pass": gate_pass,
-        }
-    mode = cell.scenario.removeprefix("corridor_")
-    _write_runtime_log(
-        output / f"{mode}_s{cell.seed}.log",
-        q._DELAY_STEPS[cell.delay_condition] or 0,
-    )
     return common | {
-        "modes": {
-            mode: {
-                "aggregate": {
-                    "episodes": 100,
-                    "success_rate": 0.8,
-                    "collision_rate": 0.2,
-                    "timeout_rate": 0.0,
-                },
-                "pass": gate_pass,
-                "structural_pass": True,
-            }
-        }
+        "aggregate": {"n": 100, "sr": 0.8, "cr": 0.2, "to": 0.0},
+        "action_stability": _ok_payload(cell=cell)["action_stability"],
+        "pass": gate_pass,
+        "logs": [str(log)],
     }
 
 
@@ -296,21 +259,39 @@ def test_all_runner_report_shapes_canonicalize(tmp_path, scenario):
     assert q.validate_result(payload, cell) == []
 
 
-def test_corridor_structural_failure_is_not_a_valid_policy_fail(tmp_path):
+def test_source_scene_contract_mismatch_fails_closed(tmp_path):
     checkpoint = tmp_path / "checkpoint_269952.pt"
     checkpoint.touch()
-    cell = _cell(scenario="corridor_random_2d", checkpoint=checkpoint)
+    cell = _cell(scenario="nav20_clean", checkpoint=checkpoint)
     output = tmp_path / "cell"
     output.mkdir()
     report = _source_report(cell, output, gate_pass=False)
-    report["modes"]["random_2d"]["structural_pass"] = False
+    report["scene_contract"]["mode"] = "native"
     (output / q.report_name(cell.scenario)).write_text(
         json.dumps(report), encoding="utf-8"
     )
-    payload = q.canonicalize_runner_result(
-        cell, output, ["runner"], 1, "start", "finish"
+    with pytest.raises(q.PreconditionError, match="scene_contract"):
+        q.canonicalize_runner_result(
+            cell, output, ["runner"], 1, "start", "finish"
+        )
+
+
+def test_source_relaxed_thresholds_fail_closed(tmp_path):
+    checkpoint = tmp_path / "checkpoint_269952.pt"
+    checkpoint.touch()
+    cell = _cell(scenario="nav20_clean", checkpoint=checkpoint)
+    output = tmp_path / "cell"
+    output.mkdir()
+    report = _source_report(cell, output, gate_pass=False)
+    report["thresholds"] = report["thresholds"] | {"success_rate_min": 0.50}
+    report["pass"] = True
+    (output / q.report_name(cell.scenario)).write_text(
+        json.dumps(report), encoding="utf-8"
     )
-    assert any("structural_pass" in p for p in q.validate_result(payload, cell))
+    with pytest.raises(q.PreconditionError, match="thresholds"):
+        q.canonicalize_runner_result(
+            cell, output, ["runner"], 0, "start", "finish"
+        )
 
 
 def _completed_metadata() -> dict:
@@ -378,14 +359,15 @@ def test_execute_queue_records_rc1_and_continues(tmp_path):
     checkpoint = tmp_path / "checkpoint_269952.pt"
     checkpoint.touch()
     cells = [
-        _cell("gate2", checkpoint=checkpoint),
-        _cell("narrow_sealed", checkpoint=checkpoint),
+        _cell("nav20_clean", checkpoint=checkpoint),
+        _cell("nav20_native", checkpoint=checkpoint),
     ]
     calls: list[str] = []
 
     def fake_runner(command, _console):
         output = Path(command[command.index("--output-dir") + 1])
-        scenario = "gate2" if "run_gate2_suite.py" in command[1] else "narrow_sealed"
+        mode = command[command.index("--mode") + 1]
+        scenario = f"nav20_{mode}"
         cell = next(item for item in cells if item.scenario == scenario)
         report = _source_report(cell, output, gate_pass=False)
         (output / q.report_name(scenario)).write_text(
@@ -404,7 +386,7 @@ def test_execute_queue_records_rc1_and_continues(tmp_path):
         )
         == 0
     )
-    assert calls == ["gate2", "narrow_sealed"]
+    assert calls == ["nav20_clean", "nav20_native"]
     assert len(list((tmp_path / "results").glob("*/cell.json"))) == 2
 
 
@@ -424,6 +406,33 @@ def test_summary_never_claims_deployable():
     summary = q.summarize_results([payload], "A")
     assert summary["deployable"] is False
     assert summary["python_torchscript_parity"] == "required_external_83d_k8_gate"
+    assert summary["candidates"][0]["all_blocking_gates_pass"] is True
+
+
+def test_native_failure_is_reported_but_does_not_fail_blocking_gate():
+    clean = _ok_payload(cell=_cell("nav20_clean"), gate_pass=True)
+    native = _ok_payload(cell=_cell("nav20_native"), gate_pass=False)
+    summary = q.summarize_results([clean, native], "A")
+    candidate = summary["candidates"][0]
+    assert candidate["all_recorded_gates_pass"] is False
+    assert candidate["all_blocking_gates_pass"] is True
+    assert candidate["advisory_failures"] == 1
+
+
+def test_incomplete_stage_b_cannot_pass_blocking_gate():
+    clean = _ok_payload(
+        cell=_cell("nav20_clean", delay="d0", seed=515, stage="B"),
+        gate_pass=True,
+    )
+    native = _ok_payload(
+        cell=_cell("nav20_native", delay="d0", seed=515, stage="B"),
+        gate_pass=True,
+    )
+    summary = q.summarize_results([clean, native], "B")
+    candidate = summary["candidates"][0]
+    assert candidate["matrix_complete"] is False
+    assert candidate["blocking_cells_complete"] is False
+    assert candidate["all_blocking_gates_pass"] is False
 
 
 def test_frozen_constants():
@@ -440,4 +449,4 @@ def test_unknown_scenario_and_delay_raise():
     with pytest.raises(ValueError):
         _cmd("does_not_exist")
     with pytest.raises(ValueError):
-        _cmd("gate2", "d9")
+        _cmd("nav20_clean", "d9")

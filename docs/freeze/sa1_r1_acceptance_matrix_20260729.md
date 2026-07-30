@@ -1,5 +1,10 @@
 # SA1 R1 Acceptance Matrix - Frozen Specification
 
+> **SUPERSEDED on 2026-07-29.** This document tested Stage-5 deployment
+> obstacle avoidance and is not an SA1 promotion specification. Use
+> `sa1_r1_nav20_acceptance_matrix_20260729.md`. Existing results from this
+> matrix are retained only as deployment stress diagnostics.
+
 - Initially frozen at: `2026-07-29T14:45+08:00`
 - Pre-execution audit revision: `2026-07-29T15:23+08:00`
 - Target run: `sa1_sim2real_v1_ne1024_s42_r1`
