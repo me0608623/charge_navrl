@@ -354,13 +354,25 @@ parser.add_argument("--narrow_replay_goal_lateral_offset_range", type=float, nar
 parser.add_argument("--narrow_replay_segment_length", type=float, default=9.0,
                     help="單段牆長 m（預設 9.0 對齊訓練；缺口偏移大時會自動加長）")
 parser.add_argument("--long_corridor_eval", action="store_true", default=False,
-                    help="部署走廊 Gate：4m 自由寬、10m 長、4 靜態+2 動態障礙")
+                    help="走廊 Gate：10m 長，自由寬與速度見 --long_corridor_free_width "
+                         "／--long_corridor_dynamic_speed_range（預設 4m 自由寬、"
+                         "0.30-0.60 m/s、4 靜態+2 動態＝部署 Gate 歷史值）")
 parser.add_argument("--long_corridor_output", type=str, default="",
                     help="部署走廊 Gate JSON 輸出路徑")
 parser.add_argument("--long_corridor_static_obstacles", type=int, default=4,
                     help="走廊診斷用靜態障礙數；正式 Gate 預設維持 4")
 parser.add_argument("--long_corridor_dynamic_obstacles", type=int, default=2,
                     help="走廊診斷用動態障礙數；正式 Gate 預設維持 2")
+parser.add_argument("--long_corridor_free_width", type=float, default=4.0,
+                    help="走廊自由寬度 m（預設 4.0 = 部署 Gate 歷史值）。"
+                         "stage-wise 課程各階不同（SA1=5.0、SA2=4.8、SA5=4.2、"
+                         "SA7/8=4.0），評測某階能力時必須傳該階的值，否則量到的"
+                         "是別階的題型。長度固定 10.0 m，不隨階段變。")
+parser.add_argument("--long_corridor_dynamic_speed_range", type=float, nargs=2,
+                    default=(0.30, 0.60),
+                    help="走廊動態障礙速度範圍 m/s（預設 0.30 0.60 = 部署 Gate "
+                         "歷史值）。stage-wise 課程各階不同（SA1=0.15-0.25、"
+                         "SA2=0.18-0.30、SA7/8=0.30-0.60）。")
 parser.add_argument(
     "--long_corridor_count_mix", type=str, default="",
     help="真實混合走廊：逐 env 抽 (靜態,動態)。格式 '3,1:0.25;4,2:0.35;...'。"
@@ -3101,14 +3113,31 @@ def main():
                 f"[PLAY] 走廊 count-mix: {_corridor_count_mix}",
                 flush=True,
             )
+        # Stage-wise geometry. The deployment Gate's 4.0 m / 0.30-0.60 m/s stay
+        # the defaults so every historical invocation is byte-identical, but a
+        # stage-specific evaluation must be able to ask for its own scene --
+        # grading SA2 on SA7's corridor is the same wrong-scenario error that
+        # Gate2 was for SA1.
+        _corridor_free_width = float(args_cli.long_corridor_free_width)
+        _corridor_speed_range = tuple(
+            float(v) for v in args_cli.long_corridor_dynamic_speed_range
+        )
+        if _corridor_free_width <= 0.0:
+            raise ValueError("--long_corridor_free_width must be positive")
+        if not (
+            0.0 < _corridor_speed_range[0] <= _corridor_speed_range[1]
+        ):
+            raise ValueError(
+                "--long_corridor_dynamic_speed_range must be positive and ordered"
+            )
         configure_long_corridor_assets(
             env_cfg,
             fraction=1.0,
-            free_width=4.0,
+            free_width=_corridor_free_width,
             length=10.0,
             static_obstacles=_corridor_static_obstacles,
             dynamic_obstacles=_corridor_dynamic_obstacles,
-            dynamic_speed_range=(0.30, 0.60),
+            dynamic_speed_range=_corridor_speed_range,
             dynamic_motion_mode=_corridor_motion_mode,
             random_2d_kinematics=(
                 args_cli.long_corridor_random_2d_kinematics
@@ -3128,11 +3157,14 @@ def main():
         args_cli.obstacle_behavior = "patrol"
         args_cli.obs_near_goal_count = 0
         args_cli.path_blocker_count = 0
+        # Print the values actually configured, never a hardcoded string: a
+        # runtime contract check that reads a constant banner verifies nothing.
         print(
-            "[PLAY] Deployment corridor gate: free_width=4.00m length=10.00m "
+            f"[PLAY] Deployment corridor gate: free_width={_corridor_free_width:.2f}m "
+            "length=10.00m "
             f"obstacles={_corridor_static_obstacles}S+"
             f"{_corridor_dynamic_obstacles}D motion={_corridor_motion_mode} "
-            "patrol=[0.30,0.60]m/s"
+            f"patrol=[{_corridor_speed_range[0]:.2f},{_corridor_speed_range[1]:.2f}]m/s"
         )
 
     # USD 場景切換（在場景參數套用之後，覆蓋 terrain + 停用牆壁 + 擴展 LiDAR）
@@ -3899,16 +3931,23 @@ def main():
         )
 
         _all_ids = torch.arange(raw_env.num_envs, device=device)
+        # Must mirror the env_cfg call above. These are two independent code
+        # paths writing the same scene; if only one is parameterised the built
+        # geometry silently disagrees with the configured geometry.
+        _install_free_width = float(args_cli.long_corridor_free_width)
+        _install_speed_range = tuple(
+            float(v) for v in args_cli.long_corridor_dynamic_speed_range
+        )
         setup_long_corridor_replay(
             raw_env,
             _all_ids,
             fraction=1.0,
-            free_width=4.0,
+            free_width=_install_free_width,
             length=10.0,
             static_obstacles=_corridor_static_obstacles,
             dynamic_obstacles=_corridor_dynamic_obstacles,
-            dynamic_speed_min=0.30,
-            dynamic_speed_max=0.60,
+            dynamic_speed_min=_install_speed_range[0],
+            dynamic_speed_max=_install_speed_range[1],
             dynamic_motion_mode=_corridor_motion_mode,
             dynamic_pause_steps_range=(
                 (0, 0) if args_cli.long_corridor_pause_mode == "zero" else None
@@ -6906,10 +6945,47 @@ def main():
                 )
                 else 0.0
             ),
+            # Derived from the measured per-step displacement, so it reflects
+            # what the obstacles did rather than what the config asked for.
+            # ONE-SIDED: pauses and blocking make a slow slot indistinguishable
+            # from a correctly-slow one, so only the upper bound is checkable.
+            # Reported, deliberately NOT folded into gate_pass -- that would
+            # change the verdict of every historical deployment-gate run.
+            "observed_max_dynamic_speed_m_s": float(
+                _long_corridor_motion_max.max().item() / float(raw_env.step_dt)
+                if (
+                    _long_corridor_motion_max is not None
+                    and _long_corridor_motion_max.numel() > 0
+                )
+                else 0.0
+            ),
+            "speed_upper_bound_pass": bool(
+                _long_corridor_motion_max is None
+                or _long_corridor_motion_max.numel() == 0
+                or (
+                    _long_corridor_motion_max.max().item()
+                    / float(raw_env.step_dt)
+                )
+                <= float(args_cli.long_corridor_dynamic_speed_range[1]) + 1e-3
+            ),
+            # Compare the *measured* wall geometry against what was requested,
+            # not against a literal. Hardcoding 4.0 here made every non-default
+            # free width report geometry_pass=False, i.e. a stage-correct scene
+            # was reported as structurally broken.
+            "requested_free_width_m": float(
+                args_cli.long_corridor_free_width
+            ),
+            "requested_length_m": 10.0,
+            "requested_dynamic_speed_range_m_s": [
+                float(v) for v in args_cli.long_corridor_dynamic_speed_range
+            ],
             "geometry_pass": bool(
                 torch.allclose(
                     _corridor_inner_width,
-                    torch.full_like(_corridor_inner_width, 4.0),
+                    torch.full_like(
+                        _corridor_inner_width,
+                        float(args_cli.long_corridor_free_width),
+                    ),
                     atol=1e-5,
                 )
                 and torch.allclose(
@@ -6945,8 +7021,11 @@ def main():
             "[LONG-CORRIDOR-METRICS] "
             f"episodes={stats_total} SR={_corridor_sr:.1%} "
             f"CR={_corridor_cr:.1%} TO={_corridor_to:.1%} "
-            f"width={_corridor_report['free_width_m_mean']:.3f}m "
+            f"width={_corridor_report['free_width_m_mean']:.3f}m"
+            f"/req{_corridor_report['requested_free_width_m']:.2f} "
             f"length={_corridor_report['length_m_mean']:.3f}m "
+            f"v_max={_corridor_report['observed_max_dynamic_speed_m_s']:.3f}m/s"
+            f"/req{_corridor_report['requested_dynamic_speed_range_m_s'][1]:.2f} "
             f"dynamic_moved={_corridor_report['dynamic_slots_moved_fraction']:.1%} "
             f"motion={_corridor_report['dynamic_motion_mode']} "
             f"motion_ok={_corridor_report['motion_mode_pass']} "
