@@ -13,6 +13,20 @@ AUTO_SUPERVISOR="$REPO/scripts/reinforcement_learning/skrl/monitoring/auto_advan
 AUTO_STATE="$STATE_DIR/auto_advance_state.json"
 PYTHON="/home/aa/miniconda3/envs/env_isaaclab/bin/python"
 
+resolve_training_log() {
+  local run_name="$1"
+  local console_log="$REPO/logs/rnn_car/${run_name}.console.log"
+  local legacy_log="/tmp/${run_name}.log"
+
+  if [[ -f "$console_log" ]]; then
+    printf '%s\n' "$console_log"
+  elif [[ -f "$legacy_log" ]]; then
+    printf '%s\n' "$legacy_log"
+  else
+    printf '%s\n' "$console_log"
+  fi
+}
+
 mkdir -p "$STATE_DIR"
 
 exec 9>"$LOCK_FILE"
@@ -29,7 +43,7 @@ status="UNSPECIFIED"
   printf 'expected_run=%s status=%s\n' "${expected_run:-<none>}" "$status"
 
   mapfile -t train_pids < <(
-    pgrep -f '^/[^ ]*/python(3([.][0-9]+)?)? .*train_rnn_car_wdclip[.]py( |$)' || true
+    pgrep -f '^/[^ ]*/python(3([.][0-9]+)?)? ([-][^ ]+ )*[^ ]*train_rnn_car_wdclip[.]py( |$)' || true
   )
   if ((${#train_pids[@]} == 0)); then
     if [[ -n "$expected_run" ]]; then
@@ -49,7 +63,7 @@ status="UNSPECIFIED"
         printf 'ALERT active run does not match expected_run\n'
       fi
 
-      log_file="/tmp/${run_name}.log"
+      log_file="$(resolve_training_log "$run_name")"
       if [[ -n "$run_name" && -f "$log_file" ]]; then
         progress="$(rg -a '\[[[:space:]]*[0-9]+/[0-9]+\].*fps=' "$log_file" | tail -n 1 || true)"
         printf 'LATEST %s\n' "${progress:-<no rollout line>}"
