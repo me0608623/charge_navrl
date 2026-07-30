@@ -2143,6 +2143,44 @@ def ppo_update_continuous(policy, value_fn, buffer, optimizer, epochs, mini_batc
 # WandB Metrics
 # ============================================================================
 
+# Scene identity for per-scene SR/CR/TO. Order fixes the integer id used by
+# ``scene_ids_from_env``; ``native`` is the fallback for environments that no
+# replay mask claims, so the four ids partition the env set exactly.
+SCENE_NAMES: tuple[str, ...] = ("native", "narrow", "corridor", "sa5_general")
+_SCENE_ID = {name: i for i, name in enumerate(SCENE_NAMES)}
+
+
+def scene_ids_from_env(env_unwrapped, num_envs: int, device) -> torch.Tensor:
+    """Snapshot per-env scene identity. MUST be called before ``env.step()``.
+
+    ``env.step()`` resets finished environments, so a mask read afterwards can
+    describe the episode that just started rather than the one that ended.
+    Overlapping masks are a wiring bug, not something to resolve by priority, so
+    they raise here rather than being silently folded into one scene.
+    """
+    template = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    previous = getattr(env_unwrapped, "_previous_stage_replay_active", template)
+    corridor = getattr(env_unwrapped, "_long_corridor_active", template)
+    narrow = getattr(env_unwrapped, "_narrow_bridge_active", template)
+
+    overlap = (
+        (previous & corridor) | (previous & narrow) | (corridor & narrow)
+    )
+    if bool(overlap.any()):
+        raise RuntimeError(
+            "scene replay masks overlap for "
+            f"{int(overlap.sum().item())} envs; per-scene metrics would "
+            "double-count these episodes"
+        )
+
+    ids = torch.full(
+        (num_envs,), _SCENE_ID["native"], dtype=torch.long, device=device
+    )
+    ids[narrow] = _SCENE_ID["narrow"]
+    ids[corridor] = _SCENE_ID["corridor"]
+    ids[previous] = _SCENE_ID["sa5_general"]
+    return ids
+
 
 class MetricsCollector:
     """Warp Drive 風格完整指標收集器。
@@ -2288,6 +2326,17 @@ class MetricsCollector:
         self._total_eps = 0
         self._first_step_deaths = 0   # dies_at_birth: done at step <= 2
 
+        # --- Per-scene termination counters (exact per-env, not rate-derived) ---
+        # The global counters above are reconstructed from Isaac Lab's aggregated
+        # Episode_Termination/ rates. These are counted per environment from the
+        # reward breakdown plus terminated/truncated, so each scene owns its
+        # denominator and no episode is attributed to two scenes.
+        self._scene_counts: dict[str, dict[str, int]] = {
+            name: {"episodes": 0, "goal": 0, "collision": 0,
+                   "timeout": 0, "other": 0}
+            for name in SCENE_NAMES
+        }
+
         # --- Reward term accumulators (Isaac Lab Episode_Reward/) ---
         self._reward_terms: dict[str, list[float]] = {}
 
@@ -2374,7 +2423,10 @@ class MetricsCollector:
              reward_breakdown: dict[str, torch.Tensor] | None = None,
              goal_diagnostics: dict[str, torch.Tensor] | None = None,
              charge_actions: dict[str, torch.Tensor] | None = None,
-             rollout_step: int | None = None):
+             rollout_step: int | None = None,
+             scene_id: torch.Tensor | None = None,
+             terminated_flat: torch.Tensor | None = None,
+             truncated_flat: torch.Tensor | None = None):
         """記錄一個 env step 的所有指標。在每個 rollout step 結束後呼叫。
 
         Args:
@@ -2388,6 +2440,10 @@ class MetricsCollector:
             goal_diagnostics: compute_goal_diagnostics 返回的診斷 dict
             charge_actions:  compute_charge_action_diagnostics 返回的物理動作診斷
             rollout_step:    當前 rollout 內的步數（用於 action table 的時間戳）
+            scene_id:        [E] 場景身分，**必須在 env.step() 之前快照**
+                             （見 scene_ids_from_env）。None = 停用分場景指標
+            terminated_flat: [E] 真 terminal（撞/到達），分場景 timeout 判定用
+            truncated_flat:  [E] 截斷（時限到），分場景 timeout 判定用
         """
         self._ep_reward += reward.reshape(-1)
         self._ep_length += 1.0
@@ -2716,6 +2772,49 @@ class MetricsCollector:
                 # dies_at_birth: episode ended within 2 steps
                 if self._ep_length[idx].item() <= 2:
                     self._first_step_deaths += 1
+
+                # --- Per-scene attribution (exact, one episode -> one scene) ---
+                if scene_id is not None and reward_breakdown is not None:
+                    goal = bool(reward_breakdown["goal_reached"][idx])
+                    collided = bool(
+                        reward_breakdown["wall_collision"][idx]
+                        or reward_breakdown["obs_collision"][idx]
+                    )
+                    other = bool(reward_breakdown.get(
+                        "other_death",
+                        torch.zeros_like(reward_breakdown["goal_reached"]),
+                    )[idx])
+                    # Timeout is truncation without a terminal event. It is not
+                    # taken from reward_breakdown: clean_progress drops the
+                    # `timeout` and `done` keys when it merges the masks, so a
+                    # lookup there would silently read nothing.
+                    timed_out = bool(
+                        truncated_flat[idx] and not terminated_flat[idx]
+                    ) if (
+                        truncated_flat is not None
+                        and terminated_flat is not None
+                    ) else False
+
+                    hits = int(goal) + int(collided) + int(timed_out) + int(other)
+                    if hits != 1:
+                        raise RuntimeError(
+                            f"env {int(idx)} ended with {hits} outcome classes "
+                            f"(goal={goal} collision={collided} "
+                            f"timeout={timed_out} other={other}); per-scene "
+                            "metrics require exactly one"
+                        )
+                    bucket = self._scene_counts[
+                        SCENE_NAMES[int(scene_id[idx])]
+                    ]
+                    bucket["episodes"] += 1
+                    if goal:
+                        bucket["goal"] += 1
+                    elif collided:
+                        bucket["collision"] += 1
+                    elif timed_out:
+                        bucket["timeout"] += 1
+                    else:
+                        bucket["other"] += 1
             self._ep_reward[ids] = 0.0
             self._ep_length[ids] = 0.0
             self._ep_steps_alive[ids] = 0.0
@@ -2776,6 +2875,22 @@ class MetricsCollector:
         total_col = self._collision + eps
         m["charge/VR_wall"] = self._wall_collision / total_col
         m["charge/VR_obstacle"] = self._obstacle_collision / total_col
+
+        # --- Per-scene SR/CR/TO -------------------------------------------
+        # Each scene divides by its own completed-episode count, so the rates
+        # are comparable across scenes even though the mix is uneven. A scene
+        # with no completed episodes emits nothing rather than a fake 0.0.
+        for _scene in SCENE_NAMES:
+            _c = self._scene_counts[_scene]
+            _n = _c["episodes"]
+            if _n == 0:
+                continue
+            m[f"scene/{_scene}/episodes"] = _n
+            m[f"scene/{_scene}/sr"] = _c["goal"] / _n
+            m[f"scene/{_scene}/cr"] = _c["collision"] / _n
+            m[f"scene/{_scene}/timeout"] = _c["timeout"] / _n
+            if _c["other"]:
+                m[f"scene/{_scene}/other_death"] = _c["other"] / _n
 
         # --- Goal-directed behavior diagnostics ---
         if self._completed_goal_start_dist:
@@ -3007,6 +3122,9 @@ class MetricsCollector:
         self._tipped_over = 0
         self._total_eps = 0
         self._first_step_deaths = 0
+        for _sc in self._scene_counts.values():
+            for _k in _sc:
+                _sc[_k] = 0
         self._reward_terms.clear()
         self._obs_speeds.clear()
         self._obs_distances.clear()
@@ -3273,14 +3391,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             ) or 0.0),
         )
 
-    # SA5 narrow-passage bridge: add two dedicated wall assets before gym.make
-    # and enable the last reset event. Reward, network, PPO and DR stay untouched.
+    # Narrow-passage replay: add two dedicated wall assets before gym.make and
+    # enable the last reset event. Stage-specific shares are owned by the config.
     _narrow_fraction = float(getattr(args_cli, "narrow_passage_fraction", 0.0))
     if _narrow_fraction > 0.0:
-        if not (0.10 <= _narrow_fraction <= 0.15):
+        if not (0.0 < _narrow_fraction <= 0.20):
             raise ValueError(
-                "narrow_passage_fraction must stay in [0.10, 0.15] for the "
-                f"accepted SA5 bridge, got {_narrow_fraction}"
+                "narrow_passage_fraction must stay in (0, 0.20], got "
+                f"{_narrow_fraction}"
             )
         from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.narrow_passage_bridge import (
             configure_narrow_passage_assets,
@@ -5960,6 +6078,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     _narrow_imitation_mask_step = _ni_geom["active"].clone()
 
             # --- 2. Env step ---
+            # Scene identity must be sampled before the step: env.step() resets
+            # finished environments, so the masks afterwards may already belong
+            # to the next episode.
+            _scene_id_step = scene_ids_from_env(env.unwrapped, num_envs, device)
             next_obs, reward, terminated, truncated, info = env.step(actions.float())
             _audit_long_corridor_goal()
             done = (terminated.squeeze(-1) | truncated.squeeze(-1)).float()  # [E] episode 結束(term|trunc, reset/stats/aux 用)
@@ -6286,7 +6408,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                          reward_breakdown=reward_breakdown,
                          goal_diagnostics=goal_diagnostics,
                          charge_actions=charge_action_diagnostics,
-                         rollout_step=step)
+                         rollout_step=step,
+                         scene_id=_scene_id_step,
+                         terminated_flat=terminated.squeeze(-1).bool(),
+                         truncated_flat=truncated.squeeze(-1).bool())
 
             # --- 6. Update states（更新 RNN hidden state + episode reset 處理）---
             rnn_state.update(new_hidden)    # 把新的 hidden state 存回 RNNStateManager
@@ -8310,6 +8435,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         f"corridor={_corridor_mask.float().mean().item():.1%} "
                         "overlap=0"
                     )
+                # REPLAY-MIX above is mask occupancy, not performance. SCENE-SR
+                # below reports the outcome of episodes that actually finished
+                # in each scene, each divided by its own episode count. Read
+                # from `wd` so the console always matches what is logged.
+                _scene_line = " ".join(
+                    f"{_s}: SR={wd[f'scene/{_s}/sr']:.1%} "
+                    f"CR={wd[f'scene/{_s}/cr']:.1%} "
+                    f"TO={wd[f'scene/{_s}/timeout']:.1%} "
+                    f"n={int(wd[f'scene/{_s}/episodes'])}"
+                    for _s in SCENE_NAMES
+                    if f"scene/{_s}/episodes" in wd
+                )
+                if _scene_line:
+                    print(f"  SCENE-SR: {_scene_line}")
                 if _corridor_adapter_enabled:
                     print(
                         "  CORRIDOR-ADAPTER: "
@@ -8870,6 +9009,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "policy_loss": float(charge_ppo_loss),
             "vf": float(charge_vf_loss),
             "entropy": float(charge_entropy),
+            # Per-scene SR/CR/TO. Absent scenes are omitted rather than written
+            # as 0.0, so a missing key means "no episode finished there this
+            # iteration", not "everything failed".
+            **{
+                _k: float(_v)
+                for _k, _v in wd.items()
+                if _k.startswith("scene/") and _k.count("/") == 2
+            },
+            "total_episodes": float(wd.get("charge/total_episodes", 0.0)),
             "kl": float(wd_update_monitor.get("rl/approx_kl", 0.0)),
             "clip_fraction": float(wd_update_monitor.get("rl/clip_fraction", 0.0)),
             "encoder_grad": float(wd_update_monitor.get("rl_encoder/grad_norm_pre_clip", 0.0)),
