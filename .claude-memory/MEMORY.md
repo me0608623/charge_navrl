@@ -6,6 +6,9 @@
 - Vector Store: `~/.claude-mem/chroma/` (Semantic search)
 - Worker: `localhost:37777` (auto-launched)
 
+## Active / Open (2026-07-28) — Fresh SA1 sim-to-real v1
+- [project_sa1_sim2real_v1_20260728.md](project_sa1_sim2real_v1_20260728.md) — **目前權威訓練主線**：W1-c10 實車舞龍舞獅後停止 warm-start，從 SA1 隨機初始化共同訓練 native 78% + 1.2–1.4m 窄縫 12% + 4×10m 走廊 10% + 實測 VLP16 full noise + actuator delay U{0,1,2}=0/200/400ms；83D/K8、RNN 不進 policy；R1 `sa1_sim2real_v1_ne1024_s42_r1` 正式長訓練中，W&B `gxtcgj3y`；`Linger=yes`。
+
 ## 🔬 走廊密度混合與行人互動 (07-27)
 - [finding_sa7_corridor_ceiling_gate_results.md](finding_sa7_corridor_ceiling_gate_results.md) — ★★★SA7-r3四候選正式gate全FAIL(SA8未啟動);窄縫Gate5a 100%但走廊卡住;最弱是longitudinal非random_2d;訓練SR最低的c90走廊最強
 - [project_sa7_corridor_density_mix.md](project_sa7_corridor_density_mix.md) — ★★SA7已啟動(1024env/s42):走廊改逐env密度混合(平均動態2.25,retention非壓測)+行人互動;commit 5a7acb2e600
@@ -36,8 +39,8 @@
 ## Active / Open (2026-07-26) — Corridor random_2d root-cause audit
 - [finding_corridor_d1_random2d_pause_model_mismatch.md](finding_corridor_d1_random2d_pause_model_mismatch.md) — **目前權威裁決**：D1 `30/10/60` 永久封存，D0 `checkpoint_3840.pt` 保持主基準；c10 只作診斷。下一步先做 evaluator-only `pause=default vs zero` 三 seed A/B + motion-phase collision audit，未通過因果門檻前禁止改 reward、開 D2 或再掃 replay 權重。
 
-## Active / Open (2026-07-27) — N1 到部署的窄口主路線
-- [project_n1_nearfield_sidegap_actuator_roadmap.md](project_n1_nearfield_sidegap_actuator_roadmap.md) — **目前權威未來順序**：先完成不改 LiDAR 的 N1（固定牆 1.2–1.4m、goal 距牆 U[2,4]m/橫偏 U[-1.5,1.5]m、scripted teacher 學先穿縫再轉向；no-update shadow 已凍結 CE λ=0.067）→ 依實車 0.30m 稀疏點雲修 hard `r_min=0.5` → 4m 走廊 1.0–1.6m 靜態側窄口 → 動態牆人 pass/yield（1.0m 非必穿）→ 最後 actuator delay U{0,1,2} steps；`obs_delay_steps=(0,0)` 永遠維持關。
+## Superseded / Historical (2026-07-27) — N1 到部署的窄口路線
+- [project_n1_nearfield_sidegap_actuator_roadmap.md](project_n1_nearfield_sidegap_actuator_roadmap.md) — 2026-07-27 的歷史順序，已於 2026-07-28 被 fresh SA1 sim-to-real v1 取代；N1/SA8/λ 維持 HOLD，不可再依「最後才加 actuator delay」啟動訓練。
 
 ## Active / Open (2026-07-13) — SA3 deploy_dense 崩塌
 - [finding_sa3_deploy_dense_value_led_collapse_20260713.md](finding_sa3_deploy_dense_value_led_collapse_20260713.md) — **必讀**：tzq22v0w 二次崩（value-led）、①不通過、②暫停；主嫌 mean_only+A2C+進場 LR 非網路結構；Obsidian 全文見 vault `bug/2026-07-13_sa3_deploy_dense_二次崩塌_actor_critic訓練規則.md`

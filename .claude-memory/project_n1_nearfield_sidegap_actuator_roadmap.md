@@ -4,11 +4,17 @@ description: N1直穿後依序修近場LiDAR、4m走廊側窄口、動態牆人�
 metadata:
   node_type: memory
   type: project
-  status: active
+  status: superseded
   date: 2026-07-27
 ---
 
 # N1 → 近場 LiDAR → 走廊側窄口 → 動態牆人窄口 → actuator bridge
+
+> **2026-07-28 狀態更正：此路線保留作歷史，不再是目前執行順序。**
+> W1-c10 實車出現舞龍舞獅、突然大腳命令與撞牆後，主線改為
+> [[project_sa1_sim2real_v1_20260728]]：從 SA1 隨機初始化，同時納入窄縫、
+> 長走廊、實測 VLP-16 雜訊與 actuator delay U{0,1,2}。N1、SA8 與
+> λ=0.067 維持 HOLD；禁止依下方「最後才做 actuator bridge」再開新 run。
 
 這是 2026-07-27 用戶核准的未來主方向。權威完整規格：
 `docs/n1_nearfield_sidegap_actuator_roadmap_for_codex.md`，Obsidian：
