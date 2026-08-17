@@ -42,6 +42,7 @@ from .long_corridor_replay_geometry import (
     sample_dynamic_trajectories,
     normalize_dynamic_motion_weights,
     sample_obstacle_layout,
+    static_layout_id,
     validate_dynamic_motion_mode,
     validate_obstacle_counts,
     validate_spec,
@@ -312,6 +313,16 @@ def _ensure_state(env) -> None:
     env._long_corridor_dynamic_motion_type = torch.full(
         (env.num_envs, MAX_CORRIDOR_DYNAMIC), -1, dtype=torch.long, device=env.device
     )
+    # Static-skeleton identity, per env, for the episode currently installed.
+    # The sampler places static obstacles on a fixed lattice (|x| = static_x,
+    # y = static_y rows) plus a small jitter, and mirrors the whole x pattern
+    # with p = 0.5. The discrete identity is therefore the sign pattern of the
+    # static x column, encoded as a bitmask: bit i is set when slot i sits at
+    # +x. -1 means "no corridor layout installed".
+    # Diagnostic only: nothing reads this to choose actions or rewards.
+    env._long_corridor_static_layout_id = torch.full(
+        (env.num_envs,), -1, dtype=torch.long, device=env.device
+    )
     # per-env 狀態，不是「最後一批 reset」的快照。用全域欄位存 counts 的話，
     # 每次 reset 都會被不同長度的張量整個蓋掉，事後無法按 global env ID
     # 把 episode 歸因到它當時真正的密度/互動型態。
@@ -413,6 +424,7 @@ def _hide_corridor_walls(env, env_ids: torch.Tensor) -> None:
     env._long_corridor_pending_obstacles[env_ids] = False
     env._long_corridor_obstacles_ready[env_ids] = False
     env._long_corridor_dynamic_motion_type[env_ids] = -1
+    env._long_corridor_static_layout_id[env_ids] = -1
     _clear_corridor_metadata(env, env_ids)
     origins = env.scene.env_origins[env_ids]
     for name in _ASSET_NAMES:
@@ -700,6 +712,11 @@ def _install_obstacles(
         scheduler.positions[selected, static_slots] = static[
             :, :static_obstacles
         ]
+        env._long_corridor_static_layout_id[selected] = static_layout_id(
+            static[:, :static_obstacles]
+        )
+    else:
+        env._long_corridor_static_layout_id[selected] = 0
 
     if dynamic_obstacles > 0:
         dynamic_slots = slice(4, 4 + dynamic_obstacles)
@@ -867,6 +884,11 @@ def _install_mixed_density_obstacles(
         torch.full_like(static_mask, BEHAVIOR_INACTIVE, dtype=torch.long),
     ).to(scheduler.behavior_type.dtype)
     scheduler.positions[selected, static_slots] = static * static_mask[..., None]
+    # Mixed density installs every slot, so the active count must be passed in
+    # explicitly; without it two densities would share one layout id.
+    env._long_corridor_static_layout_id[selected] = static_layout_id(
+        static * static_mask[..., None], static_mask.sum(dim=-1)
+    )
 
     scheduler.behavior_type[selected, dynamic_slots] = torch.where(
         dynamic_mask,

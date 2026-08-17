@@ -747,3 +747,44 @@ def sample_conflict_free_layout(
         f"{max_tries} tries for {int((~clean).sum().item())} envs "
         f"(mode={mode!r}); refusing to install an overlapped scene"
     )
+
+
+def static_layout_id(
+    static_xy: torch.Tensor,
+    active_counts: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Encode the discrete static skeleton as ``active * 100 + sign_bitmask``.
+
+    ``static_xy`` is ``[count, slots, 2]``. Bit ``i`` of the mask is set when
+    slot ``i`` sits at ``+x``; inactive slots are parked at ``x = 0`` and so
+    read as bit 0. The number of *active* static obstacles is folded into the id
+    because the bitmask alone cannot separate densities — an all-negative
+    2-obstacle layout and an all-negative 3-obstacle layout are both mask 0.
+
+    ``active_counts`` is required whenever ``static_xy`` carries inactive slots
+    (the mixed-density path passes all slots); when omitted the caller must have
+    already sliced to the active prefix, and ``slots`` is used as the count.
+
+    Purely diagnostic: the id never feeds an observation, reward or action.
+    """
+
+    if static_xy.ndim != 3 or static_xy.shape[-1] != 2:
+        raise ValueError("static_xy must have shape [count, slots, 2]")
+    count, slots = static_xy.shape[0], static_xy.shape[1]
+    if slots > 6:
+        raise ValueError("static layout id supports at most 6 static slots")
+    device = static_xy.device
+    if slots == 0:
+        return torch.zeros(count, dtype=torch.long, device=device)
+    bits = (static_xy[:, :, 0] > 0).long()
+    weights = 2 ** torch.arange(slots, device=device, dtype=torch.long)
+    mask = (bits * weights).sum(dim=-1)
+    if active_counts is None:
+        counts = torch.full((count,), slots, dtype=torch.long, device=device)
+    else:
+        counts = active_counts.reshape(-1).long()
+        if counts.numel() != count:
+            raise ValueError("active_counts must have one entry per env")
+    return counts * 100 + mask
+
+
