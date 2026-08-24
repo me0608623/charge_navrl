@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 
@@ -60,6 +61,37 @@ _GATE_ALIGNED_MODES = ("lateral", "longitudinal", "random_2d", "mixed_iid")
 
 _ASSET_NAMES = ("long_corridor_wall_0", "long_corridor_wall_1")
 _HIDDEN_Z = -10.0
+
+#: 走廊 eval 佈局是否打散 slot→列的綁定（觀察用，預設關閉）。
+#:
+#: 關閉時 S 個靜態只會用到 ``spec.static_y`` 的**前 S 列**：S=2 就永遠是
+#: y=-3.0 與 -0.6，兩者都在機器人半場，靠目標端的 y=0.6 / 3.0 一次都不會出現。
+#: 開啟後四列都可能被抽到，佈局的視覺與幾何多樣性明顯提高。
+#:
+#: ⚠️ 這會**改變佈局分佈**，因此與既有 Gate／論文圖的凍結契約不相容。
+#: 預設關閉，任何未設定此變數的既有 run（含所有正式 Gate screen）逐位元不變。
+_PERMUTE_SLOTS_ENV = "CHARGE_CORRIDOR_PERMUTE_SLOTS"
+_PERMUTE_SLOTS_BANNER_SHOWN = False
+
+
+def _corridor_permute_slots_enabled() -> bool:
+    """Read the opt-in layout-permutation flag, announcing it once.
+
+    本專案守則：**執行期 log 才是權威，config 欄位存在不代表生效**。
+    因此這裡在首次查詢時把生效狀態印出來，讓任何一份 log 都能事後判定
+    當次 run 用的是凍結佈局還是打散佈局，不必回頭猜環境變數。
+    """
+    global _PERMUTE_SLOTS_BANNER_SHOWN
+    raw = os.environ.get(_PERMUTE_SLOTS_ENV, "")
+    enabled = str(raw).strip().lower() in ("1", "true", "yes", "on")
+    if not _PERMUTE_SLOTS_BANNER_SHOWN:
+        _PERMUTE_SLOTS_BANNER_SHOWN = True
+        state = "ON（佈局打散，與凍結 Gate 契約不相容）" if enabled else "OFF（凍結佈局）"
+        print(
+            f"[LONG-CORRIDOR-PERMUTE] {_PERMUTE_SLOTS_ENV}={raw!r} -> {state}",
+            flush=True,
+        )
+    return enabled
 _INTERACTION_OVERRIDE_IDS = {
     "independent": INTERACTION_INDEPENDENT,
     "crossing": INTERACTION_CROSSING,
@@ -773,6 +805,7 @@ def _install_obstacles(
             dynamic_motion_weights,
             static_obstacles=static_obstacles,
             dynamic_obstacles=dynamic_obstacles,
+            permute_slots=_corridor_permute_slots_enabled(),
         )
     )
 

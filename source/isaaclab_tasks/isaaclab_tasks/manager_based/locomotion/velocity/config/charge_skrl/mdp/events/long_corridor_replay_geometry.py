@@ -730,6 +730,7 @@ def sample_conflict_free_layout(
     static_obstacles: int = 4,
     dynamic_obstacles: int = 2,
     max_tries: int = 20,
+    permute_slots: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Sample a corridor layout whose *spawn* is free of physical overlap.
 
@@ -741,9 +742,16 @@ def sample_conflict_free_layout(
     not silently under-represented. A postcondition raises after
     ``max_tries`` instead of shipping an overlapped scene.
 
+    ``permute_slots`` 逐 env 打散 slot→列的綁定（轉交 `sample_obstacle_layout`）。
+    **預設 False，所有既有 Gate 血緣逐位元不變。** 開啟後 `static_y` 模板的四列
+    都可能被抽到；關閉時 S 個靜態只會用到前 S 列 —— 例如 S=2 時永遠只出現
+    y=-3.0 與 -0.6（都在機器人半場），靠目標端的 y=0.6 / 3.0 一次都不會出現。
+
     Returns ``(static, dynamic, waypoints, motion_types, target_indices)``.
     """
-    static, dynamic, waypoints = sample_obstacle_layout(count, spec, device)
+    static, dynamic, waypoints = sample_obstacle_layout(
+        count, spec, device, permute_slots=permute_slots
+    )
     dynamic, waypoints, motion_types, target_indices = (
         sample_dynamic_trajectories(
             dynamic, waypoints, spec, mode, motion_weights
@@ -768,7 +776,11 @@ def sample_conflict_free_layout(
             break
         bad = ~clean
         n_bad = int(bad.sum().item())
-        s2, d2, w2 = sample_obstacle_layout(n_bad, spec, device)
+        # 重抽必須沿用同一個 permute_slots，否則被拒絕的 env 會改用另一種
+        # 列分佈重畫，讓實測佈局分佈與取樣器宣稱的不一致。
+        s2, d2, w2 = sample_obstacle_layout(
+            n_bad, spec, device, permute_slots=permute_slots
+        )
         d2, w2, _, g2 = sample_dynamic_trajectories(
             d2, w2, spec, mode, motion_weights,
             motion_types=motion_types[bad],
