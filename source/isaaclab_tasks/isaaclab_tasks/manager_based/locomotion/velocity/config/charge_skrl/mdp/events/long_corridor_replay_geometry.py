@@ -23,10 +23,11 @@ DYNAMIC_MOTION_MODES = (
 
 @dataclass(frozen=True)
 class LongCorridorSpec:
-    """Frozen geometry for a 4 m free-width, 10 m long corridor."""
+    """Frozen interaction geometry with an independently sealable wall span."""
 
     free_width: float = 4.0
     length: float = 10.0
+    wall_span_length: float | None = None
     wall_thickness: float = 1.0
     wall_height: float = 3.0
     robot_start_y: float = -4.1
@@ -52,6 +53,13 @@ class LongCorridorSpec:
         return 0.5 * self.free_width
 
     @property
+    def physical_wall_span(self) -> float:
+        """Physical side-wall length; legacy callers retain the 10 m span."""
+        if self.wall_span_length is None:
+            return self.length
+        return self.wall_span_length
+
+    @property
     def robot_conservative_radius(self) -> float:
         return math.hypot(
             self.robot_half_length + self.robot_buffer,
@@ -74,6 +82,11 @@ def validate_spec(spec: LongCorridorSpec) -> None:
         raise ValueError("corridor width and length must be positive")
     if spec.wall_thickness <= 0.0:
         raise ValueError("wall thickness must be positive")
+    if spec.physical_wall_span < spec.length:
+        raise ValueError(
+            "physical corridor wall span cannot be shorter than the "
+            "interaction length"
+        )
     if len(spec.static_y) != 4 or len(spec.dynamic_y) != 2:
         raise ValueError("deployment corridor requires exactly 4 static and 2 dynamic obstacles")
     if abs(spec.robot_start_y) >= 0.5 * spec.length:
@@ -296,8 +309,30 @@ def wall_geometry(
     centers[:, 1, 0] = spec.wall_center_offset
     sizes = torch.zeros(count, 2, 2, device=device)
     sizes[:, :, 0] = spec.wall_thickness
-    sizes[:, :, 1] = spec.length
+    sizes[:, :, 1] = spec.physical_wall_span
     return centers, sizes
+
+
+def wall_boundary_overlap(
+    spec: LongCorridorSpec,
+    *,
+    room_half_extent: float,
+    boundary_wall_width: float,
+) -> float:
+    """Return side-wall overlap with each north/south boundary wall in metres.
+
+    A negative value is a traversable geometric opening before robot size is
+    considered. Zero means face contact; a positive value is deliberate
+    overlap and is preferred for robust collision geometry.
+    """
+    room_half_extent = float(room_half_extent)
+    boundary_wall_width = float(boundary_wall_width)
+    if room_half_extent <= 0.0:
+        raise ValueError("room_half_extent must be positive")
+    if boundary_wall_width <= 0.0:
+        raise ValueError("boundary_wall_width must be positive")
+    boundary_inner_face = room_half_extent - 0.5 * boundary_wall_width
+    return 0.5 * spec.physical_wall_span - boundary_inner_face
 
 
 def sample_obstacle_layout(
@@ -786,5 +821,4 @@ def static_layout_id(
         if counts.numel() != count:
             raise ValueError("active_counts must have one entry per env")
     return counts * 100 + mask
-
 
