@@ -1419,29 +1419,77 @@ def hide_robot_camera_gizmo(raw_env) -> int:
         return 0
 
     hidden = 0
-    # ────────────────────────────────────────────────────────────────
-    # TODO(你來寫，約 5-8 行)：遍歷 stage，隱藏相機 gizmo。
-    #
-    # 這裡有一個真正的語意抉擇，值得你決定：
-    #   (A) 只隱藏 gizmo 容器 `OmniverseKitViewportCameraMesh`（葉名 = _CAMERA_GIZMO_LEAF）
-    #       → 保留其父層真正的 `.../velodyne/Camera` prim，未來車端部署要接
-    #         RGB camera 時 Camera prim 還在。← 建議這個。
-    #   (B) 連整個 `.../velodyne/Camera` 分支都隱藏 → 視覺更乾淨但把功能性
-    #       Camera prim 也藏了。
-    #
-    # 實作提示：
-    #   for prim in stage.Traverse():
-    #       if prim.GetName() == _CAMERA_GIZMO_LEAF:   # (A) 用葉名比對，跨 env 通吃
-    #           UsdGeom.Imageable(prim).MakeInvisible()  # 設 visibility=invisible
-    #           hidden += 1
-    #   （MakeInvisible() 只改 visibility，不刪 prim，可隨時 MakeVisible() 還原。）
-    # ────────────────────────────────────────────────────────────────
+    # 選 (A)：只隱藏 gizmo 容器本身，保留父層 `.../velodyne/Camera` prim
+    # （未來車端部署要接 RGB camera 時該 prim 還在；MakeInvisible() 只改
+    # visibility，不刪 prim，可隨時 MakeVisible() 還原）。
+    for prim in stage.Traverse():
+        if prim.GetName() == _CAMERA_GIZMO_LEAF:
+            UsdGeom.Imageable(prim).MakeInvisible()
+            hidden += 1
 
     if hidden:
         print(f"[PLAY] 已隱藏 {hidden} 個相機 gizmo mesh ('{_CAMERA_GIZMO_LEAF}')")
     else:
         print(f"[PLAY] ⚠ 未找到相機 gizmo mesh ('{_CAMERA_GIZMO_LEAF}')，可能 USD 版本不同")
     return hidden
+
+
+_DEFAULT_VIEWPORT_CAMERA_PATH = "/OmniverseKit_Persp"
+
+
+def force_default_viewport_camera() -> bool:
+    """把 GUI 主 viewport 的作用中相機切回預設 Persp。
+
+    Kit 會把「上次選過的作用中相機」存在本機 UI 狀態、跨進程重啟仍會殘留。
+    若那次剛好選到車體感測器相機（就是被 hide_robot_camera_gizmo 藏起來的
+    那個 gizmo 所屬的 `.../velodyne/Camera`），畫面就不是
+    `configure_camera()` 設定的俯視/跟隨/側視，而是車上第一人稱鏡頭。
+    這裡強制切回去，純視覺，不影響 policy / 觀測。失敗只印警告不擋 play。
+    """
+    try:
+        from omni.kit.viewport.window import get_viewport_window_instances
+        windows = list(get_viewport_window_instances())
+    except Exception as exc:  # pragma: no cover — API 版本差異時的保護
+        print(f"[PLAY] ⚠ 無法列舉 viewport windows: {exc}")
+        return False
+
+    if not windows:
+        print("[PLAY] ⚠ 找不到任何 viewport window，略過相機重設")
+        return False
+
+    fixed = 0
+    for win in windows:
+        viewport = getattr(win, "viewport_api", None)
+        if viewport is None:
+            continue
+        before = viewport.camera_path
+        viewport.camera_path = _DEFAULT_VIEWPORT_CAMERA_PATH
+        print(
+            f"[PLAY] viewport window {getattr(win, 'title', win)!r} 相機 "
+            f"{before!r} → {viewport.camera_path!r}"
+        )
+        fixed += 1
+    print(f"[PLAY] 共 {len(windows)} 個 viewport window，已重設 {fixed} 個相機到 "
+          f"{_DEFAULT_VIEWPORT_CAMERA_PATH}")
+
+    # 除了正名為 'Viewport' 的主面板，其餘（例如未命名的 '1'，多半是感測器
+    # camera 自動開出的預覽 tab）每幀都可能被 sensor 更新邏輯搶回自己的
+    # camera_path，光設一次擋不住。與其每幀追打，直接把它們隱藏／關掉，
+    # 確保螢幕上只剩 'Viewport'（已固定指向 Persp）在顯示。
+    hidden_extra = 0
+    for win in windows:
+        title = getattr(win, "title", "")
+        if title == "Viewport":
+            continue
+        try:
+            win.visible = False
+            hidden_extra += 1
+        except Exception as exc:
+            print(f"[PLAY] ⚠ 無法隱藏 viewport window {title!r}: {exc}")
+    if hidden_extra:
+        print(f"[PLAY] 已隱藏 {hidden_extra} 個非 'Viewport' 的額外 viewport window")
+
+    return fixed > 0
 
 
 # ── 動態障礙物 GUI 視覺標記：材質固定「深紅」，方便肉眼區別動 / 靜障礙 ──
@@ -3298,6 +3346,7 @@ def main():
     # 車體 USD 內烤進來的相機 gizmo mesh 會被當實體渲染，spawn 後隱藏它（純視覺清理）
     if not args_cli.headless:
         hide_robot_camera_gizmo(raw_env)
+        force_default_viewport_camera()
 
     # LiDAR sanity test 模式：跑完測試即退出
     if args_cli.lidar_sanity:
