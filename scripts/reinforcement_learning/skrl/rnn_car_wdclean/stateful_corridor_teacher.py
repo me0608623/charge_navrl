@@ -280,8 +280,15 @@ class StatefulCorridorTeacher:
         endpoint = teacher_result["endpoint_grid"]
         endpoint_yaw = teacher_result["endpoint_yaw_grid"]
         raw_cost = teacher_result["raw_cost_grid"]
+        obstacle_collision = teacher_result["obstacle_collision_grid"]
+        wall_collision = teacher_result["wall_collision_grid"]
         if joint.shape != linear.shape or angular.shape != linear.shape:
             raise ValueError("teacher action grids must share [E,L,A]")
+        if (
+            obstacle_collision.shape != joint.shape
+            or wall_collision.shape != joint.shape
+        ):
+            raise ValueError("collision grids must share [E,L,A] with joint")
         if endpoint.shape != (*joint.shape, 2):
             raise ValueError("teacher endpoint grid must have shape [E,L,A,2]")
         if endpoint_yaw.shape != joint.shape:
@@ -351,19 +358,20 @@ class StatefulCorridorTeacher:
         reachable_side_signal = (
             reachable_lateral >= self.spec.minimum_side_signal_m
         )
-        passage = (
-            joint
-            & (linear >= launch_threshold[:, None, None])
+        # Split out the non-geometric half of the passage test so a diagnostic
+        # can attribute a lost side to the kinematic filter, the obstacle mask
+        # or the wall mask. ``passage`` is unchanged: & is associative.
+        kinematic = (
+            (linear >= launch_threshold[:, None, None])
             & (forward_progress >= progress_threshold[:, None, None])
             & heading_allowed
             & reachable_side_signal[:, None, None]
         )
-        left = passage & (
-            lateral_offset >= side_threshold[:, None, None]
-        )
-        right = passage & (
-            lateral_offset <= -side_threshold[:, None, None]
-        )
+        passage = joint & kinematic
+        side_left = lateral_offset >= side_threshold[:, None, None]
+        side_right = lateral_offset <= -side_threshold[:, None, None]
+        left = passage & side_left
+        right = passage & side_right
         left_actions, left_valid = _masked_argmin(raw_cost, left)
         right_actions, right_valid = _masked_argmin(raw_cost, right)
         left_cost = torch.where(
@@ -588,6 +596,32 @@ class StatefulCorridorTeacher:
         used_wait = active_wait | (committed & ~committed_valid)
         used_reverse = used_wait & ~wait_valid & reverse_valid
         emergency_brake = used_wait & ~wait_choice_valid
+
+        # Candidate funnel, for attributing a lost side to one filter. Each
+        # ``*_no_x`` count answers "how many candidates would this side have if
+        # only filter x were dropped", so a zero everywhere means no single
+        # relaxation recovers the side.
+        def _count(mask: torch.Tensor) -> torch.Tensor:
+            return mask.flatten(1).sum(dim=1)
+
+        obstacle_ok = ~obstacle_collision
+        wall_ok = ~wall_collision
+        drop_obstacle = wall_ok & kinematic
+        drop_wall = obstacle_ok & kinematic
+        funnel = {
+            "n_joint": _count(joint),
+            "n_obstacle_ok": _count(obstacle_ok),
+            "n_wall_ok": _count(wall_ok),
+            "n_kinematic": _count(kinematic),
+            "n_left": _count(left),
+            "n_right": _count(right),
+            "n_left_no_obstacle": _count(drop_obstacle & side_left),
+            "n_right_no_obstacle": _count(drop_obstacle & side_right),
+            "n_left_no_wall": _count(drop_wall & side_left),
+            "n_right_no_wall": _count(drop_wall & side_right),
+            "n_left_no_kinematic": _count(joint & side_left),
+            "n_right_no_kinematic": _count(joint & side_right),
+        }
         self._step += 1
         return {
             "actions": actions,
@@ -612,6 +646,7 @@ class StatefulCorridorTeacher:
             "entered_commit": entering_commit,
             "entered_pass": entering_pass,
             "released": released,
+            **funnel,
         }
 
 

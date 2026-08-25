@@ -8,7 +8,13 @@ from rnn_car_wdclean.stateful_corridor_teacher import (
 )
 
 
-def _teacher_result(*, joint: torch.Tensor | None = None):
+def _teacher_result(
+    *,
+    joint: torch.Tensor | None = None,
+    obstacle_collision: torch.Tensor | None = None,
+    wall_collision: torch.Tensor | None = None,
+    endpoint_yaw: torch.Tensor | None = None,
+):
     linear_values = torch.tensor([-0.1, 0.0, 0.2])
     angular_values = torch.tensor([-0.5, 0.0, 0.5])
     linear = linear_values[:, None].expand(3, 3).unsqueeze(0)
@@ -20,8 +26,18 @@ def _teacher_result(*, joint: torch.Tensor | None = None):
     raw_cost[0, 2, 2] = 0.0
     raw_cost[0, 2, 0] = 1.0
     raw_cost[0, 2, 1] = 2.0
-    if joint is None:
-        joint = torch.ones(1, 3, 3, dtype=torch.bool)
+    zeros = torch.zeros(1, 3, 3, dtype=torch.bool)
+    if obstacle_collision is None and wall_collision is None:
+        # Legacy call style: attribute all infeasibility to the obstacle mask.
+        if joint is None:
+            joint = torch.ones(1, 3, 3, dtype=torch.bool)
+        obstacle_collision, wall_collision = ~joint, zeros
+    else:
+        obstacle_collision = (
+            zeros if obstacle_collision is None else obstacle_collision
+        )
+        wall_collision = zeros if wall_collision is None else wall_collision
+        joint = ~obstacle_collision & ~wall_collision
     feasible = joint & (linear >= -1e-4)
     any_feasible = feasible.flatten(1).any(dim=1)
     return {
@@ -32,8 +48,12 @@ def _teacher_result(*, joint: torch.Tensor | None = None):
         "linear_velocity_grid": linear,
         "angular_velocity_grid": angular,
         "endpoint_grid": endpoint,
-        "endpoint_yaw_grid": angular.clone(),
+        "endpoint_yaw_grid": (
+            angular.clone() if endpoint_yaw is None else endpoint_yaw
+        ),
         "raw_cost_grid": raw_cost,
+        "obstacle_collision_grid": obstacle_collision,
+        "wall_collision_grid": wall_collision,
     }
 
 
@@ -358,3 +378,54 @@ def test_committed_valid_exposes_no_switch_deadlock():
     assert stuck["committed_valid"].tolist() == [False]
     assert stuck["right_valid"].tolist() == [True]
     assert stuck["used_wait"].tolist() == [True]
+
+
+def test_candidate_funnel_counts_attribute_loss_to_the_obstacle_mask():
+    """The obstacle mask alone removes the last left passage candidate.
+
+    The leave-one-out counts must name the obstacle mask as the binding
+    constraint, so a diagnostic can tell an obstacle-clearance problem apart
+    from a wall-clearance or kinematic-filter problem.
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    obstacle = torch.zeros(1, 3, 3, dtype=torch.bool)
+    obstacle[0, 2, 2] = True          # the only left passage candidate
+
+    out = _select(
+        controller,
+        _teacher_result(obstacle_collision=obstacle),
+        reset=True,
+    )
+
+    assert out["n_left"].tolist() == [0]
+    assert out["n_left_no_obstacle"].tolist() == [1]   # relaxing obstacle helps
+    assert out["n_left_no_wall"].tolist() == [0]       # relaxing wall does not
+    assert out["n_right"].tolist() == [1]              # right side untouched
+    assert out["n_obstacle_ok"].tolist() == [8]
+    assert out["n_wall_ok"].tolist() == [9]
+    assert out["n_joint"].tolist() == [8]
+
+
+def test_candidate_funnel_counts_attribute_loss_to_the_kinematic_filter():
+    """Heading rejection, not geometry, removes the last left candidate.
+
+    ``n_left_no_kinematic`` counts geometrically clear cells on that side that
+    the passage filter discarded -- the "could have edged sideways but the
+    filter demands forward progress" case.
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    angular_values = torch.tensor([-0.5, 0.0, 0.5])
+    endpoint_yaw = angular_values[None, :].expand(3, 3).unsqueeze(0).clone()
+    endpoint_yaw[0, 2, 2] = 2.0       # beyond max_passage_heading_deviation
+
+    out = _select(
+        controller,
+        _teacher_result(endpoint_yaw=endpoint_yaw),
+        reset=True,
+    )
+
+    assert out["n_joint"].tolist() == [9]              # geometry is clear
+    assert out["n_left"].tolist() == [0]
+    assert out["n_left_no_obstacle"].tolist() == [0]   # geometry was never it
+    assert out["n_left_no_wall"].tolist() == [0]
+    assert out["n_left_no_kinematic"].tolist() == [3]  # filter is the binder

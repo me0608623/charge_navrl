@@ -4717,6 +4717,24 @@ def main():
                     "episode_step",
                     "pred_err_1step_m",
                     "pred_err_5step_m",
+                    # Contact geometry: separates a nose hit from a flank hit.
+                    "robot_yaw_rad",
+                    "nearest_dyn_slot",
+                    "nearest_dyn_bearing_rad",
+                    "nearest_dyn_distance_m",
+                    # Candidate funnel: which filter removed the last option.
+                    "n_joint",
+                    "n_obstacle_ok",
+                    "n_wall_ok",
+                    "n_kinematic",
+                    "n_left",
+                    "n_right",
+                    "n_left_no_obstacle",
+                    "n_right_no_obstacle",
+                    "n_left_no_wall",
+                    "n_right_no_wall",
+                    "n_left_no_kinematic",
+                    "n_right_no_kinematic",
                 )
             }
             print(
@@ -6584,6 +6602,94 @@ def main():
                                 device="cpu", dtype=torch.int16
                             )
                         )
+                        for _diag_key in (
+                            "n_joint",
+                            "n_obstacle_ok",
+                            "n_wall_ok",
+                            "n_kinematic",
+                            "n_left",
+                            "n_right",
+                            "n_left_no_obstacle",
+                            "n_right_no_obstacle",
+                            "n_left_no_wall",
+                            "n_right_no_wall",
+                            "n_left_no_kinematic",
+                            "n_right_no_kinematic",
+                        ):
+                            _stateful_teacher_diag[_diag_key].append(
+                                _stateful_result[_diag_key].detach().to(
+                                    device="cpu", dtype=torch.int16
+                                )
+                            )
+                        # Bearing of the closest live pedestrian in the body
+                        # frame: 0 = dead ahead (nose), +/-pi/2 = broadside,
+                        # +/-pi = behind. NaN when no dynamic slot is live.
+                        _diag_rel = (
+                            _play_behavior_scheduler.positions[:, :, :2]
+                            - _teacher_robot_xy[:, None, :]
+                        )
+                        _diag_live = (
+                            _play_behavior_scheduler.behavior_type == 2
+                        )
+                        _diag_dist = torch.where(
+                            _diag_live,
+                            _diag_rel.norm(dim=-1),
+                            torch.full_like(_diag_rel[..., 0], float("inf")),
+                        )
+                        _diag_near = _diag_dist.argmin(dim=1)
+                        _diag_any = _diag_live.any(dim=1)
+                        _diag_rows = torch.arange(
+                            _diag_dist.shape[0], device=_diag_dist.device
+                        )
+                        _diag_near_rel = _diag_rel[_diag_rows, _diag_near]
+                        _diag_bearing = torch.atan2(
+                            torch.sin(
+                                torch.atan2(
+                                    _diag_near_rel[:, 1], _diag_near_rel[:, 0]
+                                )
+                                - _teacher_yaw
+                            ),
+                            torch.cos(
+                                torch.atan2(
+                                    _diag_near_rel[:, 1], _diag_near_rel[:, 0]
+                                )
+                                - _teacher_yaw
+                            ),
+                        )
+                        _diag_nan = torch.full_like(
+                            _diag_bearing, float("nan")
+                        )
+                        for _diag_key, _diag_tensor, _diag_dtype in (
+                            ("robot_yaw_rad", _teacher_yaw, torch.float32),
+                            (
+                                "nearest_dyn_slot",
+                                torch.where(
+                                    _diag_any,
+                                    _diag_near,
+                                    torch.full_like(_diag_near, -1),
+                                ),
+                                torch.int8,
+                            ),
+                            (
+                                "nearest_dyn_bearing_rad",
+                                torch.where(_diag_any, _diag_bearing, _diag_nan),
+                                torch.float32,
+                            ),
+                            (
+                                "nearest_dyn_distance_m",
+                                torch.where(
+                                    _diag_any,
+                                    _diag_dist[_diag_rows, _diag_near],
+                                    _diag_nan,
+                                ),
+                                torch.float32,
+                            ),
+                        ):
+                            _stateful_teacher_diag[_diag_key].append(
+                                _diag_tensor.detach().to(
+                                    device="cpu", dtype=_diag_dtype
+                                )
+                            )
                         # Nominal-branch residual: how far the pedestrian
                         # actually is from where the teacher predicted it would
                         # be N steps ago. Uses the pause=0 branch because that
@@ -9453,8 +9559,31 @@ def main():
                 metadata_json=_np_stateful_diag.asarray(
                     json.dumps(
                         {
-                            "schema": "stateful_teacher_step_diagnostic/v1",
+                            "schema": "stateful_teacher_step_diagnostic/v2",
                             "array_layout": "[rollout_step, env]",
+                            "nearest_dyn_bearing_rad": (
+                                "bearing of the closest live pedestrian in the "
+                                "robot body frame: 0 = dead ahead (nose hit), "
+                                "+/-pi/2 = broadside (flank hit), +/-pi = "
+                                "behind; NaN when no dynamic slot is live"
+                            ),
+                            "nearest_dyn_slot": (
+                                "index of that pedestrian, -1 when none live; "
+                                "it is the closest slot, NOT necessarily the "
+                                "one that caused contact"
+                            ),
+                            "candidate_funnel": (
+                                "counts out of num_bins^2 candidates. n_*_no_x "
+                                "is a leave-one-out: how many candidates that "
+                                "side would have if only filter x were dropped. "
+                                "All three at zero means no single relaxation "
+                                "recovers the side"
+                            ),
+                            "n_left_no_kinematic": (
+                                "geometrically clear cells on that side that "
+                                "the passage filter discarded, i.e. sideways "
+                                "moves rejected for lacking forward progress"
+                            ),
                             "prediction_error_layout": (
                                 "[rollout_step, env, obstacle_slot]"
                             ),
