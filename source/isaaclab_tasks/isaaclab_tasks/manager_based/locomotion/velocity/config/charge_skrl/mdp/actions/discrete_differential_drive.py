@@ -70,6 +70,20 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         #   供 obs action_error 模式讀取（顯式延遲簽名，訓練端建模延遲，論文 §34）。
         self._actuator_tracking_error = torch.zeros(N, 2, device=self.device)
 
+        # Post-step diagnostics need the command that produced a terminal
+        # transition. ManagerBasedRLEnv auto-resets done environments inside
+        # env.step(), which clears the normal action state before play/eval can
+        # inspect it. These snapshots are therefore updated by process_actions
+        # and deliberately survive reset until the next command overwrites them.
+        # They are read-only diagnostics and never feed back into control.
+        self._last_pre_delay_command = torch.zeros(N, 2, device=self.device)
+        self._last_post_delay_command = torch.zeros(N, 2, device=self.device)
+        # Deployment-only output scaling is deliberately downstream of the
+        # decoder, issued-command history, and actuator queue. This snapshot is
+        # the command actually written to the simulator and survives auto-reset
+        # so post-step evaluators can inspect terminal transitions.
+        self._last_deployment_command = torch.zeros(N, 2, device=self.device)
+
         # 速度狀態
         self._current_velocity = torch.zeros(N, device=self.device)
         # 角速度狀態（用於 α slew clamp）
@@ -137,6 +151,25 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         actuator DR 關閉或 delay=0 時恆為 0。供 obs action_error 模式作為顯式延遲簽名。
         """
         return self._actuator_tracking_error
+
+    @property
+    def last_pre_delay_command(self) -> torch.Tensor:
+        """Last decoded ``[v, omega]`` command before actuator dynamics.
+
+        Unlike ``processed_actions``, this transition snapshot is not erased
+        by an auto-reset. It exists solely for post-step diagnostics.
+        """
+        return self._last_pre_delay_command
+
+    @property
+    def last_post_delay_command(self) -> torch.Tensor:
+        """Last ``[v, omega]`` command after delay/scale/lag processing."""
+        return self._last_post_delay_command
+
+    @property
+    def last_deployment_command(self) -> torch.Tensor:
+        """Last ``[v, omega]`` command after deployment output scaling."""
+        return self._last_deployment_command
 
     @property
     def a_bar(self) -> torch.Tensor:
@@ -238,6 +271,7 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         self._commanded_omega[:] = actual_angular_vel
 
         target_vel = torch.stack([next_velocity, actual_angular_vel], dim=1)
+        self._last_pre_delay_command[:] = target_vel
 
         # Actuator DR is downstream of policy decoding, like the real cmd_vel
         # path: decoded command -> delay -> velocity scaling -> motor lag.
@@ -260,6 +294,8 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         actual_angular_vel = target_vel[:, 1].clamp(
             -self.cfg.max_angular_vel, self.cfg.max_angular_vel
         )
+        self._last_post_delay_command[:, 0] = next_velocity
+        self._last_post_delay_command[:, 1] = actual_angular_vel
         applied_linear_accel = (next_velocity - v) / dt
 
         # ── 第七步：正規化 → ā_t, ω̄_t ──
@@ -309,9 +345,16 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         robot_quat_w = self._asset.data.root_quat_w  # [N, 4]
         num_envs = self._env.num_envs
 
+        # Match the real policy-node safety multiplier: keep decoder state and
+        # issued-action history unscaled, and scale only the command sent to the
+        # vehicle. Both linear and angular channels use the same speed_rate.
+        deployment_scale = float(self.cfg.deployment_speed_scale)
+        deployment_command = self._processed_actions * deployment_scale
+        self._last_deployment_command[:] = deployment_command
+
         # 差速車：只有前進方向速度（body-frame x 軸）
         local_velocity = torch.zeros(num_envs, 3, device=self.device)
-        local_velocity[:, 0] = self._current_velocity
+        local_velocity[:, 0] = deployment_command[:, 0]
 
         # body-frame → world-frame
         global_linear_velocity = math_utils.quat_apply(robot_quat_w, local_velocity)
@@ -319,7 +362,7 @@ class DiscreteDifferentialDriveAction(ActionTerm):
         # 6D root velocity: [vx, vy, vz, wx, wy, wz]
         root_velocity = torch.zeros(num_envs, 6, device=self.device)
         root_velocity[:, 0:3] = global_linear_velocity
-        root_velocity[:, 5] = self._processed_actions[:, 1]  # yaw angular velocity
+        root_velocity[:, 5] = deployment_command[:, 1]  # yaw angular velocity
 
         self._asset.write_root_velocity_to_sim(root_velocity)
 
@@ -414,3 +457,6 @@ class DiscreteDifferentialDriveActionCfg(ActionTermCfg):
     actuator_velocity_scale: tuple[float, float] = (0.9, 1.1)  # per-episode velocity scale per (v, ω)
     actuator_motor_lag: float = 0.3                         # 1st-order low-pass α (0=no response, 1=instant)
     actuator_motor_lag_by_channel: tuple[float, float] | None = None  # optional (alpha_v, alpha_omega)
+    # Deployment safety multiplier applied only when writing (v, omega) to sim.
+    # Decoder integration, d1 queue, and 83D issued-action history stay unscaled.
+    deployment_speed_scale: float = 1.0

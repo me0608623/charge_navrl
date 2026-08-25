@@ -370,6 +370,7 @@ def wd_like_sweep_72(
     hole_rate: float = 0.0,
     distractor_rate: float = 0.0,
     distractor_range: tuple[float, float] = (0.2, 2.0),
+    distractor_eligibility: str = "all_rays",
     # --- L1 noise: distance-dependent σ(r) = std_per_meter × r ---
     displacement_std_per_meter: float = 0.0,
     # --- L1 noise: fixed-σ soft target (human/clothing), independent of distance ---
@@ -439,6 +440,12 @@ def wd_like_sweep_72(
     num_envs, num_rays, _ = hit_points_w.shape
     device = hit_points_w.device
     dtype = hit_points_w.dtype
+    d7_trace_enabled = os.environ.get("CHARGE_D7_LIDAR_TRACE", "0") == "1"
+    if distractor_eligibility not in ("all_rays", "valid_return_only"):
+        raise ValueError(
+            "distractor_eligibility must be 'all_rays' or "
+            f"'valid_return_only', got {distractor_eligibility!r}"
+        )
 
     # Per-ray world-space origins (includes OffsetCfg, e.g. z=1.6)
     # sensor.data.pos_w reports parent prim (base_link z≈0), NOT ray origin.
@@ -463,6 +470,29 @@ def wd_like_sweep_72(
     yaw_quat_w = yaw_quat_w.unsqueeze(1).expand(-1, num_rays, -1)
     rel_hits_b = math_utils.quat_apply_inverse(yaw_quat_w, rel_hits_w)
 
+    if d7_trace_enabled:
+        # A no-hit ray has an infinite hit point, but it still has a finite
+        # emitted direction. Mixed-pixel noise can turn such a ray into the
+        # winning near return, so derive the audit angle from the RayCaster
+        # direction rather than atan2(inf, inf) on the hit point.
+        ray_directions_w = getattr(sensor, "_ray_directions_w", None)
+        if (
+            not isinstance(ray_directions_w, torch.Tensor)
+            or ray_directions_w.shape != hit_points_w.shape
+        ):
+            raise RuntimeError(
+                "D7 LiDAR trace requires RayCaster _ray_directions_w "
+                "with shape [num_envs, num_rays, 3]"
+            )
+        ray_directions_b = math_utils.quat_apply_inverse(
+            yaw_quat_w, ray_directions_w
+        )
+        if not bool(torch.isfinite(ray_directions_b).all()):
+            raise RuntimeError("D7 LiDAR ray directions contain non-finite data")
+        d7_ray_angles = torch.atan2(
+            ray_directions_b[..., 1], ray_directions_b[..., 0]
+        )
+
     distances_2d = torch.linalg.norm(rel_hits_b[..., :2], dim=-1)
     valid &= torch.isfinite(distances_2d)
 
@@ -475,6 +505,13 @@ def wd_like_sweep_72(
         torch.full_like(distances_2d, r_max),
     )
     distances_2d = torch.clamp(distances_2d, min=0.0, max=r_max)
+    if d7_trace_enabled:
+        # D7 snapshots realized tensors only. It never draws extra random
+        # numbers, so enabling the audit cannot perturb the policy observation.
+        d7_raw_ranges = distances_2d.detach().clone()
+        d7_raw_valid = valid.detach().clone()
+        d7_hole_mask = torch.zeros_like(valid)
+        d7_distractor_mask = torch.zeros_like(valid)
 
     # --- Per-material: classify rays hitting DYNAMIC obstacles (=human) ---
     human_mask = None
@@ -602,6 +639,9 @@ def wd_like_sweep_72(
             distances_2d = distances_2d + per_ring_bias_scale * ring_offsets.unsqueeze(0)
         distances_2d = torch.clamp(distances_2d, min=0.0, max=r_max)
 
+    if d7_trace_enabled:
+        d7_bias_ranges = distances_2d.detach().clone()
+
     # --- L1 displacement noise (hard + soft combined via RSS) ---
     has_per_meter = displacement_std_per_meter > 0 or displacement_std_per_meter_dr_min > 0
     has_soft = displacement_std_soft > 0 or displacement_std_soft_dr_min > 0
@@ -637,6 +677,9 @@ def wd_like_sweep_72(
             noise = torch.where(human_mask, torch.zeros_like(noise), noise)
         distances_2d = torch.clamp(distances_2d + noise, min=0.0, max=r_max)
 
+    if d7_trace_enabled:
+        d7_sigma_ranges = distances_2d.detach().clone()
+
     if human_mask is None:
         # Uniform path (unchanged for ideal/sigma/bias/dropout/full)
         if isinstance(active_hole_rate, torch.Tensor):
@@ -660,6 +703,11 @@ def wd_like_sweep_72(
         hole_mask = torch.rand_like(distances_2d) < p_hole
         distances_2d = torch.where(hole_mask, r_max, distances_2d)
 
+    if d7_trace_enabled:
+        if hole_mask is not None:
+            d7_hole_mask = hole_mask.detach().clone()
+        d7_dropout_ranges = distances_2d.detach().clone()
+
     # --- Mixed-pixel / distractor (ghost): white_wall base, higher rate on human rays ---
     has_ghost = distractor_rate > 0 or (human_mask is not None and human_mixed_pixel_rate > 0)
     if has_ghost:
@@ -670,12 +718,24 @@ def wd_like_sweep_72(
                 torch.full_like(distances_2d, float(human_mixed_pixel_rate)),
                 p_ghost,
             )
-            distractor_mask = torch.rand_like(distances_2d) < p_ghost
+            sampled_distractor_mask = torch.rand_like(distances_2d) < p_ghost
         else:
-            distractor_mask = torch.rand_like(distances_2d) < distractor_rate
+            sampled_distractor_mask = torch.rand_like(distances_2d) < distractor_rate
         min_r, max_r = distractor_range
         distractor_values = torch.rand_like(distances_2d) * (max_r - min_r) + min_r
+        if distractor_eligibility == "valid_return_only":
+            valid_return = valid
+            if hole_mask is not None:
+                valid_return = valid_return & ~hole_mask
+            distractor_mask = sampled_distractor_mask & valid_return
+        else:
+            distractor_mask = sampled_distractor_mask
         distances_2d = torch.where(distractor_mask, distractor_values, distances_2d)
+
+    if d7_trace_enabled:
+        if has_ghost:
+            d7_distractor_mask = distractor_mask.detach().clone()
+        d7_final_ranges = distances_2d.detach().clone()
 
     angles = torch.atan2(rel_hits_b[..., 1], rel_hits_b[..., 0])  # [-pi, pi]
     bin_size = 2.0 * math.pi / num_bins
@@ -703,6 +763,172 @@ def wd_like_sweep_72(
             offs = (bin_range - start.unsqueeze(1)) % num_bins  # [n_trig, B]
             mask = offs < w.unsqueeze(1)  # [n_trig, B]
             sweep[trig_envs] = torch.where(mask, torch.full_like(sweep[trig_envs], r_max), sweep[trig_envs])
+
+    if d7_trace_enabled:
+        def _d7_reduce_ranges(ranges: torch.Tensor) -> torch.Tensor:
+            reduced = torch.full(
+                (num_envs, num_bins), r_max, device=device, dtype=dtype
+            )
+            reduced.scatter_reduce_(
+                1, bin_indices, ranges, reduce="amin", include_self=True
+            )
+            return reduced
+
+        d7_stage_sweeps = torch.stack(
+            [
+                _d7_reduce_ranges(d7_raw_ranges),
+                _d7_reduce_ranges(d7_bias_ranges),
+                _d7_reduce_ranges(d7_sigma_ranges),
+                _d7_reduce_ranges(d7_dropout_ranges),
+                sweep.detach().clone(),
+            ],
+            dim=1,
+        )
+        ray_ids = torch.arange(num_rays, device=device, dtype=torch.long)
+        ray_ids = ray_ids.unsqueeze(0).expand(num_envs, -1)
+
+        def _d7_winners(
+            per_ray_ranges: torch.Tensor,
+            reduced_ranges: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            winning_range = torch.gather(reduced_ranges, 1, bin_indices)
+            candidates = torch.where(
+                per_ray_ranges == winning_range,
+                ray_ids,
+                torch.full_like(ray_ids, num_rays),
+            )
+            indices = torch.full(
+                (num_envs, num_bins),
+                num_rays,
+                device=device,
+                dtype=torch.long,
+            )
+            indices.scatter_reduce_(
+                1,
+                bin_indices,
+                candidates,
+                reduce="amin",
+                include_self=True,
+            )
+            winner_is_valid = indices < num_rays
+            safe_indices = indices.clamp(max=max(0, num_rays - 1))
+            return indices, winner_is_valid, safe_indices
+
+        final_per_ray = d7_final_ranges
+        final_bin_range = d7_stage_sweeps[:, -1]
+        winner_indices, winner_valid, safe_winner = _d7_winners(
+            final_per_ray, final_bin_range
+        )
+
+        # D8 valid-return-only sensitivity: preserve the exact masks and
+        # replacement values already drawn above, but a mixed-pixel outlier is
+        # eligible only when the ray had a physical hit and survived dropout.
+        # This counterfactual is trace-only and never changes ``sweep`` returned
+        # to the policy.
+        valid_return_eligible = d7_raw_valid & ~d7_hole_mask
+        removed_distractor = d7_distractor_mask & ~valid_return_eligible
+        valid_return_only_per_ray = torch.where(
+            removed_distractor,
+            d7_dropout_ranges,
+            d7_final_ranges,
+        )
+        valid_return_only_bin_range = _d7_reduce_ranges(
+            valid_return_only_per_ray
+        )
+        (
+            valid_return_only_winner_indices,
+            valid_return_only_winner_valid,
+            valid_return_only_safe_winner,
+        ) = _d7_winners(
+            valid_return_only_per_ray,
+            valid_return_only_bin_range,
+        )
+
+        def _d7_gather(
+            values: torch.Tensor,
+            winner: torch.Tensor = safe_winner,
+        ) -> torch.Tensor:
+            if values.ndim == 2:
+                return torch.gather(values, 1, winner)
+            gather_index = winner.unsqueeze(-1).expand(
+                -1, -1, values.shape[-1]
+            )
+            return torch.gather(values, 1, gather_index)
+
+        winner_hit_body = _d7_gather(rel_hits_b)
+        winner_angle = _d7_gather(d7_ray_angles)
+        horizontal_rays = max(1, num_rays // 16)
+        trace = {
+            "schema": "vlp16_d7_realized_trace/v1",
+            "sweep_sensor_ranges_m": d7_stage_sweeps,
+            "sweep_normalized": torch.clamp(
+                final_bin_range - r_robot, min=0.0, max=r_max
+            ) / r_max,
+            "winner_ray_index": winner_indices,
+            "winner_valid": winner_valid,
+            "winner_raw_valid": _d7_gather(d7_raw_valid),
+            "winner_raw_range_m": _d7_gather(d7_raw_ranges),
+            "winner_bias_range_m": _d7_gather(d7_bias_ranges),
+            "winner_sigma_range_m": _d7_gather(d7_sigma_ranges),
+            "winner_dropout_range_m": _d7_gather(d7_dropout_ranges),
+            "winner_final_range_m": _d7_gather(d7_final_ranges),
+            "winner_hole": _d7_gather(d7_hole_mask),
+            "winner_distractor": _d7_gather(d7_distractor_mask),
+            "winner_hit_body_xyz_m": winner_hit_body,
+            "winner_actual_angle_rad": winner_angle,
+            "winner_ring_index": safe_winner // horizontal_rays,
+            "winner_horizontal_index": safe_winner % horizontal_rays,
+            "valid_return_only_counterfactual_schema": (
+                "valid_return_only_mixed_pixel/v1"
+            ),
+            "valid_return_only_sweep_sensor_ranges_m": (
+                valid_return_only_bin_range
+            ),
+            "valid_return_only_sweep_normalized": torch.clamp(
+                valid_return_only_bin_range - r_robot,
+                min=0.0,
+                max=r_max,
+            ) / r_max,
+            "valid_return_only_winner_ray_index": (
+                valid_return_only_winner_indices
+            ),
+            "valid_return_only_winner_valid": (
+                valid_return_only_winner_valid
+            ),
+            "valid_return_only_winner_actual_angle_rad": _d7_gather(
+                d7_ray_angles, valid_return_only_safe_winner
+            ),
+            "realized_distractor_rays": d7_distractor_mask.sum(dim=1),
+            "valid_return_only_eligible_distractor_rays": (
+                d7_distractor_mask & valid_return_eligible
+            ).sum(dim=1),
+            "valid_return_only_removed_distractor_rays": (
+                removed_distractor.sum(dim=1)
+            ),
+            "current_winner_removed_by_valid_return_only": _d7_gather(
+                removed_distractor
+            ),
+            "noise_contract": {
+                "displacement_std_soft": float(displacement_std_soft),
+                "hole_rate": float(hole_rate),
+                "distractor_rate": float(distractor_rate),
+                "distractor_eligibility": str(distractor_eligibility),
+                "per_ring_bias": bool(per_ring_bias),
+                "human_dynamic_dropout": bool(human_dynamic_dropout),
+                "block_dropout_prob": float(block_dropout_prob),
+                "r_robot": float(r_robot),
+                "r_max": float(r_max),
+                "num_bins": int(num_bins),
+                "num_rays": int(num_rays),
+            },
+        }
+        step_token = int(getattr(env, "common_step_counter", 0))
+        if getattr(env, "_d7_lidar_trace_step", None) != step_token:
+            env._d7_lidar_trace_step = step_token
+            env._d7_lidar_trace_candidates = []
+        candidates = getattr(env, "_d7_lidar_trace_candidates", [])
+        candidates.append(trace)
+        env._d7_lidar_trace_candidates = candidates[-4:]
 
     sweep = torch.clamp(sweep - r_robot, min=0.0, max=r_max)
     sweep = sweep / r_max

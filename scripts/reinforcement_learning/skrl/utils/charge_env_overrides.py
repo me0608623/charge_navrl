@@ -75,6 +75,7 @@ def apply_charge_env_overrides(env_cfg, args_cli):
     """Apply CLI-driven reward/action/curriculum overrides to env_cfg."""
     _apply_obb_collision_config(env_cfg, args_cli)
     _apply_action_history_normalization(env_cfg, args_cli)
+    _apply_deployment_speed_scale_config(env_cfg, args_cli)
     rewards = getattr(env_cfg, "rewards", None)
     if rewards is None:
         return
@@ -562,6 +563,7 @@ def apply_charge_env_overrides(env_cfg, args_cli):
     # lidar_no_noise=True → all zeros (legacy shortcut)
     # lidar_no_noise=False → apply per-param values from YAML
     _apply_lidar_noise_config(env_cfg, args_cli)
+    _apply_lidar_distractor_eligibility_config(env_cfg, args_cli)
     # Always count as changed if any lidar param was set
     if getattr(args_cli, "lidar_no_noise", False) or not getattr(args_cli, "lidar_no_noise", True):
         changed = True
@@ -634,6 +636,32 @@ _VLP16_HUMAN_DROPOUT_INTERCEPT = 0.196
 _VLP16_HUMAN_MIXED_PIXEL = 0.178    # high vs white_wall (0.0025) but noisy → provisional
 
 _VLP16_NOISE_MODES = ("ideal", "sigma", "bias", "dropout", "full", "full_material")
+_LIDAR_DISTRACTOR_ELIGIBILITY_MODES = ("all_rays", "valid_return_only")
+
+
+def _apply_lidar_distractor_eligibility_config(env_cfg, args_cli):
+    """Select which realized ray slots may receive mixed-pixel outliers."""
+
+    mode = str(
+        getattr(args_cli, "lidar_distractor_eligibility", "all_rays")
+    ).lower()
+    if mode not in _LIDAR_DISTRACTOR_ELIGIBILITY_MODES:
+        raise ValueError(
+            f"lidar_distractor_eligibility={mode!r} invalid; choose one of "
+            f"{_LIDAR_DISTRACTOR_ELIGIBILITY_MODES}"
+        )
+    updated = []
+    for group_name, term_name, term in _find_lidar_obs_terms(env_cfg):
+        term.params["distractor_eligibility"] = mode
+        updated.append(f"{group_name}.{term_name}")
+    if not updated:
+        raise RuntimeError(
+            "LiDAR distractor eligibility requested but no LiDAR observation term exists"
+        )
+    print(
+        "[SIM2REAL][mixed-pixel-eligibility] "
+        f"mode={mode} groups={','.join(updated)}"
+    )
 
 
 def _apply_vlp16_ablation_mode(env_cfg, mode: str):
@@ -924,6 +952,30 @@ def _apply_actuator_dr_config(env_cfg, args_cli):
         f"motor_lag alpha={lag_marker}, "
         "pipeline=decode->delay->scale->lag, "
         "history=issued_command_queue"
+    )
+
+
+def _apply_deployment_speed_scale_config(env_cfg, args_cli):
+    """Apply a downstream deployment speed multiplier without changing history."""
+    scale = float(getattr(args_cli, "deployment_speed_scale", 1.0))
+    if not 0.0 < scale <= 1.0:
+        raise ValueError(
+            "deployment_speed_scale must satisfy 0 < scale <= 1, "
+            f"got {scale}"
+        )
+    actions = getattr(env_cfg, "actions", None)
+    diff = getattr(actions, "diff_drive", None) if actions is not None else None
+    if diff is None or not hasattr(diff, "deployment_speed_scale"):
+        raise RuntimeError(
+            "deployment speed scaling requested but diff_drive does not "
+            "support deployment_speed_scale"
+        )
+    diff.deployment_speed_scale = scale
+    print(
+        "[DEPLOYMENT-SPEED] "
+        f"scale={scale:g} channels=(v,omega) "
+        "pipeline=decode->d1/actuator->output_scale->sim "
+        "history=unscaled_issued_command"
     )
 
 

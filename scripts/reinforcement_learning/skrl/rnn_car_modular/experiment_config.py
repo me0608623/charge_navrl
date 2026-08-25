@@ -164,6 +164,14 @@ class ExperimentConfig:
     # SA8: 15% 3S1D / 25% 4S2D / 20% 4S3D / 20% 5S3D / 10% 5S4D / 10% 5S5D
     # 階段語意留在 config，機制在 mdp/events/corridor_density.py。
     long_corridor_obstacle_count_mix: tuple[tuple[tuple[int, int], float], ...] | None = None
+    # Joint ``((static, dynamic), (ped_speed_min, ped_speed_max), weight)``
+    # profiles. This is mutually exclusive with ``obstacle_count_mix`` and
+    # prevents independent sampling from creating an unintended Cartesian
+    # product of hard density and fast pedestrians. ``None`` preserves every
+    # historical run.
+    long_corridor_speed_density_mix: tuple[
+        tuple[tuple[int, int], tuple[float, float], float], ...
+    ] | None = None
     # 走廊 env 中改用「正式 Gate 題型」（固定 4S+2D、四模式各自純化）的比例。
     # SA7 診斷：訓練走 count-mix、Gate 是固定 4S2D 純模式 —— 兩者是不同題型，
     # 訓練分佈幾乎不含 Gate 場景。0.0 = 既有行為。
@@ -205,6 +213,9 @@ class ExperimentConfig:
     corridor_teacher_distill_neighbor_mass: float = 0.20
     corridor_teacher_distill_stride: int = 2
     corridor_teacher_distill_chunk_size: int = 32
+    # Privileged teacher goal-cost normalization. 1.0 m is the frozen v4
+    # behavior used by every historical SA5/SA6 artifact.
+    corridor_teacher_goal_denominator_floor_m: float = 1.0
     corridor_teacher_intervention_only: bool = False
     corridor_teacher_intervention_clearance_m: float = 0.20
     # Deployable observation-gated residual policy. The corridor scene label
@@ -225,6 +236,11 @@ class ExperimentConfig:
     # 0.2 m/s^2 and pi/15 rad/s function defaults for old checkpoints.
     action_history_accel_normalizer: float | None = None
     action_history_omega_normalizer: float | None = None
+
+    # Deployment vehicle speed-rate semantics. ``ego`` scales ego/goal/action
+    # history before normalization while leaving LiDAR unchanged.
+    speed_rate: float = 1.0
+    speed_rate_obs: str = "ego"
 
     # v3d: act_hist dropout（訓練時隨機 mask 4D 動作歷史，弱化 "copy 上一步" shortcut）
     # 0.0 = 不啟用（v3c 行為）。配合 CHARGE_ACT_HIST_MODE=delta 一起斷 sin 波抽動。
@@ -277,6 +293,10 @@ class ExperimentConfig:
     lidar_displacement_std: float = 0.0               # legacy fixed-σ; use soft instead
     lidar_hole_rate: float = 0.194859                 # measured dropout rate (intensity<thr), ~19.5%
     lidar_distractor_rate: float = 0.002515           # measured mixed-pixel / ghost rate
+    # Historical behavior injects mixed-pixel samples into every ray slot,
+    # including no-return slots. ``valid_return_only`` is the D9 sensitivity
+    # model that limits injection to surviving physical returns.
+    lidar_distractor_eligibility: str = "all_rays"
     lidar_distance_bias: bool = False                 # keep OFF: per_ring_bias carries systematic bias (no double-count)
     lidar_per_ring_bias: bool = False                 # 16ch measured per-ring calibration offset (mean ~+12.9mm)
 

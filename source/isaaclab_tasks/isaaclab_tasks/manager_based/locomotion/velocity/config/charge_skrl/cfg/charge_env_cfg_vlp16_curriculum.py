@@ -388,8 +388,9 @@ class EventCfgVLP16Curriculum:
         },
     )
 
-    # Deployment-corridor replay. Dedicated 10 m wall assets are added only by
-    # an experiment config; fraction=0 keeps the baseline scene unchanged.
+    # Deployment-corridor replay. Dedicated side-wall assets are added only by
+    # an experiment config; the configured 10 m interaction zone is sealed to
+    # the room boundary. fraction=0 keeps the baseline scene unchanged.
     long_corridor_replay = EventTerm(
         func=_long_corridor_replay_mod.setup_long_corridor_replay,
         mode="reset",

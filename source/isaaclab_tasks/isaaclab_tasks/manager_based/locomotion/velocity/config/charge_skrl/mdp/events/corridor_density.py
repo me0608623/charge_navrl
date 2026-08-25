@@ -20,6 +20,8 @@ import scripts，否則會重現先前 play/eval 的 sys.path 回歸。
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 
@@ -98,6 +100,131 @@ def validate_density_mix(mix) -> None:
             raise ValueError(f"static count {static} exceeds {MAX_CORRIDOR_STATIC}")
         if not 0 <= dynamic <= MAX_CORRIDOR_DYNAMIC:
             raise ValueError(f"dynamic count {dynamic} exceeds {MAX_CORRIDOR_DYNAMIC}")
+
+
+def validate_speed_density_mix(mix) -> None:
+    """Validate joint ``((S, D), (v_lo, v_hi), weight)`` profiles.
+
+    Density and pedestrian speed must be sampled jointly for a staged
+    curriculum. Sampling them independently would silently create the full
+    Cartesian product, including high-density/high-speed combinations that
+    the curriculum did not authorize.
+    """
+    if not mix:
+        raise ValueError("speed-density mix must not be empty")
+    total = sum(float(weight) for _, _, weight in mix)
+    if abs(total - 1.0) > 1e-9:
+        raise ValueError(
+            f"speed-density mix weights must sum to 1, got {total}"
+        )
+    seen: set[tuple[int, int, float, float]] = set()
+    for counts, speed_range, weight in mix:
+        static, dynamic = map(int, counts)
+        speed_min, speed_max = map(float, speed_range)
+        validate_density_mix((((static, dynamic), 1.0),))
+        if dynamic <= 0:
+            raise ValueError(
+                "speed-density profiles require at least one dynamic obstacle"
+            )
+        if not (
+            math.isfinite(speed_min)
+            and math.isfinite(speed_max)
+            and 0.0 < speed_min <= speed_max
+        ):
+            raise ValueError(
+                "speed-density pedestrian speed ranges must be finite, "
+                f"positive, and ordered; got {speed_range!r}"
+            )
+        if not math.isfinite(float(weight)) or float(weight) < 0.0:
+            raise ValueError(
+                "speed-density mix weights must be finite and non-negative"
+            )
+        key = (static, dynamic, speed_min, speed_max)
+        if key in seen:
+            raise ValueError(f"duplicate speed-density profile: {key}")
+        seen.add(key)
+
+
+def sample_speed_density_profiles_systematic(
+    count: int, *, mix, device, carry: dict | None = None
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Sample joint profiles and return counts, speed ranges, and profile IDs."""
+    validate_speed_density_mix(mix)
+    count = int(count)
+    if count <= 0:
+        return (
+            torch.zeros(0, 2, dtype=torch.long, device=device),
+            torch.zeros(0, 2, dtype=torch.float32, device=device),
+            torch.zeros(0, dtype=torch.long, device=device),
+        )
+
+    weights = torch.tensor(
+        [float(weight) for _, _, weight in mix],
+        dtype=torch.float64,
+        device=device,
+    )
+    if carry is None:
+        edges = torch.cumsum(weights, dim=0)
+        edges[-1] = 1.0
+        phase = torch.rand(1, dtype=torch.float64, device=device)
+        u = (
+            torch.arange(count, dtype=torch.float64, device=device) + phase
+        ) / count
+        picks = torch.searchsorted(edges, u, right=True).clamp_(
+            max=len(mix) - 1
+        )
+        picks = picks[torch.randperm(count, device=device)]
+    else:
+        picks = _sample_profile_ids_with_carry(
+            count, weights=weights, device=device, carry=carry
+        )
+
+    counts = torch.tensor(
+        [list(profile_counts) for profile_counts, _, _ in mix],
+        dtype=torch.long,
+        device=device,
+    )
+    speed_ranges = torch.tensor(
+        [list(speed_range) for _, speed_range, _ in mix],
+        dtype=torch.float32,
+        device=device,
+    )
+    return counts[picks], speed_ranges[picks], picks
+
+
+def _sample_profile_ids_with_carry(
+    count: int, *, weights: torch.Tensor, device, carry: dict
+) -> torch.Tensor:
+    """Largest-remainder profile allocation with cross-batch memory."""
+    k = int(weights.numel())
+    emitted = carry.get("emitted")
+    if emitted is None or emitted.numel() != k:
+        emitted = torch.zeros(k, dtype=torch.float64, device=device)
+        carry["emitted"] = emitted
+    total = float(carry.get("total", 0.0))
+    target = (total + count) * weights
+    deficit = target - emitted
+    base = deficit.clamp_min(0.0).floor()
+    if float(base.sum()) > count:
+        base = torch.zeros_like(base)
+    remainder = int(count - int(base.sum()))
+    if remainder > 0:
+        order = torch.argsort(deficit - base, descending=True)
+        base[order[:remainder]] += 1.0
+    picks = torch.repeat_interleave(
+        torch.arange(k, device=device), base.long()
+    )[:count]
+    if picks.numel() < count:
+        extra = torch.multinomial(
+            weights.float(), count - picks.numel(), replacement=True
+        )
+        picks = torch.cat([picks, extra])
+    picks = picks[torch.randperm(count, device=device)]
+    carry["emitted"] = emitted + torch.bincount(
+        picks, minlength=k
+    ).to(emitted.dtype)
+    carry["total"] = total + count
+    return picks
 
 
 def sample_density_counts_systematic(
@@ -1004,6 +1131,7 @@ def assign_families_and_pairs(
     device,
     family_debt: dict | None = None,
     global_env_ids: torch.Tensor | None = None,
+    family_weights: tuple[float, float, float] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """指派 family 並固定互動配對，回傳 ``(families [E,5], pairs [E,2])``。
 
@@ -1022,6 +1150,23 @@ def assign_families_and_pairs(
     而不是靠逐 env 的固定配額（那與互動需求會直接衝突）。
     """
     counts = dynamic_counts.reshape(-1).to(device=device, dtype=torch.long)
+    if family_weights is None:
+        weights = torch.full(
+            (_FAMILY_COUNT,), 1.0 / _FAMILY_COUNT,
+            dtype=torch.float64, device=device,
+        )
+    else:
+        weights = torch.tensor(
+            family_weights, dtype=torch.float64, device=device
+        )
+        if weights.shape != (_FAMILY_COUNT,):
+            raise ValueError("family_weights must contain lateral/longitudinal/random_2d")
+        if not bool(torch.isfinite(weights).all()) or bool((weights < 0.0).any()):
+            raise ValueError("family_weights must be finite and non-negative")
+        if abs(float(weights.sum()) - 1.0) > 1e-9:
+            raise ValueError(
+                f"family_weights must sum to 1, got {float(weights.sum())}"
+            )
     envs = counts.shape[0]
     families = torch.full(
         (envs, MAX_CORRIDOR_DYNAMIC), INACTIVE_FAMILY, dtype=torch.long, device=device
@@ -1072,15 +1217,14 @@ def assign_families_and_pairs(
     # 補不回來（實測 longitudinal 長期偏高 5pp）。把至今的累積量帶進來，
     # 讓後續的自由 slot 優先補 lateral / random_2d。
     forced = torch.bincount(families[~free & active], minlength=_FAMILY_COUNT)
-    cumulative_target = (seen + total) / _FAMILY_COUNT
-    target = torch.full(
-        (_FAMILY_COUNT,), cumulative_target, dtype=torch.float64, device=device
-    )
+    target = (seen + total) * weights
     deficit = (
         target - emitted - forced.to(torch.float64)
     ).clamp_min(0.0).to(torch.float32)
     if float(deficit.sum()) <= 0.0:
-        deficit = torch.ones(_FAMILY_COUNT, device=device)
+        deficit = weights.to(torch.float32)
+        if float(deficit.sum()) <= 0.0:
+            raise RuntimeError("family_weights left no assignable motion family")
     # Largest-remainder 配額，不是比例四捨五入。實際注入幾乎是**一次一個 env**
     # （free slot 常常只有 1-2 個），比例乘完再 round 會整個歸零，殘差又被固定
     # 丟給最後一個 family —— 實測 batch=1 時偏差 4.8pp，正好複現 sim 的 4.6pp。
@@ -1120,6 +1264,7 @@ def assign_families_and_pairs(
         families, free, free_idx, active, share, deficit64, device,
         counts=counts, interaction_types=interaction_types, pairs=pairs,
         family_debt=family_debt, global_env_ids=global_env_ids,
+        family_weights=weights,
     )
     _record_family_debt(family_debt, emitted, seen, families, active, total)
     return families, pairs
@@ -1139,6 +1284,7 @@ def _assign_free_slots_within_lateral_cap(
     pairs: torch.Tensor | None = None,
     family_debt: dict | None = None,
     global_env_ids: torch.Tensor | None = None,
+    family_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Fill the free slots, never letting an env exceed the lateral lane count.
 
@@ -1157,6 +1303,13 @@ def _assign_free_slots_within_lateral_cap(
     if excess > 0:
         share[MOTION_LATERAL] = total_capacity
         others = [MOTION_LONGITUDINAL, MOTION_RANDOM_2D]
+        if family_weights is not None:
+            others = [family for family in others if float(family_weights[family]) > 0.0]
+        if not others:
+            raise RuntimeError(
+                "lateral quota exceeds geometry capacity and no other enabled "
+                "motion family can receive the excess"
+            )
         for _ in range(excess):
             # 給當下缺口較大的那一個，維持整批平衡的意圖。
             pick = max(others, key=lambda f: float(deficit[f]) - float(share[f]))

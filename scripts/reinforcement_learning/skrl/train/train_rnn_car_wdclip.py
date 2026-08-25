@@ -618,6 +618,17 @@ parser.add_argument("--curriculum_version", type=str, default="warp_drive_single
 # - 更改影響：啟用後 LiDAR 資訊更乾淨，policy 更容易信任 LiDAR，但 sim-to-real gap 可能增大。
 parser.add_argument("--lidar_no_noise", action="store_true", default=False)
 parser.add_argument(
+    "--lidar_distractor_eligibility",
+    type=str,
+    default="all_rays",
+    choices=["all_rays", "valid_return_only"],
+    help=(
+        "Select which LiDAR ray slots may receive mixed-pixel distractors. "
+        "all_rays preserves historical training behavior; valid_return_only "
+        "limits distractors to surviving physical returns."
+    ),
+)
+parser.add_argument(
     "--action_history_accel_normalizer",
     type=float,
     default=None,
@@ -964,6 +975,15 @@ parser.add_argument(
     help="Maximum corridor envs per privileged teacher geometry batch.",
 )
 parser.add_argument(
+    "--corridor_teacher_goal_denominator_floor_m",
+    type=float,
+    default=1.0,
+    help=(
+        "Lower bound for the privileged teacher's goal-distance cost "
+        "denominator in metres. 1.0 preserves historical v4 behavior."
+    ),
+)
+parser.add_argument(
     "--corridor_teacher_intervention_only",
     action="store_true",
     default=False,
@@ -1028,6 +1048,24 @@ parser.add_argument(
     help=(
         "Residual branch input: current 83D observation or the full deployable "
         "policy feature vector including the K8 CNN embedding."
+    ),
+)
+parser.add_argument(
+    "--speed_rate",
+    type=float,
+    default=1.0,
+    help=(
+        "Deployment vehicle speed-rate. Scales linear/angular velocity and "
+        "acceleration limits; 1.0 preserves historical training behavior."
+    ),
+)
+parser.add_argument(
+    "--speed_rate_obs",
+    choices=("none", "ego", "ego_lidar"),
+    default="ego",
+    help=(
+        "Raw-observation transform paired with speed_rate. 'ego' matches the "
+        "deployed vehicle and leaves LiDAR unchanged."
     ),
 )
 
@@ -1112,6 +1150,20 @@ from rnn_car_wdclean.scripted_narrow_teacher import (
 from rnn_car_wdclean.narrow_imitation_loss import scripted_action_ce_loss
 from rnn_car_wdclean.reward_diagnostics import (
     add_long_corridor_reward_diagnostics,
+)
+from rnn_car_wdclean.corridor_family_metrics import (
+    CORRIDOR_FAMILY_NAMES,
+    CorridorFamilyMetrics,
+    CorridorFamilySnapshot,
+    snapshot_corridor_families,
+)
+from rnn_car_wdclean.corridor_profile_family_metrics import (
+    CorridorProfileFamilyMetrics,
+)
+from rnn_car_wdclean.vehicle_speed_rate import (
+    apply_vehicle_speed_rate_action_limits,
+    apply_vehicle_speed_rate_observation,
+    validate_vehicle_speed_rate,
 )
 
 # Charge 側網路模組（從 modular_rnn_models.py 匯入）
@@ -2199,7 +2251,14 @@ class MetricsCollector:
         因為它們需要跨 rollout 保持連續性；只在 episode 結束時清零）
     """
 
-    def __init__(self, num_envs: int, max_obstacles: int, device, action_table_sample_size: int = 2048):
+    def __init__(
+        self,
+        num_envs: int,
+        max_obstacles: int,
+        device,
+        action_table_sample_size: int = 2048,
+        corridor_speed_density_mix=None,
+    ):
         self.num_envs = num_envs
         self.max_obstacles = max_obstacles
         self.device = device
@@ -2336,6 +2395,16 @@ class MetricsCollector:
                    "timeout": 0, "other": 0}
             for name in SCENE_NAMES
         }
+        self._corridor_family_metrics = CorridorFamilyMetrics(
+            num_envs, device
+        )
+        self._corridor_profile_family_metrics = (
+            CorridorProfileFamilyMetrics(
+                num_envs, device, corridor_speed_density_mix
+            )
+            if corridor_speed_density_mix is not None
+            else None
+        )
 
         # --- Reward term accumulators (Isaac Lab Episode_Reward/) ---
         self._reward_terms: dict[str, list[float]] = {}
@@ -2425,6 +2494,7 @@ class MetricsCollector:
              charge_actions: dict[str, torch.Tensor] | None = None,
              rollout_step: int | None = None,
              scene_id: torch.Tensor | None = None,
+             corridor_family_snapshot: CorridorFamilySnapshot | None = None,
              terminated_flat: torch.Tensor | None = None,
              truncated_flat: torch.Tensor | None = None):
         """記錄一個 env step 的所有指標。在每個 rollout step 結束後呼叫。
@@ -2442,12 +2512,48 @@ class MetricsCollector:
             rollout_step:    當前 rollout 內的步數（用於 action table 的時間戳）
             scene_id:        [E] 場景身分，**必須在 env.step() 之前快照**
                              （見 scene_ids_from_env）。None = 停用分場景指標
+            corridor_family_snapshot:
+                             [E] 走廊動態物 family，亦須在 env.step() 前快照
             terminated_flat: [E] 真 terminal（撞/到達），分場景 timeout 判定用
             truncated_flat:  [E] 截斷（時限到），分場景 timeout 判定用
         """
         self._ep_reward += reward.reshape(-1)
         self._ep_length += 1.0
         self._ep_steps_alive += (1.0 - done.reshape(-1).float())
+
+        if corridor_family_snapshot is not None:
+            if (
+                scene_id is None
+                or terminated_flat is None
+                or truncated_flat is None
+            ):
+                raise RuntimeError(
+                    "corridor family metrics require scene and termination "
+                    "snapshots"
+                )
+            self._corridor_family_metrics.step(
+                snapshot=corridor_family_snapshot,
+                corridor_scene_mask=(
+                    scene_id.reshape(-1) == _SCENE_ID["corridor"]
+                ),
+                reward=reward,
+                reward_breakdown=reward_breakdown,
+                charge_actions=charge_actions,
+                done=done,
+                terminated_flat=terminated_flat,
+                truncated_flat=truncated_flat,
+            )
+            if self._corridor_profile_family_metrics is not None:
+                self._corridor_profile_family_metrics.step(
+                    snapshot=corridor_family_snapshot,
+                    corridor_scene_mask=(
+                        scene_id.reshape(-1) == _SCENE_ID["corridor"]
+                    ),
+                    reward_breakdown=reward_breakdown,
+                    done=done,
+                    terminated_flat=terminated_flat,
+                    truncated_flat=truncated_flat,
+                )
 
         # --- Accumulate WD reward decomposition ---
         if reward_breakdown is not None:
@@ -2891,6 +2997,30 @@ class MetricsCollector:
             m[f"scene/{_scene}/timeout"] = _c["timeout"] / _n
             if _c["other"]:
                 m[f"scene/{_scene}/other_death"] = _c["other"] / _n
+        _corridor_family_collected = self._corridor_family_metrics.collect(
+            expected_corridor_episodes=self._scene_counts["corridor"][
+                "episodes"
+            ],
+        )
+        m.update(_corridor_family_collected)
+        if self._corridor_profile_family_metrics is not None:
+            m.update(
+                self._corridor_profile_family_metrics.collect(
+                    expected_corridor_episodes=self._scene_counts[
+                        "corridor"
+                    ]["episodes"],
+                    expected_active_steps=int(
+                        _corridor_family_collected[
+                            "corridor_family/accounting/active_steps_total"
+                        ]
+                    ),
+                    expected_resets=int(
+                        _corridor_family_collected[
+                            "corridor_family/accounting/resets_total"
+                        ]
+                    ),
+                )
+            )
 
         # --- Goal-directed behavior diagnostics ---
         if self._completed_goal_start_dist:
@@ -3125,6 +3255,9 @@ class MetricsCollector:
         for _sc in self._scene_counts.values():
             for _k in _sc:
                 _sc[_k] = 0
+        self._corridor_family_metrics.reset_iteration()
+        if self._corridor_profile_family_metrics is not None:
+            self._corridor_profile_family_metrics.reset_iteration()
         self._reward_terms.clear()
         self._obs_speeds.clear()
         self._obs_distances.clear()
@@ -3254,12 +3387,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _apply_action_history_normalization,
         _apply_obb_collision_config,
         _apply_lidar_noise_config,
+        _apply_lidar_distractor_eligibility_config,
         _apply_actuator_dr_config,
         _apply_dr_param_overrides,
     )
     _apply_action_history_normalization(env_cfg, args_cli)
     _apply_obb_collision_config(env_cfg, args_cli)
     _apply_lidar_noise_config(env_cfg, args_cli)
+    _apply_lidar_distractor_eligibility_config(env_cfg, args_cli)
     # 致動器 DR（動作延遲 / 速度縮放 / 馬達一階滯後）寫進 actions.diff_drive。
     # 2026-07-28 修復：這一行原本漏掉，導致 `enable_actuator_dr=True` 的 config
     # 會**靜默地在無延遲下訓練** —— args_cli 拿到了旗標、`_apply_actuator_dr_config`
@@ -3272,6 +3407,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # 所以本行必須排在它之前且不共用那個開關。
     _apply_actuator_dr_config(env_cfg, args_cli)
     _apply_dr_param_overrides(env_cfg, args_cli)
+
+    # Match the deployed vehicle's speed-rate semantics. This must run before
+    # gym.make so the action term is constructed with the reduced limits.
+    _vehicle_speed_rate, _vehicle_speed_rate_obs = validate_vehicle_speed_rate(
+        getattr(args_cli, "speed_rate", 1.0),
+        getattr(args_cli, "speed_rate_obs", "ego"),
+    )
+    _diff_drive_cfg = getattr(getattr(env_cfg, "actions", None), "diff_drive", None)
+    if _diff_drive_cfg is None:
+        raise ValueError("speed_rate requires env_cfg.actions.diff_drive")
+    _vehicle_speed_rate_contract = apply_vehicle_speed_rate_action_limits(
+        _diff_drive_cfg,
+        _vehicle_speed_rate,
+    )
+    print(
+        f"[VEHICLE-SPEED-RATE] rate={_vehicle_speed_rate:g} "
+        f"obs={_vehicle_speed_rate_obs} "
+        f"lidar_scaled={_vehicle_speed_rate_obs == 'ego_lidar'} "
+        "deployment_scale="
+        f"{_vehicle_speed_rate_contract['deployment_speed_scale']:g} "
+        f"action_limits={_vehicle_speed_rate_contract['after']}",
+        flush=True,
+    )
 
     # Fixed SA5 general-scene replay for SA6+. No extra assets are needed:
     # selected envs receive the accepted SA5 obstacle and internal-wall layout.
@@ -3327,8 +3485,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             ),
         )
 
-    # Deployment corridor replay: dedicated 10 m walls and a controlled 4S+2D
-    # obstacle layout. This is independent of the legacy near-wall crossing event.
+    # Deployment corridor replay: a 10 m interaction zone inside side walls
+    # sealed to the room boundary, plus a controlled obstacle layout. This is
+    # independent of the legacy near-wall crossing event.
     _long_corridor_fraction = float(
         getattr(args_cli, "long_corridor_fraction", 0.0)
     )
@@ -3349,6 +3508,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 getattr(args_cli, "long_corridor_free_width", 4.0)
             ),
             length=float(getattr(args_cli, "long_corridor_length", 10.0)),
+            room_half_extent=float(
+                args_cli.room_size if args_cli.room_size is not None else 10.0
+            ),
+            boundary_wall_width=1.0,
             static_obstacles=int(
                 getattr(args_cli, "long_corridor_static_obstacles", 4)
             ),
@@ -3384,6 +3547,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obstacle_count_mix=getattr(
                 args_cli,
                 "long_corridor_obstacle_count_mix",
+                None,
+            ),
+            speed_density_mix=getattr(
+                args_cli,
+                "long_corridor_speed_density_mix",
                 None,
             ),
             gate_aligned_share=float(getattr(
@@ -4270,6 +4438,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     _corridor_teacher_distill_chunk_size = int(
         getattr(args_cli, "corridor_teacher_distill_chunk_size", 32)
     )
+    _corridor_teacher_goal_denominator_floor_m = float(
+        getattr(
+            args_cli,
+            "corridor_teacher_goal_denominator_floor_m",
+            1.0,
+        )
+    )
     _corridor_teacher_intervention_only = bool(
         getattr(args_cli, "corridor_teacher_intervention_only", False)
     )
@@ -4359,6 +4534,14 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if _corridor_teacher_distill_chunk_size <= 0:
         raise ValueError(
             "corridor_teacher_distill_chunk_size must be positive"
+        )
+    if (
+        not math.isfinite(_corridor_teacher_goal_denominator_floor_m)
+        or _corridor_teacher_goal_denominator_floor_m <= 0.0
+    ):
+        raise ValueError(
+            "corridor_teacher_goal_denominator_floor_m must be finite "
+            "and positive"
         )
     if _corridor_teacher_intervention_clearance_m < 0.0:
         raise ValueError(
@@ -4691,7 +4874,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     obs_buf = ObstacleRolloutBuffer(RL, num_envs, N_obs, OBS_POLICY_OBS_DIM, 2, device) if _obstacle_mode == "learned" else None
 
     # --- Metrics ---
-    metrics = MetricsCollector(num_envs, N_obs, device, args_cli.action_table_sample_size)
+    metrics = MetricsCollector(
+        num_envs,
+        N_obs,
+        device,
+        args_cli.action_table_sample_size,
+        corridor_speed_density_mix=getattr(
+            args_cli, "long_corridor_speed_density_mix", None
+        ),
+    )
 
     # --- Log dir + WandB ---
     run_name = args_cli.run_name or f"marl_{datetime.now().strftime('%m%d_%H%M')}"
@@ -4727,6 +4918,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "value_init_bias": args_cli.value_init_bias,
                     "disable_aux_training": args_cli.disable_aux_training,
                     "resume_optimizer": (args_cli.checkpoint is not None and not args_cli.no_resume_optimizer),
+                    "speed_rate": _vehicle_speed_rate,
+                    "speed_rate_obs": _vehicle_speed_rate_obs,
+                    "speed_rate_action_limits": _vehicle_speed_rate_contract["after"],
+                    "deployment_speed_scale": _vehicle_speed_rate_contract[
+                        "deployment_speed_scale"
+                    ],
                     "action_table_sample_size": args_cli.action_table_sample_size,
                     "teacher_retention_checkpoint": _teacher_retention_checkpoint,
                     "teacher_retention_weight": _teacher_retention_weight,
@@ -4752,6 +4949,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     "corridor_teacher_distill_neighbor_mass": _corridor_teacher_distill_neighbor_mass,
                     "corridor_teacher_distill_stride": _corridor_teacher_distill_stride,
                     "corridor_teacher_distill_chunk_size": _corridor_teacher_distill_chunk_size,
+                    "corridor_teacher_goal_denominator_floor_m": _corridor_teacher_goal_denominator_floor_m,
                     "corridor_teacher_intervention_only": _corridor_teacher_intervention_only,
                     "corridor_teacher_intervention_clearance_m": _corridor_teacher_intervention_clearance_m,
                     "critic_detach_encoder": args_cli.critic_detach_encoder,
@@ -5314,7 +5512,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             raise RuntimeError(
                 "corridor teacher could not find the discrete drive action term"
             )
-        _corridor_teacher_spec = CorridorTeacherSpec()
+        _corridor_teacher_spec = CorridorTeacherSpec(
+            goal_denominator_floor_m=(
+                _corridor_teacher_goal_denominator_floor_m
+            )
+        )
         print(
             "[CORRIDOR-DISTILL] enabled: "
             f"epochs={_corridor_teacher_distill_epochs} "
@@ -5323,6 +5525,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             f"stride={_corridor_teacher_distill_stride} "
             f"chunk={_corridor_teacher_distill_chunk_size} "
             f"horizon={_corridor_teacher_spec.horizon_s:.1f}s "
+            "goal_denominator_floor="
+            f"{_corridor_teacher_spec.goal_denominator_floor_m:g}m "
             f"intervention_only={_corridor_teacher_intervention_only} "
             f"clearance<{_corridor_teacher_intervention_clearance_m:.2f}m "
             "scope=long_corridor_only order=PPO->corridor->narrow_KL",
@@ -5706,6 +5910,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 policy_obs = obs
 
+            # Vehicle applies this transform while building raw policy obs;
+            # therefore it must precede both running-stat updates and z-score
+            # normalization. Physical obs remains unchanged for rewards/metrics.
+            policy_obs = apply_vehicle_speed_rate_observation(
+                policy_obs,
+                _vehicle_speed_rate,
+                _vehicle_speed_rate_obs,
+            )
+
             # --- 1. Charge forward（推論模式，torch.no_grad() 加速）---
             with torch.no_grad():
                 obs_normalizer.update(policy_obs)   # 更新 running stats（用 policy 看到的觀測）
@@ -6082,6 +6295,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # finished environments, so the masks afterwards may already belong
             # to the next episode.
             _scene_id_step = scene_ids_from_env(env.unwrapped, num_envs, device)
+            _corridor_family_snapshot_step = snapshot_corridor_families(
+                env.unwrapped, num_envs, device
+            )
             next_obs, reward, terminated, truncated, info = env.step(actions.float())
             _audit_long_corridor_goal()
             done = (terminated.squeeze(-1) | truncated.squeeze(-1)).float()  # [E] episode 結束(term|trunc, reset/stats/aux 用)
@@ -6374,7 +6590,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         env.unwrapped, N_obs, device,
                         top_k_velocity=_aux_vel_topk,
                         pos_scale=args_cli.aux_target_pos_scale)  # [E, predict_dim]
-            charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, obs, hidden,
+            charge_buf.add(rl_in, actions, log_prob, reward_flat, value, done, policy_obs, hidden,
                            aux_target=wd_aux_tgt, privileged=_priv_obs, terminated=_terminated_flat,
                            encoder_input=_encoder_input,
                            teacher_logits=_teacher_logits_step,
@@ -6410,6 +6626,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                          charge_actions=charge_action_diagnostics,
                          rollout_step=step,
                          scene_id=_scene_id_step,
+                         corridor_family_snapshot=(
+                             _corridor_family_snapshot_step
+                         ),
                          terminated_flat=terminated.squeeze(-1).bool(),
                          truncated_flat=truncated.squeeze(-1).bool())
 
@@ -6752,7 +6971,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # Bootstrap：用 rollout 最後一個 obs 的 value 做 GAE 的 V_{T+1}
             # （WD-order 模式時，使用 fresh features；legacy 模式使用原始 features）
             with torch.no_grad():
-                obs_normed = obs_normalizer.normalize(obs)
+                _bootstrap_policy_obs = apply_vehicle_speed_rate_observation(
+                    obs,
+                    _vehicle_speed_rate,
+                    _vehicle_speed_rate_obs,
+                )
+                obs_normed = obs_normalizer.normalize(_bootstrap_policy_obs)
                 features = _charge_features_for_rnn(obs_normed, lidar_hist=_lidar_hist)  # 多幀:用 rollout 末尾歷史
                 hidden = rnn_state.get()
                 p_obs = _charge_obs_for_rl(obs_normed)
@@ -8449,6 +8673,60 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 )
                 if _scene_line:
                     print(f"  SCENE-SR: {_scene_line}")
+                _family_line = " ".join(
+                    f"{_family}: "
+                    f"SR={wd[f'corridor_family/{_family}/sr']:.1%} "
+                    f"CR={wd[f'corridor_family/{_family}/cr']:.1%} "
+                    f"TO={wd[f'corridor_family/{_family}/timeout']:.1%} "
+                    f"n={int(wd[f'corridor_family/{_family}/episodes'])} "
+                    f"occ={wd[f'corridor_family/{_family}/active_step_share']:.1%} "
+                    f"reset={wd.get(f'corridor_family/{_family}/reset_share', 0.0):.1%}"
+                    for _family in CORRIDOR_FAMILY_NAMES
+                    if (
+                        f"corridor_family/{_family}/episodes"
+                        in wd
+                        and wd[f"corridor_family/{_family}/episodes"] > 0
+                    )
+                )
+                if _family_line:
+                    print(f"  CORRIDOR-FAMILY: {_family_line}")
+                _profile_line = " ".join(
+                    f"{_spec.label}: "
+                    f"SR={wd[f'corridor_profile/{_spec.label}/sr']:.1%} "
+                    f"CR={wd[f'corridor_profile/{_spec.label}/cr']:.1%} "
+                    f"TO={wd[f'corridor_profile/{_spec.label}/timeout']:.1%} "
+                    f"n={int(wd[f'corridor_profile/{_spec.label}/episodes'])} "
+                    f"occ={wd[f'corridor_profile/{_spec.label}/active_step_share']:.1%} "
+                    f"reset={wd[f'corridor_profile/{_spec.label}/reset_share']:.1%}"
+                    for _spec in (
+                        metrics._corridor_profile_family_metrics.specs
+                        if metrics._corridor_profile_family_metrics is not None
+                        else ()
+                    )
+                    if wd.get(f"corridor_profile/{_spec.label}/episodes", 0) > 0
+                )
+                if _profile_line:
+                    print(f"  CORRIDOR-PROFILE: {_profile_line}")
+                _p060_family_line = " ".join(
+                    f"{_spec.label}/{_family}: "
+                    f"SR={wd[f'corridor_profile_family/{_spec.label}/{_family}/sr']:.1%} "
+                    f"CR={wd[f'corridor_profile_family/{_spec.label}/{_family}/cr']:.1%} "
+                    f"TO={wd[f'corridor_profile_family/{_spec.label}/{_family}/timeout']:.1%} "
+                    f"n={int(wd[f'corridor_profile_family/{_spec.label}/{_family}/episodes'])}"
+                    for _spec in (
+                        metrics._corridor_profile_family_metrics.specs
+                        if metrics._corridor_profile_family_metrics is not None
+                        else ()
+                    )
+                    if _spec.label.startswith("p060_")
+                    for _family in CORRIDOR_FAMILY_NAMES[:4]
+                    if wd.get(
+                        f"corridor_profile_family/{_spec.label}/{_family}/episodes",
+                        0,
+                    ) > 0
+                )
+                if _p060_family_line:
+                    print(f"  P060-FAMILY: {_p060_family_line}")
                 if _corridor_adapter_enabled:
                     print(
                         "  CORRIDOR-ADAPTER: "
@@ -8697,6 +8975,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 ),
                 "phase_parameter/corridor_teacher_distill_stride": float(
                     _corridor_teacher_distill_stride
+                ),
+                "phase_parameter/corridor_teacher_goal_denominator_floor_m": (
+                    _corridor_teacher_goal_denominator_floor_m
                 ),
                 "phase_parameter/corridor_teacher_intervention_only": float(
                     _corridor_teacher_intervention_only
@@ -8987,6 +9268,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             "iterations_target": num_iterations,
             "total_steps": total_steps,
             "stage": int(wd.get("curriculum/stage", 0)),
+            "speed_rate": _vehicle_speed_rate,
+            "speed_rate_obs": _vehicle_speed_rate_obs,
+            "speed_rate_action_limits": _vehicle_speed_rate_contract["after"],
+            "deployment_speed_scale": _vehicle_speed_rate_contract[
+                "deployment_speed_scale"
+            ],
             "sr": float(wd.get("charge/goal_reach_rate", 0.0)),
             "cr": float(wd.get("charge/hit_probability", 0.0)),
             "timeout": float(_timeout_rate),
@@ -9016,6 +9303,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 _k: float(_v)
                 for _k, _v in wd.items()
                 if _k.startswith("scene/") and _k.count("/") == 2
+            },
+            **{
+                _k: float(_v)
+                for _k, _v in wd.items()
+                if _k.startswith("corridor_family/")
+                or _k.startswith("corridor_profile/")
+                or _k.startswith("corridor_profile_family/")
             },
             "total_episodes": float(wd.get("charge/total_episodes", 0.0)),
             "kl": float(wd_update_monitor.get("rl/approx_kl", 0.0)),

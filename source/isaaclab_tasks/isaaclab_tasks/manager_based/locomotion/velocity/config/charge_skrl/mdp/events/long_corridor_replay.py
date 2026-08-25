@@ -1,4 +1,4 @@
-"""Reset injector for the 4 m x 10 m deployment-corridor replay scene."""
+"""Reset injector for a 10 m interaction corridor sealed to room boundaries."""
 
 from __future__ import annotations
 
@@ -26,7 +26,9 @@ from .corridor_density import (
     dynamic_layout_for_families,
     dynamic_waypoints_for_families,
     sample_density_counts_systematic,
+    sample_speed_density_profiles_systematic,
     validate_density_mix,
+    validate_speed_density_mix,
 )
 from .long_corridor_replay_geometry import (
     MIXED_MAX_DYNAMIC,
@@ -46,6 +48,7 @@ from .long_corridor_replay_geometry import (
     validate_dynamic_motion_mode,
     validate_obstacle_counts,
     validate_spec,
+    wall_boundary_overlap,
     wall_geometry,
 )
 
@@ -83,6 +86,8 @@ def configure_long_corridor_assets(
     fraction: float,
     free_width: float = 4.0,
     length: float = 10.0,
+    room_half_extent: float,
+    boundary_wall_width: float = 1.0,
     static_obstacles: int = 4,
     dynamic_obstacles: int = 2,
     dynamic_speed_range: tuple[float, float] = (0.30, 0.60),
@@ -90,6 +95,7 @@ def configure_long_corridor_assets(
     dynamic_motion_weights: tuple[float, float, float] | None = None,
     random_2d_kinematics: str = "patrol",
     obstacle_count_mix=None,
+    speed_density_mix=None,
     interaction_override: str | None = None,
     gate_aligned_share: float = 0.0,
 ) -> None:
@@ -101,15 +107,37 @@ def configure_long_corridor_assets(
     from isaaclab.assets import RigidObjectCfg
     import isaaclab.sim as sim_utils
 
-    spec = LongCorridorSpec(free_width=float(free_width), length=float(length))
+    wall_span_length = 2.0 * float(room_half_extent)
+    spec = LongCorridorSpec(
+        free_width=float(free_width),
+        length=float(length),
+        wall_span_length=wall_span_length,
+    )
     validate_spec(spec)
-    if obstacle_count_mix is None:
+    boundary_overlap = wall_boundary_overlap(
+        spec,
+        room_half_extent=float(room_half_extent),
+        boundary_wall_width=float(boundary_wall_width),
+    )
+    if boundary_overlap < 0.0:
+        raise ValueError(
+            "long-corridor side walls do not reach the north/south "
+            f"boundary walls: overlap={boundary_overlap:.3f}m"
+        )
+    if obstacle_count_mix is not None and speed_density_mix is not None:
+        raise ValueError(
+            "obstacle_count_mix and speed_density_mix are mutually exclusive"
+        )
+    if obstacle_count_mix is None and speed_density_mix is None:
         validate_obstacle_counts(static_obstacles, dynamic_obstacles)
         required_scheduler_capacity = max(
             int(static_obstacles), 4 + int(dynamic_obstacles)
         )
     else:
-        validate_density_mix(obstacle_count_mix)
+        if speed_density_mix is not None:
+            validate_speed_density_mix(speed_density_mix)
+        else:
+            validate_density_mix(obstacle_count_mix)
         required_scheduler_capacity = (
             MAX_CORRIDOR_STATIC + MAX_CORRIDOR_DYNAMIC
         )
@@ -119,8 +147,14 @@ def configure_long_corridor_assets(
     )
     kinematics = validate_random_2d_kinematics(random_2d_kinematics)
     override_id = _normalize_interaction_override(interaction_override)
-    if override_id is not None and obstacle_count_mix is None:
-        raise ValueError("interaction_override requires obstacle_count_mix")
+    if (
+        override_id is not None
+        and obstacle_count_mix is None
+        and speed_density_mix is None
+    ):
+        raise ValueError(
+            "interaction_override requires obstacle_count_mix or speed_density_mix"
+        )
     speed_min, speed_max = map(float, dynamic_speed_range)
     if not (0.0 < speed_min <= speed_max):
         raise ValueError("dynamic corridor speed range must be positive and ordered")
@@ -150,7 +184,11 @@ def configure_long_corridor_assets(
             RigidObjectCfg(
                 prim_path=f"{{ENV_REGEX_NS}}/Wall_LongCorridor_{index}",
                 spawn=sim_utils.CuboidCfg(
-                    size=(spec.wall_thickness, spec.length, spec.wall_height),
+                    size=(
+                        spec.wall_thickness,
+                        spec.physical_wall_span,
+                        spec.wall_height,
+                    ),
                     rigid_props=rigid_props,
                     collision_props=collision_props,
                     visual_material=visual,
@@ -169,6 +207,7 @@ def configure_long_corridor_assets(
             "fraction": float(fraction),
             "free_width": spec.free_width,
             "length": spec.length,
+            "wall_span_length": spec.physical_wall_span,
             "static_obstacles": int(static_obstacles),
             "dynamic_obstacles": int(dynamic_obstacles),
             "dynamic_speed_min": speed_min,
@@ -185,6 +224,8 @@ def configure_long_corridor_assets(
             # 同上，必須隨 event params 走：auto-reset 會重跑 setup，
             # 少了這個 key 會從第二次 reset 起悄悄掉回 legacy 密度。
             "obstacle_count_mix": obstacle_count_mix,
+            # Joint speed-density curriculum. None is the historical no-op.
+            "speed_density_mix": speed_density_mix,
             # 同上，必須隨 event params 走：auto-reset 會重跑 setup。
             "gate_aligned_share": float(gate_aligned_share),
             # Eval/GUI only. None keeps the production 60/20/20 sampler.
@@ -193,7 +234,12 @@ def configure_long_corridor_assets(
     )
     # 密度描述必須反映**實際生效**的那一組：混合場一開，
     # static_obstacles/dynamic_obstacles 就失效了，照印會讓 log 說謊。
-    if obstacle_count_mix is None:
+    if speed_density_mix is not None:
+        density = "speed_density_mix[" + ",".join(
+            f"{s}S{d}D@{lo:.2f}-{hi:.2f}:{w:.2f}"
+            for (s, d), (lo, hi), w in speed_density_mix
+        ) + "]"
+    elif obstacle_count_mix is None:
         density = f"{static_obstacles}S+{dynamic_obstacles}D"
     else:
         density = "mix[" + ",".join(
@@ -202,7 +248,10 @@ def configure_long_corridor_assets(
     print(
         "[LONG-CORRIDOR-CONFIG] "
         f"fraction={fraction:.3f} free_width={spec.free_width:.2f}m "
-        f"length={spec.length:.2f}m obstacles={density} "
+        f"interaction_length={spec.length:.2f}m "
+        f"wall_span={spec.physical_wall_span:.2f}m "
+        f"boundary_overlap={boundary_overlap:.2f}m "
+        f"obstacles={density} "
         f"speed=[{speed_min:.2f},{speed_max:.2f}]m/s "
         f"motion={motion_mode} random_2d_kinematics={kinematics} "
         f"interaction_override={interaction_override or 'sample'} "
@@ -351,6 +400,12 @@ def _ensure_state(env) -> None:
     env._long_corridor_density_counts = torch.zeros(
         env.num_envs, 2, dtype=torch.long, device=env.device
     )
+    env._long_corridor_speed_density_profile = torch.full(
+        (env.num_envs,), -1, dtype=torch.long, device=env.device
+    )
+    env._long_corridor_sampled_speed_range = torch.full(
+        (env.num_envs, 2), float("nan"), dtype=torch.float32, device=env.device
+    )
     env._long_corridor_interaction_type = torch.full(
         (env.num_envs,), -1, dtype=torch.long, device=env.device
     )
@@ -370,6 +425,12 @@ def _ensure_state(env) -> None:
     # 跨批次記憶：密度 carry 降低短期變異；family debt 補回配對強制吃掉的
     # longitudinal 額度（只在當批補償補不回來）。
     env._long_corridor_density_carry = {}
+    env._long_corridor_speed_density_carry = {}
+    env._long_corridor_speed_density_profile_total = torch.zeros(
+        0,
+        dtype=torch.long,
+        device=env.device,
+    )
     env._long_corridor_family_debt = {}
     # crossing 狀態機：固定交點 + 起始側別 + 各自是否已穿越。
     env._long_corridor_cross_point = torch.zeros(env.num_envs, 2, device=env.device)
@@ -413,6 +474,8 @@ def _clear_corridor_metadata(env, env_ids: torch.Tensor) -> None:
     """
     _harvest_completed_crossings(env, env_ids)
     env._long_corridor_density_counts[env_ids] = 0
+    env._long_corridor_speed_density_profile[env_ids] = -1
+    env._long_corridor_sampled_speed_range[env_ids] = float("nan")
     env._long_corridor_interaction_type[env_ids] = -1
     env._long_corridor_interaction_pair[env_ids] = NO_PAIR
     env._long_corridor_cross_done[env_ids] = False
@@ -497,6 +560,8 @@ def _sample_mixed_density_layout(
     family_debt: dict | None = None,
     global_env_ids: torch.Tensor | None = None,
     interaction_override: str | None = None,
+    counts_override: torch.Tensor | None = None,
+    family_weights: tuple[float, float, float] | None = None,
 ):
     """Sample a per-env variable-density corridor layout.
 
@@ -507,9 +572,18 @@ def _sample_mixed_density_layout(
     位置與路徑由幾何層產生。未啟用的 slot 一律留在原點並標成 INACTIVE，
     但**檢查時**先挪到哨兵位置，避免假重疊。
     """
-    counts = sample_density_counts_systematic(
-        count, mix=count_mix, device=device, carry=density_carry
-    )
+    if counts_override is None:
+        counts = sample_density_counts_systematic(
+            count, mix=count_mix, device=device, carry=density_carry
+        )
+    else:
+        counts = counts_override.to(device=device, dtype=torch.long)
+        if counts.shape != (count, 2):
+            raise ValueError(
+                f"counts_override must have shape {(count, 2)}, got "
+                f"{tuple(counts.shape)}"
+            )
+        active_masks_from_counts(counts)  # fail closed on capacity/count errors
     dynamic_counts = counts[:, 1]
     # 順序不可調換：互動型態是契約，family 是為了實現它而指派的。
     # 反過來（先 family 再問做得出什麼互動）只能默默降級，湊不出 60/20/20。
@@ -531,6 +605,7 @@ def _sample_mixed_density_layout(
     families, pairs = assign_families_and_pairs(
         dynamic_counts, interaction_types, device=device,
         family_debt=family_debt,
+        family_weights=family_weights,
         # global env ID 必須傳下去 —— 沒有它，dump 出來的 batch-local 索引
         # 無法對回是哪些環境，重現時只能猜。
         global_env_ids=global_env_ids,
@@ -657,15 +732,18 @@ def _install_obstacles(
     dynamic_motion_mode: str,
     dynamic_motion_weights: tuple[float, float, float] | None = None,
     count_mix=None,
+    speed_density_mix=None,
     interaction_override: str | None = None,
 ) -> bool:
     scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
     if scheduler is None:
         env._long_corridor_pending_obstacles[selected] = True
         return False
-    if count_mix is not None:
+    if count_mix is not None or speed_density_mix is not None:
         return _install_mixed_density_obstacles(
             env, selected, spec, speed_min, speed_max, count_mix, scheduler,
+            speed_density_mix=speed_density_mix,
+            dynamic_motion_weights=dynamic_motion_weights,
             interaction_override=interaction_override,
         )
     validate_obstacle_counts(static_obstacles, dynamic_obstacles)
@@ -804,6 +882,8 @@ def _install_mixed_density_obstacles(
     speed_max: float,
     count_mix,
     scheduler,
+    speed_density_mix=None,
+    dynamic_motion_weights: tuple[float, float, float] | None = None,
     interaction_override: str | None = None,
 ) -> bool:
     """Install a per-env variable-density corridor scene (2026-07-27 混合場).
@@ -827,6 +907,21 @@ def _install_mixed_density_obstacles(
         )
 
     count = selected.numel()
+    sampled_counts = None
+    sampled_speed_ranges = None
+    sampled_profile_ids = None
+    if speed_density_mix is not None:
+        (
+            sampled_counts,
+            sampled_speed_ranges,
+            sampled_profile_ids,
+        ) = sample_speed_density_profiles_systematic(
+            count,
+            mix=speed_density_mix,
+            device=env.device,
+            carry=getattr(env, "_long_corridor_speed_density_carry", None),
+        )
+
     (
         counts, families, static, dynamic, waypoints, targets,
         static_mask, dynamic_mask, interaction_types, pairs,
@@ -836,11 +931,31 @@ def _install_mixed_density_obstacles(
         family_debt=getattr(env, "_long_corridor_family_debt", None),
         global_env_ids=selected,
         interaction_override=interaction_override,
+        counts_override=sampled_counts,
+        family_weights=dynamic_motion_weights,
     )
 
-    speeds = torch.empty(
-        count, MAX_CORRIDOR_DYNAMIC, device=env.device
-    ).uniform_(float(speed_min), float(speed_max)) * dynamic_mask
+    if sampled_speed_ranges is None:
+        speeds = torch.empty(
+            count, MAX_CORRIDOR_DYNAMIC, device=env.device
+        ).uniform_(float(speed_min), float(speed_max))
+        env._long_corridor_speed_density_profile[selected] = -1
+        env._long_corridor_sampled_speed_range[selected, 0] = float(speed_min)
+        env._long_corridor_sampled_speed_range[selected, 1] = float(speed_max)
+    else:
+        unit = torch.rand(
+            count, MAX_CORRIDOR_DYNAMIC, device=env.device
+        )
+        speed_lo = sampled_speed_ranges[:, 0:1]
+        speed_hi = sampled_speed_ranges[:, 1:2]
+        speeds = speed_lo + unit * (speed_hi - speed_lo)
+        env._long_corridor_speed_density_profile[selected] = sampled_profile_ids
+        env._long_corridor_sampled_speed_range[selected] = sampled_speed_ranges
+        env._long_corridor_speed_density_profile_total += torch.bincount(
+            sampled_profile_ids,
+            minlength=len(speed_density_mix),
+        )
+    speeds = speeds * dynamic_mask
 
     # 互動幾何必須在寫進 scheduler **之前**套用，而且要 fail-fast：
     # 抽到 crossing 卻蓋不出 crossing 的話，指標會報 20% 交叉、場景裡卻是
@@ -1055,7 +1170,10 @@ def _verify_pairs_this_step(env, selected: torch.Tensor) -> None:
     scheduler = getattr(env.unwrapped, "_behavior_scheduler", None)
     if scheduler is None or selected.numel() == 0:
         return
-    if getattr(env, "_long_corridor_obstacle_count_mix", None) is None:
+    if (
+        getattr(env, "_long_corridor_obstacle_count_mix", None) is None
+        and getattr(env, "_long_corridor_speed_density_mix", None) is None
+    ):
         return
     from .behavior_scheduler import BEHAVIOR_RANDOM_WALK
 
@@ -1142,6 +1260,22 @@ def _maybe_log_cumulative_density_audit(env) -> None:
         for d in range(stride)
         if int(combo[s * stride + d]) > 0
     }
+    profile_realized = None
+    profile_total = getattr(env, "_long_corridor_speed_density_profile_total", None)
+    speed_density_mix = getattr(env, "_long_corridor_speed_density_mix", None)
+    if (
+        speed_density_mix is not None
+        and profile_total is not None
+        and int(profile_total.sum()) > 0
+    ):
+        profile_denominator = int(profile_total.sum())
+        profile_realized = {
+            (
+                f"{counts[0]}S{counts[1]}D@"
+                f"{speed_range[0]:.2f}-{speed_range[1]:.2f}"
+            ): round(float(profile_total[index]) / profile_denominator, 4)
+            for index, (counts, speed_range, _) in enumerate(speed_density_mix)
+        }
     names = [INTERACTION_NAMES[k] for k in range(3)]
     overall = env._long_corridor_interaction_total
     by_d = {
@@ -1157,6 +1291,7 @@ def _maybe_log_cumulative_density_audit(env) -> None:
     print(
         "[LONG-CORRIDOR-AUDIT] "
         f"assignments={total} density={realized} "
+        f"speed_density_profiles={profile_realized} "
         f"interaction_order={names} "
         f"interaction_overall={[int(v) for v in overall]} "
         f"interaction_by_dynamic_count={by_d} "
@@ -1195,6 +1330,7 @@ def setup_long_corridor_replay(
     fraction: float = 0.0,
     free_width: float = 4.0,
     length: float = 10.0,
+    wall_span_length: float | None = None,
     static_obstacles: int = 4,
     dynamic_obstacles: int = 2,
     dynamic_speed_min: float = 0.30,
@@ -1203,6 +1339,7 @@ def setup_long_corridor_replay(
     dynamic_motion_weights: tuple[float, float, float] | None = None,
     dynamic_pause_steps_range: tuple[int, int] | None = None,
     obstacle_count_mix=None,
+    speed_density_mix=None,
     gate_aligned_share: float = 0.0,
     random_2d_kinematics: str = "patrol",
     interaction_override: str | None = None,
@@ -1220,15 +1357,29 @@ def setup_long_corridor_replay(
     """
     if fraction <= 0.0:
         return
-    if obstacle_count_mix is None:
+    if obstacle_count_mix is not None and speed_density_mix is not None:
+        raise ValueError(
+            "obstacle_count_mix and speed_density_mix are mutually exclusive"
+        )
+    if obstacle_count_mix is None and speed_density_mix is None:
         validate_obstacle_counts(static_obstacles, dynamic_obstacles)
+    elif speed_density_mix is not None:
+        validate_speed_density_mix(speed_density_mix)
     else:
         validate_density_mix(obstacle_count_mix)
 
     ids = _as_env_ids(env, env_ids)
     if ids.numel() == 0:
         return
-    spec = LongCorridorSpec(free_width=float(free_width), length=float(length))
+    spec = LongCorridorSpec(
+        free_width=float(free_width),
+        length=float(length),
+        wall_span_length=(
+            float(wall_span_length)
+            if wall_span_length is not None
+            else None
+        ),
+    )
     validate_spec(spec)
     motion_mode = validate_dynamic_motion_mode(dynamic_motion_mode)
     motion_weights = normalize_dynamic_motion_weights(
@@ -1244,9 +1395,27 @@ def setup_long_corridor_replay(
     env._long_corridor_motion_mode = motion_mode
     env._long_corridor_motion_weights = motion_weights
     env._long_corridor_obstacle_count_mix = obstacle_count_mix
+    env._long_corridor_speed_density_mix = speed_density_mix
+    expected_profiles = len(speed_density_mix) if speed_density_mix is not None else 0
+    profile_total = env._long_corridor_speed_density_profile_total
+    if profile_total.numel() == 0 and expected_profiles > 0:
+        env._long_corridor_speed_density_profile_total = torch.zeros(
+            expected_profiles, dtype=torch.long, device=env.device
+        )
+    elif profile_total.numel() != expected_profiles:
+        raise RuntimeError(
+            "speed-density profile count changed after environment setup: "
+            f"{profile_total.numel()} -> {expected_profiles}"
+        )
     _normalize_interaction_override(interaction_override)
-    if interaction_override not in (None, "", "sample") and obstacle_count_mix is None:
-        raise ValueError("interaction_override requires obstacle_count_mix")
+    if (
+        interaction_override not in (None, "", "sample")
+        and obstacle_count_mix is None
+        and speed_density_mix is None
+    ):
+        raise ValueError(
+            "interaction_override requires obstacle_count_mix or speed_density_mix"
+        )
     env._long_corridor_interaction_override = interaction_override
     env._long_corridor_pause_steps_range = apply_pause_override(env, dynamic_pause_steps_range)
     env._long_corridor_random_2d_kinematics = validate_random_2d_kinematics(
@@ -1322,7 +1491,10 @@ def setup_long_corridor_replay(
     #: count-mix 取樣器的審計母體。Gate 題型是固定 4S+2D，混進來會讓
     #: 「取樣器有沒有重現凍結表」這個問題失去意義（4S2D 會被灌爆）。
     mix_selected = selected
-    if _gate_share > 0.0 and obstacle_count_mix is not None and selected.numel() > 0:
+    _mixed_profiles_enabled = (
+        obstacle_count_mix is not None or speed_density_mix is not None
+    )
+    if _gate_share > 0.0 and _mixed_profiles_enabled and selected.numel() > 0:
         is_gate = torch.rand(selected.numel(), device=env.device) < _gate_share
         gate_ids = selected[is_gate]
         mix_ids = selected[~is_gate]
@@ -1345,6 +1517,7 @@ def setup_long_corridor_replay(
                     env, sub, spec, dynamic_speed_min, dynamic_speed_max,
                     _GATE_ALIGNED_STATIC, _GATE_ALIGNED_DYNAMIC,
                     gate_mode, None, count_mix=None,
+                    speed_density_mix=None,
                     interaction_override=None,
                 ))
                 env._long_corridor_gate_aligned_counts[k] += int(sub.numel())
@@ -1353,6 +1526,7 @@ def setup_long_corridor_replay(
                 env, mix_ids, spec, dynamic_speed_min, dynamic_speed_max,
                 static_obstacles, dynamic_obstacles, motion_mode, motion_weights,
                 count_mix=obstacle_count_mix,
+                speed_density_mix=speed_density_mix,
                 interaction_override=interaction_override,
             ))
             env._long_corridor_mixed_env_total += int(mix_ids.numel())
@@ -1368,6 +1542,7 @@ def setup_long_corridor_replay(
             motion_mode,
             motion_weights,
             count_mix=obstacle_count_mix,
+            speed_density_mix=speed_density_mix,
             interaction_override=interaction_override,
         )
 
@@ -1376,7 +1551,7 @@ def setup_long_corridor_replay(
         env._long_corridor_logged = True
         pending = 0 if installed else selected.numel()
         motion_audit = ""
-        if installed and obstacle_count_mix is not None:
+        if installed and _mixed_profiles_enabled:
             # 只統計**這批真的裝進走廊**的 env。density_counts 現在是
             # per-env 全域欄位，整片拿去 bincount 會把 56 個非走廊 env
             # 算成一個叫「0S0D」的密度組合。
@@ -1391,6 +1566,43 @@ def setup_long_corridor_replay(
                 for d in range(MAX_CORRIDOR_DYNAMIC + 1)
                 if int(combo[s * (MAX_CORRIDOR_DYNAMIC + 1) + d]) > 0
             }
+            profile_audit = ""
+            if speed_density_mix is not None and mix_selected.numel() > 0:
+                profile_ids = env._long_corridor_speed_density_profile[mix_selected]
+                if bool((profile_ids < 0).any()):
+                    raise RuntimeError(
+                        "joint speed-density install left an unassigned profile ID"
+                    )
+                profile_counts = torch.bincount(
+                    profile_ids, minlength=len(speed_density_mix)
+                )
+                profile_realized = {
+                    (
+                        f"{counts_[0]}S{counts_[1]}D@"
+                        f"{speed_range[0]:.2f}-{speed_range[1]:.2f}"
+                    ): int(profile_counts[index])
+                    for index, (counts_, speed_range, _) in enumerate(
+                        speed_density_mix
+                    )
+                }
+                expected_ranges = torch.tensor(
+                    [speed_range for _, speed_range, _ in speed_density_mix],
+                    dtype=env._long_corridor_sampled_speed_range.dtype,
+                    device=env.device,
+                )[profile_ids]
+                actual_ranges = env._long_corridor_sampled_speed_range[mix_selected]
+                range_mismatch = int(
+                    (~torch.isclose(actual_ranges, expected_ranges)).any(dim=1).sum()
+                )
+                if range_mismatch:
+                    raise RuntimeError(
+                        "joint speed-density profile/range pairing drifted for "
+                        f"{range_mismatch} env(s)"
+                    )
+                profile_audit = (
+                    f" speed_density_profiles={profile_realized}"
+                    f" profile_range_mismatch={range_mismatch}"
+                )
             slow_min, slow_n, slow_total = getattr(
                 env, "_long_corridor_density_speed_audit", (float("nan"), -1, -1)
             )
@@ -1414,6 +1626,7 @@ def setup_long_corridor_replay(
             motion_audit = (
                 f"{gate_audit}"
                 f" density_mix_realized={realized}"
+                f"{profile_audit}"
                 f" interaction_geometry_ok="
                 f"crossing {interaction.get('crossing_ok', 0)}/"
                 f"{interaction.get('crossing_n', 0)},"
@@ -1456,7 +1669,7 @@ def setup_long_corridor_replay(
             f"free_width={spec.free_width:.2f}m length={spec.length:.2f}m "
             f"walls_x=+/-{spec.wall_center_offset:.2f}m "
             f"obstacles="
-            f"{'per-env mix' if obstacle_count_mix is not None else f'{static_obstacles}S+{dynamic_obstacles}D'} "
+            f"{'joint speed-density mix' if speed_density_mix is not None else ('per-env mix' if obstacle_count_mix is not None else f'{static_obstacles}S+{dynamic_obstacles}D')} "
             f"speed=[{dynamic_speed_min:.2f},"
             f"{dynamic_speed_max:.2f}]m/s motion={motion_mode} "
             f"pending_scheduler={pending} "
@@ -1493,6 +1706,9 @@ def maintain_long_corridor_goal(env, env_ids=None) -> None:
             env._long_corridor_motion_mode,
             getattr(env, "_long_corridor_motion_weights", None),
             count_mix=getattr(env, "_long_corridor_obstacle_count_mix", None),
+            speed_density_mix=getattr(
+                env, "_long_corridor_speed_density_mix", None
+            ),
             interaction_override=getattr(
                 env, "_long_corridor_interaction_override", None
             ),
