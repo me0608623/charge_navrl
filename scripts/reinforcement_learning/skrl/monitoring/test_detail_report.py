@@ -56,6 +56,56 @@ def _rows(count=80, **overrides):
     return [_row(i, **overrides) for i in range(1, count + 1)]
 
 
+def _with_corridor_families(row):
+    row = dict(row)
+    row.update(
+        {
+            "corridor_family/accounting/reconciliation_ok": 1.0,
+            "corridor_family/accounting/episodes_total": 260.0,
+            "corridor_family/accounting/expected_corridor_episodes": 260.0,
+            "corridor_family/lateral/active_steps": 5000.0,
+            "corridor_family/lateral/active_step_share": 0.52,
+            "corridor_family/lateral/reset_share": 0.50,
+            "corridor_family/lateral/episodes": 130.0,
+            "corridor_family/lateral/completed_episode_share": 0.50,
+            "corridor_family/lateral/sr": 0.96,
+            "corridor_family/lateral/cr": 0.04,
+            "corridor_family/lateral/timeout": 0.0,
+            "corridor_family/lateral/linear_speed_abs_mean_mps": 0.21,
+            "corridor_family/lateral/stop_command_fraction": 0.13,
+            "corridor_family/lateral/reverse_command_fraction": 0.01,
+            "corridor_family/lateral/high_turn_fraction": 0.22,
+            "corridor_family/lateral/extreme_turn_fraction": 0.08,
+            "corridor_family/lateral/wall_cr": 0.01,
+            "corridor_family/lateral/obstacle_cr": 0.03,
+            "corridor_family/lateral/static_obstacle_cr": 0.01,
+            "corridor_family/lateral/dynamic_obstacle_cr": 0.02,
+            "corridor_family/lateral/signal/total_reward_mean_per_step": 0.12,
+            "corridor_family/lateral/signal/progress_reward_mean_per_step": 0.03,
+            "corridor_family/longitudinal/active_steps": 4600.0,
+            "corridor_family/longitudinal/active_step_share": 0.48,
+            "corridor_family/longitudinal/reset_share": 0.50,
+            "corridor_family/longitudinal/episodes": 130.0,
+            "corridor_family/longitudinal/completed_episode_share": 0.50,
+            "corridor_family/longitudinal/sr": 0.98,
+            "corridor_family/longitudinal/cr": 0.02,
+            "corridor_family/longitudinal/timeout": 0.0,
+            "corridor_family/longitudinal/linear_speed_abs_mean_mps": 0.24,
+            "corridor_family/longitudinal/stop_command_fraction": 0.09,
+            "corridor_family/longitudinal/reverse_command_fraction": 0.00,
+            "corridor_family/longitudinal/high_turn_fraction": 0.16,
+            "corridor_family/longitudinal/extreme_turn_fraction": 0.05,
+            "corridor_family/longitudinal/wall_cr": 0.00,
+            "corridor_family/longitudinal/obstacle_cr": 0.02,
+            "corridor_family/longitudinal/static_obstacle_cr": 0.00,
+            "corridor_family/longitudinal/dynamic_obstacle_cr": 0.02,
+            "corridor_family/longitudinal/signal/total_reward_mean_per_step": 0.16,
+            "corridor_family/longitudinal/signal/progress_reward_mean_per_step": 0.04,
+        }
+    )
+    return row
+
+
 def _levels(findings):
     return {f.code: f.level for f in findings}
 
@@ -301,6 +351,60 @@ def test_scene_cr_alone_does_not_trigger_red_when_n_is_tiny():
 
 
 # --------------------------------------------------------------------------
+# 走廊 motion-family 表
+# --------------------------------------------------------------------------
+def test_corridor_family_rows_extract_outcomes_mix_and_behavior():
+    families = dr.corridor_family_snapshot(
+        _with_corridor_families(_row(80))
+    )
+    assert [family.name for family in families] == [
+        "lateral",
+        "longitudinal",
+    ]
+    lateral = families[0]
+    assert lateral.episodes == 130.0
+    assert lateral.cr == 0.04
+    assert lateral.active_step_share == 0.52
+    assert lateral.stop_command_fraction == 0.13
+    assert lateral.dynamic_obstacle_cr == 0.02
+    assert lateral.progress_mean_per_step == 0.03
+
+
+def test_corridor_family_snapshot_is_empty_for_legacy_run():
+    assert dr.corridor_family_snapshot(_row(80)) == []
+
+
+def test_corridor_family_low_n_is_a_confidence_warning():
+    rows = _rows(80)
+    rows[-1] = _with_corridor_families(rows[-1])
+    rows[-1]["corridor_family/lateral/episodes"] = 3.0
+    findings = dr.evaluate(rows)
+    assert _levels(findings)["corridor_family_low_n"] == "YELLOW"
+
+
+def test_corridor_family_failed_reconciliation_is_red():
+    rows = _rows(80)
+    rows[-1] = _with_corridor_families(rows[-1])
+    rows[-1]["corridor_family/accounting/reconciliation_ok"] = 0.0
+    findings = dr.evaluate(rows)
+    assert _levels(findings)["corridor_family_reconciliation"] == "RED"
+
+
+def test_corridor_family_tables_show_both_directions_and_actions():
+    rows = [
+        _with_corridor_families(_row(iteration))
+        for iteration in range(78, 81)
+    ]
+    outcomes = dr._corridor_family_outcome_table(rows, window=3)
+    behavior = dr._corridor_family_behavior_table(rows[-1])
+    assert "lateral" in outcomes
+    assert "longitudinal" in outcomes
+    assert "occ" in outcomes
+    assert "xturn" in behavior
+    assert "R/step" in behavior
+
+
+# --------------------------------------------------------------------------
 # I/O 外殼
 # --------------------------------------------------------------------------
 def test_find_active_run_picks_newest_dir_with_metrics(tmp_path):
@@ -399,6 +503,45 @@ def test_render_survives_run_without_scene_metrics():
         now_text="t",
     )
     assert "legacy_run" in text
+
+
+def test_render_contains_corridor_family_section_when_available():
+    rows = [
+        _with_corridor_families(_row(iteration))
+        for iteration in range(1, 4)
+    ]
+    text = dr.render_report(
+        run_name="family_run",
+        rows=rows,
+        process_alive=True,
+        gpu_lines=[],
+        gpu_procs=[],
+        errors=[],
+        replay_mix=None,
+        rate=None,
+        findings=dr.evaluate(rows),
+        now_text="t",
+    )
+    assert "走廊 motion family" in text
+    assert "lateral" in text
+    assert "longitudinal" in text
+    assert "最新一輪行為與碰撞分解" in text
+
+
+def test_render_marks_legacy_run_without_corridor_family_metrics():
+    text = dr.render_report(
+        run_name="legacy_run",
+        rows=_rows(3),
+        process_alive=True,
+        gpu_lines=[],
+        gpu_procs=[],
+        errors=[],
+        replay_mix=None,
+        rate=None,
+        findings=[],
+        now_text="t",
+    )
+    assert "未輸出 corridor_family/* 指標" in text
 
 
 def test_render_lists_every_finding():

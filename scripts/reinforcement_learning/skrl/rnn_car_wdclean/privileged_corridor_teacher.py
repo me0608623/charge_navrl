@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 
@@ -23,6 +24,9 @@ class CorridorTeacherSpec:
     obstacle_clearance_margin_m: float = 0.40
     obstacle_clearance_weight: float = 0.50
     goal_distance_weight: float = 3.0
+    # Historical v4 behavior is exactly 1.0 m. Keep the default immutable for
+    # old configs/checkpoints; new experiments must opt in explicitly.
+    goal_denominator_floor_m: float = 1.0
     goal_heading_weight: float = 0.50
     action_smoothness_weight: float = 0.05
     stall_weight: float = 1.0
@@ -67,6 +71,11 @@ def _validate_teacher_spec(spec: CorridorTeacherSpec) -> None:
         raise ValueError("hard obstacle clearance must be non-negative")
     if spec.obstacle_clearance_margin_m <= 0.0:
         raise ValueError("obstacle clearance margin must be positive")
+    if (
+        not math.isfinite(spec.goal_denominator_floor_m)
+        or spec.goal_denominator_floor_m <= 0.0
+    ):
+        raise ValueError("goal denominator floor must be finite and positive")
 
 
 def predict_patrol_obstacle_paths(
@@ -209,6 +218,96 @@ def _unicycle_paths(
     return path, yaw
 
 
+def _arc_displacement(
+    linear_velocity: torch.Tensor,
+    angular_velocity: torch.Tensor,
+    duration_s: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return exact unicycle displacement in the segment start frame."""
+
+    straight = angular_velocity.abs() < 1e-4
+    omega_safe = torch.where(
+        straight, torch.ones_like(angular_velocity), angular_velocity
+    )
+    radius = linear_velocity / omega_safe
+    angle = angular_velocity * duration_s
+    x = radius * torch.sin(angle)
+    y = radius * (1.0 - torch.cos(angle))
+    x = torch.where(straight, linear_velocity * duration_s, x)
+    y = torch.where(straight, torch.zeros_like(y), y)
+    return x, y
+
+
+def _d1_unicycle_paths(
+    linear_velocity: torch.Tensor,
+    angular_velocity: torch.Tensor,
+    pending_command: torch.Tensor,
+    robot_xy_m: torch.Tensor,
+    robot_yaw_rad: torch.Tensor,
+    *,
+    horizon_s: float,
+    samples: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Predict paths when one queued command precedes the candidate.
+
+    The pending command occupies exactly the first control interval. The newly
+    decoded candidate starts at the second interval, matching the runtime
+    ``decode -> fixed d1 queue -> simulator`` pipeline.
+    """
+
+    if pending_command.shape != (linear_velocity.shape[0], 2):
+        raise ValueError("pending d1 command must have shape [E,2]")
+    if not bool(torch.isfinite(pending_command).all()):
+        raise ValueError("pending d1 command contains non-finite data")
+
+    dt = float(horizon_s) / int(samples)
+    times = (
+        torch.arange(
+            1,
+            int(samples) + 1,
+            dtype=linear_velocity.dtype,
+            device=linear_velocity.device,
+        )
+        * dt
+    )
+    prefix_t = times.clamp(max=dt)[None, None, None, :]
+    candidate_t = (times - dt).clamp(min=0.0)[None, None, None, :]
+
+    pending_v = pending_command[:, 0, None, None, None]
+    pending_w = pending_command[:, 1, None, None, None]
+    prefix_x, prefix_y = _arc_displacement(
+        pending_v, pending_w, prefix_t
+    )
+    prefix_yaw = pending_w * prefix_t
+
+    candidate_v = linear_velocity[..., None]
+    candidate_w = angular_velocity[..., None]
+    candidate_x, candidate_y = _arc_displacement(
+        candidate_v, candidate_w, candidate_t
+    )
+    cos_prefix = torch.cos(prefix_yaw)
+    sin_prefix = torch.sin(prefix_yaw)
+    local_x = (
+        prefix_x
+        + cos_prefix * candidate_x
+        - sin_prefix * candidate_y
+    )
+    local_y = (
+        prefix_y
+        + sin_prefix * candidate_x
+        + cos_prefix * candidate_y
+    )
+    relative_yaw = prefix_yaw + candidate_w * candidate_t
+
+    c0 = torch.cos(robot_yaw_rad)[:, None, None, None]
+    s0 = torch.sin(robot_yaw_rad)[:, None, None, None]
+    world_x = robot_xy_m[:, None, None, 0, None] + c0 * local_x - s0 * local_y
+    world_y = robot_xy_m[:, None, None, 1, None] + s0 * local_x + c0 * local_y
+    path = torch.stack([world_x, world_y], dim=-1)
+    yaw = robot_yaw_rad[:, None, None, None] + relative_yaw
+    return path, yaw
+
+
 def _obb_circle_clearance(
     robot_path_m: torch.Tensor,
     robot_yaw_rad: torch.Tensor,
@@ -316,6 +415,7 @@ def corridor_teacher_action_grid(
     max_linear_accel: float,
     max_angular_velocity: float,
     max_angular_accel: float,
+    pending_d1_command: torch.Tensor | None = None,
     spec: CorridorTeacherSpec = CorridorTeacherSpec(),
 ) -> dict[str, torch.Tensor]:
     """Rank all reachable action pairs by hard safety then local goal cost."""
@@ -332,14 +432,25 @@ def corridor_teacher_action_grid(
         max_angular_velocity=max_angular_velocity,
         max_angular_accel=max_angular_accel,
     )
-    path, yaw = _unicycle_paths(
-        linear,
-        angular,
-        robot_xy_m,
-        robot_yaw_rad,
-        horizon_s=spec.horizon_s,
-        samples=spec.samples,
-    )
+    if pending_d1_command is None:
+        path, yaw = _unicycle_paths(
+            linear,
+            angular,
+            robot_xy_m,
+            robot_yaw_rad,
+            horizon_s=spec.horizon_s,
+            samples=spec.samples,
+        )
+    else:
+        path, yaw = _d1_unicycle_paths(
+            linear,
+            angular,
+            pending_d1_command,
+            robot_xy_m,
+            robot_yaw_rad,
+            horizon_s=spec.horizon_s,
+            samples=spec.samples,
+        )
     obstacle_clearance = _obb_circle_clearance(
         path,
         yaw,
@@ -361,7 +472,8 @@ def corridor_teacher_action_grid(
         spec,
     )
     wall_collision = wall_collision_samples.any(dim=-1)
-    feasible = ~obstacle_collision & ~wall_collision
+    joint_feasible = ~obstacle_collision & ~wall_collision
+    feasible = joint_feasible.clone()
     if not spec.allow_reverse:
         feasible &= linear >= -1e-4
 
@@ -371,7 +483,7 @@ def corridor_teacher_action_grid(
     goal_distance = goal_delta.norm(dim=-1)
     initial_goal_distance = (
         goal_xy_m - robot_xy_m
-    ).norm(dim=-1).clamp_min(1.0)
+    ).norm(dim=-1).clamp_min(spec.goal_denominator_floor_m)
     goal_distance_cost = goal_distance / initial_goal_distance[:, None, None]
     goal_heading = torch.atan2(goal_delta[..., 1], goal_delta[..., 0])
     heading_error = torch.atan2(
@@ -422,6 +534,11 @@ def corridor_teacher_action_grid(
         "cost_grid": ranked_cost,
         "linear_velocity_grid": linear,
         "angular_velocity_grid": angular,
+        "feasible_grid": feasible,
+        "joint_feasible_grid": joint_feasible,
+        "raw_cost_grid": cost,
+        "endpoint_grid": endpoint,
+        "endpoint_yaw_grid": endpoint_yaw,
         "min_obstacle_clearance_grid": min_obstacle_clearance,
         "wall_collision_grid": wall_collision,
         "obstacle_collision_grid": obstacle_collision,

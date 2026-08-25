@@ -5,6 +5,13 @@ from __future__ import annotations
 import torch
 
 
+STOP_SPEED_MPS = 0.10
+LOW_SPEED_MPS = 0.12
+REVERSE_SPEED_MPS = -0.02
+HIGH_TURN_RAD_S = 0.80
+EXTREME_TURN_RAD_S = 1.00
+
+
 def corridor_clear_mask(
     policy_obs: torch.Tensor,
     *,
@@ -38,11 +45,11 @@ def corridor_clear_mask(
 def summarize_corridor_actions(
     actions: torch.Tensor,
     *,
-    stop_speed_mps: float = 0.10,
-    low_speed_mps: float = 0.12,
-    reverse_speed_mps: float = -0.02,
-    high_turn_rad_s: float = 0.80,
-    extreme_turn_rad_s: float = 1.00,
+    stop_speed_mps: float = STOP_SPEED_MPS,
+    low_speed_mps: float = LOW_SPEED_MPS,
+    reverse_speed_mps: float = REVERSE_SPEED_MPS,
+    high_turn_rad_s: float = HIGH_TURN_RAD_S,
+    extreme_turn_rad_s: float = EXTREME_TURN_RAD_S,
 ) -> dict[str, float | int | None]:
     """Summarize applied ``(v, omega)`` commands without simulator state."""
     if actions.ndim != 2 or actions.shape[1] < 2:

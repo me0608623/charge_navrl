@@ -40,6 +40,7 @@ validate_obstacle_counts = _MOD.validate_obstacle_counts
 normalize_dynamic_motion_weights = _MOD.normalize_dynamic_motion_weights
 sample_motion_families = _MOD.sample_motion_families
 wall_geometry = _MOD.wall_geometry
+wall_boundary_overlap = _MOD.wall_boundary_overlap
 
 
 def test_wall_inner_faces_are_exactly_four_metres_apart() -> None:
@@ -49,6 +50,27 @@ def test_wall_inner_faces_are_exactly_four_metres_apart() -> None:
     right_inner = centers[:, 1, 0] - 0.5 * sizes[:, 1, 0]
     assert torch.allclose(right_inner - left_inner, torch.full((3,), 4.0))
     assert torch.allclose(sizes[:, :, 1], torch.full((3, 2), 10.0))
+
+
+def test_sealed_wall_span_overlaps_stage5_boundary_without_changing_interaction_length() -> None:
+    spec = LongCorridorSpec(
+        free_width=4.2,
+        length=10.0,
+        wall_span_length=15.0,
+    )
+    centers, sizes = wall_geometry(3, spec, "cpu")
+    assert torch.allclose(sizes[:, :, 1], torch.full((3, 2), 15.0))
+    assert spec.length == 10.0
+    assert wall_boundary_overlap(
+        spec,
+        room_half_extent=7.5,
+        boundary_wall_width=1.0,
+    ) == pytest.approx(0.5)
+
+
+def test_wall_span_shorter_than_interaction_zone_is_rejected() -> None:
+    with pytest.raises(ValueError, match="cannot be shorter"):
+        validate_spec(LongCorridorSpec(length=10.0, wall_span_length=9.0))
 
 
 def test_sampled_layouts_stay_inside_and_keep_static_centerline_open() -> None:
@@ -679,6 +701,29 @@ def test_configure_event_params_carry_random_2d_kinematics() -> None:
     assert '"random_2d_kinematics"' in update.group(1)
     # And the setup function must accept it, so the event call does not crash.
     assert "random_2d_kinematics: str = \"patrol\"" in replay_src
+
+
+def test_configure_event_params_carry_physical_wall_span_across_resets() -> None:
+    """The sealed wall size must survive every auto-reset event invocation."""
+    import re
+
+    replay_src = (_MODULE_PATH.parent / "long_corridor_replay.py").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(
+        r"def configure_long_corridor_assets\(.*?\n(def |\Z)",
+        replay_src,
+        re.S,
+    )
+    assert match is not None
+    update = re.search(
+        r"event\.params\.update\(\s*\{(.*?)\}\s*\)",
+        match.group(0),
+        re.S,
+    )
+    assert update is not None
+    assert '"wall_span_length"' in update.group(1)
+    assert "wall_span_length: float | None = None" in replay_src
 
 
 # ---------------------------------------------------------------------------

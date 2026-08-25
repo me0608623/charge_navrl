@@ -174,6 +174,11 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--steps", type=int, default=1200)
+    # speed_rate 消融：複製車端 policy_node 的時間膨脹，量它對動態障礙的影響。
+    # 預設 1.0 = 不啟用，既有呼叫的意義完全不變。
+    parser.add_argument("--speed_rate", type=float, default=1.0)
+    parser.add_argument("--speed_rate_obs", type=str, default="ego",
+                        choices=["none", "ego", "ego_lidar"])
     parser.add_argument(
         "--seeds", type=_parse_csv_ints, default=(515, 616, 717)
     )
@@ -266,6 +271,9 @@ def main() -> int:
         "profile_complete": profile_complete,
         "random_2d_kinematics": args.random_2d_kinematics,
         "phase_audit": bool(args.phase_audit),
+        # 記進報告，避免事後分不清哪一份是哪一臂
+        "speed_rate": float(args.speed_rate),
+        "speed_rate_obs": (args.speed_rate_obs if args.speed_rate < 0.999 else None),
         "thresholds": {
             "success_rate_min": SR_MIN,
             "collision_rate_max": CR_MAX,
@@ -321,6 +329,14 @@ def main() -> int:
                     "--seed",
                     str(seed),
                     *actuator_args,
+                    *(
+                        [
+                            "--speed_rate", str(args.speed_rate),
+                            "--speed_rate_obs", args.speed_rate_obs,
+                        ]
+                        if args.speed_rate < 0.999
+                        else []
+                    ),
                 ],
             )
             verify_fixed_actuator_runtime(

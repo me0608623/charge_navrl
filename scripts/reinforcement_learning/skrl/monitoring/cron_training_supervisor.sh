@@ -11,6 +11,8 @@ STATUS_FILE="$STATE_DIR/status.txt"
 LOCK_FILE="/tmp/isaaclab_training_supervisor.lock"
 AUTO_SUPERVISOR="$REPO/scripts/reinforcement_learning/skrl/monitoring/auto_advance_supervisor.py"
 AUTO_STATE="$STATE_DIR/auto_advance_state.json"
+COMPLETION_TRANSITION="$REPO/scripts/reinforcement_learning/skrl/monitoring/training_completion_transition.py"
+COMPLETION_LEDGER="$STATE_DIR/completion_ledger.jsonl"
 PYTHON="/home/aa/miniconda3/envs/env_isaaclab/bin/python"
 
 resolve_training_log() {
@@ -47,7 +49,18 @@ status="UNSPECIFIED"
   )
   if ((${#train_pids[@]} == 0)); then
     if [[ -n "$expected_run" ]]; then
-      printf 'ALERT expected training process is not running\n'
+      if completion="$(
+        "$PYTHON" "$COMPLETION_TRANSITION" \
+          --repo "$REPO" \
+          --expected-run-file "$EXPECTED_RUN_FILE" \
+          --status-file "$STATUS_FILE" \
+          --ledger-file "$COMPLETION_LEDGER" 2>&1
+      )"; then
+        printf '%s\n' "$completion"
+      else
+        printf 'ALERT expected training process is not running\n'
+        printf '%s\n' "$completion"
+      fi
     else
       printf 'IDLE no training process expected\n'
     fi

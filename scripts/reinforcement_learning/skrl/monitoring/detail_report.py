@@ -35,6 +35,14 @@ STATE_DIR_DEFAULT = REPO_DEFAULT / "logs" / "training_supervisor"
 
 METRICS_FILENAME = "supervisor_metrics.jsonl"
 SCENE_NAMES = ("native", "narrow", "corridor")
+CORRIDOR_FAMILY_NAMES = (
+    "lateral",
+    "longitudinal",
+    "random_2d",
+    "mixed",
+    "no_dynamic",
+    "unready",
+)
 CORE_FIELDS = ("sr", "cr", "entropy", "kl", "vf", "policy_loss")
 
 #: 與 cron_training_supervisor.sh 相同的收斂式 regex：conda wrapper 不得誤配。
@@ -97,6 +105,29 @@ class SceneRow:
     sr: float | None
     cr: float | None
     timeout: float | None
+
+
+@dataclass(frozen=True)
+class CorridorFamilyRow:
+    name: str
+    episodes: float | None
+    sr: float | None
+    cr: float | None
+    timeout: float | None
+    active_step_share: float | None
+    reset_share: float | None
+    completed_episode_share: float | None
+    linear_speed_abs_mean_mps: float | None
+    stop_command_fraction: float | None
+    reverse_command_fraction: float | None
+    high_turn_fraction: float | None
+    extreme_turn_fraction: float | None
+    wall_cr: float | None
+    obstacle_cr: float | None
+    static_obstacle_cr: float | None
+    dynamic_obstacle_cr: float | None
+    reward_mean_per_step: float | None
+    progress_mean_per_step: float | None
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +237,68 @@ def scene_snapshot(row):
             )
         )
     return scenes
+
+
+def corridor_family_snapshot(row):
+    """抽出走廊 family 指標；舊 run 沒有欄位時回傳空 list。"""
+    families = []
+    for name in CORRIDOR_FAMILY_NAMES:
+        prefix = f"corridor_family/{name}"
+        if (
+            f"{prefix}/active_steps" not in row
+            and f"{prefix}/episodes" not in row
+        ):
+            continue
+        families.append(
+            CorridorFamilyRow(
+                name=name,
+                episodes=_num(row.get(f"{prefix}/episodes")),
+                sr=_num(row.get(f"{prefix}/sr")),
+                cr=_num(row.get(f"{prefix}/cr")),
+                timeout=_num(row.get(f"{prefix}/timeout")),
+                active_step_share=_num(
+                    row.get(f"{prefix}/active_step_share")
+                ),
+                reset_share=_num(row.get(f"{prefix}/reset_share")),
+                completed_episode_share=_num(
+                    row.get(f"{prefix}/completed_episode_share")
+                ),
+                linear_speed_abs_mean_mps=_num(
+                    row.get(f"{prefix}/linear_speed_abs_mean_mps")
+                ),
+                stop_command_fraction=_num(
+                    row.get(f"{prefix}/stop_command_fraction")
+                ),
+                reverse_command_fraction=_num(
+                    row.get(f"{prefix}/reverse_command_fraction")
+                ),
+                high_turn_fraction=_num(
+                    row.get(f"{prefix}/high_turn_fraction")
+                ),
+                extreme_turn_fraction=_num(
+                    row.get(f"{prefix}/extreme_turn_fraction")
+                ),
+                wall_cr=_num(row.get(f"{prefix}/wall_cr")),
+                obstacle_cr=_num(row.get(f"{prefix}/obstacle_cr")),
+                static_obstacle_cr=_num(
+                    row.get(f"{prefix}/static_obstacle_cr")
+                ),
+                dynamic_obstacle_cr=_num(
+                    row.get(f"{prefix}/dynamic_obstacle_cr")
+                ),
+                reward_mean_per_step=_num(
+                    row.get(
+                        f"{prefix}/signal/total_reward_mean_per_step"
+                    )
+                ),
+                progress_mean_per_step=_num(
+                    row.get(
+                        f"{prefix}/signal/progress_reward_mean_per_step"
+                    )
+                ),
+            )
+        )
+    return families
 
 
 def evaluate(rows, thresholds=None):
@@ -322,6 +415,35 @@ def evaluate(rows, thresholds=None):
                     f"（< {limits.min_scene_episodes}），其比率不足以支撐結論",
                 )
             )
+
+    families = corridor_family_snapshot(last)
+    if families:
+        reconciliation = _num(
+            last.get("corridor_family/accounting/reconciliation_ok")
+        )
+        if reconciliation != 1.0:
+            findings.append(
+                Finding(
+                    "RED",
+                    "corridor_family_reconciliation",
+                    "走廊 family 帳本未通過 scene/corridor 對帳",
+                )
+            )
+        for family in families:
+            if (
+                family.episodes is not None
+                and family.episodes < limits.min_scene_episodes
+            ):
+                findings.append(
+                    Finding(
+                        "YELLOW",
+                        "corridor_family_low_n",
+                        f"走廊 family {family.name} 本輪僅 "
+                        f"{family.episodes:.0f} 個 episode"
+                        f"（< {limits.min_scene_episodes}），"
+                        "其比率不足以支撐結論",
+                    )
+                )
 
     return findings
 
@@ -549,6 +671,62 @@ def _scene_table(rows, window):
     return "\n".join(lines)
 
 
+def _corridor_family_outcome_table(rows, window):
+    present = [
+        (row, corridor_family_snapshot(row))
+        for row in rows[-window:]
+        if corridor_family_snapshot(row)
+    ]
+    if not present:
+        return None
+    header = (
+        f"{'it':>5} {'family':<13} {'n':>6} "
+        f"{'SR':>6} {'CR':>6} {'TO':>6} "
+        f"{'occ':>6} {'reset':>6} {'done':>6}"
+    )
+    lines = [header, "-" * len(header)]
+    for row, families in present:
+        for family in families:
+            lines.append(
+                f"{row.get('iteration'):>5} {family.name:<13} "
+                f"{_fmt(family.episodes, '.0f'):>6} "
+                f"{_fmt(family.sr):>6} {_fmt(family.cr):>6} "
+                f"{_fmt(family.timeout):>6} "
+                f"{_fmt(family.active_step_share):>6} "
+                f"{_fmt(family.reset_share):>6} "
+                f"{_fmt(family.completed_episode_share):>6}"
+            )
+    return "\n".join(lines)
+
+
+def _corridor_family_behavior_table(row):
+    families = corridor_family_snapshot(row)
+    if not families:
+        return None
+    header = (
+        f"{'family':<13} {'|v|':>6} {'stop':>6} {'rev':>6} "
+        f"{'turn':>6} {'xturn':>6} {'wall':>6} {'obs':>6} "
+        f"{'static':>6} {'dyn':>6} {'R/step':>8} {'prog':>7}"
+    )
+    lines = [header, "-" * len(header)]
+    for family in families:
+        lines.append(
+            f"{family.name:<13} "
+            f"{_fmt(family.linear_speed_abs_mean_mps):>6} "
+            f"{_fmt(family.stop_command_fraction):>6} "
+            f"{_fmt(family.reverse_command_fraction):>6} "
+            f"{_fmt(family.high_turn_fraction):>6} "
+            f"{_fmt(family.extreme_turn_fraction):>6} "
+            f"{_fmt(family.wall_cr):>6} "
+            f"{_fmt(family.obstacle_cr):>6} "
+            f"{_fmt(family.static_obstacle_cr):>6} "
+            f"{_fmt(family.dynamic_obstacle_cr):>6} "
+            f"{_fmt(family.reward_mean_per_step, '.4f'):>8} "
+            f"{_fmt(family.progress_mean_per_step, '.4f'):>7}"
+        )
+    return "\n".join(lines)
+
+
 def render_report(
     run_name,
     rows,
@@ -599,7 +777,26 @@ def render_report(
     else:
         out += ["【2】分場景 SR / CR / TO：此 run 未輸出 scene/* 指標", ""]
 
-    out += ["【3】趨勢（實際跨度，非要求跨度）"]
+    family_outcomes = _corridor_family_outcome_table(
+        rows, limits.table_window
+    )
+    family_behavior = _corridor_family_behavior_table(last)
+    if family_outcomes:
+        out += [
+            "【3】走廊 motion family（occ/reset/done 皆為各自分母內占比）",
+            family_outcomes,
+            "",
+            "    最新一輪行為與碰撞分解",
+            family_behavior,
+            "",
+        ]
+    else:
+        out += [
+            "【3】走廊 motion family：此 run 未輸出 corridor_family/* 指標",
+            "",
+        ]
+
+    out += ["【4】趨勢（實際跨度，非要求跨度）"]
     for key, label in (("entropy", "entropy"), ("cr", "CR"), ("sr", "SR"), ("vf", "vf")):
         tr = trend(rows, key, limits.trend_lookback)
         if tr is None:
@@ -611,23 +808,23 @@ def render_report(
         )
     out.append("")
 
-    out += ["【4】GPU"]
+    out += ["【5】GPU"]
     out += [f"  {line}" for line in gpu_lines] or ["  （查不到）"]
     for pid, mem in gpu_procs:
         tag = " ← 本 run" if pid in pids else " ← 他人 process"
         out.append(f"  pid {pid:>8}  {mem}{tag}")
     out.append("")
 
-    out += ["【5】REPLAY-MIX（占用率，非表現）", f"  {replay_mix or '（無）'}", ""]
+    out += ["【6】REPLAY-MIX（占用率，非表現）", f"  {replay_mix or '（無）'}", ""]
 
-    out += ["【6】錯誤掃描"]
+    out += ["【7】錯誤掃描"]
     if errors:
         out += [f"  ⚠ {line[:160]}" for line in errors]
     else:
         out.append("  無 Traceback / CUDA / OOM / NaN / assert")
     out.append("")
 
-    out += ["【7】判定明細"]
+    out += ["【8】判定明細"]
     if findings:
         for finding in sorted(
             findings, key=lambda f: -LEVEL_ORDER.get(f.level, 0)

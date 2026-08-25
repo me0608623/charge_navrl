@@ -1,7 +1,10 @@
+import pytest
 import torch
+from pathlib import Path
 
 from rnn_car_wdclean.privileged_corridor_teacher import (
     CorridorTeacherSpec,
+    _d1_unicycle_paths,
     corridor_teacher_action_grid,
     predict_patrol_obstacle_paths,
     select_teacher_rollout_actions,
@@ -41,6 +44,94 @@ def test_empty_corridor_teacher_accelerates_straight_to_goal():
 
     assert bool(result["any_feasible"][0])
     assert result["actions"][0].tolist() == [18, 9]
+
+
+def test_d1_candidate_cannot_change_the_first_path_sample():
+    linear = torch.tensor([[[0.5]]])
+    angular = torch.zeros_like(linear)
+    path, yaw = _d1_unicycle_paths(
+        linear,
+        angular,
+        pending_command=torch.tensor([[0.0, 0.0]]),
+        robot_xy_m=torch.zeros(1, 2),
+        robot_yaw_rad=torch.zeros(1),
+        horizon_s=0.4,
+        samples=2,
+    )
+
+    assert path[0, 0, 0, 0, 0] == pytest.approx(0.0)
+    assert path[0, 0, 0, 1, 0] == pytest.approx(0.1)
+    torch.testing.assert_close(yaw, torch.zeros_like(yaw))
+
+
+def test_d1_teacher_executes_pending_command_before_candidate():
+    inputs = _teacher_inputs()
+    result = corridor_teacher_action_grid(
+        **inputs,
+        pending_d1_command=torch.tensor([[0.25, 0.0]]),
+    )
+
+    # The selected 0.1 m/s candidate runs for 1.8 s after the queued 0.25 m/s
+    # command runs for the first 0.2 s: 0.25*0.2 + 0.1*1.8 = 0.23 m.
+    assert result["actions"][0].tolist() == [18, 9]
+    assert result["endpoint_grid"][0, 18, 9, 0] == pytest.approx(0.23)
+
+
+def test_pending_d1_command_shape_is_fail_closed():
+    with pytest.raises(ValueError, match="pending d1 command"):
+        corridor_teacher_action_grid(
+            **_teacher_inputs(),
+            pending_d1_command=torch.zeros(1, 1, 2),
+        )
+
+
+def test_goal_denominator_default_preserves_explicit_historical_r1():
+    implicit = corridor_teacher_action_grid(**_teacher_inputs())
+    explicit = corridor_teacher_action_grid(
+        **_teacher_inputs(),
+        spec=CorridorTeacherSpec(goal_denominator_floor_m=1.0),
+    )
+
+    assert CorridorTeacherSpec().goal_denominator_floor_m == 1.0
+    for key in ("actions", "selected_cost", "cost_grid"):
+        torch.testing.assert_close(implicit[key], explicit[key])
+
+
+@pytest.mark.parametrize("floor", [0.0, -1.0, float("nan"), float("inf")])
+def test_goal_denominator_floor_must_be_finite_and_positive(floor):
+    with pytest.raises(ValueError, match="goal denominator floor"):
+        corridor_teacher_action_grid(
+            **_teacher_inputs(),
+            spec=CorridorTeacherSpec(goal_denominator_floor_m=floor),
+        )
+
+
+def test_r10_restores_clearance_in_the_synthetic_near_goal_band():
+    inputs = _teacher_inputs()
+    inputs["current_velocity"][:] = 1.0
+    inputs["goal_xy_m"][:] = torch.tensor([2.0, 0.0])
+    inputs["obstacle_paths_m"][0, 0, :, 0] = 2.0
+    inputs["obstacle_paths_m"][0, 0, :, 1] = 0.3
+    inputs["obstacle_valid"][:] = True
+
+    r1 = corridor_teacher_action_grid(
+        **inputs,
+        spec=CorridorTeacherSpec(goal_denominator_floor_m=1.0),
+    )
+    r10 = corridor_teacher_action_grid(
+        **inputs,
+        spec=CorridorTeacherSpec(goal_denominator_floor_m=10.0),
+    )
+
+    def selected_clearance(result):
+        linear_index, angular_index = result["actions"][0]
+        return result["min_obstacle_clearance_grid"][
+            0, linear_index, angular_index
+        ]
+
+    assert selected_clearance(r1) == pytest.approx(0.104259, abs=1e-5)
+    assert selected_clearance(r10) == pytest.approx(0.381992, abs=1e-5)
+    assert selected_clearance(r10) > selected_clearance(r1) + 0.25
 
 
 def test_patrol_prediction_turns_at_current_waypoint():
@@ -161,3 +252,23 @@ def test_teacher_override_changes_only_feasible_actions():
         executed,
         torch.tensor([[4.0, 12.0], [9.0, 4.0]]),
     )
+
+
+def test_play_teacher_models_pending_d1_before_env_step():
+    play = (
+        Path(__file__).resolve().parents[1]
+        / "play_eval"
+        / "play_rnn_car.py"
+    ).read_text(encoding="utf-8")
+
+    pending = play.index(
+        "_teacher_pending_d1_command = pending_d1_command("
+    )
+    teacher = play.index("_teacher_result = corridor_teacher_action_grid(", pending)
+    passed = play.index(
+        "pending_d1_command=_teacher_pending_d1_command", teacher
+    )
+    override = play.index("actions = select_teacher_rollout_actions(", passed)
+    env_step = play.index("env.step(actions.float())", override)
+
+    assert pending < teacher < passed < override < env_step

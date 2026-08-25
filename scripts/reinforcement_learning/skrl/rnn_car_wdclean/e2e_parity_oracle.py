@@ -34,17 +34,29 @@ import torch
 
 _SKRL = Path(__file__).resolve().parents[1]  # scripts/reinforcement_learning/skrl
 sys.path.insert(0, str(_SKRL / "models"))
-from modular_rnn_models import LidarStateExtractor, PolicyHead  # noqa: E402
+from modular_rnn_models import (  # noqa: E402
+    ACT_HIST_DIM,
+    ACT_HIST_END,
+    ACT_HIST_START,
+    TIME_END,
+    TIME_START,
+    LidarStateExtractor,
+    PolicyHead,
+)
 
 LIDAR_START, LIDAR_END = 6, 78
 LIDAR_LEN = 72
 
 
 def build_obs_sequence(steps: int, num_envs: int, obs_dim: int, seed: int) -> torch.Tensor:
-    """產生固定、可重現、涵蓋合理數值範圍的 raw obs 序列 [T, N, 79]。
+    """產生固定、可重現、涵蓋合理數值範圍的 raw obs 序列 ``[T, N, obs_dim]``。
 
     數值範圍模擬部署 obs：ego 小值、goal ±數 m、LiDAR 正距離、time in [0,1]。
     序列本身不需真實物理，只需確定性且能完整驅動 forward + 疊幀 buffer。
+
+    ``obs_dim=83`` 時尾端 4 維是 act_hist（過去 2 步 issued
+    ``[linear_accel/0.5, omega/1.2]``，車端最終 clip 到 ``[-2, 2]``），
+    所以取樣範圍用 ``[-2, 2]`` 覆蓋該契約的完整值域。
     """
     g = torch.Generator().manual_seed(seed)
     obs = torch.zeros(steps, num_envs, obs_dim)
@@ -57,7 +69,11 @@ def build_obs_sequence(steps: int, num_envs: int, obs_dim: int, seed: int) -> to
     obs[..., LIDAR_START:LIDAR_END] = torch.rand(steps, num_envs, LIDAR_LEN, generator=g) * 1.2
     # time [78] 遞減比例
     ramp = torch.linspace(1.0, 0.0, steps).reshape(steps, 1)
-    obs[..., 78] = ramp.expand(steps, num_envs)
+    obs[..., TIME_START] = ramp.expand(steps, num_envs)
+    if obs_dim == ACT_HIST_END:
+        obs[..., ACT_HIST_START:ACT_HIST_END] = (
+            torch.rand(steps, num_envs, ACT_HIST_DIM, generator=g) * 4.0 - 2.0
+        )
     return obs
 
 
@@ -84,20 +100,37 @@ def main() -> None:
     mean = on["mean"].to(device).reshape(-1).float()
     var = on["var"].to(device).reshape(-1).float()
     obs_dim = int(mean.shape[-1])
-    assert obs_dim == 79, f"expected 79D normalizer, got {obs_dim}"
+    # 79D = v3f lineage (no action history). 83D = current sim2real lineage,
+    # which appends act_hist [79:83]; the frame-stack history still goes last,
+    # after act_hist, because the extractor slices it with obs[:, -(K-1)*72:].
+    assert obs_dim in (TIME_END, ACT_HIST_END), (
+        f"expected {TIME_END}D or {ACT_HIST_END}D normalizer, got {obs_dim}"
+    )
+    include_act_hist = obs_dim == ACT_HIST_END
 
     def normalize(x: torch.Tensor) -> torch.Tensor:
         return torch.clamp((x - mean) / (var.sqrt() + 1e-8), -5.0, 5.0)
 
     # --- models (identical class the car reuses) ---
-    extractor = LidarStateExtractor(legacy=False, include_act_hist=False, frame_stack=K).to(device)
+    # act_hist_dropout is deliberately left at 0: the oracle runs in eval mode
+    # where dropout is a passthrough, so a nonzero training value must not
+    # change the golden.
+    extractor = LidarStateExtractor(
+        legacy=False, include_act_hist=include_act_hist, frame_stack=K
+    ).to(device)
     extractor.load_state_dict(ck["extractor"])
     extractor.train(False)
 
-    rl_in_dim = obs_dim + extractor.output_dim  # 79 + 96 = 175
+    rl_in_dim = obs_dim + extractor.output_dim  # 79+96=175 or 83+96=179
     policy = PolicyHead(input_dim=rl_in_dim).to(device)
     policy.load_state_dict(ck["policy_head"])
     policy.train(False)
+    # Fail closed if the checkpoint's head disagrees with the derived input dim;
+    # a silent mismatch here would ship a golden the car can never reproduce.
+    _first = policy.state_dict()[next(iter(policy.state_dict()))]
+    assert _first.shape[-1] == rl_in_dim, (
+        f"policy head expects {_first.shape[-1]}D input, derived {rl_in_dim}D"
+    )
 
     # --- deterministic obs sequence ---
     obs_seq = build_obs_sequence(args.steps, args.num_envs, obs_dim, args.seed).to(device)

@@ -150,10 +150,25 @@ def test_scene_snapshot_is_taken_before_env_step():
     assert snap < step, "scene identity must be sampled before env.step()"
 
 
+def test_corridor_family_snapshot_is_taken_before_env_step():
+    snap = SOURCE.index(
+        "_corridor_family_snapshot_step = snapshot_corridor_families("
+    )
+    step = SOURCE.index(
+        "next_obs, reward, terminated, truncated, info = env.step("
+    )
+    assert snap < step, "corridor family must be sampled before env.step()"
+
+
 def test_step_receives_scene_and_termination_flags():
-    call = SOURCE[SOURCE.index("metrics.step("):]
+    call = SOURCE[SOURCE.index("            metrics.step(obs,"):]
     call = call[: call.index("\n\n")]
-    for kw in ("scene_id=", "terminated_flat=", "truncated_flat="):
+    for kw in (
+        "scene_id=",
+        "corridor_family_snapshot=",
+        "terminated_flat=",
+        "truncated_flat=",
+    ):
         assert kw in call, f"metrics.step is missing {kw}"
 
 
@@ -188,6 +203,10 @@ def test_scene_counters_are_reset_each_iteration():
     assert "for _sc in self._scene_counts.values():" in SOURCE
 
 
+def test_corridor_family_iteration_counters_are_reset():
+    assert "self._corridor_family_metrics.reset_iteration()" in SOURCE
+
+
 def test_outcome_gate_requires_exactly_one_class():
     assert "if hits != 1:" in SOURCE
     assert "exactly one" in SOURCE
@@ -209,3 +228,15 @@ def test_scene_fields_reach_the_supervisor_jsonl():
         "the shared denominator must be logged so per-scene counts can be "
         "reconciled against the global path"
     )
+
+
+def test_corridor_family_fields_reach_the_supervisor_jsonl():
+    block = SOURCE[SOURCE.index("_supervisor_metrics = {"):]
+    block = block[: block.index("\n        }")]
+    assert 'if _k.startswith("corridor_family/")' in block
+
+
+def test_existing_corridor_scene_metrics_are_not_replaced():
+    emission = _emission_block()
+    for key in ("episodes", "sr", "cr", "timeout"):
+        assert f'm[f"scene/{{_scene}}/{key}"]' in emission
