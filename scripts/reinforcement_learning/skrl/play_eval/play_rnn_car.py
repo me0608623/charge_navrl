@@ -31,6 +31,7 @@ import argparse
 import copy
 import glob
 import json
+import math
 import os
 import sys
 import time
@@ -238,6 +239,28 @@ parser.add_argument(
         "also enables --jitter_eval"
     ),
 )
+parser.add_argument(
+    "--goal_distance_stats_output",
+    type=str,
+    default="",
+    help=(
+        "write the distribution of the goal observation magnitude |obs[4:6]| "
+        "as JSON. Used to compare the training goal-distance distribution "
+        "against the deployed pure-pursuit carrot (path_lookahead_m=2.0), "
+        "and to report how often the +/-10 m clamp is reached."
+    ),
+)
+parser.add_argument(
+    "--action_stats_output",
+    type=str,
+    default="",
+    help=(
+        "write decoder action statistics as JSON: slew saturation of the "
+        "DESIRED angular change (Q2), act_hist distribution (Q4) and reverse "
+        "command frequency (Q5). Uses the pre-delay commanded omega, so the "
+        "actuator delay does not contaminate the slew measurement."
+    ),
+)
 parser.add_argument("--seed", type=int, default=None,
                     help="環境隨機種子（控制 obstacle/goal 生成順序，None=使用 env config 預設 42）")
 parser.add_argument("--real_time", action="store_true", default=REAL_TIME,
@@ -354,7 +377,7 @@ parser.add_argument("--narrow_replay_goal_lateral_offset_range", type=float, nar
 parser.add_argument("--narrow_replay_segment_length", type=float, default=9.0,
                     help="單段牆長 m（預設 9.0 對齊訓練；缺口偏移大時會自動加長）")
 parser.add_argument("--long_corridor_eval", action="store_true", default=False,
-                    help="走廊 Gate：10m 長，自由寬與速度見 --long_corridor_free_width "
+                    help="走廊 Gate：10m 互動區，側牆密封到外牆；自由寬與速度見 --long_corridor_free_width "
                          "／--long_corridor_dynamic_speed_range（預設 4m 自由寬、"
                          "0.30-0.60 m/s、4 靜態+2 動態＝部署 Gate 歷史值）")
 parser.add_argument("--long_corridor_output", type=str, default="",
@@ -458,6 +481,96 @@ parser.add_argument(
     help="動態碰撞前回溯的 counterfactual lead-time 步數（dt=0.2s）",
 )
 parser.add_argument(
+    "--d3_yield_audit",
+    action="store_true",
+    default=False,
+    help=(
+        "SA4-D3：記錄 lateral corridor 碰撞前 5 秒的 policy/effective "
+        "action、pre/post-delay command、實際車速、動態障礙距離/closing/risk。"
+    ),
+)
+parser.add_argument(
+    "--d3_yield_output",
+    type=str,
+    default="",
+    help="SA4-D3 時序事件 JSON；啟用 --d3_yield_audit 時必填",
+)
+parser.add_argument(
+    "--d3_shield_mode",
+    choices=(
+        "baseline",
+        "sustained_brake",
+        "best_turn",
+        "combined",
+        "geometry_feasible",
+        "geometry_feasible_argmin",
+    ),
+    default="baseline",
+    help=(
+        "D3/D4 固定機制實驗臂；介入仍在 policy action 與 d1 queue 之間"
+    ),
+)
+parser.add_argument(
+    "--d5_feasibility_shadow",
+    action="store_true",
+    default=False,
+    help=(
+        "SA4-D5：baseline-only shadow 計算所有有效動態場景幀的 19x19 "
+        "dynamic/static/joint feasibility；不修改 policy action"
+    ),
+)
+parser.add_argument(
+    "--d5_feasibility_output",
+    type=str,
+    default="",
+    help="SA4-D5 feasibility-frontier JSON；啟用 shadow 時必填",
+)
+parser.add_argument(
+    "--d6_static_sensitivity",
+    action="store_true",
+    default=False,
+    help=(
+        "SA4-D6：baseline-only shadow 分解 static feasibility 的 LiDAR "
+        "來源、horizon 與 clearance；不修改 policy action"
+    ),
+)
+parser.add_argument(
+    "--d6_static_sensitivity_output",
+    type=str,
+    default="",
+    help="SA4-D6 static-sensitivity JSON；啟用 shadow 時必填",
+)
+parser.add_argument(
+    "--d7_lidar_residual_origin",
+    action="store_true",
+    default=False,
+    help=(
+        "SA4-D7：baseline-only 追蹤 D6 residual 72-bin 回波的 raw/bias/"
+        "sigma/dropout/distractor 來源；不修改 policy action"
+    ),
+)
+parser.add_argument(
+    "--d7_lidar_residual_origin_output",
+    type=str,
+    default="",
+    help="SA4-D7 residual-origin JSON；啟用 audit 時必填",
+)
+parser.add_argument(
+    "--d8_noise_eligibility_sensitivity",
+    action="store_true",
+    default=False,
+    help=(
+        "SA4-D8：同一 realized trace 配對比較目前 mixed-pixel 雜訊與"
+        "只允許有效回波產生 outlier 的 counterfactual；不修改 policy action"
+    ),
+)
+parser.add_argument(
+    "--d8_noise_eligibility_output",
+    type=str,
+    default="",
+    help="SA4-D8 paired noise-eligibility JSON；啟用 shadow 時必填",
+)
+parser.add_argument(
     "--privileged_corridor_teacher",
     action="store_true",
     default=False,
@@ -483,6 +596,24 @@ parser.add_argument(
     type=str,
     default="",
     help="保存 policy 179D 輸入與同幀 teacher actions，供 held-out 可學性 probe",
+)
+parser.add_argument(
+    "--corridor_teacher_goal_denominator_floor_m",
+    type=float,
+    default=1.0,
+    help=(
+        "teacher goal-cost 分母下限（m）；1.0 完整保留歷史 v4，"
+        "teacher-only A/B 可顯式改為 10.0"
+    ),
+)
+parser.add_argument(
+    "--corridor_teacher_controller",
+    choices=("memoryless", "stateful"),
+    default="memoryless",
+    help=(
+        "teacher 控制器；memoryless 保留歷史逐幀 argmin，stateful 使用 "
+        "WAIT→COMMIT_SIDE→PASS 並鎖定通行側"
+    ),
 )
 parser.add_argument("--solvability_audit_output", type=str, default="",
                     help="診斷每回合起始場景的牆/靜態/全障礙可達性並輸出 JSON；不改 gate 或 policy")
@@ -629,12 +760,32 @@ parser.add_argument("--vlp16_noise_mode", type=str, default=None,
                     choices=["ideal", "sigma", "bias", "dropout", "full", "full_material"],
                     help="VLP-16 實測雜訊 preset。未指定時自動從 checkpoint 繼承(對齊訓練分佈)；"
                          "要刻意乾淨評估請顯式傳 --vlp16_noise_mode ideal")
+parser.add_argument(
+    "--lidar-distractor-eligibility",
+    choices=("all_rays", "valid_return_only"),
+    default="all_rays",
+    help=(
+        "mixed-pixel outlier 資格：all_rays 保留歷史語意；"
+        "valid_return_only 僅允許有效且未 dropout 的 ray"
+    ),
+)
 parser.add_argument("--lidar_r_min", type=float, default=LIDAR_R_MIN,
                     help="LiDAR 最小量測距離（盲區）m。實機 VLP16 ≈ 0.9")
 parser.add_argument("--collision_dist", type=float, default=COLLISION_DIST,
                     help="碰撞判定距離 m（= body_radius + buffer）。預設 0.45")
 parser.add_argument("--max_angular_vel", type=float, default=None,
                     help="角速度上限 rad/s（預設沿用 env cfg，例如 1.2）")
+#: speed_rate 消融（車端 policy_node 的「時間膨脹」）
+#  車端 rate<1 時做兩件事：動作上限 ×rate（真的變慢），obs 的 ego/goal ×1/rate
+#  （騙 policy 說自己還在原速）。**但光達不縮放** —— 這個不對稱是待驗的假說。
+#    none      = 只有動作變慢（單純降速）
+#    ego       = 車端現況（ego+goal 放大、光達原樣）
+#    ego_lidar = 補上缺的那半（光達也放大 → 時間膨脹一致）
+parser.add_argument("--speed_rate", type=float, default=1.0,
+                    help="動作上限縮放係數（車端 policy_node 的 speed_rate）。1.0=不啟用")
+parser.add_argument("--speed_rate_obs", type=str, default="ego",
+                    choices=["none", "ego", "ego_lidar"],
+                    help="speed_rate 時 obs 端放大哪些欄位（見上方說明）")
 parser.add_argument("--max_angular_accel", type=float, default=None,
                     help="角加速度上限 rad/s²（slew clamp 強度。預設沿用 env cfg，例如 3.0）")
 parser.add_argument("--no_goal_movement", action="store_true", default=False,
@@ -696,6 +847,15 @@ parser.add_argument(
     default=None,
     metavar=("ALPHA_V", "ALPHA_OMEGA"),
     help="分通道一階低通 (alpha_v, alpha_omega)，設定時覆寫 scalar alpha",
+)
+parser.add_argument(
+    "--deployment_speed_scale",
+    type=float,
+    default=1.0,
+    help=(
+        "部署端安全速度倍率；只縮放送入 simulator 的 (v,omega)，不改 decoder "
+        "積分、d1 queue 或 issued-action history"
+    ),
 )
 
 # --- BEV 俯視圖 ---
@@ -880,6 +1040,19 @@ from rnn_car_wdclean.privileged_corridor_teacher import (
     predict_patrol_obstacle_paths,
     select_teacher_rollout_actions,
 )
+from rnn_car_wdclean.teacher_closed_loop_metrics import (
+    TeacherClosedLoopMetrics,
+)
+from rnn_car_wdclean.teacher_interaction_metrics import (
+    TeacherInteractionMetrics,
+)
+from rnn_car_wdclean.stateful_corridor_teacher import (
+    COMMIT_SIDE as STATEFUL_TEACHER_COMMIT_SIDE,
+    PASS as STATEFUL_TEACHER_PASS,
+    WAIT as STATEFUL_TEACHER_WAIT,
+    StatefulCorridorTeacher,
+    StatefulTeacherSpec,
+)
 from rnn_car_wdclean.scripted_narrow_teacher import (
     ScriptedNarrowTeacherSpec,
     narrow_bridge_teacher_geometry,
@@ -894,6 +1067,50 @@ from rnn_car_wdclean.reward_diagnostics import (
     decode_discrete_drive_action_grid,
     future_occupancy_action_counterfactuals,
     future_occupancy_risk_grid,
+)
+from rnn_car_wdclean.d3_yield_recorder import (
+    D3YieldRecorder,
+    ShieldMode as D3ShieldMode,
+    STOP_SPEED_MPS as D3_STOP_SPEED_MPS,
+    StepRecord as D3StepRecord,
+    build_shield as build_d3_shield,
+    shield_protocol as d3_shield_protocol,
+    validate_audit_motion_scope as validate_d3_audit_motion_scope,
+)
+from rnn_car_wdclean.d4_geometry_selector import (
+    ARGMIN_MODE as D4_ARGMIN_GEOMETRY_MODE,
+    MODE as D4_GEOMETRY_MODE,
+    build_argmin_geometry_selector,
+    build_geometry_selector,
+    geometry_argmin_selector_protocol,
+    geometry_selector_protocol,
+    pending_d1_command,
+    speed_scaled_geometry_spec,
+    validate_action_contract as validate_d4_action_contract,
+)
+from rnn_car_wdclean.d5_feasibility_shadow import (
+    FeasibilityFrontierRecorder as D5FeasibilityFrontierRecorder,
+    build_feasibility_shadow,
+    feasibility_shadow_protocol,
+)
+from rnn_car_wdclean.d6_static_feasibility_sensitivity import (
+    build_static_sensitivity,
+    static_sensitivity_protocol,
+)
+from rnn_car_wdclean.d7_lidar_residual_origin import (
+    build_residual_origin_audit,
+    residual_origin_protocol,
+    select_matching_lidar_trace,
+)
+from rnn_car_wdclean.d8_noise_eligibility_sensitivity import (
+    build_noise_eligibility_sensitivity,
+    noise_eligibility_protocol,
+)
+from rnn_car_wdclean.vehicle_speed_rate import (
+    apply_vehicle_speed_rate_action_limits,
+    apply_vehicle_speed_rate_observation,
+    speed_rate_is_active,
+    validate_vehicle_speed_rate,
 )
 from rnn_car_wdclean.teacher_retention import categorical_forward_kl
 from wd_aux_targets import build_wd_preprocess_targets  # RNN aux 7D target 計算
@@ -3170,6 +3387,13 @@ def main():
         _corridor_speed_range = tuple(
             float(v) for v in args_cli.long_corridor_dynamic_speed_range
         )
+        _corridor_room_half_extent = (
+            0.5 * float(args_cli.arena_size)
+            if args_cli.arena_size is not None
+            else 0.5 * ARENA_REF_SIZE
+        )
+        _corridor_boundary_wall_width = 1.0
+        _corridor_wall_span_requested = 2.0 * _corridor_room_half_extent
         if _corridor_free_width <= 0.0:
             raise ValueError("--long_corridor_free_width must be positive")
         if not (
@@ -3183,6 +3407,8 @@ def main():
             fraction=1.0,
             free_width=_corridor_free_width,
             length=10.0,
+            room_half_extent=_corridor_room_half_extent,
+            boundary_wall_width=_corridor_boundary_wall_width,
             static_obstacles=_corridor_static_obstacles,
             dynamic_obstacles=_corridor_dynamic_obstacles,
             dynamic_speed_range=_corridor_speed_range,
@@ -3279,6 +3505,29 @@ def main():
             _diff_drive_cfg.max_angular_accel = args_cli.max_angular_accel
             print(f"[PLAY] 覆寫 max_angular_accel: {_old_a} → {args_cli.max_angular_accel} rad/s²")
 
+        # speed_rate：四個動作上限同乘 rate，與車端 policy_node act_eff 一致。
+        # dt 與 reverse_velocity_scale 不動（前者是控制週期、後者是比例）。
+        _sr, _sr_obs_mode = validate_vehicle_speed_rate(
+            getattr(args_cli, "speed_rate", 1.0),
+            getattr(args_cli, "speed_rate_obs", "ego"),
+        )
+        _sr_contract = apply_vehicle_speed_rate_action_limits(
+            _diff_drive_cfg,
+            _sr,
+        )
+        if speed_rate_is_active(_sr):
+            for _name, _old in _sr_contract["before"].items():
+                print(
+                    f"[SPEED_RATE] {_name}: {_old} → "
+                    f"{_sr_contract['after'][_name]:.4f}"
+                )
+            print(f"[SPEED_RATE] rate={_sr:.2f}  obs 模式={args_cli.speed_rate_obs}")
+        print(
+            f"[VEHICLE-SPEED-RATE] rate={_sr:g} obs={args_cli.speed_rate_obs} "
+            "lidar_scaled=False "
+            f"deployment_scale={float(args_cli.deployment_speed_scale):g}"
+        )
+
     # 印出配置摘要
     print(f"[PLAY] checkpoint: {ckpt_path}")
     print(f"[PLAY] task: {args_cli.task}")
@@ -3301,6 +3550,15 @@ def main():
         env_cfg.seed = _random.randint(0, 99999)
     print(f"[PLAY] 環境 seed = {env_cfg.seed}")
 
+    # D7 must observe the very first reset sweep. Enable realized-stage tracing
+    # before gym.make/env.reset; the observation function only snapshots tensors
+    # that were already generated and consumes no additional RNG.
+    if (
+        args_cli.d7_lidar_residual_origin
+        or args_cli.d8_noise_eligibility_sensitivity
+        or args_cli.d3_shield_mode == D4_ARGMIN_GEOMETRY_MODE
+    ):
+        os.environ["CHARGE_D7_LIDAR_TRACE"] = "1"
     env = gym.make(args_cli.task, cfg=env_cfg)
     raw_env = env.unwrapped
     # ★LV-DOT channel 存廢驗證: CHARGE_LVDOT_ZERO=1 → 用現有 DR dropout 機制把整條
@@ -3942,6 +4200,11 @@ def main():
     _long_corridor_local_goal_error_max = 0.0
     _long_corridor_applied_actions: list[torch.Tensor] = []
     _long_corridor_clear_actions: list[torch.Tensor] = []
+    _long_corridor_pre_deployment_actions: list[torch.Tensor] = []
+    _long_corridor_clear_pre_deployment_actions: list[torch.Tensor] = []
+    _long_corridor_actual_body_velocities: list[torch.Tensor] = []
+    _long_corridor_deployment_scale_samples = 0
+    _long_corridor_deployment_scale_max_error = 0.0
 
     def _audit_long_corridor_goal() -> None:
         nonlocal _long_corridor_goal_error_max
@@ -3993,6 +4256,7 @@ def main():
             fraction=1.0,
             free_width=_install_free_width,
             length=10.0,
+            wall_span_length=_corridor_wall_span_requested,
             static_obstacles=_corridor_static_obstacles,
             dynamic_obstacles=_corridor_dynamic_obstacles,
             dynamic_speed_min=_install_speed_range[0],
@@ -4226,6 +4490,21 @@ def main():
     episode_omega_target_max = torch.zeros(raw_env.num_envs, device=device) # 回合最高 |ω_target|
     episode_slew_sum = torch.zeros(raw_env.num_envs, device=device)         # 累積 |ω_target - ω_actual|
     episode_slew_max = torch.zeros(raw_env.num_envs, device=device)         # 回合最高 slew 差
+    # --- action stats (Q2 slew 飽和 / Q4 act_hist / Q5 倒車) ---
+    #   刻意用 pre-delay 的 _commanded_omega 當基準：既有的 episode_slew_* 讀
+    #   _current_omega（post-delay），開啟 actuator DR 時會把延遲混進 slew 統計。
+    # --- goal 距離分布（對照車端 pure-pursuit carrot）---
+    _gd_on = bool(args_cli.goal_distance_stats_output)
+    _gd_samples: list = []
+    _as_on = bool(args_cli.action_stats_output)
+    _as_steps = 0
+    _as_slew_sat = 0            # 想要的 |Δω| 觸及 slew 上限的步數
+    _as_dw_desired: list = []   # |ω_target - ω_prev_cmd| 每步樣本（CPU）
+    _as_rev_cmd = 0             # 實際下達倒車（next_v < 0）的步數
+    _as_brake_intent = 0        # ratio_linear < 0（制動/倒車意圖）的步數
+    _as_next_v: list = []
+    _as_acthist: list = []
+    _as_prev_cmd_omega = None
     # 讀取動作項目參數（用於計算 ω_target）
     _action_term_ref = list(raw_env.action_manager._terms.values())[0]
     _max_ang_vel = float(_action_term_ref.cfg.max_angular_vel)
@@ -4246,6 +4525,12 @@ def main():
     _corridor_teacher_stats = None
     _corridor_teacher_spec = None
     _corridor_teacher_probe = None
+    _corridor_teacher_closed_loop_metrics = None
+    _corridor_teacher_interaction_metrics = None
+    _corridor_teacher_uses_d1 = False
+    _stateful_teacher_controller = None
+    _stateful_teacher_spec = None
+    _stateful_teacher_stats = None
     if _corridor_teacher_enabled:
         if not args_cli.long_corridor_eval:
             raise ValueError(
@@ -4256,11 +4541,70 @@ def main():
             raise ValueError(
                 "privileged corridor teacher modes require --deterministic"
             )
-        if bool(
-            getattr(_action_term_ref.cfg, "enable_actuator_dr", False)
+        _teacher_actuator_cfg = _action_term_ref.cfg
+        if bool(getattr(_teacher_actuator_cfg, "enable_actuator_dr", False)):
+            _teacher_delay = tuple(
+                int(value)
+                for value in getattr(
+                    _teacher_actuator_cfg, "actuator_delay_range", ()
+                )
+            )
+            _teacher_scale = tuple(
+                float(value)
+                for value in getattr(
+                    _teacher_actuator_cfg, "actuator_velocity_scale", ()
+                )
+            )
+            _teacher_lag = getattr(
+                _teacher_actuator_cfg,
+                "actuator_motor_lag_by_channel",
+                None,
+            )
+            if _teacher_lag is None:
+                _teacher_lag = (
+                    float(_teacher_actuator_cfg.actuator_motor_lag),
+                ) * 2
+            else:
+                _teacher_lag = tuple(float(value) for value in _teacher_lag)
+            if _teacher_delay != (1, 1):
+                raise ValueError(
+                    "privileged corridor teacher actuator model supports "
+                    "fixed d1 only"
+                )
+            if _teacher_scale != (1.0, 1.0) or _teacher_lag != (1.0, 1.0):
+                raise ValueError(
+                    "privileged corridor teacher d1 model requires identity "
+                    "velocity scale and motor lag"
+                )
+            if float(
+                getattr(_teacher_actuator_cfg, "deployment_speed_scale", 1.0)
+            ) != 1.0:
+                raise ValueError(
+                    "privileged corridor teacher d1 model requires "
+                    "deployment_speed_scale=1"
+                )
+            _corridor_teacher_uses_d1 = True
+        if args_cli.corridor_teacher_controller == "stateful":
+            if not _corridor_teacher_override:
+                raise ValueError(
+                    "stateful corridor teacher is a closed-loop controller "
+                    "and requires --privileged_corridor_teacher"
+                )
+            if not _corridor_teacher_uses_d1:
+                raise ValueError(
+                    "stateful corridor teacher requires the exact fixed d1 "
+                    "actuator queue"
+                )
+        _teacher_goal_denominator_floor_m = float(
+            args_cli.corridor_teacher_goal_denominator_floor_m
+        )
+        if (
+            not math.isfinite(_teacher_goal_denominator_floor_m)
+            or _teacher_goal_denominator_floor_m <= 0.0
         ):
             raise ValueError(
-                "privileged corridor teacher does not model actuator DR"
+                "--corridor_teacher_goal_denominator_floor_m must be "
+                "finite and positive"
             )
         _teacher_zero = lambda: torch.zeros(  # noqa: E731
             (), dtype=torch.float32, device=device
@@ -4281,7 +4625,46 @@ def main():
                 "teacher_right_turn",
             )
         }
-        _corridor_teacher_spec = CorridorTeacherSpec()
+        _corridor_teacher_spec = CorridorTeacherSpec(
+            goal_denominator_floor_m=(
+                _teacher_goal_denominator_floor_m
+            )
+        )
+        _corridor_teacher_closed_loop_metrics = TeacherClosedLoopMetrics(
+            raw_env.num_envs,
+            device,
+            near_goal_threshold_m=3.0,
+        )
+        _corridor_teacher_interaction_metrics = TeacherInteractionMetrics(
+            raw_env.num_envs,
+            device,
+            dt_s=float(_action_term_ref._dt),
+        )
+        if args_cli.corridor_teacher_controller == "stateful":
+            _stateful_teacher_spec = StatefulTeacherSpec()
+            _stateful_teacher_controller = StatefulCorridorTeacher(
+                raw_env.num_envs,
+                device,
+                dt_s=float(_action_term_ref._dt),
+                spec=_stateful_teacher_spec,
+            )
+            _stateful_teacher_stats = {
+                key: _teacher_zero()
+                for key in (
+                    "wait_state_frames",
+                    "commit_state_frames",
+                    "pass_state_frames",
+                    "interaction_frames",
+                    "override_frames",
+                    "geometric_feasible_frames",
+                    "used_wait_frames",
+                    "used_reverse_frames",
+                    "emergency_brake_frames",
+                    "entered_commit",
+                    "entered_pass",
+                    "released",
+                )
+            }
         if args_cli.privileged_corridor_teacher_probe_output:
             _corridor_teacher_probe = {
                 "policy_input": [],
@@ -4296,7 +4679,11 @@ def main():
             "waypoint-aware patrol prediction, "
             "OBB-circle obstacles, OBB-AABB walls, 19x19 reachable actions, "
             f"horizon={_corridor_teacher_spec.horizon_s:.1f}s, "
-            "reverse=disabled, future_pause_branches=0/5 steps",
+            "goal_denominator_floor="
+            f"{_corridor_teacher_spec.goal_denominator_floor_m:g}m, "
+            f"actuator={'fixed_d1_queue' if _corridor_teacher_uses_d1 else 'd0'}, "
+            f"controller={args_cli.corridor_teacher_controller}, "
+            "base_reverse=disabled, future_pause_branches=0/5 steps",
             flush=True,
         )
     _future_cf_enabled = bool(
@@ -4405,6 +4792,580 @@ def main():
             flush=True,
         )
 
+    _d3_enabled = bool(args_cli.d3_yield_audit)
+    _d3_shield = None
+    _d3_recorder = None
+    _d3_protocol = None
+    if _d3_enabled:
+        if not args_cli.d3_yield_output:
+            raise ValueError(
+                "--d3_yield_audit requires --d3_yield_output"
+            )
+        if not args_cli.long_corridor_eval:
+            raise ValueError(
+                "--d3_yield_audit requires --long_corridor_eval"
+            )
+        validate_d3_audit_motion_scope(
+            args_cli.long_corridor_motion_mode,
+            args_cli.d3_shield_mode,
+            feasibility_shadow=bool(args_cli.d5_feasibility_shadow),
+        )
+        if not args_cli.deterministic:
+            raise ValueError("SA4-D3 requires --deterministic")
+        if abs(float(raw_env.step_dt) - 0.2) > 1.0e-9:
+            raise ValueError(
+                f"SA4-D3 requires dt=0.2s, got {raw_env.step_dt}"
+            )
+        conflicting_overrides = {
+            "safety_shield": bool(args_cli.use_safety_shield),
+            "vo_shield": bool(args_cli.use_vo_shield),
+            "rvo2_filter": bool(args_cli.use_rvo2_filter),
+            "rsgs": bool(args_cli.use_rsgs),
+            "corridor_teacher": bool(_corridor_teacher_enabled),
+            "narrow_teacher": bool(args_cli.narrow_scripted_teacher),
+        }
+        enabled_conflicts = sorted(
+            name for name, enabled in conflicting_overrides.items() if enabled
+        )
+        if enabled_conflicts:
+            raise ValueError(
+                "SA4-D3 forbids other action overrides: "
+                + ", ".join(enabled_conflicts)
+            )
+        _d3_cfg = _action_term_ref.cfg
+        if not bool(getattr(_d3_cfg, "enable_actuator_dr", False)):
+            raise ValueError("SA4-D3 requires actuator DR with fixed d1")
+        if tuple(getattr(_d3_cfg, "actuator_delay_range", ())) != (1, 1):
+            raise ValueError(
+                "SA4-D3 requires actuator_delay_range=(1,1)"
+            )
+        if tuple(getattr(_d3_cfg, "actuator_velocity_scale", ())) != (
+            1.0,
+            1.0,
+        ):
+            raise ValueError(
+                "SA4-D3 requires actuator_velocity_scale=(1.0,1.0)"
+            )
+        if float(getattr(_d3_cfg, "actuator_motor_lag", 0.0)) != 1.0:
+            raise ValueError("SA4-D3 requires actuator_motor_lag=1.0")
+        if getattr(_d3_cfg, "actuator_motor_lag_by_channel", None) not in (
+            None,
+            (1.0, 1.0),
+        ):
+            raise ValueError(
+                "SA4-D3 requires no per-channel motor lag or (1.0,1.0)"
+            )
+        for attribute in (
+            "last_pre_delay_command",
+            "last_post_delay_command",
+        ):
+            if not hasattr(_action_term_ref, attribute):
+                raise RuntimeError(
+                    f"action term lacks required D3 transition snapshot: {attribute}"
+                )
+        if args_cli.d3_shield_mode in (
+            D4_GEOMETRY_MODE,
+            D4_ARGMIN_GEOMETRY_MODE,
+        ):
+            validate_d4_action_contract(
+                num_bins=int(_d3_cfg.num_bins),
+                max_linear_velocity=float(_d3_cfg.max_linear_velocity),
+                reverse_velocity_scale=float(
+                    _d3_cfg.reverse_velocity_scale
+                ),
+                max_linear_accel=float(_d3_cfg.max_linear_accel),
+                max_angular_velocity=float(_d3_cfg.max_angular_vel),
+                max_angular_accel=float(_d3_cfg.max_angular_accel),
+            )
+            if args_cli.d3_shield_mode == D4_ARGMIN_GEOMETRY_MODE:
+                _d3_shield = build_argmin_geometry_selector()
+                _d3_protocol = geometry_argmin_selector_protocol()
+            else:
+                _d3_shield = build_geometry_selector()
+                _d3_protocol = geometry_selector_protocol()
+        else:
+            _d3_shield = build_d3_shield(args_cli.d3_shield_mode)
+            _d3_protocol = d3_shield_protocol()
+        if int(_corridor_dynamic_obstacles) < 1:
+            raise ValueError(
+                "SA4-D3 requires at least one dynamic corridor obstacle"
+            )
+        _d3_recorder = D3YieldRecorder(
+            raw_env.num_envs,
+            mode=args_cli.d3_shield_mode,
+            expected_delay_steps=1,
+            num_dynamic_obstacles=int(_corridor_dynamic_obstacles),
+        )
+        print(
+            f"[SA4-D3] {args_cli.d3_shield_mode} recorder enabled: "
+            f"motion={args_cli.long_corridor_motion_mode} d1, "
+            "25 lead steps + event frame (5.0s), "
+            f"protocol={_d3_protocol['schema']}",
+            flush=True,
+        )
+
+    _d5_enabled = bool(args_cli.d5_feasibility_shadow)
+    _d5_shadow = None
+    _d5_recorder = None
+    _d5_protocol = None
+    _d5_geometry_spec = None
+    if _d5_enabled:
+        if not _d3_enabled:
+            raise ValueError(
+                "SA4-D5 requires --d3_yield_audit for transition and event reconciliation"
+            )
+        if args_cli.d3_shield_mode != D3ShieldMode.BASELINE.value:
+            raise ValueError("SA4-D5 permits only the identity D3 baseline arm")
+        if not args_cli.d5_feasibility_output:
+            raise ValueError(
+                "--d5_feasibility_shadow requires --d5_feasibility_output"
+            )
+        _d5_geometry_spec = speed_scaled_geometry_spec(
+            float(args_cli.speed_rate)
+        )
+        validate_d4_action_contract(
+            num_bins=int(_d3_cfg.num_bins),
+            max_linear_velocity=float(_d3_cfg.max_linear_velocity),
+            reverse_velocity_scale=float(_d3_cfg.reverse_velocity_scale),
+            max_linear_accel=float(_d3_cfg.max_linear_accel),
+            max_angular_velocity=float(_d3_cfg.max_angular_vel),
+            max_angular_accel=float(_d3_cfg.max_angular_accel),
+            spec=_d5_geometry_spec,
+        )
+        _d5_shadow = build_feasibility_shadow(
+            geometry_spec=_d5_geometry_spec
+        )
+        _d5_protocol = feasibility_shadow_protocol(
+            geometry_spec=_d5_geometry_spec
+        )
+        _d5_recorder = D5FeasibilityFrontierRecorder(
+            raw_env.num_envs,
+            num_dynamic_obstacles=int(_corridor_dynamic_obstacles),
+            geometry_spec=_d5_geometry_spec,
+        )
+        print(
+            "[SA4-D5] baseline-only feasibility shadow enabled: all valid-dynamic "
+            "frames, 361 actions, 5.0s event frontier; policy actions unchanged; "
+            f"protocol={_d5_protocol['sha256']}",
+            flush=True,
+        )
+
+    _d6_enabled = bool(args_cli.d6_static_sensitivity)
+    _d6_shadow = None
+    _d6_protocol = None
+    _d6_get_combined_wall_data = None
+    if _d6_enabled:
+        if not _d3_enabled:
+            raise ValueError(
+                "SA4-D6 requires --d3_yield_audit for transition reconciliation"
+            )
+        if args_cli.d3_shield_mode != D3ShieldMode.BASELINE.value:
+            raise ValueError("SA4-D6 permits only the identity D3 baseline arm")
+        if not args_cli.d6_static_sensitivity_output:
+            raise ValueError(
+                "--d6_static_sensitivity requires "
+                "--d6_static_sensitivity_output"
+            )
+        validate_d4_action_contract(
+            num_bins=int(_d3_cfg.num_bins),
+            max_linear_velocity=float(_d3_cfg.max_linear_velocity),
+            reverse_velocity_scale=float(_d3_cfg.reverse_velocity_scale),
+            max_linear_accel=float(_d3_cfg.max_linear_accel),
+            max_angular_velocity=float(_d3_cfg.max_angular_vel),
+            max_angular_accel=float(_d3_cfg.max_angular_accel),
+        )
+        for attribute in (
+            "_long_corridor_wall_centers",
+            "_long_corridor_wall_sizes",
+            "_long_corridor_wall_mask",
+            "_boundary_wall_centers",
+            "_boundary_wall_sizes",
+        ):
+            if not hasattr(raw_env, attribute):
+                raise RuntimeError(
+                    f"SA4-D6 requires privileged corridor geometry {attribute}"
+                )
+        from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.wall_layout import (
+            get_combined_wall_data as _d6_get_combined_wall_data,
+        )
+
+        _d6_shadow = build_static_sensitivity()
+        _d6_protocol = static_sensitivity_protocol()
+        print(
+            "[SA4-D6] baseline-only static sensitivity enabled: LiDAR source "
+            "ablation + horizon/clearance matrix; policy actions unchanged; "
+            f"protocol={_d6_protocol['sha256']}",
+            flush=True,
+        )
+
+    _d7_enabled = bool(args_cli.d7_lidar_residual_origin)
+    _d7_audit = None
+    _d7_protocol = None
+    if _d7_enabled:
+        if not _d6_enabled:
+            raise ValueError(
+                "SA4-D7 requires --d6_static_sensitivity so residual labels "
+                "and frozen blocked-frame scopes share one runtime model"
+            )
+        if args_cli.d3_shield_mode != D3ShieldMode.BASELINE.value:
+            raise ValueError("SA4-D7 permits only the identity D3 baseline arm")
+        if not args_cli.d7_lidar_residual_origin_output:
+            raise ValueError(
+                "--d7_lidar_residual_origin requires "
+                "--d7_lidar_residual_origin_output"
+            )
+        _d7_audit = build_residual_origin_audit()
+        _d7_protocol = residual_origin_protocol()
+        print(
+            "[SA4-D7] realized LiDAR origin audit enabled: raw -> bias -> "
+            "sigma -> dropout -> distractor, exact policy-trace match, "
+            "actions unchanged; "
+            f"protocol={_d7_protocol['sha256']}",
+            flush=True,
+        )
+
+    _d8_enabled = bool(args_cli.d8_noise_eligibility_sensitivity)
+    _d8_audit = None
+    _d8_protocol = None
+    if _d8_enabled:
+        if not _d3_enabled:
+            raise ValueError(
+                "SA4-D8 requires --d3_yield_audit for transition reconciliation"
+            )
+        if args_cli.d3_shield_mode != D3ShieldMode.BASELINE.value:
+            raise ValueError("SA4-D8 permits only the identity D3 baseline arm")
+        if not args_cli.d8_noise_eligibility_output:
+            raise ValueError(
+                "--d8_noise_eligibility_sensitivity requires "
+                "--d8_noise_eligibility_output"
+            )
+        validate_d4_action_contract(
+            num_bins=int(_d3_cfg.num_bins),
+            max_linear_velocity=float(_d3_cfg.max_linear_velocity),
+            reverse_velocity_scale=float(_d3_cfg.reverse_velocity_scale),
+            max_linear_accel=float(_d3_cfg.max_linear_accel),
+            max_angular_velocity=float(_d3_cfg.max_angular_vel),
+            max_angular_accel=float(_d3_cfg.max_angular_accel),
+        )
+        _d8_audit = build_noise_eligibility_sensitivity()
+        _d8_protocol = noise_eligibility_protocol()
+        print(
+            "[SA4-D8] paired current-vs-valid-return-only LiDAR shadow enabled: "
+            "same realized random draws, frozen D4 active frames, actions unchanged; "
+            f"protocol={_d8_protocol['sha256']}",
+            flush=True,
+        )
+
+    def _d3_capture_pre_step(
+        policy_actions: torch.Tensor,
+        policy_observations: torch.Tensor,
+    ):
+        """Capture the state in which D3's policy action was selected."""
+        if not _d3_enabled:
+            return None
+        if _play_behavior_scheduler is None:
+            raise RuntimeError("SA4-D3 requires the corridor behavior scheduler")
+        with torch.no_grad():
+            robot = raw_env.scene["robot"].data
+            robot_xy_local = (
+                robot.root_pos_w[:, :2]
+                - raw_env.scene.env_origins[:, :2]
+            )
+            robot_vel_w = robot.root_lin_vel_w[:, :2]
+            quat = robot.root_quat_w
+            yaw = torch.atan2(
+                2.0
+                * (
+                    quat[:, 0] * quat[:, 3]
+                    + quat[:, 1] * quat[:, 2]
+                ),
+                1.0
+                - 2.0
+                * (quat[:, 2].square() + quat[:, 3].square()),
+            )
+            cos_yaw = torch.cos(yaw)
+            sin_yaw = torch.sin(yaw)
+            body_forward = (
+                cos_yaw * robot_vel_w[:, 0]
+                + sin_yaw * robot_vel_w[:, 1]
+            )
+            body_lateral = (
+                -sin_yaw * robot_vel_w[:, 0]
+                + cos_yaw * robot_vel_w[:, 1]
+            )
+            body_planar = robot_vel_w.norm(dim=-1)
+
+            obstacle_pos = _play_behavior_scheduler.positions[
+                :, _corridor_dynamic_slice, :2
+            ]
+            obstacle_vel = _play_behavior_scheduler.velocities[
+                :, _corridor_dynamic_slice, :2
+            ]
+            active = (
+                _play_behavior_scheduler.behavior_type[
+                    :, _corridor_dynamic_slice
+                ]
+                != 0
+            )
+            ready = getattr(
+                raw_env, "_long_corridor_obstacles_ready", None
+            )
+            if ready is None:
+                raise RuntimeError(
+                    "SA4-D3 requires _long_corridor_obstacles_ready"
+                )
+            active = active & ready[:, None]
+            delta_world = obstacle_pos - robot_xy_local[:, None, :]
+            distances = delta_world.norm(dim=-1)
+            masked_distance = torch.where(
+                active,
+                distances,
+                torch.full_like(distances, float("inf")),
+            )
+            nearest_distance, nearest_index = masked_distance.min(dim=1)
+            any_active = active.any(dim=1)
+            env_index = torch.arange(raw_env.num_envs, device=device)
+            relative_velocity_all = obstacle_vel - robot_vel_w[:, None, :]
+            radial_all = delta_world / delta_world.norm(
+                dim=-1, keepdim=True
+            ).clamp(min=1.0e-6)
+            relative_closing_all = -(
+                relative_velocity_all * radial_all
+            ).sum(dim=-1)
+            relative_closing = relative_closing_all[
+                env_index, nearest_index
+            ]
+            nearest_distance = torch.where(
+                any_active,
+                nearest_distance,
+                torch.full_like(nearest_distance, 999.0),
+            )
+            relative_closing = torch.where(
+                any_active,
+                relative_closing,
+                torch.zeros_like(relative_closing),
+            )
+
+            # Match the training reward's body-frame constant-arc risk. Invalid
+            # corridor slots are moved out of range and marked stationary.
+            body_x = (
+                cos_yaw[:, None] * delta_world[:, :, 0]
+                + sin_yaw[:, None] * delta_world[:, :, 1]
+            )
+            body_y = (
+                -sin_yaw[:, None] * delta_world[:, :, 0]
+                + cos_yaw[:, None] * delta_world[:, :, 1]
+            )
+            velocity_body_x = (
+                cos_yaw[:, None] * obstacle_vel[:, :, 0]
+                + sin_yaw[:, None] * obstacle_vel[:, :, 1]
+            )
+            velocity_body_y = (
+                -sin_yaw[:, None] * obstacle_vel[:, :, 0]
+                + cos_yaw[:, None] * obstacle_vel[:, :, 1]
+            )
+            obstacle_pos_body = torch.stack([body_x, body_y], dim=-1)
+            obstacle_vel_body = torch.stack(
+                [velocity_body_x, velocity_body_y], dim=-1
+            )
+            obstacle_pos_body = torch.where(
+                active[:, :, None],
+                obstacle_pos_body,
+                torch.full_like(obstacle_pos_body, 1.0e6),
+            )
+            obstacle_vel_body = torch.where(
+                active[:, :, None],
+                obstacle_vel_body,
+                torch.zeros_like(obstacle_vel_body),
+            )
+            _d3_dynamic_count = obstacle_pos_body.shape[1]
+            _d3_slot_v = _action_term_ref._current_velocity[:, None].expand(
+                -1, _d3_dynamic_count
+            ).reshape(-1, 1, 1)
+            _d3_slot_w = _action_term_ref._current_omega[:, None].expand(
+                -1, _d3_dynamic_count
+            ).reshape(-1, 1, 1)
+            _d3_slot_risk_grid, _, _d3_slot_risk_active = (
+                future_occupancy_risk_grid(
+                    _d3_slot_v,
+                    _d3_slot_w,
+                    obstacle_pos_body.reshape(-1, 1, 2),
+                    obstacle_vel_body.reshape(-1, 1, 2),
+                )
+            )
+            _d3_slot_risk = _d3_slot_risk_grid[:, 0, 0].reshape(
+                raw_env.num_envs, _d3_dynamic_count
+            )
+            _d3_slot_risk_active = _d3_slot_risk_active.reshape(
+                raw_env.num_envs, _d3_dynamic_count
+            )
+            _d3_action_cfg = _action_term_ref.cfg
+            _d3_linear_grid, _ = decode_discrete_drive_action_grid(
+                _action_term_ref._current_velocity,
+                _action_term_ref._current_omega,
+                num_bins=int(_d3_action_cfg.num_bins),
+                dt=float(_action_term_ref._dt),
+                max_linear_velocity=float(
+                    _d3_action_cfg.max_linear_velocity
+                ),
+                reverse_velocity_scale=float(
+                    _d3_action_cfg.reverse_velocity_scale
+                ),
+                max_linear_accel=float(_d3_action_cfg.max_linear_accel),
+                max_angular_velocity=float(_d3_action_cfg.max_angular_vel),
+                max_angular_accel=float(_d3_action_cfg.max_angular_accel),
+            )
+            _d3_brake_action_indices = (
+                _d3_linear_grid[:, :, 0].abs().argmin(dim=1)
+            )
+            if (
+                policy_observations.ndim != 2
+                or policy_observations.shape[0] != raw_env.num_envs
+                or policy_observations.shape[1] < 78
+            ):
+                raise RuntimeError(
+                    "SA4-D4 requires raw policy observations with 72-bin "
+                    "LiDAR at columns [6:78]"
+                )
+            _d3_command_reference = torch.stack(
+                [
+                    _action_term_ref._current_velocity,
+                    _action_term_ref._current_omega,
+                ],
+                dim=1,
+            )
+            _d3_pending_command = pending_d1_command(
+                getattr(raw_env, "_action_delay_buffer", None),
+                raw_env.episode_length_buf == 0,
+                reference=_d3_command_reference,
+            )
+            _d3_all_radii = getattr(
+                raw_env, "_obstacle_phys_radii", None
+            )
+            if _d3_all_radii is None:
+                _d3_dynamic_radii = torch.full(
+                    active.shape,
+                    0.30,
+                    dtype=obstacle_pos_body.dtype,
+                    device=device,
+                )
+            else:
+                _d3_dynamic_radii = _d3_all_radii[
+                    :, _corridor_dynamic_slice
+                ]
+                if _d3_dynamic_radii.shape != active.shape:
+                    raise RuntimeError(
+                        "SA4-D4 dynamic radius layout does not match corridor slots"
+                    )
+            _d3_context = {
+                "policy_actions": policy_actions.detach().clone(),
+                "body_forward_speed": body_forward.detach().clone(),
+                "robot_velocity_body": torch.stack(
+                    [body_forward, body_lateral], dim=1
+                ).detach().clone(),
+                "body_planar_speed": body_planar.detach().clone(),
+                "obstacle_distance": nearest_distance.detach().clone(),
+                "relative_closing": relative_closing.detach().clone(),
+                "risk": _d3_slot_risk.max(dim=1).values.detach().clone(),
+                "risk_active": _d3_slot_risk_active.any(
+                    dim=1
+                ).detach().clone(),
+                "obstacle_distances": torch.where(
+                    active,
+                    distances,
+                    torch.full_like(distances, 999.0),
+                ).detach().clone(),
+                "relative_closings": torch.where(
+                    active,
+                    relative_closing_all,
+                    torch.zeros_like(relative_closing_all),
+                ).detach().clone(),
+                "obstacle_risks": _d3_slot_risk.detach().clone(),
+                "obstacle_risk_active": (
+                    _d3_slot_risk_active.detach().clone()
+                ),
+                "obstacle_body_y": obstacle_pos_body[:, :, 1]
+                .detach()
+                .clone(),
+                "obstacle_body_vy": obstacle_vel_body[:, :, 1]
+                .detach()
+                .clone(),
+                "brake_action_indices": (
+                    _d3_brake_action_indices.detach().clone()
+                ),
+                "current_velocity": (
+                    _action_term_ref._current_velocity.detach().clone()
+                ),
+                "current_omega": (
+                    _action_term_ref._current_omega.detach().clone()
+                ),
+                "pending_command": _d3_pending_command.detach().clone(),
+                "policy_lidar_clearance": (
+                    policy_observations[:, 6:78].detach().clone()
+                ),
+                "dynamic_positions_body": (
+                    obstacle_pos_body.detach().clone()
+                ),
+                "dynamic_velocities_body": (
+                    obstacle_vel_body.detach().clone()
+                ),
+                "dynamic_radii": _d3_dynamic_radii.detach().clone(),
+                "dynamic_valid": active.detach().clone(),
+            }
+            if _d6_enabled:
+                if _d6_get_combined_wall_data is None:
+                    raise RuntimeError("SA4-D6 combined-wall provider is unavailable")
+                (
+                    _d6_wall_centers,
+                    _d6_wall_sizes,
+                    _d6_wall_valid,
+                ) = _d6_get_combined_wall_data(raw_env)
+                _d6_static_positions = _play_behavior_scheduler.positions[
+                    :, _corridor_static_slice, :2
+                ]
+                _d6_static_valid = (
+                    _play_behavior_scheduler.behavior_type[
+                        :, _corridor_static_slice
+                    ]
+                    != 0
+                ) & ready[:, None]
+                if _d3_all_radii is None:
+                    _d6_static_radii = torch.full(
+                        _d6_static_valid.shape,
+                        0.30,
+                        dtype=_d6_static_positions.dtype,
+                        device=device,
+                    )
+                else:
+                    _d6_static_radii = _d3_all_radii[
+                        :, _corridor_static_slice
+                    ]
+                if _d6_static_radii.shape != _d6_static_valid.shape:
+                    raise RuntimeError(
+                        "SA4-D6 static radius layout does not match corridor slots"
+                    )
+                _d3_context.update(
+                    {
+                        "robot_position_local": robot_xy_local.detach().clone(),
+                        "robot_yaw": yaw.detach().clone(),
+                        "static_positions_local": (
+                            _d6_static_positions.detach().clone()
+                        ),
+                        "static_radii": _d6_static_radii.detach().clone(),
+                        "static_valid": _d6_static_valid.detach().clone(),
+                        "wall_centers_local": (
+                            _d6_wall_centers.detach().clone()
+                        ),
+                        "wall_sizes": (
+                            _d6_wall_sizes.detach().clone()
+                        ),
+                        "wall_valid": (
+                            _d6_wall_valid.detach().clone()
+                        ),
+                    }
+                )
+            return _d3_context
+
     # --- 回合統計計數器 ---
     stats_goal = 0       # 到達目標次數
     stats_wall = 0       # 撞牆次數
@@ -4424,6 +5385,13 @@ def main():
         for name in _CORRIDOR_PAIR_NAMES.values()
     }
     _corridor_motion_snapshot = None
+    # Static-skeleton split. The sampler varies static geometry only by a
+    # left/right mirror of a fixed lattice, so an episode-weighted split by
+    # layout id shows whether outcomes depend on which mirror was drawn.
+    # Snapshotted before env.step() for the same reason as the pair snapshot:
+    # auto-reset installs the next episode's layout inside step.
+    _corridor_layout_stats: dict[int, dict[str, int]] = {}
+    _corridor_layout_snapshot = None
     # Motion-phase audit state. Every tensor below is captured *before*
     # env.step() for the same reason the pair snapshot is: auto-reset rewrites
     # waypoint index and pause counter inside step, which would misattribute a
@@ -4589,6 +5557,26 @@ def main():
     def normalize(x):
         """用訓練時的 running mean/var 正規化觀測，clamp 到 [-5, 5]。"""
         return torch.clamp((x - mean) / (var.sqrt() + 1e-8), -5.0, 5.0)
+
+    # ---- speed_rate 觀測端放大（對應車端 policy_node 的 ×inv）----
+    _SR_RATE, _SR_MODE = validate_vehicle_speed_rate(
+        getattr(args_cli, "speed_rate", 1.0),
+        getattr(args_cli, "speed_rate_obs", "ego"),
+    )
+    _SR_INV = 1.0 / _SR_RATE
+    _SR_ON = speed_rate_is_active(_SR_RATE) and _SR_MODE != "none"
+
+    def apply_speed_rate_obs(x):
+        """把 raw obs 依車端語意放大，**必須在 normalize 之前**。
+
+        車端 `build_obs_79d` 收到的就是已 ×inv 的量，正規化在其後。
+        順序反了會得到不同的數值。
+        """
+        return apply_vehicle_speed_rate_observation(x, _SR_RATE, _SR_MODE)
+
+    if _SR_ON:
+        print(f"[SPEED_RATE] obs 放大 ×{_SR_INV:.3f}  模式={_SR_MODE}"
+              f"（光達{'也放大' if _SR_MODE == 'ego_lidar' else '不放大'}）")
 
     def _wd_like_obs(obs_normed: torch.Tensor) -> torch.Tensor:
         """將 IsaacLab 139D 觀測投射到 WD car 113D 格式（wd_exact_rnn 專用）。
@@ -4852,6 +5840,9 @@ def main():
             # ★CHARGE_LVDOT_ZERO_ALL=1 → 歸零整條 channel(位置+速度+r+valid),channel 存廢對照
             if _LVDOT_ZERO_ALL and obs_tensor.shape[-1] >= 109:
                 obs_tensor[:, 79:109] = 0.0
+            # speed_rate：車端在 build_obs 就已 ×inv，故必須在 normalize 之前套用
+            if _SR_ON:
+                obs_tensor = apply_speed_rate_obs(obs_tensor)
             obs_normed = normalize(obs_tensor)               # 正規化觀測
             # LiDAR distance bias: 在 z-score 空間加偏移，讓 agent 覺得障礙物更遠
             if _lidar_bias_zscore is not None:
@@ -5385,6 +6376,20 @@ def main():
                     [_teacher_radii, _teacher_radii], dim=1
                 )
                 _teacher_cfg = _action_term_ref.cfg
+                _teacher_pending_d1_command = None
+                if _corridor_teacher_uses_d1:
+                    _teacher_command_reference = torch.stack(
+                        [
+                            _action_term_ref._current_velocity,
+                            _action_term_ref._current_omega,
+                        ],
+                        dim=1,
+                    )
+                    _teacher_pending_d1_command = pending_d1_command(
+                        getattr(raw_env, "_action_delay_buffer", None),
+                        raw_env.episode_length_buf == 0,
+                        reference=_teacher_command_reference,
+                    )
                 _teacher_result = corridor_teacher_action_grid(
                     current_velocity=(
                         _action_term_ref._current_velocity.clone()
@@ -5420,14 +6425,77 @@ def main():
                     max_angular_accel=float(
                         _teacher_cfg.max_angular_accel
                     ),
+                    pending_d1_command=_teacher_pending_d1_command,
                     spec=_corridor_teacher_spec,
                 )
                 _teacher_feasible = _teacher_result["any_feasible"]
                 _teacher_actions = _teacher_result["actions"]
+                _teacher_override_mask = _teacher_feasible
+                if _stateful_teacher_controller is not None:
+                    _stateful_result = _stateful_teacher_controller.select(
+                        teacher_result=_teacher_result,
+                        just_reset=(raw_env.episode_length_buf == 0),
+                        robot_xy_m=_teacher_robot_xy,
+                        robot_yaw_rad=_teacher_yaw,
+                        goal_xy_m=_teacher_goal_xy,
+                        applied_command=torch.stack(
+                            [
+                                _action_term_ref._current_velocity,
+                                _action_term_ref._current_omega,
+                            ],
+                            dim=1,
+                        ),
+                        dynamic_positions_m=(
+                            _play_behavior_scheduler.positions
+                        ),
+                        dynamic_velocities_mps=(
+                            _play_behavior_scheduler.velocities
+                        ),
+                        dynamic_valid=(
+                            _play_behavior_scheduler.behavior_type == 2
+                        ),
+                        dynamic_future_paths_m=(
+                            _teacher_obstacle_paths_moving
+                        ),
+                    )
+                    _teacher_actions = _stateful_result["actions"]
+                    _teacher_feasible = _stateful_result[
+                        "selected_geometric_feasible"
+                    ]
+                    _teacher_override_mask = _stateful_result[
+                        "override_mask"
+                    ]
+                    _stateful_state = _stateful_result["state"]
+                    _stateful_teacher_stats["wait_state_frames"] += (
+                        _stateful_state == STATEFUL_TEACHER_WAIT
+                    ).float().sum()
+                    _stateful_teacher_stats["commit_state_frames"] += (
+                        _stateful_state == STATEFUL_TEACHER_COMMIT_SIDE
+                    ).float().sum()
+                    _stateful_teacher_stats["pass_state_frames"] += (
+                        _stateful_state == STATEFUL_TEACHER_PASS
+                    ).float().sum()
+                    for _stateful_key, _stateful_value in (
+                        ("interaction_frames", "interaction_active"),
+                        ("override_frames", "override_mask"),
+                        (
+                            "geometric_feasible_frames",
+                            "selected_geometric_feasible",
+                        ),
+                        ("used_wait_frames", "used_wait"),
+                        ("used_reverse_frames", "used_bounded_reverse"),
+                        ("emergency_brake_frames", "emergency_brake"),
+                        ("entered_commit", "entered_commit"),
+                        ("entered_pass", "entered_pass"),
+                        ("released", "released"),
+                    ):
+                        _stateful_teacher_stats[_stateful_key] += (
+                            _stateful_result[_stateful_value].float().sum()
+                        )
                 actions = select_teacher_rollout_actions(
                     _teacher_policy_actions,
                     _teacher_actions,
-                    _teacher_feasible,
+                    _teacher_override_mask,
                     override=_corridor_teacher_override,
                 ).float()
 
@@ -5482,6 +6550,61 @@ def main():
                 ).float().sum()
                 _teacher_env_index = torch.arange(
                     raw_env.num_envs, device=device
+                )
+                _teacher_selected_clearance = _teacher_result[
+                    "min_obstacle_clearance_grid"
+                ][
+                    _teacher_env_index,
+                    _teacher_actions[:, 0],
+                    _teacher_actions[:, 1],
+                ]
+                _corridor_teacher_closed_loop_metrics.record_step(
+                    goal_distance_m=(
+                        _teacher_goal_xy - _teacher_robot_xy
+                    ).norm(dim=-1),
+                    selected_clearance_m=_teacher_selected_clearance,
+                    feasible=_teacher_feasible,
+                )
+                _teacher_selected_endpoint = _teacher_result[
+                    "endpoint_grid"
+                ][
+                    _teacher_env_index,
+                    _teacher_actions[:, 0],
+                    _teacher_actions[:, 1],
+                ]
+                _corridor_teacher_interaction_metrics.record_step(
+                    just_reset=(raw_env.episode_length_buf == 0),
+                    robot_xy_m=_teacher_robot_xy,
+                    robot_yaw_rad=_teacher_yaw,
+                    goal_xy_m=_teacher_goal_xy,
+                    applied_command=torch.stack(
+                        [
+                            _action_term_ref._current_velocity,
+                            _action_term_ref._current_omega,
+                        ],
+                        dim=1,
+                    ),
+                    selected_endpoint_m=_teacher_selected_endpoint,
+                    selected_feasible=_teacher_feasible,
+                    feasible_grid=_teacher_result["feasible_grid"],
+                    linear_velocity_grid=_teacher_result[
+                        "linear_velocity_grid"
+                    ],
+                    endpoint_grid_m=_teacher_result["endpoint_grid"],
+                    dynamic_positions_m=(
+                        _play_behavior_scheduler.positions
+                    ),
+                    dynamic_velocities_mps=(
+                        _play_behavior_scheduler.velocities
+                    ),
+                    dynamic_valid=(
+                        _play_behavior_scheduler.behavior_type == 2
+                    ),
+                    selected_side_hint=(
+                        _stateful_result["committed_side"]
+                        if _stateful_teacher_controller is not None
+                        else None
+                    ),
                 )
                 _teacher_selected_v = _teacher_result[
                     "linear_velocity_grid"
@@ -5645,6 +6768,12 @@ def main():
             _corridor_motion_snapshot = (
                 _snap_src.clone() if _snap_src is not None else None
             )
+            _layout_src = getattr(
+                raw_env, "_long_corridor_static_layout_id", None
+            )
+            _corridor_layout_snapshot = (
+                _layout_src.clone() if _layout_src is not None else None
+            )
             if _play_behavior_scheduler is not None:
                 _pen_dyn = _play_behavior_scheduler.positions[
                     :, _corridor_dynamic_slice
@@ -5802,6 +6931,323 @@ def main():
                 gap_center_y_m=_snt_geom["gap_center_y_m"],
                 goal_xy_m=_snt_geom["goal_xy_m"],
             ).float()
+
+        _d3_step_context = _d3_capture_pre_step(actions, obs_tensor)
+        if (
+            _d3_enabled
+            and args_cli.d3_shield_mode == D4_ARGMIN_GEOMETRY_MODE
+        ):
+            _d4_trace, _d4_trace_match_count = select_matching_lidar_trace(
+                raw_env,
+                _d3_step_context["policy_lidar_clearance"],
+            )
+            _d4_winner_angles = _d4_trace.get("winner_actual_angle_rad")
+            if not isinstance(_d4_winner_angles, torch.Tensor):
+                raise RuntimeError(
+                    "D4-r2 trace lacks winner_actual_angle_rad"
+                )
+            if _d4_winner_angles.shape != _d3_step_context[
+                "policy_lidar_clearance"
+            ].shape:
+                raise RuntimeError(
+                    "D4-r2 winner-angle shape does not match policy LiDAR"
+                )
+            if int(_d4_trace_match_count) < 1:
+                raise RuntimeError("D4-r2 LiDAR trace did not match policy input")
+            _d3_step_context["lidar_beam_angles_rad"] = _d4_winner_angles
+        _d5_step_context = None
+        if _d5_enabled:
+            _d5_policy_before = actions.detach().clone()
+            _d5_step_context = _d5_shadow.observe(
+                actions,
+                {
+                    "obstacle_distances_m": _d3_step_context[
+                        "obstacle_distances"
+                    ],
+                    "relative_closing_speeds_mps": _d3_step_context[
+                        "relative_closings"
+                    ],
+                    "current_velocity_mps": _d3_step_context[
+                        "current_velocity"
+                    ],
+                    "current_omega_rad_s": _d3_step_context[
+                        "current_omega"
+                    ],
+                    "pending_command": _d3_step_context["pending_command"],
+                    "policy_lidar_clearance": _d3_step_context[
+                        "policy_lidar_clearance"
+                    ],
+                    "dynamic_positions_body_m": _d3_step_context[
+                        "dynamic_positions_body"
+                    ],
+                    "dynamic_velocities_body_mps": _d3_step_context[
+                        "dynamic_velocities_body"
+                    ],
+                    "dynamic_radii_m": _d3_step_context["dynamic_radii"],
+                    "dynamic_valid": _d3_step_context["dynamic_valid"],
+                    "robot_velocity_body_mps": _d3_step_context[
+                        "robot_velocity_body"
+                    ],
+                    "num_bins": int(_d3_cfg.num_bins),
+                    "max_linear_velocity": float(
+                        _d3_cfg.max_linear_velocity
+                    ),
+                    "reverse_velocity_scale": float(
+                        _d3_cfg.reverse_velocity_scale
+                    ),
+                    "max_linear_accel": float(_d3_cfg.max_linear_accel),
+                    "max_angular_velocity": float(_d3_cfg.max_angular_vel),
+                    "max_angular_accel": float(_d3_cfg.max_angular_accel),
+                },
+            )
+            if not torch.equal(actions, _d5_policy_before):
+                raise RuntimeError("D5 shadow modified policy actions")
+        _d6_step_context = None
+        _d7_step_context = None
+        if _d6_enabled:
+            _d6_policy_before = actions.detach().clone()
+            _d6_step_context = _d6_shadow.observe(
+                actions,
+                {
+                    "obstacle_distances_m": _d3_step_context[
+                        "obstacle_distances"
+                    ],
+                    "current_velocity_mps": _d3_step_context[
+                        "current_velocity"
+                    ],
+                    "current_omega_rad_s": _d3_step_context[
+                        "current_omega"
+                    ],
+                    "pending_command": _d3_step_context["pending_command"],
+                    "policy_lidar_clearance": _d3_step_context[
+                        "policy_lidar_clearance"
+                    ],
+                    "dynamic_positions_body_m": _d3_step_context[
+                        "dynamic_positions_body"
+                    ],
+                    "dynamic_velocities_body_mps": _d3_step_context[
+                        "dynamic_velocities_body"
+                    ],
+                    "dynamic_radii_m": _d3_step_context["dynamic_radii"],
+                    "dynamic_valid": _d3_step_context["dynamic_valid"],
+                    "robot_position_local_m": _d3_step_context[
+                        "robot_position_local"
+                    ],
+                    "robot_yaw_rad": _d3_step_context["robot_yaw"],
+                    "static_positions_local_m": _d3_step_context[
+                        "static_positions_local"
+                    ],
+                    "static_radii_m": _d3_step_context["static_radii"],
+                    "static_obstacle_valid": _d3_step_context[
+                        "static_valid"
+                    ],
+                    "wall_centers_local_m": _d3_step_context[
+                        "wall_centers_local"
+                    ],
+                    "wall_sizes_m": _d3_step_context["wall_sizes"],
+                    "wall_valid": _d3_step_context["wall_valid"],
+                    "num_bins": int(_d3_cfg.num_bins),
+                    "max_linear_velocity": float(
+                        _d3_cfg.max_linear_velocity
+                    ),
+                    "reverse_velocity_scale": float(
+                        _d3_cfg.reverse_velocity_scale
+                    ),
+                    "max_linear_accel": float(_d3_cfg.max_linear_accel),
+                    "max_angular_velocity": float(_d3_cfg.max_angular_vel),
+                    "max_angular_accel": float(_d3_cfg.max_angular_accel),
+                },
+            )
+            if not torch.equal(actions, _d6_policy_before):
+                raise RuntimeError("D6 shadow modified policy actions")
+            if _d7_enabled:
+                _d7_trace, _d7_trace_match_count = select_matching_lidar_trace(
+                    raw_env,
+                    _d3_step_context["policy_lidar_clearance"],
+                )
+                _d7_policy_before = actions.detach().clone()
+                _d7_step_context = _d7_audit.observe(
+                    actions,
+                    policy_lidar=_d3_step_context[
+                        "policy_lidar_clearance"
+                    ],
+                    trace=_d7_trace,
+                    trace_match_count=_d7_trace_match_count,
+                    context={
+                        "dynamic_positions_body_m": _d3_step_context[
+                            "dynamic_positions_body"
+                        ],
+                        "dynamic_radii_m": _d3_step_context[
+                            "dynamic_radii"
+                        ],
+                        "dynamic_valid": _d3_step_context[
+                            "dynamic_valid"
+                        ],
+                        "robot_position_local_m": _d3_step_context[
+                            "robot_position_local"
+                        ],
+                        "robot_yaw_rad": _d3_step_context["robot_yaw"],
+                        "static_positions_local_m": _d3_step_context[
+                            "static_positions_local"
+                        ],
+                        "static_radii_m": _d3_step_context[
+                            "static_radii"
+                        ],
+                        "static_obstacle_valid": _d3_step_context[
+                            "static_valid"
+                        ],
+                        "wall_centers_local_m": _d3_step_context[
+                            "wall_centers_local"
+                        ],
+                        "wall_sizes_m": _d3_step_context["wall_sizes"],
+                        "wall_valid": _d3_step_context["wall_valid"],
+                    },
+                    d6_snapshot=_d6_step_context,
+                )
+                if not torch.equal(actions, _d7_policy_before):
+                    raise RuntimeError("D7 shadow modified policy actions")
+        _d8_step_context = None
+        if _d8_enabled:
+            _d8_trace, _d8_trace_match_count = select_matching_lidar_trace(
+                raw_env,
+                _d3_step_context["policy_lidar_clearance"],
+            )
+            _d8_policy_before = actions.detach().clone()
+            _d8_step_context = _d8_audit.observe(
+                actions,
+                policy_lidar=_d3_step_context["policy_lidar_clearance"],
+                trace=_d8_trace,
+                trace_match_count=_d8_trace_match_count,
+                context={
+                    "obstacle_distances_m": _d3_step_context[
+                        "obstacle_distances"
+                    ],
+                    "relative_closing_speeds_mps": _d3_step_context[
+                        "relative_closings"
+                    ],
+                    "current_velocity_mps": _d3_step_context[
+                        "current_velocity"
+                    ],
+                    "current_omega_rad_s": _d3_step_context[
+                        "current_omega"
+                    ],
+                    "pending_command": _d3_step_context["pending_command"],
+                    "dynamic_positions_body_m": _d3_step_context[
+                        "dynamic_positions_body"
+                    ],
+                    "dynamic_velocities_body_mps": _d3_step_context[
+                        "dynamic_velocities_body"
+                    ],
+                    "dynamic_radii_m": _d3_step_context["dynamic_radii"],
+                    "dynamic_valid": _d3_step_context["dynamic_valid"],
+                    "num_bins": int(_d3_cfg.num_bins),
+                    "max_linear_velocity": float(
+                        _d3_cfg.max_linear_velocity
+                    ),
+                    "reverse_velocity_scale": float(
+                        _d3_cfg.reverse_velocity_scale
+                    ),
+                    "max_linear_accel": float(_d3_cfg.max_linear_accel),
+                    "max_angular_velocity": float(_d3_cfg.max_angular_vel),
+                    "max_angular_accel": float(_d3_cfg.max_angular_accel),
+                },
+            )
+            if not torch.equal(actions, _d8_policy_before):
+                raise RuntimeError("D8 shadow modified policy actions")
+        if _d3_enabled:
+            _d3_policy_object = actions
+            _d3_effective_actions = _d3_shield(
+                actions,
+                context={
+                    "risk": _d3_step_context["risk"],
+                    "risk_active": _d3_step_context["risk_active"],
+                    "obstacle_distance_m": _d3_step_context[
+                        "obstacle_distance"
+                    ],
+                    "relative_closing_speed_mps": _d3_step_context[
+                        "relative_closing"
+                    ],
+                    "obstacle_distances_m": _d3_step_context[
+                        "obstacle_distances"
+                    ],
+                    "relative_closing_speeds_mps": _d3_step_context[
+                        "relative_closings"
+                    ],
+                    "obstacle_body_y_m": _d3_step_context[
+                        "obstacle_body_y"
+                    ],
+                    "obstacle_body_vy_mps": _d3_step_context[
+                        "obstacle_body_vy"
+                    ],
+                    "brake_action_indices": _d3_step_context[
+                        "brake_action_indices"
+                    ],
+                    "current_velocity_mps": _d3_step_context[
+                        "current_velocity"
+                    ],
+                    "current_omega_rad_s": _d3_step_context[
+                        "current_omega"
+                    ],
+                    "pending_command": _d3_step_context[
+                        "pending_command"
+                    ],
+                    "policy_lidar_clearance": _d3_step_context[
+                        "policy_lidar_clearance"
+                    ],
+                    "lidar_beam_angles_rad": _d3_step_context.get(
+                        "lidar_beam_angles_rad"
+                    ),
+                    "dynamic_positions_body_m": _d3_step_context[
+                        "dynamic_positions_body"
+                    ],
+                    "dynamic_velocities_body_mps": _d3_step_context[
+                        "dynamic_velocities_body"
+                    ],
+                    "dynamic_radii_m": _d3_step_context[
+                        "dynamic_radii"
+                    ],
+                    "dynamic_valid": _d3_step_context[
+                        "dynamic_valid"
+                    ],
+                    "num_bins": int(_d3_cfg.num_bins),
+                    "max_linear_velocity": float(
+                        _d3_cfg.max_linear_velocity
+                    ),
+                    "reverse_velocity_scale": float(
+                        _d3_cfg.reverse_velocity_scale
+                    ),
+                    "max_linear_accel": float(
+                        _d3_cfg.max_linear_accel
+                    ),
+                    "max_angular_velocity": float(
+                        _d3_cfg.max_angular_vel
+                    ),
+                    "max_angular_accel": float(
+                        _d3_cfg.max_angular_accel
+                    ),
+                },
+            )
+            if args_cli.d3_shield_mode == D3ShieldMode.BASELINE.value:
+                if _d3_effective_actions is not _d3_policy_object:
+                    raise RuntimeError(
+                        "D3 baseline shield returned a different action object"
+                    )
+                if not torch.equal(
+                    _d3_effective_actions, _d3_policy_object
+                ):
+                    raise RuntimeError("D3 baseline modified policy actions")
+            if _d3_effective_actions.shape != actions.shape:
+                raise RuntimeError(
+                    "D3 shield changed the action tensor shape"
+                )
+            _d3_step_context["effective_actions"] = (
+                _d3_effective_actions.detach().clone()
+            )
+            _d3_step_context["shield_engaged"] = (
+                _d3_step_context["effective_actions"].round().long()
+                != _d3_step_context["policy_actions"].round().long()
+            ).any(dim=1)
+            actions = _d3_effective_actions
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
         if _phase_accumulator is not None and _phase_snapshot is not None:
             _slot_mask = getattr(raw_env, "_obs_collision_slot_mask", None)
@@ -5854,23 +7300,62 @@ def main():
                 _phase_prev_pause[_done_mask] = -1
                 _phase_tracker[_done_mask] = -1
         if args_cli.long_corridor_eval:
+            _corridor_pre_deployment = getattr(
+                _action_term_ref, "last_post_delay_command", None
+            )
             _corridor_applied = getattr(
-                _action_term_ref, "processed_actions", None
+                _action_term_ref, "last_deployment_command", None
             )
             _corridor_active = getattr(
                 raw_env, "_long_corridor_active", None
             )
             if (
                 _corridor_applied is not None
+                and _corridor_pre_deployment is not None
                 and _corridor_active is not None
                 and _corridor_applied.shape[0] == raw_env.num_envs
+                and _corridor_pre_deployment.shape[0] == raw_env.num_envs
                 and bool(_corridor_active.any())
             ):
+                _deployment_expected = (
+                    _corridor_pre_deployment[_corridor_active, :2]
+                    * float(
+                        getattr(
+                            _action_term_ref.cfg,
+                            "deployment_speed_scale",
+                            1.0,
+                        )
+                    )
+                )
+                _deployment_error = (
+                    _corridor_applied[_corridor_active, :2]
+                    - _deployment_expected
+                ).abs()
+                _long_corridor_deployment_scale_samples += int(
+                    _deployment_error.numel()
+                )
+                _long_corridor_deployment_scale_max_error = max(
+                    _long_corridor_deployment_scale_max_error,
+                    float(_deployment_error.max().item()),
+                )
                 _long_corridor_applied_actions.append(
                     _corridor_applied[_corridor_active, :2]
                     .detach()
                     .clone()
                 )
+                _long_corridor_pre_deployment_actions.append(
+                    _corridor_pre_deployment[_corridor_active, :2]
+                    .detach()
+                    .clone()
+                )
+                if _d3_step_context is not None:
+                    _long_corridor_actual_body_velocities.append(
+                        _d3_step_context["robot_velocity_body"][
+                            _corridor_active
+                        ]
+                        .detach()
+                        .clone()
+                    )
                 _corridor_obs = obs_tensor.reshape(
                     raw_env.num_envs, -1
                 )
@@ -5884,6 +7369,11 @@ def main():
                         .detach()
                         .clone()
                     )
+                    _long_corridor_clear_pre_deployment_actions.append(
+                        _corridor_pre_deployment[_corridor_clear, :2]
+                        .detach()
+                        .clone()
+                    )
         # ManagerBasedRLEnv auto-resets terminal envs inside env.step(). Compute
         # done first so trajectory metrics do not count the reset jump as travel.
         done = (
@@ -5891,6 +7381,168 @@ def main():
             if terminated.ndim > 1
             else (terminated | truncated)
         )
+        _transition_cause = None
+        if _d3_enabled or bool(done.any()):
+            _terminated_flat = (
+                terminated.squeeze(-1)
+                if terminated.ndim > 1
+                else terminated
+            )
+            _truncated_flat = (
+                truncated.squeeze(-1)
+                if truncated.ndim > 1
+                else truncated
+            )
+            _transition_cause = detect_termination_cause(
+                raw_env, _terminated_flat, _truncated_flat
+            )
+        if _d3_enabled:
+            _d3_dynamic_collision = getattr(
+                raw_env, "_obs_collision_dynamic_mask", None
+            )
+            if _d3_dynamic_collision is None:
+                raise RuntimeError(
+                    "SA4-D3 requires _obs_collision_dynamic_mask on every "
+                    "transition; refusing to record unverifiable collisions"
+                )
+            _d3_pre_delay = _action_term_ref.last_pre_delay_command
+            _d3_post_delay = _action_term_ref.last_post_delay_command
+            if _d3_pre_delay.shape != (raw_env.num_envs, 2):
+                raise RuntimeError(
+                    "D3 pre-delay snapshot has unexpected shape "
+                    f"{tuple(_d3_pre_delay.shape)}"
+                )
+            if _d3_post_delay.shape != (raw_env.num_envs, 2):
+                raise RuntimeError(
+                    "D3 post-delay snapshot has unexpected shape "
+                    f"{tuple(_d3_post_delay.shape)}"
+                )
+
+            # One synchronization per simulator step. State columns come from
+            # the policy-selection instant; command and outcome columns describe
+            # the transition produced by that action. This avoids reading the
+            # auto-reset state of terminal environments.
+            _d3_cpu_rows = torch.cat(
+                [
+                    _d3_step_context["policy_actions"].float(),
+                    _d3_step_context["effective_actions"].float(),
+                    _d3_pre_delay.float(),
+                    _d3_post_delay.float(),
+                    _d3_step_context["body_forward_speed"][:, None],
+                    _d3_step_context["body_planar_speed"][:, None],
+                    _d3_step_context["obstacle_distance"][:, None],
+                    _d3_step_context["relative_closing"][:, None],
+                    _d3_step_context["risk"][:, None],
+                    _d3_step_context["risk_active"].float()[:, None],
+                    _d3_step_context["shield_engaged"].float()[:, None],
+                    _d3_dynamic_collision.reshape(-1).float()[:, None],
+                    done.reshape(-1).float()[:, None],
+                    _transition_cause.reshape(-1).float()[:, None],
+                    _d3_step_context["obstacle_distances"].float(),
+                    _d3_step_context["relative_closings"].float(),
+                    _d3_step_context["obstacle_risks"].float(),
+                    _d3_step_context["obstacle_risk_active"].float(),
+                ],
+                dim=1,
+            ).detach().cpu().tolist()
+            _d3_records = []
+            _d3_slot_count = int(_corridor_dynamic_obstacles)
+            for _d3_env_id, _d3_row in enumerate(_d3_cpu_rows):
+                _d3_slot_offset = 18
+                _d3_slot_distances = tuple(
+                    float(value)
+                    for value in _d3_row[
+                        _d3_slot_offset : _d3_slot_offset + _d3_slot_count
+                    ]
+                )
+                _d3_slot_offset += _d3_slot_count
+                _d3_slot_closings = tuple(
+                    float(value)
+                    for value in _d3_row[
+                        _d3_slot_offset : _d3_slot_offset + _d3_slot_count
+                    ]
+                )
+                _d3_slot_offset += _d3_slot_count
+                _d3_slot_risks = tuple(
+                    float(value)
+                    for value in _d3_row[
+                        _d3_slot_offset : _d3_slot_offset + _d3_slot_count
+                    ]
+                )
+                _d3_slot_offset += _d3_slot_count
+                _d3_slot_risk_active = tuple(
+                    bool(value)
+                    for value in _d3_row[
+                        _d3_slot_offset : _d3_slot_offset + _d3_slot_count
+                    ]
+                )
+                _d3_records.append(
+                    D3StepRecord(
+                        step=int(step),
+                        env_id=_d3_env_id,
+                        episode_id=_d3_recorder.episode_id(_d3_env_id),
+                        policy_action_indices=(
+                            int(round(_d3_row[0])),
+                            int(round(_d3_row[1])),
+                        ),
+                        effective_action_indices=(
+                            int(round(_d3_row[2])),
+                            int(round(_d3_row[3])),
+                        ),
+                        shield_engaged=bool(_d3_row[14]),
+                        pre_delay_v_command_mps=float(_d3_row[4]),
+                        pre_delay_w_command_rad_s=float(_d3_row[5]),
+                        post_delay_v_command_mps=float(_d3_row[6]),
+                        post_delay_w_command_rad_s=float(_d3_row[7]),
+                        body_forward_speed_mps=float(_d3_row[8]),
+                        body_planar_speed_mps=float(_d3_row[9]),
+                        obstacle_center_distance_m=float(_d3_row[10]),
+                        relative_closing_speed_mps=float(_d3_row[11]),
+                        risk=float(_d3_row[12]),
+                        risk_active=bool(_d3_row[13]),
+                        dynamic_obstacle_center_distances_m=(
+                            _d3_slot_distances
+                        ),
+                        dynamic_obstacle_relative_closing_speeds_mps=(
+                            _d3_slot_closings
+                        ),
+                        dynamic_obstacle_risks=_d3_slot_risks,
+                        dynamic_obstacle_risk_active=(
+                            _d3_slot_risk_active
+                        ),
+                        dynamic_collision=bool(_d3_row[15]),
+                        done=bool(_d3_row[16]),
+                        termination_cause=int(round(_d3_row[17])),
+                    )
+                )
+            _d3_recorder.record_batch(_d3_records)
+            if _d5_enabled:
+                _d5_recorder.record_tensor_batch(
+                    step=int(step),
+                    policy_actions=_d3_step_context["policy_actions"],
+                    effective_actions=_d3_step_context["effective_actions"],
+                    snapshot=_d5_step_context,
+                    obstacle_distances_m=_d3_step_context[
+                        "obstacle_distances"
+                    ],
+                    obstacle_closings_mps=_d3_step_context[
+                        "relative_closings"
+                    ],
+                    dynamic_collision=_d3_dynamic_collision,
+                    done=done,
+                    termination_cause=_transition_cause,
+                )
+            if _d6_enabled:
+                _d6_shadow.record_transition(
+                    _d6_step_context, _d3_dynamic_collision
+                )
+            if _d7_enabled:
+                _d7_audit.record_transition(
+                    _d7_step_context, _d3_dynamic_collision
+                )
+            if _d8_enabled:
+                _d8_audit.record_transition(done)
+            _d3_shield.reset(done)
         if _narrow_gap_controller is not None:
             _narrow_gap_controller.observe(done)
         if _narrow_replay_metrics is not None:
@@ -6176,7 +7828,10 @@ def main():
                     if int(_rma.sum().item()) > 0:
                         _react_omega_ahead[_rk].append((_omega_cmd[_rma].mean().item(), int(_rma.sum().item())))
 
-        episode_goal_dist_sum += torch.norm(_obs_flat_ep[:, 4:6], dim=1)
+        _goal_dist_now = torch.norm(_obs_flat_ep[:, 4:6], dim=1)
+        episode_goal_dist_sum += _goal_dist_now
+        if _gd_on:
+            _gd_samples.append(_goal_dist_now.detach().cpu())
         if _play_behavior_scheduler is not None:
             _rp_ep = _robot_data.root_pos_w[:, :2]
             _eo_ep = raw_env.scene.env_origins[:, :2]
@@ -6235,6 +7890,34 @@ def main():
         episode_omega_target_max = torch.maximum(episode_omega_target_max, _omega_target.abs())
         episode_slew_sum += _slew_delta
         episode_slew_max = torch.maximum(episode_slew_max, _slew_delta)
+
+        # --- action stats (Q2/Q4/Q5) ---------------------------------------
+        if _as_on:
+            _as_max_dw = float(_action_term_ref.cfg.max_angular_accel) * float(
+                _action_term_ref._dt
+            )
+            # slew 的基準是「上一拍的 pre-delay 命令」，與解碼器第 240 行一致
+            if _as_prev_cmd_omega is not None:
+                _dw_want = (_omega_target - _as_prev_cmd_omega).abs()
+                _as_dw_desired.append(_dw_want.detach().cpu())
+                # 觸及上限 = slew clamp 生效（留 1e-6 容差）
+                _as_slew_sat += int((_dw_want >= _as_max_dw - 1e-6).sum().item())
+                _as_steps += int(_dw_want.numel())
+            _as_prev_cmd_omega = torch.where(
+                done,
+                torch.zeros_like(_action_term_ref._commanded_omega),
+                _action_term_ref._commanded_omega,
+            ).clone()
+
+            _next_v = _action_term_ref.processed_actions[:, 0]
+            _as_rev_cmd += int((_next_v < -1e-6).sum().item())
+            _as_next_v.append(_next_v.detach().cpu())
+            _ratio_lin = (actions[:, 0].float() - 9.0) / 9.0
+            _as_brake_intent += int((_ratio_lin < 0).sum().item())
+
+            if _obs_flat_ep.shape[1] >= 83:
+                _as_acthist.append(_obs_flat_ep[:, 79:83].detach().cpu())
+        # --------------------------------------------------------------------
 
         # --- Per-step velocity/position log (env 0) for stuck diagnosis ---
         _t0_orca = time.time()
@@ -6337,9 +8020,20 @@ def main():
         # --- 回合結束處理 ---
         if done.any():
             done_ids = done.nonzero(as_tuple=False).reshape(-1)  # 結束的 env ID
-            terminated_flat = terminated.squeeze(-1) if terminated.ndim > 1 else terminated
-            truncated_flat = truncated.squeeze(-1) if truncated.ndim > 1 else truncated
-            cause = detect_termination_cause(raw_env, terminated_flat, truncated_flat)
+            if _transition_cause is None:
+                terminated_flat = terminated.squeeze(-1) if terminated.ndim > 1 else terminated
+                truncated_flat = truncated.squeeze(-1) if truncated.ndim > 1 else truncated
+                cause = detect_termination_cause(raw_env, terminated_flat, truncated_flat)
+            else:
+                cause = _transition_cause
+            if _corridor_teacher_closed_loop_metrics is not None:
+                _corridor_teacher_closed_loop_metrics.finish_episodes(
+                    done_ids,
+                    cause,
+                )
+                _corridor_teacher_interaction_metrics.finish_episodes(
+                    done_ids
+                )
             if _solvability_audit is not None:
                 _solvability_audit.finish(done_ids, cause)
             if _near_wall_controller is not None:
@@ -6442,6 +8136,26 @@ def main():
                                 _bucket["obstacle"] += 1
                             elif c == 4:
                                 _bucket["timeout"] += 1
+                if (
+                    args_cli.long_corridor_eval
+                    and _corridor_layout_snapshot is not None
+                ):
+                    _layout = int(_corridor_layout_snapshot[env_id].item())
+                    if _layout >= 0:
+                        _lb = _corridor_layout_stats.setdefault(
+                            _layout,
+                            {"episodes": 0, "goal": 0, "wall": 0,
+                             "obstacle": 0, "timeout": 0},
+                        )
+                        _lb["episodes"] += 1
+                        if c == 1:
+                            _lb["goal"] += 1
+                        elif c == 2:
+                            _lb["wall"] += 1
+                        elif c == 3:
+                            _lb["obstacle"] += 1
+                        elif c == 4:
+                            _lb["timeout"] += 1
                 print(
                     f"[回合 {stats_total:3d}] 環境={env_id} 原因={cause_name:7s} "
                     f"步數={ep_steps:4d} 獎勵={ep_rew:.1f} "
@@ -6740,7 +8454,21 @@ def main():
             (_corridor_centers[:, 1, 0] - 0.5 * _corridor_sizes[:, 1, 0])
             - (_corridor_centers[:, 0, 0] + 0.5 * _corridor_sizes[:, 0, 0])
         )
-        _corridor_length = _corridor_sizes[:, :, 1]
+        _corridor_wall_span = _corridor_sizes[:, :, 1]
+        _corridor_length = torch.full_like(
+            _corridor_wall_span,
+            float(raw_env._long_corridor_spec.length),
+        )
+        _corridor_boundary_inner_face = (
+            _corridor_room_half_extent
+            - 0.5 * _corridor_boundary_wall_width
+        )
+        _corridor_boundary_overlap = (
+            0.5 * _corridor_wall_span - _corridor_boundary_inner_face
+        )
+        _corridor_sealed_to_boundary_pass = bool(
+            (_corridor_boundary_overlap >= -1e-6).all().item()
+        )
         _moving_slots = (
             _long_corridor_motion_max > 0.01
             if _long_corridor_motion_max is not None
@@ -6867,6 +8595,56 @@ def main():
                 )
             ).items()
         }
+        _corridor_pre_deployment_metrics = {
+            f"pre_deployment_{key}": value
+            for key, value in summarize_corridor_actions(
+                (
+                    torch.cat(_long_corridor_pre_deployment_actions, dim=0)
+                    if _long_corridor_pre_deployment_actions
+                    else torch.empty(0, 2, device=device)
+                )
+            ).items()
+        }
+        _corridor_clear_pre_deployment_metrics = {
+            f"clear_pre_deployment_{key}": value
+            for key, value in summarize_corridor_actions(
+                (
+                    torch.cat(
+                        _long_corridor_clear_pre_deployment_actions, dim=0
+                    )
+                    if _long_corridor_clear_pre_deployment_actions
+                    else torch.empty(0, 2, device=device)
+                )
+            ).items()
+        }
+        _corridor_actual_body = (
+            torch.cat(_long_corridor_actual_body_velocities, dim=0)
+            if _long_corridor_actual_body_velocities
+            else torch.empty(0, 2, device=device)
+        )
+        _corridor_actual_planar_speed = torch.linalg.vector_norm(
+            _corridor_actual_body, dim=1
+        )
+        _corridor_actual_forward_abs_mean = (
+            float(_corridor_actual_body[:, 0].abs().mean().item())
+            if _corridor_actual_body.numel()
+            else None
+        )
+        _corridor_actual_planar_mean = (
+            float(_corridor_actual_planar_speed.mean().item())
+            if _corridor_actual_planar_speed.numel()
+            else None
+        )
+        _corridor_actual_stop_fraction = (
+            float(
+                (_corridor_actual_planar_speed <= D3_STOP_SPEED_MPS)
+                .float()
+                .mean()
+                .item()
+            )
+            if _corridor_actual_planar_speed.numel()
+            else None
+        )
         _corridor_report = {
             "episodes": int(stats_total),
             "success_rate": float(_corridor_sr),
@@ -6874,8 +8652,55 @@ def main():
             "wall_collision_rate": float(stats_wall / stats_total) if stats_total else 0.0,
             "obstacle_collision_rate": float(stats_obs / stats_total) if stats_total else 0.0,
             "timeout_rate": float(_corridor_to),
+            "speed_rate": float(getattr(args_cli, "speed_rate", 1.0)),
+            "speed_rate_obs_mode": str(
+                getattr(args_cli, "speed_rate_obs", "ego")
+            ),
+            "speed_rate_action_limits": {
+                "max_linear_velocity": float(
+                    _action_term_ref.cfg.max_linear_velocity
+                ),
+                "max_linear_accel": float(
+                    _action_term_ref.cfg.max_linear_accel
+                ),
+                "max_angular_vel": float(
+                    _action_term_ref.cfg.max_angular_vel
+                ),
+                "max_angular_accel": float(
+                    _action_term_ref.cfg.max_angular_accel
+                ),
+            },
+            "actual_body_velocity_frames": int(
+                _corridor_actual_body.shape[0]
+            ),
+            "actual_body_linear_speed_abs_mean_mps": (
+                _corridor_actual_forward_abs_mean
+            ),
+            "actual_body_planar_speed_mean_mps": (
+                _corridor_actual_planar_mean
+            ),
+            "actual_body_stop_threshold_mps": float(D3_STOP_SPEED_MPS),
+            "actual_body_stop_fraction": _corridor_actual_stop_fraction,
+            "deployment_speed_scale": float(
+                getattr(_action_term_ref.cfg, "deployment_speed_scale", 1.0)
+            ),
+            "deployment_scale_samples": int(
+                _long_corridor_deployment_scale_samples
+            ),
+            "deployment_scale_max_abs_error": float(
+                _long_corridor_deployment_scale_max_error
+            ),
             "free_width_m_mean": float(_corridor_inner_width.mean().item()),
             "length_m_mean": float(_corridor_length.mean().item()),
+            "wall_span_m_mean": float(_corridor_wall_span.mean().item()),
+            "requested_wall_span_m": float(_corridor_wall_span_requested),
+            "boundary_inner_face_abs_y_m": float(
+                _corridor_boundary_inner_face
+            ),
+            "wall_boundary_overlap_m_min": float(
+                _corridor_boundary_overlap.min().item()
+            ),
+            "sealed_to_boundary_pass": _corridor_sealed_to_boundary_pass,
             "active_env_fraction": float(
                 raw_env._long_corridor_active.float().mean().item()
             ),
@@ -6894,6 +8719,38 @@ def main():
                 else None
             ),
             "dynamic_motion_type_fractions": _motion_type_fractions,
+            # Episode-weighted split by static skeleton. id = active_static*100
+            # + sign bitmask of the static x column. The sampler mirrors a fixed
+            # lattice with p=0.5, so a 4S scene yields ids 405 and 410 only;
+            # a materially different SR/CR between them means the policy is
+            # sensitive to which mirror it drew, not just to obstacle presence.
+            "static_layout_outcomes": {
+                str(_lid): {
+                    "episodes": int(b["episodes"]),
+                    "success_rate": (
+                        float(b["goal"] / b["episodes"]) if b["episodes"] else 0.0
+                    ),
+                    "collision_rate": (
+                        float((b["wall"] + b["obstacle"]) / b["episodes"])
+                        if b["episodes"] else 0.0
+                    ),
+                    "wall_collision_rate": (
+                        float(b["wall"] / b["episodes"]) if b["episodes"] else 0.0
+                    ),
+                    "obstacle_collision_rate": (
+                        float(b["obstacle"] / b["episodes"])
+                        if b["episodes"] else 0.0
+                    ),
+                    "timeout_rate": (
+                        float(b["timeout"] / b["episodes"])
+                        if b["episodes"] else 0.0
+                    ),
+                }
+                for _lid, b in sorted(_corridor_layout_stats.items())
+            },
+            "static_layout_episodes_total": int(
+                sum(b["episodes"] for b in _corridor_layout_stats.values())
+            ),
             "motion_pair_outcomes": {
                 name: {
                     "episodes": int(b["episodes"]),
@@ -7042,6 +8899,15 @@ def main():
                     torch.full_like(_corridor_length, 10.0),
                     atol=1e-5,
                 )
+                and torch.allclose(
+                    _corridor_wall_span,
+                    torch.full_like(
+                        _corridor_wall_span,
+                        _corridor_wall_span_requested,
+                    ),
+                    atol=1e-5,
+                )
+                and _corridor_sealed_to_boundary_pass
             ),
             "movement_pass": _movement_pass,
             "goal_command_max_error_m": _long_corridor_goal_error_max,
@@ -7052,6 +8918,8 @@ def main():
             ),
             **_corridor_action_metrics,
             **_corridor_clear_metrics,
+            **_corridor_pre_deployment_metrics,
+            **_corridor_clear_pre_deployment_metrics,
         }
         _corridor_report["gate_pass"] = bool(
             _corridor_report["geometry_pass"]
@@ -7073,6 +8941,8 @@ def main():
             f"width={_corridor_report['free_width_m_mean']:.3f}m"
             f"/req{_corridor_report['requested_free_width_m']:.2f} "
             f"length={_corridor_report['length_m_mean']:.3f}m "
+            f"wall_span={_corridor_report['wall_span_m_mean']:.3f}m "
+            f"boundary_overlap={_corridor_report['wall_boundary_overlap_m_min']:.3f}m "
             f"v_max={_corridor_report['observed_max_dynamic_speed_m_s']:.3f}m/s"
             f"/req{_corridor_report['requested_dynamic_speed_range_m_s'][1]:.2f} "
             f"dynamic_moved={_corridor_report['dynamic_slots_moved_fraction']:.1%} "
@@ -7135,6 +9005,118 @@ def main():
         )
         _teacher_frame_denom = max(_teacher_frames, 1.0)
         _teacher_feasible_denom = max(_teacher_feasible_frames, 1.0)
+        _stateful_teacher_report = None
+        if _stateful_teacher_stats is not None:
+            _stateful_teacher_report = {
+                "schema": "stateful_corridor_teacher_runtime/v1",
+                "states": {
+                    "WAIT": (
+                        _teacher_float(
+                            _stateful_teacher_stats["wait_state_frames"]
+                        )
+                        / _teacher_frame_denom
+                    ),
+                    "COMMIT_SIDE": (
+                        _teacher_float(
+                            _stateful_teacher_stats["commit_state_frames"]
+                        )
+                        / _teacher_frame_denom
+                    ),
+                    "PASS": (
+                        _teacher_float(
+                            _stateful_teacher_stats["pass_state_frames"]
+                        )
+                        / _teacher_frame_denom
+                    ),
+                },
+                "interaction_frame_fraction": (
+                    _teacher_float(
+                        _stateful_teacher_stats["interaction_frames"]
+                    )
+                    / _teacher_frame_denom
+                ),
+                "override_frame_fraction": (
+                    _teacher_float(
+                        _stateful_teacher_stats["override_frames"]
+                    )
+                    / _teacher_frame_denom
+                ),
+                "geometric_feasible_frame_fraction": (
+                    _teacher_float(
+                        _stateful_teacher_stats[
+                            "geometric_feasible_frames"
+                        ]
+                    )
+                    / _teacher_frame_denom
+                ),
+                "used_wait_frame_fraction": (
+                    _teacher_float(
+                        _stateful_teacher_stats["used_wait_frames"]
+                    )
+                    / _teacher_frame_denom
+                ),
+                "used_bounded_reverse_frame_fraction": (
+                    _teacher_float(
+                        _stateful_teacher_stats["used_reverse_frames"]
+                    )
+                    / _teacher_frame_denom
+                ),
+                "emergency_brake_frame_fraction": (
+                    _teacher_float(
+                        _stateful_teacher_stats[
+                            "emergency_brake_frames"
+                        ]
+                    )
+                    / _teacher_frame_denom
+                ),
+                "transitions": {
+                    key: int(
+                        round(_teacher_float(_stateful_teacher_stats[key]))
+                    )
+                    for key in ("entered_commit", "entered_pass", "released")
+                },
+                "spec": {
+                    "interaction_distance_m": (
+                        _stateful_teacher_spec.interaction_distance_m
+                    ),
+                    "release_distance_m": (
+                        _stateful_teacher_spec.release_distance_m
+                    ),
+                    "side_confirm_steps": (
+                        _stateful_teacher_spec.side_confirm_steps
+                    ),
+                    "release_confirm_steps": (
+                        _stateful_teacher_spec.release_confirm_steps
+                    ),
+                    "recent_vacated_window_s": (
+                        _stateful_teacher_spec.recent_vacated_window_s
+                    ),
+                    "max_reverse_speed_mps": (
+                        _stateful_teacher_spec.max_reverse_speed_mps
+                    ),
+                    "max_reverse_distance_m": (
+                        _stateful_teacher_spec.max_reverse_distance_m
+                    ),
+                    "max_passage_heading_deviation_rad": (
+                        _stateful_teacher_spec.max_passage_heading_deviation_rad
+                    ),
+                    "low_speed_reachable_fraction": (
+                        _stateful_teacher_spec.low_speed_reachable_fraction
+                    ),
+                    "low_speed_side_fraction": (
+                        _stateful_teacher_spec.low_speed_side_fraction
+                    ),
+                    "minimum_side_signal_m": (
+                        _stateful_teacher_spec.minimum_side_signal_m
+                    ),
+                    "crossing_lateral_speed_mps": (
+                        _stateful_teacher_spec.crossing_lateral_speed_mps
+                    ),
+                    "crossing_lateral_span_m": (
+                        _stateful_teacher_spec.crossing_lateral_span_m
+                    ),
+                },
+            }
         _teacher_report = {
             "checkpoint_policy_observation_source": os.path.abspath(
                 ckpt_path
@@ -7145,6 +9127,23 @@ def main():
             "teacher_mode": (
                 "override" if _corridor_teacher_override else "shadow"
             ),
+            "teacher_spec": {
+                "horizon_s": _corridor_teacher_spec.horizon_s,
+                "samples": _corridor_teacher_spec.samples,
+                "hard_obstacle_clearance_m": (
+                    _corridor_teacher_spec.hard_obstacle_clearance_m
+                ),
+                "goal_denominator_floor_m": (
+                    _corridor_teacher_spec.goal_denominator_floor_m
+                ),
+                "allow_reverse": _corridor_teacher_spec.allow_reverse,
+                "controller": args_cli.corridor_teacher_controller,
+                "actuator_model": (
+                    "fixed_d1_queue"
+                    if _corridor_teacher_uses_d1
+                    else "no_delay"
+                ),
+            },
             "frames": int(round(_teacher_frames)),
             "feasible_frame_fraction": (
                 _teacher_feasible_frames / _teacher_frame_denom
@@ -7203,6 +9202,11 @@ def main():
                 )
                 / _teacher_feasible_denom
             ),
+            **_corridor_teacher_closed_loop_metrics.to_report(),
+            "interaction_behavior": (
+                _corridor_teacher_interaction_metrics.to_report()
+            ),
+            "stateful_controller": _stateful_teacher_report,
             "closed_loop_outcome": _corridor_report,
         }
         print(
@@ -7219,6 +9223,50 @@ def main():
             f"left/right="
             f"{_teacher_report['teacher_left_turn_fraction']:.1%}/"
             f"{_teacher_report['teacher_right_turn_fraction']:.1%}",
+            flush=True,
+        )
+        if _stateful_teacher_report is not None:
+            _stateful_states = _stateful_teacher_report["states"]
+            print(
+                "[CORRIDOR-TEACHER-STATEFUL] "
+                f"WAIT={_stateful_states['WAIT']:.1%} "
+                f"COMMIT={_stateful_states['COMMIT_SIDE']:.1%} "
+                f"PASS={_stateful_states['PASS']:.1%} "
+                "emergency="
+                f"{_stateful_teacher_report['emergency_brake_frame_fraction']:.1%} "
+                "transitions="
+                f"{_stateful_teacher_report['transitions']}",
+                flush=True,
+            )
+        _teacher_near_goal = _teacher_report[
+            "near_goal_episode_outcomes"
+        ]
+        _teacher_near_clearance = _teacher_report[
+            "near_goal_selected_predicted_clearance"
+        ]
+        print(
+            "[CORRIDOR-TEACHER-NEAR-GOAL] "
+            f"D<={_teacher_near_goal['threshold_m']:g}m "
+            f"episodes={_teacher_near_goal['entered_episodes']} "
+            f"completion={_teacher_near_goal['completion_rate']:.1%} "
+            f"collision={_teacher_near_goal['collision_rate']:.1%} "
+            f"timeout={_teacher_near_goal['timeout_rate']:.1%} "
+            f"clearance_p05={_teacher_near_clearance['p05_m']}",
+            flush=True,
+        )
+        _teacher_interaction = _teacher_report["interaction_behavior"]
+        _teacher_gap = _teacher_interaction["safe_gap"]
+        _teacher_heading = _teacher_interaction["heading"]
+        print(
+            "[CORRIDOR-TEACHER-INTERACTION] "
+            f"gap_launch={_teacher_gap['launches']}/"
+            f"{_teacher_gap['opportunities']} "
+            f"delay_p50={_teacher_gap['launch_delay_s']['p50']}s "
+            f"vacated_side="
+            f"{_teacher_interaction['vacated_side_choice']['match_fraction']:.1%} "
+            f"u_turn={_teacher_heading['u_turn_episode_fraction']:.1%} "
+            f"full_rotation="
+            f"{_teacher_heading['full_rotation_episode_fraction']:.1%}",
             flush=True,
         )
         if args_cli.privileged_corridor_teacher_output:
@@ -7280,8 +9328,14 @@ def main():
                                 "hard_obstacle_clearance_m": (
                                     _corridor_teacher_spec.hard_obstacle_clearance_m
                                 ),
+                                "goal_denominator_floor_m": (
+                                    _corridor_teacher_spec.goal_denominator_floor_m
+                                ),
                                 "allow_reverse": (
                                     _corridor_teacher_spec.allow_reverse
+                                ),
+                                "controller": (
+                                    args_cli.corridor_teacher_controller
                                 ),
                             },
                         }
@@ -7489,6 +9543,457 @@ def main():
             print(
                 f"[FUTURE-CF-AUDIT] JSON report: {_future_cf_output}"
             )
+    if _d3_enabled:
+        _d3_lag_by_channel = getattr(
+            _d3_cfg, "actuator_motor_lag_by_channel", None
+        )
+        _d3_shield_runtime = _d3_shield.report()
+        _d3_report = _d3_recorder.write(
+            args_cli.d3_yield_output,
+            metadata={
+                "checkpoint": os.path.abspath(ckpt_path),
+                "stage": int(args_cli.stage),
+                "seed": int(args_cli.seed),
+                "num_envs": int(raw_env.num_envs),
+                "num_dynamic_obstacles": int(
+                    _corridor_dynamic_obstacles
+                ),
+                "rollout_steps_requested": int(args_cli.steps),
+                "expected_records": int(args_cli.steps)
+                * int(raw_env.num_envs),
+                "completed_episodes": int(_corridor_report["episodes"]),
+                "deterministic": bool(args_cli.deterministic),
+                "corridor_motion_mode": str(
+                    args_cli.long_corridor_motion_mode
+                ),
+                "corridor_free_width_m": float(
+                    args_cli.long_corridor_free_width
+                ),
+                "corridor_dynamic_speed_range_m_s": [
+                    float(value)
+                    for value in args_cli.long_corridor_dynamic_speed_range
+                ],
+                "policy_action_semantics": (
+                    "raw two-index MultiDiscrete action selected by policy"
+                ),
+                "effective_action_semantics": (
+                    "action indices after optional shield and before env.step"
+                ),
+                "state_timing": (
+                    "body speed, obstacle distance/closing and risk are sampled "
+                    "at policy selection before the resulting transition"
+                ),
+                "command_timing": (
+                    "pre/post-delay commands are snapshots from process_actions "
+                    "before deployment output scaling; they survive terminal "
+                    "auto-reset"
+                ),
+                "shield_insertion": (
+                    "policy action -> optional shield -> env.step/process_actions "
+                    "-> decode -> delay queue -> deployment output scale -> simulator"
+                ),
+                "deployment_speed_scale": float(
+                    getattr(_d3_cfg, "deployment_speed_scale", 1.0)
+                ),
+                "deployment_speed_scale_channels": ["v", "omega"],
+                "speed_rate": float(
+                    getattr(args_cli, "speed_rate", 1.0)
+                ),
+                "speed_rate_obs_mode": str(
+                    getattr(args_cli, "speed_rate_obs", "ego")
+                ),
+                "speed_rate_lidar_scaled": bool(
+                    getattr(args_cli, "speed_rate_obs", "ego")
+                    == "ego_lidar"
+                ),
+                "issued_action_history_scaled": False,
+                "baseline_tensor_identity_checked_each_step": bool(
+                    args_cli.d3_shield_mode == D3ShieldMode.BASELINE.value
+                ),
+                "shield_protocol": _d3_protocol,
+                "shield_runtime": _d3_shield_runtime,
+                "actuator": {
+                    "delay_range": list(_d3_cfg.actuator_delay_range),
+                    "velocity_scale_range": list(
+                        _d3_cfg.actuator_velocity_scale
+                    ),
+                    "motor_lag_alpha": float(
+                        _d3_cfg.actuator_motor_lag
+                    ),
+                    "motor_lag_alpha_by_channel": (
+                        list(_d3_lag_by_channel)
+                        if _d3_lag_by_channel is not None
+                        else None
+                    ),
+                },
+                "corridor_outcomes": {
+                    "episodes": int(_corridor_report["episodes"]),
+                    "success_rate": float(
+                        _corridor_report["success_rate"]
+                    ),
+                    "collision_rate": float(
+                        _corridor_report["collision_rate"]
+                    ),
+                    "wall_collision_rate": float(
+                        _corridor_report["wall_collision_rate"]
+                    ),
+                    "obstacle_collision_rate": float(
+                        _corridor_report["obstacle_collision_rate"]
+                    ),
+                    "timeout_rate": float(
+                        _corridor_report["timeout_rate"]
+                    ),
+                },
+                "termination_cause_codes": {
+                    "0": "running",
+                    "1": "goal",
+                    "2": "wall_collision",
+                    "3": "obstacle_collision",
+                    "4": "timeout",
+                    "5": "other",
+                },
+            },
+        )
+        _d3_self_check = _d3_report["self_check"]
+        print(
+            f"[SA4-D3-{args_cli.d3_shield_mode.upper()}] "
+            f"records={_d3_report['counts']['records']} "
+            f"episodes={_d3_report['counts']['completed_episodes']} "
+            f"collisions={_d3_report['counts']['dynamic_collision']} "
+            f"closest_approach_controls="
+            f"{_d3_report['counts']['noncollision_closest_approach']} "
+            f"delay_samples={_d3_self_check['delay_alignment_samples']} "
+            f"delay_errors={_d3_self_check['delay_alignment_errors']} "
+            f"reconciliation={_d3_self_check['reconciliation_ok']}",
+            flush=True,
+        )
+        print(
+            f"[SA4-D3-{args_cli.d3_shield_mode.upper()}] JSON report: "
+            f"{args_cli.d3_yield_output}",
+            flush=True,
+        )
+        if not bool(_d3_self_check["reconciliation_ok"]):
+            raise RuntimeError(
+                "SA4-D3 self-check failed; JSON was retained but must not be "
+                "used as mechanism evidence"
+            )
+    if _d5_enabled:
+        _d5_shadow_runtime = _d5_shadow.report()
+        _d5_report = _d5_recorder.write(
+            args_cli.d5_feasibility_output,
+            metadata={
+                "checkpoint": os.path.abspath(ckpt_path),
+                "stage": int(args_cli.stage),
+                "seed": int(args_cli.seed),
+                "num_envs": int(raw_env.num_envs),
+                "num_dynamic_obstacles": int(
+                    _corridor_dynamic_obstacles
+                ),
+                "rollout_steps_requested": int(args_cli.steps),
+                "expected_records": int(args_cli.steps)
+                * int(raw_env.num_envs),
+                "completed_episodes": int(_corridor_report["episodes"]),
+                "deterministic": bool(args_cli.deterministic),
+                "corridor_motion_mode": str(
+                    args_cli.long_corridor_motion_mode
+                ),
+                "baseline_policy_action_unchanged": True,
+                "shadow_protocol": _d5_protocol,
+                "geometry_protocol": geometry_selector_protocol(
+                    _d5_geometry_spec
+                ),
+                "shadow_runtime": _d5_shadow_runtime,
+                "d3_reconciliation_ok": bool(
+                    _d3_self_check["reconciliation_ok"]
+                ),
+                "d3_delay_alignment_errors": int(
+                    _d3_self_check["delay_alignment_errors"]
+                ),
+                "actuator": {
+                    "delay_range": list(_d3_cfg.actuator_delay_range),
+                    "velocity_scale_range": list(
+                        _d3_cfg.actuator_velocity_scale
+                    ),
+                    "motor_lag_alpha": float(_d3_cfg.actuator_motor_lag),
+                },
+                "corridor_outcomes": {
+                    "episodes": int(_corridor_report["episodes"]),
+                    "success_rate": float(_corridor_report["success_rate"]),
+                    "collision_rate": float(
+                        _corridor_report["collision_rate"]
+                    ),
+                    "wall_collision_rate": float(
+                        _corridor_report["wall_collision_rate"]
+                    ),
+                    "obstacle_collision_rate": float(
+                        _corridor_report["obstacle_collision_rate"]
+                    ),
+                    "timeout_rate": float(
+                        _corridor_report["timeout_rate"]
+                    ),
+                },
+                "termination_cause_codes": {
+                    "0": "running",
+                    "1": "goal",
+                    "2": "wall_collision",
+                    "3": "obstacle_collision",
+                    "4": "timeout",
+                    "5": "other",
+                },
+            },
+        )
+        _d5_self_check = _d5_report["self_check"]
+        _d5_collision_frontier = _d5_report["frontier_summary"][
+            "dynamic_collision"
+        ]
+        print(
+            "[SA4-D5] "
+            f"records={_d5_report['counts']['records']} "
+            f"evaluated={_d5_report['counts']['evaluated_records']} "
+            f"collisions={_d5_report['counts']['dynamic_collision']} "
+            f"controls={_d5_report['counts']['successful_noncollision_closest_approach']} "
+            f"no_feasible_frames={_d5_report['counts']['no_jointly_feasible_records']} "
+            f"collision_event_no_feasible="
+            f"{_d5_collision_frontier['event_no_feasible_fraction']:.3f} "
+            f"reconciliation={_d5_self_check['reconciliation_ok']}",
+            flush=True,
+        )
+        print(
+            f"[SA4-D5] JSON report: {args_cli.d5_feasibility_output}",
+            flush=True,
+        )
+        if not bool(_d5_self_check["reconciliation_ok"]):
+            raise RuntimeError(
+                "SA4-D5 self-check failed; JSON was retained but must not be "
+                "used as diagnostic evidence"
+            )
+    if _d6_enabled:
+        _d6_report = _d6_shadow.write(
+            args_cli.d6_static_sensitivity_output,
+            metadata={
+                "checkpoint": os.path.abspath(ckpt_path),
+                "stage": int(args_cli.stage),
+                "seed": int(args_cli.seed),
+                "num_envs": int(raw_env.num_envs),
+                "num_static_obstacles": int(_corridor_static_obstacles),
+                "num_dynamic_obstacles": int(_corridor_dynamic_obstacles),
+                "rollout_steps_requested": int(args_cli.steps),
+                "expected_records": int(args_cli.steps)
+                * int(raw_env.num_envs),
+                "completed_episodes": int(_corridor_report["episodes"]),
+                "deterministic": bool(args_cli.deterministic),
+                "corridor_motion_mode": str(
+                    args_cli.long_corridor_motion_mode
+                ),
+                "baseline_policy_action_unchanged": True,
+                "sensitivity_protocol": _d6_protocol,
+                "geometry_protocol": geometry_selector_protocol(),
+                "d3_reconciliation_ok": bool(
+                    _d3_self_check["reconciliation_ok"]
+                ),
+                "d3_delay_alignment_errors": int(
+                    _d3_self_check["delay_alignment_errors"]
+                ),
+                "actuator": {
+                    "delay_range": list(_d3_cfg.actuator_delay_range),
+                    "velocity_scale_range": list(
+                        _d3_cfg.actuator_velocity_scale
+                    ),
+                    "motor_lag_alpha": float(_d3_cfg.actuator_motor_lag),
+                },
+                "corridor_outcomes": {
+                    "episodes": int(_corridor_report["episodes"]),
+                    "success_rate": float(_corridor_report["success_rate"]),
+                    "collision_rate": float(
+                        _corridor_report["collision_rate"]
+                    ),
+                    "wall_collision_rate": float(
+                        _corridor_report["wall_collision_rate"]
+                    ),
+                    "obstacle_collision_rate": float(
+                        _corridor_report["obstacle_collision_rate"]
+                    ),
+                    "timeout_rate": float(
+                        _corridor_report["timeout_rate"]
+                    ),
+                },
+            },
+        )
+        _d6_self_check = _d6_report["self_check"]
+        _d6_points = _d6_report["lidar_point_attribution"]
+        _d6_frozen = _d6_report["matrix"]["all_evaluated"][
+            "variants"
+        ]["lidar_all_h2.4_c0.10"]
+        print(
+            "[SA4-D6] "
+            f"records={_d6_report['runtime']['environment_frames']} "
+            f"static_points={_d6_points['static_valid_points']} "
+            f"frozen_static_any="
+            f"{_d6_frozen['static_any_feasible_rate']:.3f} "
+            f"frozen_joint_any="
+            f"{_d6_frozen['joint_any_feasible_rate']:.3f} "
+            f"reconciliation={_d6_self_check['reconciliation_ok']}",
+            flush=True,
+        )
+        print(
+            f"[SA4-D6] JSON report: "
+            f"{args_cli.d6_static_sensitivity_output}",
+            flush=True,
+        )
+        if not bool(_d6_self_check["reconciliation_ok"]):
+            raise RuntimeError(
+                "SA4-D6 self-check failed; JSON was retained but must not be "
+                "used as diagnostic evidence"
+            )
+    if _d7_enabled:
+        _d7_report = _d7_audit.write(
+            args_cli.d7_lidar_residual_origin_output,
+            metadata={
+                "checkpoint": os.path.abspath(ckpt_path),
+                "stage": int(args_cli.stage),
+                "seed": int(args_cli.seed),
+                "num_envs": int(raw_env.num_envs),
+                "num_static_obstacles": int(_corridor_static_obstacles),
+                "num_dynamic_obstacles": int(_corridor_dynamic_obstacles),
+                "rollout_steps_requested": int(args_cli.steps),
+                "expected_records": int(args_cli.steps)
+                * int(raw_env.num_envs),
+                "completed_episodes": int(_corridor_report["episodes"]),
+                "deterministic": bool(args_cli.deterministic),
+                "corridor_motion_mode": str(
+                    args_cli.long_corridor_motion_mode
+                ),
+                "baseline_policy_action_unchanged": True,
+                "residual_origin_protocol": _d7_protocol,
+                "d6_protocol": _d6_protocol,
+                "d6_reconciliation_ok": bool(
+                    _d6_self_check["reconciliation_ok"]
+                ),
+                "d3_reconciliation_ok": bool(
+                    _d3_self_check["reconciliation_ok"]
+                ),
+                "d3_delay_alignment_errors": int(
+                    _d3_self_check["delay_alignment_errors"]
+                ),
+                "actuator": {
+                    "delay_range": list(_d3_cfg.actuator_delay_range),
+                    "velocity_scale_range": list(
+                        _d3_cfg.actuator_velocity_scale
+                    ),
+                    "motor_lag_alpha": float(_d3_cfg.actuator_motor_lag),
+                },
+                "corridor_outcomes": {
+                    "episodes": int(_corridor_report["episodes"]),
+                    "success_rate": float(_corridor_report["success_rate"]),
+                    "collision_rate": float(
+                        _corridor_report["collision_rate"]
+                    ),
+                    "wall_collision_rate": float(
+                        _corridor_report["wall_collision_rate"]
+                    ),
+                    "obstacle_collision_rate": float(
+                        _corridor_report["obstacle_collision_rate"]
+                    ),
+                    "timeout_rate": float(
+                        _corridor_report["timeout_rate"]
+                    ),
+                },
+            },
+        )
+        _d7_self_check = _d7_report["self_check"]
+        _d7_all = _d7_report["scopes"]["all_evaluated"]
+        _d7_blocked = _d7_report["scopes"]["frozen_static_blocked"]
+        print(
+            "[SA4-D7] "
+            f"records={_d7_report['runtime']['environment_frames']} "
+            f"residual_points={_d7_all['final_residual_points']} "
+            f"distractor_winners="
+            f"{_d7_all['final_mechanism']['distractor_winner']} "
+            f"blocked_frames={_d7_blocked['frames']} "
+            f"reconciliation={_d7_self_check['reconciliation_ok']}",
+            flush=True,
+        )
+        print(
+            f"[SA4-D7] JSON report: "
+            f"{args_cli.d7_lidar_residual_origin_output}",
+            flush=True,
+        )
+        if not bool(_d7_self_check["reconciliation_ok"]):
+            raise RuntimeError(
+                "SA4-D7 self-check failed; JSON was retained but must not be "
+                "used as diagnostic evidence"
+            )
+    if _d8_enabled:
+        _d8_report = _d8_audit.write(
+            args_cli.d8_noise_eligibility_output,
+            metadata={
+                "checkpoint": os.path.abspath(ckpt_path),
+                "stage": int(args_cli.stage),
+                "seed": int(args_cli.seed),
+                "num_envs": int(raw_env.num_envs),
+                "num_dynamic_obstacles": int(_corridor_dynamic_obstacles),
+                "rollout_steps_requested": int(args_cli.steps),
+                "expected_records": int(args_cli.steps)
+                * int(raw_env.num_envs),
+                "completed_episodes": int(_corridor_report["episodes"]),
+                "deterministic": bool(args_cli.deterministic),
+                "corridor_motion_mode": str(
+                    args_cli.long_corridor_motion_mode
+                ),
+                "baseline_policy_action_unchanged": True,
+                "counterfactual_fed_to_policy": False,
+                "noise_eligibility_protocol": _d8_protocol,
+                "d3_reconciliation_ok": bool(
+                    _d3_self_check["reconciliation_ok"]
+                ),
+                "d3_delay_alignment_errors": int(
+                    _d3_self_check["delay_alignment_errors"]
+                ),
+                "actuator": {
+                    "delay_range": list(_d3_cfg.actuator_delay_range),
+                    "velocity_scale_range": list(
+                        _d3_cfg.actuator_velocity_scale
+                    ),
+                    "motor_lag_alpha": float(_d3_cfg.actuator_motor_lag),
+                },
+                "corridor_outcomes_current_policy": {
+                    "episodes": int(_corridor_report["episodes"]),
+                    "success_rate": float(_corridor_report["success_rate"]),
+                    "collision_rate": float(
+                        _corridor_report["collision_rate"]
+                    ),
+                    "wall_collision_rate": float(
+                        _corridor_report["wall_collision_rate"]
+                    ),
+                    "obstacle_collision_rate": float(
+                        _corridor_report["obstacle_collision_rate"]
+                    ),
+                    "timeout_rate": float(_corridor_report["timeout_rate"]),
+                },
+            },
+        )
+        _d8_self_check = _d8_report["self_check"]
+        _d8_pair = _d8_report["paired_feasibility"]
+        print(
+            "[SA4-D8] "
+            f"records={_d8_report['runtime']['environment_frames']} "
+            f"active={_d8_pair['active_frames']} "
+            f"current_no_feasible={_d8_pair['current_no_feasible_fraction']:.3f} "
+            f"corrected_no_feasible={_d8_pair['corrected_no_feasible_fraction']:.3f} "
+            f"rescued={_d8_pair['rescued_current_no_feasible_fraction']:.3f} "
+            f"major={_d8_pair['major_fake_obstacle_contributor']} "
+            f"reconciliation={_d8_self_check['reconciliation_ok']}",
+            flush=True,
+        )
+        print(
+            f"[SA4-D8] JSON report: {args_cli.d8_noise_eligibility_output}",
+            flush=True,
+        )
+        if not bool(_d8_self_check["reconciliation_ok"]):
+            raise RuntimeError(
+                "SA4-D8 self-check failed; JSON was retained but must not be "
+                "used as diagnostic evidence"
+            )
     if _narrow_replay_metrics is not None:
         print(_narrow_replay_metrics.summary_line())
     if _narrow_gap_controller is not None:
@@ -7625,6 +10130,95 @@ def main():
         print(f"    目標距離均值:         {diag_goal_distance_sum/diag_samples:.4f}")
         print(f"    線性動作 idx 均值:    {diag_action_linear_sum/diag_samples:.4f}")
         print(f"    角度動作 idx 均值:    {diag_action_angular_sum/diag_samples:.4f}")
+    # --- goal 距離分布摘要 ---
+    if _gd_on and _gd_samples:
+        _gd = torch.cat(_gd_samples)
+        _gd_report = {
+            "checkpoint": str(ckpt_path),
+            "samples": int(_gd.numel()),
+            "goal_clamp_m": 10.0,
+            "percentiles_m": {
+                p: float(_gd.quantile(q))
+                for p, q in (("p05", 0.05), ("p25", 0.25), ("p50", 0.50),
+                             ("p75", 0.75), ("p95", 0.95), ("p99", 0.99))
+            },
+            "min_m": float(_gd.min()),
+            "max_m": float(_gd.max()),
+            "mean_m": float(_gd.mean()),
+            "std_m": float(_gd.std()),
+            # 對照車端 carrot：|goal| 落在 2.0±0.25 與 3.4±0.25 的比例
+            "near_carrot_2m_fraction": float(((_gd - 2.0).abs() <= 0.25).float().mean()),
+            "near_carrot_3p4m_fraction": float(((_gd - 3.4).abs() <= 0.25).float().mean()),
+            # ±10 m 裁切觸及比例（單軸裁切，模長 >=10 為必要條件之一）
+            "at_or_above_10m_fraction": float((_gd >= 10.0 - 1e-6).float().mean()),
+        }
+        print(
+            f"[GOAL-DIST] n={_gd_report['samples']}  "
+            f"p05/p50/p95 = {_gd_report['percentiles_m']['p05']:.2f}/"
+            f"{_gd_report['percentiles_m']['p50']:.2f}/"
+            f"{_gd_report['percentiles_m']['p95']:.2f} m  "
+            f"max={_gd_report['max_m']:.2f}  "
+            f"落在車端 2.0m carrot 帶內 {100*_gd_report['near_carrot_2m_fraction']:.1f}%"
+        )
+        _gd_path = Path(args_cli.goal_distance_stats_output).expanduser()
+        _gd_path.parent.mkdir(parents=True, exist_ok=True)
+        _gd_path.write_text(json.dumps(_gd_report, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"[GOAL-DIST] JSON: {_gd_path}")
+    elif _gd_on:
+        raise RuntimeError("--goal_distance_stats_output requested but no steps recorded")
+
+    # --- action stats 摘要 (Q2/Q4/Q5) ---
+    if _as_on and _as_steps > 0:
+        _as_dw = torch.cat(_as_dw_desired)
+        _as_v = torch.cat(_as_next_v)
+        _as_max_dw_out = float(_action_term_ref.cfg.max_angular_accel) * float(
+            _action_term_ref._dt
+        )
+        _as_report = {
+            "checkpoint": str(ckpt_path),
+            "steps_env_sum": int(_as_steps),
+            "slew_limit_rad_s": _as_max_dw_out,
+            "q2_slew": {
+                "saturated_fraction": _as_slew_sat / _as_steps,
+                "desired_dw_p50": float(_as_dw.quantile(0.50)),
+                "desired_dw_p95": float(_as_dw.quantile(0.95)),
+                "desired_dw_max": float(_as_dw.max()),
+                "desired_dw_mean": float(_as_dw.mean()),
+            },
+            "q5_reverse": {
+                "reverse_cmd_fraction": _as_rev_cmd / _as_steps,
+                "brake_intent_fraction": _as_brake_intent / _as_steps,
+                "next_v_p05": float(_as_v.quantile(0.05)),
+                "next_v_min": float(_as_v.min()),
+                "next_v_p50": float(_as_v.quantile(0.50)),
+            },
+        }
+        if _as_acthist:
+            _as_ah = torch.cat(_as_acthist)
+            _as_report["q4_act_hist"] = {
+                "dims": ["accel_t-1", "omega_t-1", "accel_t-2", "omega_t-2"],
+                "abs_p50": [float(_as_ah[:, i].abs().quantile(0.50)) for i in range(4)],
+                "abs_p95": [float(_as_ah[:, i].abs().quantile(0.95)) for i in range(4)],
+                "abs_max": [float(_as_ah[:, i].abs().max()) for i in range(4)],
+                "clipped_at_2_fraction": [
+                    float((_as_ah[:, i].abs() >= 2.0 - 1e-6).float().mean())
+                    for i in range(4)
+                ],
+            }
+        print(
+            f"[ACTION-STATS] slew 飽和 {100*_as_report['q2_slew']['saturated_fraction']:.1f}%  "
+            f"想要Δω p50/p95={_as_report['q2_slew']['desired_dw_p50']:.3f}/"
+            f"{_as_report['q2_slew']['desired_dw_p95']:.3f} (上限 {_as_max_dw_out:.3f})  "
+            f"倒車 {100*_as_report['q5_reverse']['reverse_cmd_fraction']:.2f}%  "
+            f"制動意圖 {100*_as_report['q5_reverse']['brake_intent_fraction']:.1f}%"
+        )
+        _as_path = Path(args_cli.action_stats_output).expanduser()
+        _as_path.parent.mkdir(parents=True, exist_ok=True)
+        _as_path.write_text(json.dumps(_as_report, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"[ACTION-STATS] JSON: {_as_path}")
+    elif _as_on:
+        raise RuntimeError("--action_stats_output requested but no steps were recorded")
+
     # --- jitter_eval 摘要（deterministic 真實抽動，去掉訓練探索噪聲）---
     if args_cli.jitter_eval and _jit_steps.max().item() > 0:
         import numpy as _np
