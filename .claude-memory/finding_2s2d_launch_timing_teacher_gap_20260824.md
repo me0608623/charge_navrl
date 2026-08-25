@@ -72,3 +72,17 @@ Status: `COMPLETE_VALID_DIAGNOSTIC_EVIDENCE`; source fingerprint stable; shared-
 - Do not increase distillation weight. First stratify collisions by FSM state and determine whether a multi-stage spatiotemporal passage planner is required instead of another one-step 19x19 selector adjustment.
 
 Obsidian note: `/home/aa/Documents/Obsidian Vault/isaaclab_v4/Gate結果/59_2S2D折返行人的出發時機與特權教師適用性_20260824.md`
+
+## r4 per-step mechanism diagnostic (2026-08-25)
+
+Output: `logs/gates/teacher_2s2d_stateful_d1_screen/screen_20260825_r4/`.
+
+- r4 is record-only. For both cells, `teacher.json`, `corridor.json`, and `cell.json` are byte-identical to r3. Protocol SHA remains `0d608c1e...`; source fingerprint is stable.
+- NPZ accounting is valid: shapes are 4000x64, episode-end counts are 1436/1549, terminal rows align to episode_step=n-1, and the next row resets to zero.
+- Timeout terminal median abs(lateral x) is 0.370 m / 0.388 m and median applied speed is 0. The robot usually stops near the corridor center rather than against a wall.
+- Among committed-invalid frames, opposite-side-open/no-switch accounts for 10.86% / 9.79%; both-sides-without-passage accounts for 89.14% / 90.21% (lateral/mixed). No-switch deadlock exists but is secondary.
+- Lateral obstacle collisions: 753/753 episodes experienced both-sides-blocked and 747/753 terminated there. Mixed: 807/813 experienced it and 765/813 terminated there.
+- The 1.0 s prediction residual p95 is 0.174/0.177 m overall and 0.117/0.129 m on obstacle-collision terminal slot samples. There is no broad collision-linked residual increase.
+- Critical limitation: both-sides-blocked is a committed-invalid frame-level property of the frozen 19x19/2 s teacher model. It is not a physical inevitability or collision proportion. Prediction samples are not matched to the contacting obstacle.
+- Next: record-only decomposition of passage kinematics/progress/heading, obstacle collision, and wall collision masks under the same frozen two cells. Do not alter clearance, horizon, FSM, reward, training, distillation, or SA6 before this split.
+- Durable analyzer: `scripts/reinforcement_learning/skrl/rnn_car_wdclean/analyze_stateful_teacher_step_diagnostic.py`; report JSON/Markdown are in the r4 output directory.

@@ -598,6 +598,15 @@ parser.add_argument(
     help="保存 policy 179D 輸入與同幀 teacher actions，供 held-out 可學性 probe",
 )
 parser.add_argument(
+    "--stateful_teacher_diagnostic_output",
+    type=str,
+    default="",
+    help=(
+        "保存 stateful teacher 逐步診斷 npz：走廊橫向座標、FSM 承諾側/左右側"
+        "可行性、行人預測誤差。純記錄，不改變教師行為"
+    ),
+)
+parser.add_argument(
     "--corridor_teacher_goal_denominator_floor_m",
     type=float,
     default=1.0,
@@ -4531,6 +4540,10 @@ def main():
     _stateful_teacher_controller = None
     _stateful_teacher_spec = None
     _stateful_teacher_stats = None
+    _stateful_teacher_diag = None
+    _stateful_diag_pred_history: list[dict[int, torch.Tensor]] = []
+    _stateful_diag_episode_end: list[tuple[int, int, int, int]] = []
+    _STATEFUL_DIAG_LAGS = ((1, "pred_err_1step_m"), (5, "pred_err_5step_m"))
     if _corridor_teacher_enabled:
         if not args_cli.long_corridor_eval:
             raise ValueError(
@@ -4673,6 +4686,45 @@ def main():
                 "feasible": [],
                 "env_id": [],
             }
+        if args_cli.stateful_teacher_diagnostic_output:
+            if _stateful_teacher_controller is None:
+                raise ValueError(
+                    "--stateful_teacher_diagnostic_output requires "
+                    "--corridor_teacher_controller stateful"
+                )
+            _max_diag_lag = max(lag for lag, _ in _STATEFUL_DIAG_LAGS)
+            if int(_corridor_teacher_spec.samples) < _max_diag_lag:
+                raise ValueError(
+                    "teacher horizon samples "
+                    f"({_corridor_teacher_spec.samples}) cannot cover the "
+                    f"{_max_diag_lag}-step prediction-error probe"
+                )
+            _stateful_teacher_diag = {
+                key: []
+                for key in (
+                    "lateral_m",
+                    "longitudinal_m",
+                    "state",
+                    "committed_side",
+                    "committed_valid",
+                    "left_valid",
+                    "right_valid",
+                    "used_wait",
+                    "emergency_brake",
+                    "interaction_active",
+                    "applied_v_mps",
+                    "applied_omega_rps",
+                    "episode_step",
+                    "pred_err_1step_m",
+                    "pred_err_5step_m",
+                )
+            }
+            print(
+                "[STATEFUL-TEACHER-DIAG] per-step recording enabled -> "
+                f"{args_cli.stateful_teacher_diagnostic_output} "
+                "(record-only; teacher actions are unchanged)",
+                flush=True,
+            )
         print(
             "[CORRIDOR-TEACHER] enabled "
             f"(mode={'override' if _corridor_teacher_override else 'shadow'}): "
@@ -6492,6 +6544,97 @@ def main():
                         _stateful_teacher_stats[_stateful_key] += (
                             _stateful_result[_stateful_value].float().sum()
                         )
+                    if _stateful_teacher_diag is not None:
+                        # Corridor frame: local x is the lateral axis (walls at
+                        # +/- free_width/2), local y is along the corridor.
+                        for _diag_key, _diag_tensor in (
+                            ("lateral_m", _teacher_robot_xy[:, 0]),
+                            ("longitudinal_m", _teacher_robot_xy[:, 1]),
+                            (
+                                "applied_v_mps",
+                                _action_term_ref._current_velocity,
+                            ),
+                            (
+                                "applied_omega_rps",
+                                _action_term_ref._current_omega,
+                            ),
+                        ):
+                            _stateful_teacher_diag[_diag_key].append(
+                                _diag_tensor.detach().to(
+                                    device="cpu", dtype=torch.float32
+                                )
+                            )
+                        for _diag_key, _diag_dtype in (
+                            ("state", torch.int8),
+                            ("committed_side", torch.int8),
+                            ("committed_valid", torch.bool),
+                            ("left_valid", torch.bool),
+                            ("right_valid", torch.bool),
+                            ("used_wait", torch.bool),
+                            ("emergency_brake", torch.bool),
+                            ("interaction_active", torch.bool),
+                        ):
+                            _stateful_teacher_diag[_diag_key].append(
+                                _stateful_result[_diag_key].detach().to(
+                                    device="cpu", dtype=_diag_dtype
+                                )
+                            )
+                        _stateful_teacher_diag["episode_step"].append(
+                            raw_env.episode_length_buf.detach().to(
+                                device="cpu", dtype=torch.int16
+                            )
+                        )
+                        # Nominal-branch residual: how far the pedestrian
+                        # actually is from where the teacher predicted it would
+                        # be N steps ago. Uses the pause=0 branch because that
+                        # is the teacher's point prediction; the pause=5 branch
+                        # only widens the blocked set for feasibility.
+                        _diag_actual = (
+                            _play_behavior_scheduler.positions[:, :, :2]
+                        )
+                        _diag_slot_ok = (
+                            _play_behavior_scheduler.behavior_type == 2
+                        )
+                        _diag_age = raw_env.episode_length_buf
+                        for _diag_lag, _diag_key in _STATEFUL_DIAG_LAGS:
+                            _diag_err = torch.full(
+                                _diag_actual.shape[:2],
+                                float("nan"),
+                                device=_diag_actual.device,
+                            )
+                            if len(_stateful_diag_pred_history) >= _diag_lag:
+                                # NaN (not 0) wherever the episode reset inside
+                                # the lag window: a reset teleports the
+                                # pedestrian, so the residual is meaningless
+                                # and must not be averaged in.
+                                _diag_err = torch.where(
+                                    _diag_slot_ok
+                                    & (_diag_age >= _diag_lag)[:, None],
+                                    (
+                                        _stateful_diag_pred_history[
+                                            -_diag_lag
+                                        ][_diag_lag]
+                                        - _diag_actual
+                                    ).norm(dim=-1),
+                                    _diag_err,
+                                )
+                            _stateful_teacher_diag[_diag_key].append(
+                                _diag_err.detach().to(
+                                    device="cpu", dtype=torch.float32
+                                )
+                            )
+                        _stateful_diag_pred_history.append(
+                            {
+                                _diag_lag: _teacher_obstacle_paths_moving[
+                                    :, :, _diag_lag - 1, :2
+                                ].detach().clone()
+                                for _diag_lag, _ in _STATEFUL_DIAG_LAGS
+                            }
+                        )
+                        if len(_stateful_diag_pred_history) > max(
+                            lag for lag, _ in _STATEFUL_DIAG_LAGS
+                        ):
+                            _stateful_diag_pred_history.pop(0)
                 actions = select_teacher_rollout_actions(
                     _teacher_policy_actions,
                     _teacher_actions,
@@ -8102,6 +8245,12 @@ def main():
                 ep_bwd_ratio = _bc / max(ep_steps, 1)
                 stats_total += 1
                 stats_steps_list.append(ep_steps)
+                if _stateful_teacher_diag is not None:
+                    # cause: 1=goal 2=wall 3=obstacle 4=timeout. Joins to the
+                    # per-step arrays through (rollout_step, env_id).
+                    _stateful_diag_episode_end.append(
+                        (int(step), int(env_id), int(c), int(ep_steps))
+                    )
                 if c == 1:
                     stats_goal += 1
                 elif c == 2:
@@ -9280,6 +9429,83 @@ def main():
             )
             print(
                 f"[CORRIDOR-TEACHER] JSON report: {_teacher_output}"
+            )
+        if _stateful_teacher_diag is not None:
+            import numpy as _np_stateful_diag
+
+            _stateful_diag_output = Path(
+                args_cli.stateful_teacher_diagnostic_output
+            ).expanduser()
+            _stateful_diag_output.parent.mkdir(parents=True, exist_ok=True)
+            # Stack on a new leading axis so every array is [T, E, ...] and an
+            # episode is a contiguous run within one env column.
+            _stateful_diag_arrays = {
+                key: torch.stack(value, dim=0).numpy()
+                for key, value in _stateful_teacher_diag.items()
+                if value
+            }
+            _np_stateful_diag.savez_compressed(
+                _stateful_diag_output,
+                **_stateful_diag_arrays,
+                episode_end=_np_stateful_diag.asarray(
+                    _stateful_diag_episode_end or [], dtype=_np_stateful_diag.int32
+                ).reshape(-1, 4),
+                metadata_json=_np_stateful_diag.asarray(
+                    json.dumps(
+                        {
+                            "schema": "stateful_teacher_step_diagnostic/v1",
+                            "array_layout": "[rollout_step, env]",
+                            "prediction_error_layout": (
+                                "[rollout_step, env, obstacle_slot]"
+                            ),
+                            "lateral_m": (
+                                "robot local x; corridor centerline is 0 and "
+                                "the walls sit at +/- free_width/2"
+                            ),
+                            "longitudinal_m": "robot local y, along the corridor",
+                            "state": "0=WAIT 1=COMMIT_SIDE 2=PASS",
+                            "committed_side": "+1=left, -1=right, 0=uncommitted",
+                            "committed_valid": (
+                                "the flag the controller used to choose between "
+                                "the committed action and the wait fallback; "
+                                "only meaningful where committed_side != 0"
+                            ),
+                            "left_valid_right_valid": (
+                                "unconditional per-side passage feasibility; "
+                                "committed_valid False with the opposite side "
+                                "True is the no-switch deadlock signature"
+                            ),
+                            "prediction_error_semantics": (
+                                "distance between the pause=0 branch prediction "
+                                "made N steps earlier and the actual pedestrian "
+                                "position now; NaN where the slot is inactive "
+                                "or the episode reset inside the lag window"
+                            ),
+                            "episode_end_columns": [
+                                "rollout_step",
+                                "env_id",
+                                "cause",
+                                "episode_steps",
+                            ],
+                            "cause_codes": {
+                                "1": "goal",
+                                "2": "wall",
+                                "3": "obstacle",
+                                "4": "timeout",
+                            },
+                            "teacher_replaced_policy_actions": (
+                                _corridor_teacher_override
+                            ),
+                            "record_only": True,
+                        }
+                    )
+                ),
+            )
+            print(
+                "[STATEFUL-TEACHER-DIAG] npz written: "
+                f"{_stateful_diag_output} "
+                f"({len(_stateful_diag_episode_end)} completed episodes)",
+                flush=True,
             )
         if _corridor_teacher_probe is not None:
             import numpy as _np_teacher_probe

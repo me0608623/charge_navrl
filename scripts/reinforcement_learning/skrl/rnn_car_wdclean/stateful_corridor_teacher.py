@@ -595,6 +595,16 @@ class StatefulCorridorTeacher:
             "selected_geometric_feasible": selected_geometric_feasible,
             "state": self.state.clone(),
             "committed_side": self.committed_side.clone(),
+            # Side feasibility as the controller itself saw it this step.
+            # ``committed_valid`` mirrors the value used to pick between the
+            # committed action and the wait fallback, so it is only meaningful
+            # where ``committed_side != 0``; ``left_valid``/``right_valid`` are
+            # unconditional and let a diagnostic separate "the committed side
+            # lost its path while the other side was open" (a commitment-rule
+            # failure) from "both sides were blocked" (a geometry failure).
+            "committed_valid": committed_valid,
+            "left_valid": left_valid,
+            "right_valid": right_valid,
             "interaction_active": interaction,
             "used_wait": used_wait,
             "used_bounded_reverse": used_reverse,

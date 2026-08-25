@@ -302,3 +302,59 @@ def test_reset_clears_commitment_and_reverse_budget():
 
     assert reset["state"].tolist() == [WAIT]
     assert reset["committed_side"].tolist() == [0]
+
+
+def test_select_reports_left_and_right_side_feasibility():
+    """The FSM must expose which sides still have a passage candidate.
+
+    Without these flags a diagnostic cannot tell "the committed side lost its
+    path" apart from "both sides are blocked" -- two failures with opposite
+    fixes.
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+
+    both = _select(controller, _teacher_result(), reset=True)
+    assert both["left_valid"].tolist() == [True]
+    assert both["right_valid"].tolist() == [True]
+    assert both["left_valid"].shape == (1,)
+    assert both["left_valid"].dtype == torch.bool
+
+    # Grid layout: only [2, 2] satisfies the left mask and only [2, 0]
+    # satisfies the right mask, so killing [2, 0] must kill right_valid alone.
+    joint = torch.ones(1, 3, 3, dtype=torch.bool)
+    joint[0, 2, 0] = False
+    left_only = _select(controller, _teacher_result(joint=joint))
+    assert left_only["left_valid"].tolist() == [True]
+    assert left_only["right_valid"].tolist() == [False]
+
+
+def test_committed_valid_exposes_no_switch_deadlock():
+    """Commit left, then remove the left candidate while right stays open.
+
+    This is the exact signature the r3 screen could not measure: the committed
+    side is infeasible, the opposite side is feasible, and the controller stops
+    instead of switching.
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    result = _teacher_result()
+
+    _select(controller, result, reset=True, dynamic_y=0.2, dynamic_vy=-1.0)
+    _select(controller, result, dynamic_y=-0.2, dynamic_vy=-1.0)
+    committed = _select(controller, result, dynamic_y=-0.3, dynamic_vy=-1.0)
+    assert committed["state"].tolist() == [COMMIT_SIDE]
+    assert committed["committed_side"].tolist() == [1]
+    assert committed["committed_valid"].tolist() == [True]
+
+    joint = torch.ones(1, 3, 3, dtype=torch.bool)
+    joint[0, 2, 2] = False
+    stuck = _select(
+        controller,
+        _teacher_result(joint=joint),
+        dynamic_y=-0.4,
+        dynamic_vy=-1.0,
+    )
+
+    assert stuck["committed_side"].tolist() == [1]
+    assert stuck["committed_valid"].tolist() == [False]
+    assert stuck["right_valid"].tolist() == [True]
+    assert stuck["used_wait"].tolist() == [True]

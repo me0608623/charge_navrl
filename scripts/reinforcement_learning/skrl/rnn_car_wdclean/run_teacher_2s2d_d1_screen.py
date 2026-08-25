@@ -140,6 +140,7 @@ def _run_cell(
     log_path: Path,
     teacher_path: Path,
     corridor_path: Path,
+    diag_path: Path | None = None,
 ) -> None:
     command = [
         str(REPO / "isaaclab.sh"),
@@ -208,6 +209,11 @@ def _run_cell(
         "--corridor_teacher_controller",
         getattr(protocol, "CONTROLLER", "memoryless"),
     ]
+    if diag_path is not None:
+        command += [
+            "--stateful_teacher_diagnostic_output",
+            str(diag_path),
+        ]
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env["CONDA_PREFIX"] = str(PYTHON.parent.parent)
@@ -321,12 +327,20 @@ def main(argv: list[str] | None = None) -> int:
         "summary": output / "SUMMARY.md",
         "incomplete": output / "INCOMPLETE_NO_VERDICT.json",
     }
+    _stateful = getattr(protocol, "CONTROLLER", "memoryless") == "stateful"
     cells = {
         scenario["name"]: {
             "log": output / f"{scenario['name']}.log",
             "teacher": output / f"{scenario['name']}_teacher.json",
             "corridor": output / f"{scenario['name']}_corridor.json",
             "cell": output / f"{scenario['name']}_cell.json",
+            # Record-only per-step diagnostic; the stateful controller is the
+            # only one that produces FSM commitment state to record.
+            **(
+                {"diag": output / f"{scenario['name']}_stateful_diag.npz"}
+                if _stateful
+                else {}
+            ),
         }
         for scenario in protocol.SCENARIOS
     }
@@ -370,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
                 log_path=paths["log"],
                 teacher_path=paths["teacher"],
                 corridor_path=paths["corridor"],
+                diag_path=paths.get("diag"),
             )
             if source_fingerprint() != fingerprint:
                 raise RuntimeError(f"source drift during {name}")
