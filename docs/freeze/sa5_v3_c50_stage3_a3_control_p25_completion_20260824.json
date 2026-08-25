@@ -1,0 +1,48 @@
+{
+  "schema": "sa5_v3_c50_stage3_arm_completion/v1",
+  "arm": "A3_CONTROL",
+  "status": "COMPLETE_VALID_DIAGNOSTIC_ARM_NOT_PARENT",
+  "run_name": "sa5_v3_c50_stage3_a3_control_ne1024_s42_p25_r1",
+  "unit": "sa5-v3-c50-stage3-a3-control-p25-r1.service",
+  "authorization": "docs/freeze/sa5_v3_c50_stage3_p060_alignment_p25_authorization_20260824.json",
+  "parent": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "45c972f804f1e9b24ade9b8164568cd8ac93f33e4f8b8685ee7347723b1aee30"
+  },
+  "output_checkpoint": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_a3_control_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "ae6c2495040b8582a5d82ccff3fefea02ff10cc209e7e37cb8230be7d61dde13",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "rl_optimizer_param_groups": 1
+  },
+  "metrics": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_a3_control_ne1024_s42_p25_r1/supervisor_metrics.jsonl",
+    "sha256": "49bd265910668afb6beafabf285746f27bfe8f1b8105dcab5cf07689a941d32a",
+    "rows": 25,
+    "iterations": "1..25",
+    "final_sr": 0.8761270090126377,
+    "final_cr": 0.11995295962320678,
+    "final_to": 0.0,
+    "final_entropy": 4.171917170286179,
+    "max_kl": 0.008684134683448974,
+    "max_clip_fraction": 0.09052085876464844,
+    "nonfinite_rows": 0,
+    "reconciliation_failures": 0
+  },
+  "console": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_a3_control_ne1024_s42_p25_r1.console.log",
+    "sha256": "c1542e41a164f41498c946ff6fd54e1a80ed1a4f86c5d56e25b2cab25725d1b2",
+    "completion_marker": "Training complete: 3,200 steps in 1095s (18.2min)",
+    "nan_oom_traceback_findings": 0
+  },
+  "decision": {
+    "parent_selected": false,
+    "extension_authorized": false,
+    "graduation_authorized": false,
+    "sa6_started": false,
+    "next_action": "RUN_MATCHED_B3_P060_ALIGNED_ARM"
+  },
+  "interpretation_limit": "Single training-seed diagnostic control arm. Training-distribution metrics do not decide retention or graduation; use the frozen paired post-training screen."
+}

@@ -1,0 +1,183 @@
+{
+  "anchor_replication": {
+    "handling": "reported, not fail-closed; a mismatch means the evaluator is non-deterministic and must be investigated before the new anchor values replace the frontier values",
+    "reference": {
+      "cells": {
+        "lateral": {
+          "cr": 0.6022196261682243,
+          "n": 1712
+        },
+        "longitudinal": {
+          "cr": 0.8147540983606557,
+          "n": 1830
+        },
+        "mixed": {
+          "cr": 0.5601688951442646,
+          "n": 1421
+        },
+        "random_2d": {
+          "cr": 0.7366841710427607,
+          "n": 1333
+        }
+      },
+      "source": "logs/gates/sa5_v3_c50_difficulty_frontier/screen_20260823_r1"
+    }
+  },
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_it50_direction_ab_authorization_20260823.json",
+    "sha256": "5dc349cf58f0168608715364e9261634ad050e9b94b53000e161fc8f88df3308"
+  },
+  "decision_rules": {
+    "direction_specific_degradation": "at least one motion mode degrades significantly on a primary metric while at least one other mode does not",
+    "no_direction_improved": "no motion mode improves significantly on SR",
+    "on_direction_specific": "RAISE_EXPOSURE_FOR_DEGRADED_DIRECTIONS_ONLY",
+    "on_no_improvement": "RESTART_FROM_C50_STAGED_1D_TO_2D_THEN_1S_2S_4S_NO_SIMULTANEOUS_TWO_AXIS_INCREASE"
+  },
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "dynamic_speed_range_m_s": [
+      0.25,
+      0.45
+    ],
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_episodes": 1000,
+    "num_envs": 64,
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "stage": 5,
+    "steps": 2500
+  },
+  "interpretation_limit": "single evaluator seed evaluation-only direction decomposition; it cannot graduate SA5, formalize any parent, or authorize SA6",
+  "lineage": {
+    "anchor": {
+      "conceptual_iteration": 50,
+      "expected_sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+      "name": "anchor_c50",
+      "path": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+      "status": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT"
+    },
+    "pilot_it25": "REJECTED",
+    "pilot_it50": "REJECTED",
+    "sa4": "SA4_NOT_GRADUATED",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "matrix": {
+    "cell_count": 8,
+    "cells": [
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "lateral",
+        "name": "s4_d2_lateral",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "longitudinal",
+        "name": "s4_d2_longitudinal",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "random_2d",
+        "name": "s4_d2_random_2d",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "mixed",
+        "name": "s4_d2_mixed",
+        "static_obstacles": 4
+      }
+    ],
+    "checkpoints": [
+      "anchor_c50",
+      "pilot_it50"
+    ],
+    "dynamic_obstacles": 2,
+    "motion_modes": [
+      "lateral",
+      "longitudinal",
+      "random_2d",
+      "mixed"
+    ],
+    "static_obstacles": 4
+  },
+  "question": "which pedestrian motion mode was not learned, holding the high-density corridor fixed at 4S2D",
+  "reading_rules": {
+    "min_abs_delta": 0.005,
+    "min_abs_z": 2.0,
+    "primary_metrics": [
+      "to",
+      "sr"
+    ],
+    "rationale": "frontier pilot screen pooled target CR moved only 1.1 SE (within noise) while TO moved 6.6 SE; reading CR alone produces a false 'nothing changed' conclusion",
+    "required_behavior_metrics": [
+      "stop_command_fraction",
+      "linear_speed_abs_mean_mps",
+      "reverse_command_fraction"
+    ],
+    "secondary_metrics": [
+      "cr"
+    ]
+  },
+  "schema": "sa5_v3_c50_it50_direction_ab_protocol/v1",
+  "screen_authorizes_graduation": false,
+  "screen_starts_sa6": false,
+  "screen_starts_training": false,
+  "sha256": "1b44f757a141b99859b348a1a4b0907afcd5850f170d392cb1b05b618cb63b3a",
+  "thresholds": {
+    "cr_max": 0.1,
+    "episodes_min": 1000,
+    "sr_min": 0.9,
+    "to_max": 0.05
+  }
+}

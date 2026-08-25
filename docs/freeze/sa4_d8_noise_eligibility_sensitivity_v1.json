@@ -1,0 +1,69 @@
+{
+  "comparison_scope": "the exact frozen D4 two-frame trigger/release active frames; both sweeps use their realized winner-ray angles and the same dynamic state",
+  "counterfactual_noise": "reuse the exact realized masks and replacement values, but restore a distractor to its pre-distractor value unless raw_valid AND not hole; no random number is redrawn",
+  "counterfactual_schema": "valid_return_only_mixed_pixel/v1",
+  "current_noise": "the realized full-noise sweep: every one of 5760 raw ray slots is eligible for the Bernoulli mixed-pixel replacement",
+  "descriptive_rules": {
+    "inferential_claim": false,
+    "major_fake_obstacle_contributor": "corrected_only_feasible / current_no_feasible >= 0.250, net recovery / active >= 0.050, and net recovery >= 100 frames"
+  },
+  "geometry_protocol_sha256": "aca15fbdc2a2a7545dbc3d4b6dfba86549e1fac9e39ae0e4c24549abe6facdcd",
+  "geometry_spec": {
+    "action_chunk_size": 64,
+    "contact_distance_m": 0.7,
+    "control_dt_s": 0.2,
+    "delay_steps": 1,
+    "dynamic_return_margin_m": 0.15,
+    "dynamic_surface_clearance_m": 0.1,
+    "horizon_s": 2.4,
+    "lidar_body_radius_m": 0.35,
+    "lidar_hole_threshold_m": 0.4,
+    "lidar_max_range_m": 20.0,
+    "max_angular_accel_rad_s2": 3.0,
+    "max_angular_velocity_rad_s": 1.2,
+    "max_linear_accel_mps2": 0.5,
+    "max_linear_velocity_mps": 1.0,
+    "num_action_bins": 19,
+    "release_confirm_steps": 2,
+    "release_distance_m": 3.25,
+    "reverse_velocity_scale": 0.2,
+    "robot_half_length_m": 0.35,
+    "robot_half_width_m": 0.3,
+    "robot_obb_offset_x_m": -0.128,
+    "samples": 12,
+    "static_surface_clearance_m": 0.1,
+    "trigger_confirm_steps": 2,
+    "trigger_distance_m": 3.0,
+    "trigger_ttc_s": 2.0
+  },
+  "interpretation_limits": [
+    "this is not a validated VLP-16 noise model; it is an eligibility sensitivity",
+    "the U(0.2,2.0m) replacement distribution is deliberately unchanged",
+    "the 0.2515% estimate is not reinterpreted as a calibrated per-ray probability",
+    "the counterfactual is not fed to the policy, so no SR/CR causal effect is estimated",
+    "feasibility is the frozen D4 model, not proof of physical avoidability",
+    "single checkpoint and evaluator seed are diagnostic evidence only"
+  ],
+  "mode": "mixed_pixel_valid_return_shadow",
+  "noise_trace_spec": {
+    "exact_policy_trace_match": true,
+    "expected_distractor_rate": 0.002515,
+    "expected_hole_rate": 0.194859,
+    "expected_num_bins": 72,
+    "expected_num_rays": 5760,
+    "expected_r_max_m": 20.0,
+    "expected_r_robot_m": 0.35,
+    "expected_sigma_m": 0.008672,
+    "require_block_dropout_prob": 0.0,
+    "require_human_dynamic_dropout": false,
+    "require_per_ring_bias": true
+  },
+  "schema": "sa4_d8_noise_eligibility_sensitivity/v1",
+  "scope": "single-checkpoint, single-evaluator-seed baseline-only paired shadow; policy action and realized policy observation are unchanged",
+  "sha256": "1fcce8d769fef404d01304b184eeef96a073cce7b4275849184a1a850e701185",
+  "spec": {
+    "major_rescue_fraction_of_current_no_feasible": 0.25,
+    "material_net_recovery_fraction_of_active": 0.05,
+    "material_net_recovery_min_frames": 100
+  }
+}

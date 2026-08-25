@@ -1,0 +1,40 @@
+{
+  "evaluation_scope": "every environment frame with at least one valid corridor dynamic obstacle; no radial-TTC trigger gates geometry evaluation",
+  "event_alignment": {
+    "collision_event": "dynamic collision transition",
+    "control_event": "per-obstacle radial closing changes positive to non-positive inside 3.0m; successful controls terminate at the goal",
+    "lead_seconds": 5.0,
+    "lead_steps": 25
+  },
+  "frontier_metrics": [
+    "dynamic/static/joint feasible action counts over the frozen 19x19 grid",
+    "policy action dynamic/static/joint feasibility",
+    "radial TTC using the frozen 0.70m contact distance",
+    "constant-relative-velocity closest-approach time and distance",
+    "linear conflict time when closest approach is within 0.80m",
+    "delay-aware policy-path first predicted dynamic conflict within 2.4s",
+    "persistent jointly-feasible-to-zero suffix before each event"
+  ],
+  "geometry_protocol_sha256": "1729fe3a878b1a1c64f172bb7b3bb0a23f6553385c8b8ca9e982e0cf97170e9d",
+  "interpretation_limits": [
+    "no-feasible is relative to the frozen D4 model, not physical impossibility",
+    "active-frame and event denominators must not be mixed",
+    "linear closest approach is a circular constant-velocity proxy",
+    "policy-path conflict uses 0.2s samples and the frozen 2.4s horizon",
+    "trigger timing remains a hypothesis until this shadow distribution is analysed"
+  ],
+  "mode": "feasibility_shadow",
+  "policy_action_contract": "shadow observes the original policy tensor and must leave the same values unchanged before env.step",
+  "schema": "sa4_d5_feasibility_shadow/v1",
+  "scope": "single-checkpoint privileged baseline-only diagnostic; no action override, no training, and no deployment safety claim",
+  "sha256": "3ff3513423bd132a7dba7261bf3d3d4cf0f738d9d7f5b1f79e6ed40b40bde1b1",
+  "spec": {
+    "contact_distance_m": 0.7,
+    "control_dt_s": 0.2,
+    "invalid_time_s": 999.0,
+    "lead_steps": 25,
+    "linear_conflict_clearance_m": 0.1,
+    "near_distance_m": 3.0,
+    "near_exit_distance_m": 3.25
+  }
+}

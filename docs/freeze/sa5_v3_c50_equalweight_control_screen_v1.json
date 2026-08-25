@@ -1,0 +1,173 @@
+{
+  "analysis": {
+    "generic_continuation": "control - anchor",
+    "maximum_degradation": 0.02,
+    "maximum_target_to": 0.05,
+    "meaningful_absolute_delta": 0.02,
+    "minimum_absolute_z": 2.0,
+    "minimum_target_cr_reduction": 0.05,
+    "minimum_target_sr_improvement": 0.05,
+    "retention_motion_modes": [
+      "lateral",
+      "longitudinal",
+      "mixed"
+    ],
+    "target_motion_mode": "random_2d",
+    "weight_specific": "weighted - control"
+  },
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_equalweight_control_screen_authorization_20260824.json",
+    "sha256": "65aaa49ed77767020ebdc1f1277043f5cc32168284185205aced65ac5ba0094d"
+  },
+  "decision_rules": {
+    "generic_continuation_without_weight_specific_effect": "GENERIC_CONTINUATION_EFFECT_OBSERVED_DO_NOT_ATTRIBUTE_TO_WEIGHTS",
+    "meaningful_weight_specific_tradeoff": "WEIGHT_SPECIFIC_CAPABILITY_REDISTRIBUTION_OBSERVED_REJECT_CURRENT_WEIGHTS",
+    "otherwise": "NO_CLEAN_ATTRIBUTION_HOLD_AND_CALIBRATE_ALLOCATOR",
+    "target_and_retention_pass": "WEIGHT_SPECIFIC_SUPPORT_OBSERVED_CALIBRATE_ALLOCATOR_BEFORE_ANY_NEW_PILOT"
+  },
+  "evidence_reuse": {
+    "control_completion": "docs/freeze/sa5_v3_c50_equalweight_control_p25_completion_20260824.json",
+    "control_completion_sha256": "81771f0d7c5d7b10ec90494f8590b4c5a5bf77bcea3ab40a1d1efa1c56807e50",
+    "prior_protocol": "docs/freeze/sa5_v3_c50_random2d_weighted_screen_v1.json",
+    "prior_protocol_sha256": "d360a760d34f78d549ffd8bed4785ce8d4243752a54f25d563ec9a9f7efd97ae",
+    "prior_summary": "logs/gates/sa5_v3_c50_random2d_weighted_screen/screen_20260824_r1/SUMMARY.json",
+    "prior_summary_sha256": "2f428c4c2ce25a9c27d0fc15b5f705be824e9789e72cabcd04496dcefd9ad3b4"
+  },
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "dynamic_speed_range_m_s": [
+      0.25,
+      0.45
+    ],
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_episodes": 1000,
+    "num_envs": 64,
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "stage": 5,
+    "steps": 2500
+  },
+  "interpretation_limit": "Single training seed and evaluator seed development comparison. Binomial z scores are descriptive and not a substitute for independent training-seed replication.",
+  "lineage": {
+    "anchor": {
+      "conceptual_iteration": 50,
+      "expected_sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+      "name": "anchor_c50",
+      "path": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+      "status": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT"
+    },
+    "control": {
+      "conceptual_iteration": 25,
+      "expected_sha256": "d9095e7df21633056ef3f491d460520b99dbd72d9924355821c1e48783b3419a",
+      "name": "equalweight_control_it25",
+      "path": "logs/rnn_car/sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1/checkpoint_3200.pt",
+      "status": "MATCHED_DEVELOPMENT_CONTROL_NOT_PARENT"
+    },
+    "sa5": "HOLD_NOT_GRADUATED",
+    "sa6": "HOLD_NOT_AUTHORIZED",
+    "weighted": {
+      "conceptual_iteration": 25,
+      "expected_sha256": "cbc8a91a43eb0674dcd33118b3436f73f5d611b33860ebab5f7c83e6048f670f",
+      "name": "weighted_it25",
+      "path": "logs/rnn_car/sa5_v3_c50_random2d_weighted_ne1024_s42_p25_r1/checkpoint_3200.pt",
+      "status": "UNSCREENED_DEVELOPMENT_CANDIDATE_NOT_PARENT"
+    }
+  },
+  "new_matrix": {
+    "cells": [
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "lateral",
+        "name": "s4_d2_lateral",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "longitudinal",
+        "name": "s4_d2_longitudinal",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "random_2d",
+        "name": "s4_d2_random_2d",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "mixed",
+        "name": "s4_d2_mixed",
+        "static_obstacles": 4
+      }
+    ],
+    "checkpoints": [
+      "equalweight_control_it25"
+    ],
+    "dynamic_obstacles": 2,
+    "motion_modes": [
+      "lateral",
+      "longitudinal",
+      "random_2d",
+      "mixed"
+    ],
+    "new_cell_count": 4,
+    "reused_cell_count": 8,
+    "static_obstacles": 4
+  },
+  "question": "separate generic 25-iteration continuation from the random-2D motion-family weight intervention",
+  "schema": "sa5_v3_c50_equalweight_control_screen_protocol/v1",
+  "screen_authorizes_extension": false,
+  "screen_authorizes_graduation": false,
+  "screen_starts_sa6": false,
+  "screen_starts_training": false,
+  "sha256": "72f61ef2dd9ff0d94b0edd32c6ad85047b822676aebd9fce6cdc8bcb07193429"
+}

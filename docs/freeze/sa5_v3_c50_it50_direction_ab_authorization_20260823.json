@@ -1,0 +1,21 @@
+{
+  "authorized_at": "2026-08-23",
+  "authorized_by": "user",
+  "schema": "sa5_v3_c50_it50_direction_ab_authorization/v1",
+  "goal": "先做不訓練的 8 格方向分解：anchor c50 / it50 × lateral / longitudinal / random_2d / mixed",
+  "conditional_next_steps": {
+    "direction_specific_degradation": "只提高該方向曝光",
+    "no_direction_improved": "下一輪從 c50 重新開始，先單獨做 1D → 2D，通過後才做 1S → 2S → 4S；不再於同一個短 pilot 同時提高兩個難度軸"
+  },
+  "reading_rules": {
+    "primary_metrics": ["to", "sr"],
+    "secondary_metrics": ["cr"],
+    "rationale": "pooled target CR change was only 1.1 SE (noise) while TO change was 6.6 SE; reading CR alone yields a false 'nothing changed' conclusion",
+    "required_per_cell": ["sr", "cr", "to", "n", "stop_command_fraction", "linear_speed_abs_mean_mps", "reverse_command_fraction"],
+    "anchor_replication": "anchor cells must be reconciled against the already-measured difficulty-frontier 4S2D values; a mismatch indicates evaluator non-determinism and must be investigated before the new values are used"
+  },
+  "training_authorized": false,
+  "sa6_authorized": false,
+  "graduation_authorized": false,
+  "notes": "no training is performed by this screen; it is a frozen evaluation-only direction decomposition"
+}

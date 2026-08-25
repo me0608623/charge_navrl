@@ -1,0 +1,105 @@
+{
+  "schema": "sa5_v3_c50_frontier_curriculum_p50_authorization/v1",
+  "created_at": "2026-08-23T19:35:00+08:00",
+  "decision": "HUMAN_AUTHORIZED_SA5_V3_C50_JOINT_FRONTIER_CURRICULUM_P50",
+  "lineage_status": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "evidence": {
+    "summary": "logs/gates/sa5_v3_c50_difficulty_frontier/screen_20260823_r1/SUMMARY.json",
+    "summary_sha256": "2eb683551ddeb4d9e33cb56994cdd1eb6bbe3dc7196385088768cb818f859bdf",
+    "required_status": "COMPLETE_VALID_SINGLE_CHECKPOINT_SINGLE_SEED_DIAGNOSTIC",
+    "required_next_action": "BUILD_JOINT_1D_2D_AND_1S_2S_4S_CURRICULUM_PILOT_FROM_C50",
+    "source_fingerprint_stable": true,
+    "valid_cells": 24,
+    "invalid_cells": 0
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+    "embedded_iteration": 49,
+    "embedded_total_steps": 6400,
+    "required_rl_optimizer_state_entries": 38,
+    "optimizer_resume": true
+  },
+  "identity_contract": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c500_parent_control_from_sa4v3_p50.py",
+    "source_config_sha256": "ee7990c162da118571910d47d3d73c530b63595c0ef14a404703ab57bc2005f1",
+    "allowed_behavioral_differences": [
+      "checkpoint",
+      "long_corridor_speed_density_mix",
+      "timesteps"
+    ],
+    "must_not_change": [
+      "action contract",
+      "observation contract",
+      "reward contract",
+      "network",
+      "PPO",
+      "LiDAR noise",
+      "actuator delay",
+      "vehicle speed rate",
+      "stage geometry",
+      "native/narrow/corridor reset shares",
+      "seed",
+      "number of environments"
+    ]
+  },
+  "pilot": {
+    "total_iterations": 50,
+    "rollout_length": 128,
+    "num_envs": 1024,
+    "seed": 42,
+    "phase_1": {
+      "conceptual_iterations": [1, 25],
+      "profiles": [
+        [[0, 1], [0.70, 0.90], 0.10],
+        [[1, 1], [0.70, 0.90], 0.10],
+        [[2, 1], [0.50, 0.70], 0.15],
+        [[1, 1], [0.25, 0.45], 0.20],
+        [[2, 1], [0.25, 0.45], 0.15],
+        [[4, 1], [0.25, 0.45], 0.10],
+        [[1, 2], [0.25, 0.45], 0.20]
+      ]
+    },
+    "phase_2": {
+      "conceptual_iterations": [26, 50],
+      "profiles": [
+        [[0, 1], [0.70, 0.90], 0.05],
+        [[1, 1], [0.70, 0.90], 0.05],
+        [[2, 1], [0.50, 0.70], 0.10],
+        [[1, 1], [0.25, 0.45], 0.05],
+        [[2, 1], [0.25, 0.45], 0.05],
+        [[4, 1], [0.25, 0.45], 0.10],
+        [[1, 2], [0.25, 0.45], 0.15],
+        [[2, 2], [0.25, 0.45], 0.20],
+        [[4, 2], [0.25, 0.45], 0.25]
+      ]
+    },
+    "scene_reset_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "checkpoints": [25, 50],
+    "auto_extend": false,
+    "auto_start_sa6": false
+  },
+  "acceptance": {
+    "compare": ["anchor_c50", "pilot_it25", "pilot_it50"],
+    "target_sr_must_increase": true,
+    "target_to_max": 0.05,
+    "native_degradation_max_pp": 2.0,
+    "native_graduation_cr_max": 0.10,
+    "retention_required": ["narrow", "P060_0S1D", "P060_1S1D"]
+  },
+  "forbidden": [
+    "continue the stopped c100/c150 lineage",
+    "treat c50 as a graduated or formal parent",
+    "change reward, network, LiDAR, actuator delay, or action/observation contract",
+    "auto-extend beyond 50 pilot iterations",
+    "launch SA6"
+  ]
+}

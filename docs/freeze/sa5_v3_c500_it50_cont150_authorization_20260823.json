@@ -1,0 +1,109 @@
+{
+  "schema": "sa5_v3_c500_it50_cont150_human_authorization/v1",
+  "authorized_at": "2026-08-23T00:00:00+08:00",
+  "decision": "HUMAN_AUTHORIZED_BOUNDED_CONTINUATION_C500_IT50_TO_IT150",
+  "lineage_status": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "sa5_source": "PROVISIONAL_SA5_C500_IT50_CONTINUATION_SOURCE",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "protocol_amendment": {
+    "prior_summary": "logs/gates/sa5_v3_c500_parent_control_screen/screen_20260823_r1/SUMMARY.json",
+    "prior_summary_sha256": "35417943f31191496b56a24b5d0ba939d3e40ca754ed597d6643ced40f8a79e7",
+    "prior_status": "COMPLETE_VALID_SINGLE_SEED_DEVELOPMENT_CONTROL_SCREEN",
+    "prior_extension_authorized": false,
+    "prior_next_action": "HOLD_SA5_REDESIGN_NO_REWARD_CHANGE_NO_EXTRA_ITERATIONS",
+    "interpretation": "The prior verdict remains immutable and valid under its preregistered rule. This record authorizes a new bounded continuation because the fixed it25-to-it50 comparison showed directional improvement without an observed retention tradeoff; it does not retroactively convert the prior FAIL into PASS."
+  },
+  "directional_evidence": {
+    "target_cr_improvement_it25_to_it50": 0.1353377970163473,
+    "target_z": 8.167,
+    "native_cr_improvement_it25_to_it50": 0.03664837938489969,
+    "native_z": 3.103,
+    "p060_0s1d_cr_improvement_it25_to_it50": 0.02118532873089889,
+    "p060_0s1d_z": 2.786,
+    "p060_1s1d_cr_improvement_it25_to_it50": 0.07037041415361773,
+    "p060_1s1d_z": 7.035,
+    "narrow_cr_it25": 0.0,
+    "narrow_cr_it50": 0.0
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+    "checkpoint_iteration": 49,
+    "checkpoint_total_steps": 6400,
+    "conceptual_iteration": 50,
+    "optimizer_resume": true,
+    "required_rl_optimizer_state_entries": 38
+  },
+  "identity_contract": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c500_parent_control_from_sa4v3_p50.py",
+    "source_config_sha256": "ee7990c162da118571910d47d3d73c530b63595c0ef14a404703ab57bc2005f1",
+    "allowed_behavioral_differences": [
+      "checkpoint",
+      "timesteps"
+    ],
+    "unchanged_families": [
+      "action",
+      "observation",
+      "reward",
+      "scene_mix",
+      "corridor_speed_density_mix",
+      "lidar_noise",
+      "actuator_delay",
+      "network",
+      "ppo",
+      "seed",
+      "num_envs",
+      "rollout_length",
+      "save_interval"
+    ]
+  },
+  "continuation": {
+    "additional_training_iterations": 100,
+    "conceptual_start_iteration": 50,
+    "conceptual_end_iteration": 150,
+    "rollout_length": 128,
+    "timesteps": 12800,
+    "save_interval_iterations": 25,
+    "local_save_iterations": [
+      25,
+      50,
+      75,
+      100
+    ],
+    "conceptual_save_iterations": [
+      75,
+      100,
+      125,
+      150
+    ],
+    "checkpoint_steps": [
+      3200,
+      6400,
+      9600,
+      12800
+    ]
+  },
+  "evaluation": {
+    "phase_a": "Fresh fixed target and native cells for conceptual c50/c75/c100/c125/c150.",
+    "phase_a_cells": 10,
+    "top_two_selection": "Minimize max(target_CR / c50_target_CR, native_CR / 0.10), then mean of the two normalized terms, then target CR, then native CR, then prefer the later iteration only within an exact tie.",
+    "phase_b": "Fresh narrow, P060 0S1D, and P060 1S1D cells for the preregistered top two.",
+    "phase_b_cells": 6,
+    "final_acceptance": [
+      "target CR improves over fresh c50 by at least 0.005 with pooled z >= 2.0",
+      "native CR <= 0.10",
+      "native, narrow, and both P060 retention metrics do not degrade by more than 0.02 relative to the frozen c50 baseline",
+      "all absolute retention gates pass",
+      "all cells are valid and source fingerprints remain stable"
+    ]
+  },
+  "forbidden": [
+    "retroactively changing the prior c500 screen verdict",
+    "changing reward, action, observation, scene mix, LiDAR noise, or actuator delay",
+    "training past conceptual iteration 150 without a new human authorization",
+    "launching SA6",
+    "auto-advancing from this authorization"
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "actuator_order": "policy indices -> selector indices -> decode -> d1 queue -> applied",
+  "delay_model": "first 0.2s uses the already pending decoded command; selected candidate is held only after the d1 prefix",
+  "dynamic_geometry": "constant-velocity obstacle prediction; robot OBB versus obstacle circle surface clearance",
+  "limitations": [
+    "dynamic state and dynamic-return attribution are privileged",
+    "static geometry contains only currently visible 72-bin LiDAR surface samples",
+    "occluded static surfaces cannot be reconstructed after removing a dynamic return",
+    "dynamic obstacle motion is predicted at constant velocity",
+    "an unresolved no-feasible frame has no safety guarantee"
+  ],
+  "mode": "geometry_feasible",
+  "schema": "sa4_d4_geometry_selector/v1",
+  "scope": "fixed-checkpoint diagnostic upper bound; privileged dynamic state/attribution; not a deployment shield",
+  "selection": [
+    "activate only after the frozen two-frame radial-TTC trigger",
+    "keep the policy action whenever it satisfies both hard clearances",
+    "otherwise choose the feasible action with minimum L1 index change",
+    "break ties by maximum bottleneck clearance then forward speed",
+    "break any remaining tie by the smallest flattened action index",
+    "if no jointly feasible action exists, preserve policy action, mark unresolved, and make no protection claim"
+  ],
+  "sha256": "1729fe3a878b1a1c64f172bb7b3bb0a23f6553385c8b8ca9e982e0cf97170e9d",
+  "spec": {
+    "action_chunk_size": 64,
+    "contact_distance_m": 0.7,
+    "control_dt_s": 0.2,
+    "delay_steps": 1,
+    "dynamic_return_margin_m": 0.15,
+    "dynamic_surface_clearance_m": 0.1,
+    "horizon_s": 2.4,
+    "lidar_body_radius_m": 0.35,
+    "lidar_hole_threshold_m": 0.4,
+    "lidar_max_range_m": 20.0,
+    "max_angular_accel_rad_s2": 3.0,
+    "max_angular_velocity_rad_s": 1.2,
+    "max_linear_accel_mps2": 0.5,
+    "max_linear_velocity_mps": 1.0,
+    "num_action_bins": 19,
+    "release_confirm_steps": 2,
+    "release_distance_m": 3.25,
+    "reverse_velocity_scale": 0.2,
+    "robot_half_length_m": 0.35,
+    "robot_half_width_m": 0.3,
+    "robot_obb_offset_x_m": -0.128,
+    "samples": 12,
+    "static_surface_clearance_m": 0.1,
+    "trigger_confirm_steps": 2,
+    "trigger_distance_m": 3.0,
+    "trigger_ttc_s": 2.0
+  },
+  "static_wall_geometry": "policy-visible 72-bin LiDAR points versus swept robot OBB; LiDAR returns attributed to known dynamic circles are removed"
+}

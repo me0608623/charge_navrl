@@ -1,0 +1,59 @@
+{
+  "schema": "sa5_v3_c50_frontier_curriculum_phase1_complete/v1",
+  "completed_at": "2026-08-23T20:00:50+08:00",
+  "status": "COMPLETE_VALID_PHASE1_DIAGNOSTIC_CURRICULUM",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "phase_2": "READY_FOR_LOCK_AND_SMOKE_NOT_AUTO_STARTED",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_frontier_curriculum_phase1_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-frontier-curriculum-phase1-p25-r1.service",
+    "systemd_result": "success",
+    "config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_frontier_curriculum_phase1_p25.py",
+    "config_sha256": "181bcb01354f352df28cf49a5c146a69d6e0ebd7c704d509eeddaf47e7427bcc",
+    "trainer_sha256_before": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6",
+    "trainer_sha256_after": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6",
+    "iterations": 25,
+    "timesteps": 3200,
+    "wall_seconds": 1096
+  },
+  "checkpoint": {
+    "path": "logs/rnn_car/sa5_v3_c50_frontier_curriculum_phase1_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "c120ef3c892030019af377f2932b1ddf6c8253071b7c98513c3af7f28cd7cb9f",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "optimizer_resume_required_for_phase_2": true
+  },
+  "final_training_metrics": {
+    "sr": 0.9011964492439167,
+    "cr": 0.09687379390159447,
+    "to": 0.0,
+    "entropy": 4.205582648515701,
+    "kl": 0.004307103202222606,
+    "clip_fraction": 0.04471397399902344,
+    "policy_loss": -0.002354900725549669,
+    "vf": 6.82189704477787,
+    "fps": 2992.1445478069704
+  },
+  "integrity": {
+    "metrics_rows": 25,
+    "strict_errors": 0,
+    "nan": 0,
+    "oom": 0,
+    "traceback": 0,
+    "training_complete_marker": true,
+    "checkpoint_present": true,
+    "gpu_released": true
+  },
+  "interpretation_limit": "training-distribution health evidence only; no Gate or graduation claim is made before the fixed anchor/it25/it50 screen",
+  "forbidden": [
+    "call phase 1 a Gate pass",
+    "treat c50 or it25 as a formal parent",
+    "change non-curriculum behavior in phase 2",
+    "auto-launch SA6"
+  ]
+}

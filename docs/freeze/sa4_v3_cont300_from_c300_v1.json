@@ -1,0 +1,77 @@
+{
+  "schema": "sa4_v3_cont300_authorization/v1",
+  "created_at": "2026-08-22T14:20:00+08:00",
+  "decision": "HUMAN_AUTHORIZED_C300_TO_C600_EXACT_CONTINUATION",
+  "purpose": "Continue the relatively best SA4-v3 c300 checkpoint for 300 additional iterations under the identical training recipe, then compare c300 through c600 on the unchanged frozen SA4-v3 Gate.",
+  "evidence_boundary": {
+    "statement": "c300 ranked first among c50-c300 on the three fixed lateral Gate cells, but c300 did not pass the absolute SA4 graduation thresholds.",
+    "c300_worst_fixed_cell_cr": 0.17369385884509625,
+    "c300_mean_fixed_cell_cr": 0.14573889596547002,
+    "c300_hard_gate_pass": false,
+    "continuation_is": "bounded exploratory optimization under an unchanged contract",
+    "continuation_is_not": "pre-acceptance of c600 or authorization to launch SA5"
+  },
+  "parent": {
+    "run_name": "sa4_speed_density_v3_from_sa3r1_c300_ne1024_s42_p300_r1",
+    "path": "logs/rnn_car/sa4_speed_density_v3_from_sa3r1_c300_ne1024_s42_p300_r1/checkpoint_38400.pt",
+    "checkpoint_name": "c300",
+    "conceptual_iteration": 300,
+    "total_steps": 38400,
+    "sha256": "ccb95b1667e0f3f9330ffaed62ea8ad728221d270bf9b8a30b6135f421998e73",
+    "required_optimizer_state": {
+      "charge_opt_rl": "present and non-empty",
+      "resume": true
+    }
+  },
+  "selection_evidence": {
+    "path": "logs/gates/sa4_v3_checkpoint_screen/screen_20260822_r1/SUMMARY.json",
+    "sha256": "046e2f390aec12dd7439109768977c4a085b2f368a08f17610f17ed04d32aa0e",
+    "schema": "sa4_v3_checkpoint_screen_summary/v1",
+    "status": "COMPLETE_VALID_SINGLE_SEED_DEVELOPMENT_SCREEN",
+    "source_fingerprint_stable": true,
+    "ranked_first": "c300"
+  },
+  "unchanged_recipe_source": {
+    "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa4_k8_obb_speed_density_v3_from_sa3.py",
+    "sha256": "30dee032487d786393030d7e4c436a10226338fa765ba4d72bef396b8c1764d3"
+  },
+  "continuation": {
+    "stage": 4,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "additional_iterations": 300,
+    "additional_steps": 38400,
+    "save_interval_iterations": 50,
+    "resume_optimizer": true,
+    "conceptual_checkpoints": [
+      {"name": "c350", "new_run_filename": "checkpoint_6400.pt"},
+      {"name": "c400", "new_run_filename": "checkpoint_12800.pt"},
+      {"name": "c450", "new_run_filename": "checkpoint_19200.pt"},
+      {"name": "c500", "new_run_filename": "checkpoint_25600.pt"},
+      {"name": "c550", "new_run_filename": "checkpoint_32000.pt"},
+      {"name": "c600", "new_run_filename": "checkpoint_38400.pt"}
+    ],
+    "allowed_behavioral_differences_from_source_config": [],
+    "allowed_operational_differences_from_source_config": [
+      "checkpoint",
+      "no_resume_optimizer",
+      "name",
+      "description",
+      "tags",
+      "notes"
+    ]
+  },
+  "post_training_gate": {
+    "candidate_names": ["c300", "c350", "c400", "c450", "c500", "c550", "c600"],
+    "evaluation_contract": "reuse the exact three-cell SA4-v3 checkpoint Gate without changing seed, density, pedestrian speed, lateral motion, speed_rate, delay, thresholds, or ranking",
+    "frozen_gate_path": "docs/freeze/sa4_v3_checkpoint_screen_v1.json",
+    "frozen_gate_sha256": "9031081d2d84d7ebb855a87f4d225d1742a7a85c44928137f9ab2987fafa41ef",
+    "ranking": "minimize worst CR, then mean CR; later checkpoint only on exact ties",
+    "hard_gate": "all three cells require n>=1000, SR>=0.90, CR<=0.10, TO<=0.05",
+    "retention": "run native, narrow, and P060 low-density retention on the top candidates before parent acceptance",
+    "auto_start_gate": false,
+    "auto_accept_parent": false,
+    "auto_start_sa5": false
+  }
+}

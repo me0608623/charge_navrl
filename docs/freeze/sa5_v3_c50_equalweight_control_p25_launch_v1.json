@@ -1,0 +1,95 @@
+{
+  "schema": "sa5_v3_c50_equalweight_control_p25_launch/v1",
+  "created_at": "2026-08-24T02:01:55+08:00",
+  "status": "LAUNCHED_RUNTIME_CONTRACT_CONFIRMED",
+  "launched_at": "2026-08-24T02:03:09+08:00",
+  "systemd_invocation_id": "2d78a517fab74919898bcc472cff2f84",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "control": "MATCHED_DEVELOPMENT_CONTROL_NOT_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_equalweight_control_p25_authorization_20260824.json",
+    "sha256": "baa8249688e919356a88589744e0e5acc3fc338556d5200338d950b445f6439f"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-equalweight-control-p25-r1.service",
+    "config_module": "e2e_sa5_v3_c50_equalweight_control_p25",
+    "config_path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_equalweight_control_p25.py",
+    "config_sha256": "210c5e073f2d3433b3b43e9066e3e176428253408125711ff23fed70df9bd64e",
+    "trainer_path": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+    "trainer_sha256": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+    "embedded_iteration": 49,
+    "embedded_total_steps": 6400,
+    "rl_optimizer_state_entries": 38,
+    "optimizer_policy": "RESUME_EMBEDDED_OPTIMIZER"
+  },
+  "control": {
+    "iterations": 25,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "timesteps": 3200,
+    "save_interval": 25,
+    "expected_checkpoint": "checkpoint_3200.pt",
+    "corridor_motion_weights": null,
+    "outer_scene_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "extension_auto_start": false,
+    "sa6_auto_start": false
+  },
+  "paired_intervention": {
+    "run_name": "sa5_v3_c50_random2d_weighted_ne1024_s42_p25_r1",
+    "config_sha256": "5dd4309cb93f2f584151a3f9752e91d6ba39425e2c24e02b44455b34c873758a",
+    "only_behavioral_difference": "long_corridor_dynamic_motion_weights",
+    "intervention_value": [
+      0.15,
+      0.15,
+      0.70
+    ]
+  },
+  "verification": {
+    "targeted_and_related_tests": "63 passed",
+    "test_file": "scripts/reinforcement_learning/skrl/rnn_car_wdclean/test_sa5_v3_c50_equalweight_control.py",
+    "test_file_sha256": "d633c39e8f7ff927a217da9e1c96c25c12d6bff228bfafcdb32cebd408423f33",
+    "gpu_smoke_run": "sa5_v3_c50_equalweight_control_smoke_ne64_s42_p1_r2",
+    "gpu_smoke_metrics_sha256": "4ef4397e4990b3ccf305bda92b2f298219ecbe1f032aace12085516f4a0e6b89",
+    "gpu_smoke_checkpoint_sha256": "e924004179316193c9b809815870a8e45db7d73ba7c8ddabf65f4a636db3d77e",
+    "gpu_smoke_console_sha256": "cdb34672c1b536f32815ef5002cf0eb8b28b1feb711372bc29615f88ad45ec84",
+    "gpu_smoke_optimizer_loaded": true,
+    "gpu_smoke_runtime_configured_motion_weights": null,
+    "gpu_smoke_reconciliation_ok": true,
+    "gpu_smoke_strict_errors": 0,
+    "failed_pre_environment_attempt": "sa5_v3_c50_equalweight_control_smoke_ne64_s42_p1_r1.console.log",
+    "failed_pre_environment_reason": "non-interactive shell had not activated env_isaaclab; no simulation or training data produced"
+  },
+  "source_fingerprint_before": {
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_equalweight_control_p25.py": "210c5e073f2d3433b3b43e9066e3e176428253408125711ff23fed70df9bd64e",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c500_parent_control_from_sa4v3_p50.py": "ee7990c162da118571910d47d3d73c530b63595c0ef14a404703ab57bc2005f1",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_random2d_weighted_p25.py": "5dd4309cb93f2f584151a3f9752e91d6ba39425e2c24e02b44455b34c873758a",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/sim2real_speed_density_curriculum_v3.py": "ec21941030cc02030c40395b61720711bbe74fc0fdbff8de6a4d9443a1ee9fc6",
+    "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6",
+    "scripts/reinforcement_learning/skrl/utils/charge_env_overrides.py": "b11b3c1753ee3efd8d072118e79f63a16fb8d2b53a03e0a03d39a4f1a5328d08",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/cfg/charge_env_cfg_vlp16_curriculum.py": "4ad2f4139924bbbb169750b9f82dce53bc7ce692eb1782d63f5932ea76dc1aa8",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/actions/discrete_differential_drive.py": "2ebf823a140e68ff855b36d1f95c65a1881dbbd9f539dfc670c8c63cb15bb9b0",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/corridor_density.py": "f6877a92699406809675f4013a86d4be6ba6d9db7cf93564106d19ad8cf91028",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay.py": "9e6e1f6f922daede1c58343f93e12b279ff3798f55449287ca13eb99094c0067",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay_geometry.py": "f57f4351573af93cd3e42d60554ba9d77956a49ed5614a9df5d2b40b646466a4"
+  },
+  "forbidden": [
+    "treat the c50 anchor, matched control, or weighted arm as a graduated SA5 parent",
+    "change reward, action, observation, network, speed-density mix, LiDAR, delay or vehicle speed contract",
+    "extend training before the frozen three-arm comparison",
+    "launch SA6"
+  ]
+}

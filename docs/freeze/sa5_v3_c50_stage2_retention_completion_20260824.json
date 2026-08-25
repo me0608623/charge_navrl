@@ -1,0 +1,32 @@
+{
+  "schema": "sa5_v3_c50_stage2_retention_completion/v1",
+  "completed_at": "2026-08-24T12:40:31+08:00",
+  "status": "COMPLETE_VALID_REJECT_MILD_WEIGHT_FOR_RETENTION_FAILURE",
+  "summary": {
+    "path": "logs/gates/sa5_v3_c50_stage2_retention_screen/screen_20260824_r1/SUMMARY.json",
+    "sha256": "33abc01a64fad68ea62e7d6ef1d0a31f712d7d14244c0567ed10da97181fa3ba",
+    "protocol_sha256": "bb435cf2ed4cf017fbb1ab6fc2c3b98238c348201b8a5a28b7152e2eab553844",
+    "source_fingerprint_sha256": "c3eb3ef052d39f54827c146d3790b8eafee1f39d070fce60ac1a4e53e03a6eb6",
+    "source_fingerprint_stable": true,
+    "valid_cells": 8,
+    "invalid_cells": 0
+  },
+  "strict_frozen_rule": {
+    "retention_supported": false,
+    "reason": "B2 failed the absolute native and P060 1S1D gates",
+    "selected_development_checkpoint": null,
+    "selected_extension_checkpoint": null
+  },
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "a2": "DIAGNOSTIC_CONTROL_NOT_PARENT",
+    "b2": "REJECTED_DEVELOPMENT_CANDIDATE_NOT_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "automatic_actions": {
+    "training_started": false,
+    "extension_authorized": false,
+    "graduation_authorized": false,
+    "sa6_started": false
+  }
+}

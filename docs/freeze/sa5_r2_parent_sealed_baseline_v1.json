@@ -1,0 +1,83 @@
+{
+  "evidence_boundary": "single evaluator seed and diagnostic baseline only; this run cannot accept or reject a parent and cannot launch training or SA6",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "corridor_geometry_contract": "10 m interaction zone; physical side walls span the 15 m arena and overlap each north/south boundary wall by 0.5 m",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "num_envs": 64,
+    "scenarios": [
+      "corridor_lateral",
+      "corridor_longitudinal",
+      "corridor_random2d",
+      "corridor_mixed"
+    ],
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "screen_protocol_sha256": "7fc8ce95d829b92fb6502979bbbb824dd4ce643dd0ef0e1278367afaf7413e48",
+    "seed": 818,
+    "stage": 5,
+    "steps": 2500
+  },
+  "parent": {
+    "checkpoint": "/home/aa/IsaacLab/logs/rnn_car/sa4_r3_cont25_from_it100_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "conceptual_iteration": 125,
+    "name": "sa4r3_it125",
+    "sha256": "57f43d07255971ad607e0bf3234dd7d46984c9c71cc9550e2e9461fbc95ab71d"
+  },
+  "purpose": "Measure the exact SA4-R3 conceptual-it125 parent before any SA5-R2 sealed corrective update.",
+  "required_metrics": [
+    "sr",
+    "cr",
+    "to",
+    "wall_cr",
+    "obstacle_cr"
+  ],
+  "schema": "sa5_r2_parent_sealed_baseline/v1",
+  "sha256": "a4a8f14d471fa8d7fab02db05011bb9deade8ec9838d468a343c208d34eff362",
+  "status": "AUTHORIZED_NOT_STARTED"
+}

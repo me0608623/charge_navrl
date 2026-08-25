@@ -1,0 +1,62 @@
+{
+  "arms": {
+    "current_full": {
+      "distractor_eligibility": "all_rays",
+      "policy_observation": "current historical full-noise sweep"
+    },
+    "valid_return_only": {
+      "distractor_eligibility": "valid_return_only",
+      "policy_observation": "corrected sweep is fed to the policy"
+    }
+  },
+  "d8_parent_protocol_sha256": "1fcce8d769fef404d01304b184eeef96a073cce7b4275849184a1a850e701185",
+  "descriptive_rules": {
+    "directional_improvement": "B SR > A SR, B CR < A CR, and B TO <= A TO + 0.005",
+    "graduation_thresholds_reported_only": {
+      "cr_max": 0.1,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "inferential_claim": false,
+    "material_improvement": "directional improvement and both SR gain and CR reduction >= 0.005"
+  },
+  "fixed_cell": {
+    "action_override": "none",
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "checkpoint_sha256": "c6dbd94bcbd6cc17ceca3cf8d5abfb4d956c98ed173c0dd890b9fc45959a2197",
+    "deterministic": true,
+    "evaluator_seed": 818,
+    "num_envs": 64,
+    "rollout_steps": 2500,
+    "scenario": "corridor_lateral",
+    "stage": 4,
+    "vlp16_noise_mode": "full"
+  },
+  "interpretation_limits": [
+    "single checkpoint, corridor family, and evaluator seed",
+    "closed-loop divergence prevents per-episode paired-state interpretation",
+    "valid-return-only remains a sensitivity model, not a validated VLP-16 model",
+    "this diagnostic cannot authorize an SA4 parent or SA5"
+  ],
+  "primary_outcomes": [
+    "success_rate",
+    "collision_rate",
+    "obstacle_collision_rate",
+    "wall_collision_rate",
+    "timeout_rate"
+  ],
+  "purpose": "test whether the D8 valid-return-only mixed-pixel eligibility sensitivity improves realized closed-loop episode outcomes",
+  "random_draw_contract": "both modes draw the same Bernoulli mask and U(0.2,2.0m) values; valid_return_only gates the realized mask after those draws",
+  "schema": "sa4_d9_noise_closed_loop_ab/v1",
+  "sha256": "e7ad89bc996d9c012515e25746dd6162bf52c13a61a5f407945ae5f2dba41ca4",
+  "sole_behavioral_difference": "mixed-pixel distractor eligibility",
+  "validity": [
+    "both fresh-process arms complete",
+    "runtime eligibility banner matches the requested arm",
+    "checkpoint and source fingerprints remain stable",
+    "corridor and console episode ledgers reconcile",
+    "no NaN, OOM, traceback, action override, training, or SA5 launch"
+  ]
+}

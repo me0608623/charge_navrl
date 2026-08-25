@@ -1,0 +1,167 @@
+{
+  "candidates": [
+    {
+      "conceptual_iteration": 100,
+      "filename": "checkpoint_12800.pt",
+      "name": "c100",
+      "sha256": "87eb7fcc88179875b9a545f904c078fc546e3e0d162e72b3c5f67835053be6ae"
+    },
+    {
+      "conceptual_iteration": 150,
+      "filename": "checkpoint_19200.pt",
+      "name": "c150",
+      "sha256": "055ad9f6be976868e478ed9c44deb62fa9b073903bffa221d809e764752c7d9a"
+    },
+    {
+      "conceptual_iteration": 200,
+      "filename": "checkpoint_25600.pt",
+      "name": "c200",
+      "sha256": "32d368e2c9e5bbca2abd11b2768e8b865148e6647ae22a8e7a281e843e9e2ded"
+    },
+    {
+      "conceptual_iteration": 250,
+      "filename": "checkpoint_32000.pt",
+      "name": "c250",
+      "sha256": "1465abe11436a823e190bb8a75bf1f4773460b43844f1553eefbca75fb7dd779"
+    },
+    {
+      "conceptual_iteration": 300,
+      "filename": "checkpoint_38400.pt",
+      "name": "c300",
+      "sha256": "6888d4c4759413ddc81f1e1eb13f6fb02244823ea1977a97705f4ee2e5c79122"
+    }
+  ],
+  "cells": [
+    {
+      "cell": "c100_0s1d_p060_lateral_s070",
+      "checkpoint_name": "c100",
+      "density": "0S1D",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c100_1s1d_p060_lateral_s070",
+      "checkpoint_name": "c100",
+      "density": "1S1D",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c150_0s1d_p060_lateral_s070",
+      "checkpoint_name": "c150",
+      "density": "0S1D",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c150_1s1d_p060_lateral_s070",
+      "checkpoint_name": "c150",
+      "density": "1S1D",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c200_0s1d_p060_lateral_s070",
+      "checkpoint_name": "c200",
+      "density": "0S1D",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c200_1s1d_p060_lateral_s070",
+      "checkpoint_name": "c200",
+      "density": "1S1D",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c250_0s1d_p060_lateral_s070",
+      "checkpoint_name": "c250",
+      "density": "0S1D",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c250_1s1d_p060_lateral_s070",
+      "checkpoint_name": "c250",
+      "density": "1S1D",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c300_0s1d_p060_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "0S1D",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c300_1s1d_p060_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "1S1D",
+      "scenario": "corridor_low_1s1d"
+    }
+  ],
+  "evidence_boundary": "single training seed and single evaluator seed developmental checkpoint screen; it ranks candidates for retention but does not accept an SA3 parent, replace the SA4 sentinel, or launch SA4",
+  "excluded_candidates": [
+    {
+      "conceptual_iteration": 50,
+      "filename": "checkpoint_6400.pt",
+      "name": "c50",
+      "reason": "pre-screen training-window worst-direction CR was about 36 percentage points behind the leading cluster; retained on disk but omitted from the fixed screen to reduce GPU cost",
+      "sha256": "71df125ad753c38f17fd07fd7e6202eed9e09a808c890d0bc2574bb197d6f9ea"
+    }
+  ],
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "density_arms": [
+      {
+        "dynamic_obstacles": 1,
+        "label": "0S1D",
+        "scenario": "corridor_low_0s1d",
+        "static_obstacles": 0
+      },
+      {
+        "dynamic_obstacles": 1,
+        "label": "1S1D",
+        "scenario": "corridor_low_1s1d",
+        "static_obstacles": 1
+      }
+    ],
+    "deployment_speed_scale": 1.0,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "motion_mode": "lateral",
+    "num_envs": 64,
+    "pedestrian_speed_label": "P060",
+    "pedestrian_speed_range_m_s": [
+      0.5,
+      0.7
+    ],
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "steps": 2500
+  },
+  "forbidden": [
+    "evaluate the omitted c50 as if it were part of this protocol",
+    "change density, P060 speed, lateral motion, speed_rate, delay, or seed",
+    "continue with partial or invalid cells",
+    "auto-run retention",
+    "replace the SA4 parent sentinel",
+    "launch SA4"
+  ],
+  "purpose": "rank the retained SA3-v3 checkpoints on the frozen speed_rate=0.7 P060 0S1D/1S1D lateral graduation cells",
+  "ranking": {
+    "descriptive_tie_margin": 0.005,
+    "hard_gate": "both fixed cells must meet SR/CR/TO and n",
+    "primary": "minimize max(CR_0S1D, CR_1S1D)",
+    "promotion": "top two valid checkpoints proceed to retention",
+    "secondary": "minimize mean(CR_0S1D, CR_1S1D)",
+    "tertiary": "prefer later checkpoint only after exact score ties"
+  },
+  "run_name": "sa3_speed_density_v3_from_sa2r1_c100_ne1024_s42_p300_r1",
+  "schema": "sa3_v3_p060_checkpoint_screen_protocol/v1",
+  "sha256": "b127a7cd704001c01a5a50f9e0ce3e6ef7e6f8c049c8c3b2aacb905ab5095067",
+  "stage": 3,
+  "thresholds": {
+    "cr_max": 0.1,
+    "episodes_min": 1000,
+    "sr_min": 0.9,
+    "to_max": 0.05
+  }
+}

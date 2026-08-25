@@ -1,0 +1,101 @@
+{
+  "schema": "sa5_v3_provisional_parent_authorization/v1",
+  "decision": "HUMAN_AUTHORIZED_PROVISIONAL_SA5_PARENT_C550",
+  "lineage_status": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "sa5_parent": "PROVISIONAL_SA5_PARENT_C550",
+    "meaning": "Training may continue under a bounded SA5 pilot, but the failed SA4 graduation verdict remains unchanged."
+  },
+  "parent": {
+    "name": "c550",
+    "conceptual_sa4_iteration": 550,
+    "checkpoint": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_32000.pt",
+    "sha256": "235a79a41b1d83510bbbb314c965a7ef5ba73e898aec121310a92965092c4ba8",
+    "optimizer_state": "embedded charge_opt_rl and charge_opt_aux state in checkpoint",
+    "optimizer_resume": true
+  },
+  "evidence": {
+    "sa4_gate_summary": {
+      "path": "logs/gates/sa4_v3_c300_c600_gate/screen_20260822_r1/SUMMARY.json",
+      "sha256": "ab0e41e148fd82582b15e9e7c473297d5ec5b8a3a050411801b639e1214e3df5",
+      "c550_rank": 1,
+      "c550_hard_gate_pass": false,
+      "c550_worst_fixed_corridor_cr": 0.12357954545454546,
+      "c550_mean_fixed_corridor_cr": 0.10018488854809837
+    },
+    "retention_summary": {
+      "path": "logs/gates/sa4_v3_c550_c600_retention/screen_20260822_r1/SUMMARY.json",
+      "sha256": "620b777dc1fa611b3e24cef8cc0a6f88f14783cd2a9235418615b58a6d15f25a",
+      "c550_native": {
+        "n": 3688,
+        "sr": 0.9140455531453362,
+        "cr": 0.08595444685466377,
+        "to": 0.0,
+        "gate_pass": false
+      },
+      "c550_narrow_gate_pass": true,
+      "c550_p060_0s1d_gate_pass": true,
+      "c550_p060_1s1d_gate_pass": true
+    }
+  },
+  "pilot": {
+    "stage": 5,
+    "training_iterations": 50,
+    "rollout_length": 128,
+    "timesteps": 6400,
+    "save_iterations": [25, 50],
+    "num_envs": 1024,
+    "training_seed": 42,
+    "scene_reset_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "corridor_speed_density_mix": [
+      {"density": "0S1D", "speed_m_s": [0.70, 0.90], "share": 0.10},
+      {"density": "1S1D", "speed_m_s": [0.70, 0.90], "share": 0.10},
+      {"density": "2S1D", "speed_m_s": [0.50, 0.70], "share": 0.15},
+      {"density": "3S2D", "speed_m_s": [0.25, 0.45], "share": 0.30},
+      {"density": "4S2D", "speed_m_s": [0.25, 0.45], "share": 0.35}
+    ],
+    "retained_contracts": {
+      "vehicle_speed_rate": 0.7,
+      "speed_rate_observation": "ego",
+      "actuator_delay_steps": [1, 2],
+      "actuator_velocity_scale": [1.0, 1.0],
+      "lidar_noise_mode": "full",
+      "lidar_distractor_eligibility": "valid_return_only",
+      "lidar_frame_stack": 8,
+      "action_contract_changed": false,
+      "observation_contract_changed": false,
+      "reward_contract_changed": false,
+      "ppo_contract_changed": false
+    }
+  },
+  "post_pilot_screen": {
+    "candidates": ["parent_c550", "pilot_it25", "pilot_it50"],
+    "fixed_scenarios": [
+      "sa5_target_4s2d_mixed_p035",
+      "nav_native",
+      "narrow_range",
+      "p060_0s1d_lateral",
+      "p060_1s1d_lateral"
+    ],
+    "extension_rule": {
+      "target_clear_improvement": "target CR decreases by at least 0.5 percentage points and at least 2.0 pooled standard errors versus parent",
+      "native_absolute": "SR>=0.90, CR<=0.10, TO<=0.05",
+      "retention_relative": "each retained scenario has CR increase <=0.02, SR decrease <=0.02, and TO increase <=0.02 versus parent",
+      "retention_absolute": "narrow and both P060 cells retain their frozen hard gates"
+    }
+  },
+  "authorized_next_actions": {
+    "on_c550_pilot_pass": "extend the selected eligible c550 lineage to total SA5 iteration 300",
+    "on_c550_pilot_fail": "run the same 50-iteration SA5 pilot from c500 as a parent control",
+    "forbidden": [
+      "rewrite SA4 graduation as pass",
+      "change reward, action, observation, PPO, sensor or actuator contract during the c550 pilot",
+      "extend before the fixed post-pilot screen",
+      "launch SA6"
+    ]
+  }
+}

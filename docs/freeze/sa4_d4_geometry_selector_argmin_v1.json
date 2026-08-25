@@ -1,0 +1,60 @@
+{
+  "actuator_order": "policy indices -> selector indices -> decode -> d1 queue -> applied",
+  "delay_model": "first 0.2s uses the already pending decoded command; selected candidate is held only after the d1 prefix",
+  "dynamic_geometry": "constant-velocity obstacle prediction; robot OBB versus obstacle circle surface clearance",
+  "lidar_angle_contract": {
+    "fallback": null,
+    "match": "trace sweep must be bitwise identical to current policy LiDAR",
+    "source": "winner_actual_angle_rad from the realized 5760-to-72 amin trace"
+  },
+  "limitations": [
+    "dynamic state and dynamic-return attribution are privileged",
+    "static geometry contains only currently visible 72-bin LiDAR surface samples",
+    "occluded static surfaces cannot be reconstructed after removing a dynamic return",
+    "dynamic obstacle motion is predicted at constant velocity",
+    "an unresolved no-feasible frame has no safety guarantee",
+    "the realized winner trace is diagnostic instrumentation unavailable to the policy"
+  ],
+  "mode": "geometry_feasible_argmin",
+  "paired_static_shadow": "on every active frame, recompute the legacy 5-degree-center grid on the identical state; only the actual-angle grid may select actions",
+  "schema": "sa4_d4_geometry_selector_argmin/v1",
+  "scope": "fixed-checkpoint diagnostic upper bound; privileged dynamic state/attribution and realized LiDAR winner trace; not a deployment shield",
+  "selection": [
+    "activate only after the frozen two-frame radial-TTC trigger",
+    "keep the policy action whenever it satisfies both hard clearances",
+    "otherwise choose the feasible action with minimum L1 index change",
+    "break ties by maximum bottleneck clearance then forward speed",
+    "break any remaining tie by the smallest flattened action index",
+    "if no jointly feasible action exists, preserve policy action, mark unresolved, and make no protection claim"
+  ],
+  "sha256": "aca15fbdc2a2a7545dbc3d4b6dfba86549e1fac9e39ae0e4c24549abe6facdcd",
+  "spec": {
+    "action_chunk_size": 64,
+    "contact_distance_m": 0.7,
+    "control_dt_s": 0.2,
+    "delay_steps": 1,
+    "dynamic_return_margin_m": 0.15,
+    "dynamic_surface_clearance_m": 0.1,
+    "horizon_s": 2.4,
+    "lidar_body_radius_m": 0.35,
+    "lidar_hole_threshold_m": 0.4,
+    "lidar_max_range_m": 20.0,
+    "max_angular_accel_rad_s2": 3.0,
+    "max_angular_velocity_rad_s": 1.2,
+    "max_linear_accel_mps2": 0.5,
+    "max_linear_velocity_mps": 1.0,
+    "num_action_bins": 19,
+    "release_confirm_steps": 2,
+    "release_distance_m": 3.25,
+    "reverse_velocity_scale": 0.2,
+    "robot_half_length_m": 0.35,
+    "robot_half_width_m": 0.3,
+    "robot_obb_offset_x_m": -0.128,
+    "samples": 12,
+    "static_surface_clearance_m": 0.1,
+    "trigger_confirm_steps": 2,
+    "trigger_distance_m": 3.0,
+    "trigger_ttc_s": 2.0
+  },
+  "static_wall_geometry": "policy-visible 72-bin LiDAR ranges placed at the realized raw-ray angle that won each amin bin; LiDAR returns attributed to known dynamic circles are removed"
+}

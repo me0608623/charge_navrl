@@ -1,0 +1,92 @@
+{
+  "schema": "sa5_v3_c50_random2d_weighted_p25_authorization/v1",
+  "authorized_at": "2026-08-24T00:28:22+08:00",
+  "authorized_by": "user_conditional_8h_autonomy",
+  "decision": "ACTIVATE_SHORT_HORIZON_ACTION_OPPORTUNITY_BRANCH",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "upstream_authorization": {
+    "path": "docs/freeze/sa5_v3_c50_random2d_feasibility_authorization_20260824.json",
+    "sha256": "0bb6f6e05922adc406286bc99fffef8c548549c85e91fd45be387672b36398ec"
+  },
+  "evidence": {
+    "analysis": "logs/gates/sa5_v3_c50_random2d_feasibility_shadow/audit_20260824_r1/ANALYSIS.json",
+    "analysis_sha256": "016ae0731b2bdb6fe3c0cbdf60c7b383a2dd18ee14d85a3131f2948a341b647f",
+    "manifest": "logs/gates/sa5_v3_c50_random2d_feasibility_shadow/audit_20260824_r1/MANIFEST.json",
+    "manifest_sha256": "dff1fff697faa88f5cdb3f2a0196ed237ae2903783c7fc3d9de46f94d88a992c",
+    "required_status": "COMPLETE_VALID_MODEL_BOUNDED_DIAGNOSTIC_EVIDENCE",
+    "required_decision": "SHORT_HORIZON_ACTION_OPPORTUNITY_OBSERVED"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+    "embedded_iteration": 49,
+    "embedded_total_steps": 6400,
+    "optimizer_resume": true
+  },
+  "pilot": {
+    "iterations": 25,
+    "rollout_length": 128,
+    "timesteps": 3200,
+    "save_interval": 25,
+    "motion_mode": "env_stratified",
+    "source_motion_weights": null,
+    "intervention_motion_weights": [
+      0.15,
+      0.15,
+      0.70
+    ],
+    "expected_random_2d_reset_share_of_all_scenes": 0.07,
+    "checkpoint": "checkpoint_3200.pt"
+  },
+  "identity_contract": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c500_parent_control_from_sa4v3_p50.py",
+    "source_config_sha256": "ee7990c162da118571910d47d3d73c530b63595c0ef14a404703ab57bc2005f1",
+    "allowed_behavioral_differences": [
+      "checkpoint",
+      "long_corridor_dynamic_motion_weights",
+      "timesteps"
+    ],
+    "unchanged": [
+      "action",
+      "observation",
+      "reward",
+      "network",
+      "PPO",
+      "speed_rate",
+      "LiDAR noise semantics",
+      "actuator delay",
+      "speed-density mix",
+      "native/narrow/corridor shares",
+      "geometry",
+      "seed and environment count"
+    ]
+  },
+  "post_training_screen": {
+    "checkpoints": [
+      "c50 anchor",
+      "weighted pilot it25"
+    ],
+    "fixed_4S2D_modes": [
+      "lateral",
+      "longitudinal",
+      "random_2d",
+      "mixed"
+    ],
+    "cells": 8,
+    "extension_auto_authorized": false,
+    "graduation_auto_authorized": false
+  },
+  "stop_conditions": [
+    "NaN, OOM, traceback or CUDA failure",
+    "checkpoint or source hash mismatch",
+    "optimizer resume failure",
+    "missing checkpoint or metrics",
+    "unexpected behavioral config drift",
+    "SA6 launch"
+  ],
+  "interpretation_limit": "Single training seed and evaluator seed developmental pilot. It may reject or provisionally support the exposure hypothesis but cannot graduate SA5 or authorize SA6."
+}

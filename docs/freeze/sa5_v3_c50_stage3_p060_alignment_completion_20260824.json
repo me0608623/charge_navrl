@@ -1,0 +1,56 @@
+{
+  "schema": "sa5_v3_c50_stage3_p060_alignment_completion/v1",
+  "status": "COMPLETE_VALID_POSTPROCESS_RECOVERED_PHASE_A_FAIL",
+  "completed_at": "2026-08-24T14:20:47+08:00",
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_stage3_p060_alignment_p25_authorization_20260824.json",
+    "sha256": "f72e9afcc5e840de52ab8571edb0ddfde943c6bbad60334f41fc174a52ccb1dc"
+  },
+  "arms": {
+    "a3_control": {
+      "completion": "docs/freeze/sa5_v3_c50_stage3_a3_control_p25_completion_20260824.json",
+      "completion_sha256": "a2ef7fcc380f58b034e9f7a3ae1ba25ee04ab5f192923a07ead7be2cc74100d5",
+      "checkpoint_sha256": "ae6c2495040b8582a5d82ccff3fefea02ff10cc209e7e37cb8230be7d61dde13"
+    },
+    "b3_p060_aligned": {
+      "completion": "docs/freeze/sa5_v3_c50_stage3_b3_p060aligned_p25_completion_20260824.json",
+      "completion_sha256": "64e9cc164ade5d97b919b6f010387ce14a589237732986e729ae5db0e60fada4",
+      "checkpoint_sha256": "5645f84625649a6050e862eb17b8e81e2e02225973fd371f29e663785104f2b8"
+    }
+  },
+  "phase_a": {
+    "screen": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1",
+    "protocol_sha256": "528bb21756e71ca96ebc1c7397724c791c042b7cf822c249a7cdd7d5f8a0641e",
+    "summary_sha256": "cf7076561df1c22f288e0958232627dd12ab2774e074db329a8a6284b2aa7b71",
+    "postprocess_recovery_sha256": "2b7f93ccfc98c0a154b8e09f07819aeb1889808f1644662ac722038b0320e8fa",
+    "effect_analysis_sha256": "f757cb44929b9aed76eb8800cefd01d4583747a2eccd0e3cb4da99fc0c107220",
+    "cells": 8,
+    "invalid_cells": 0,
+    "source_fingerprint_stable": true,
+    "p060_absolute_pass": false,
+    "p080_retention_pass": true,
+    "phase_a_pass": false,
+    "worst_p060_cr": {
+      "a3_control": 0.2020985401459854,
+      "b3_p060_aligned": 0.1409561360275998,
+      "improvement": 0.06114240411838562,
+      "required_improvement": 0.02,
+      "absolute_gate": 0.10
+    }
+  },
+  "postprocess_incident": {
+    "original_incomplete_retained": true,
+    "error": "KeyError: 'selected_extension_checkpoint'",
+    "impact": "presentation-only exception after all cells, fingerprints, and SUMMARY were written",
+    "recovery": "independent validation of all cells, all recorded source hashes, before/after fingerprints, and exact recomputation of every stored verdict field"
+  },
+  "decision": {
+    "phase_b_executed": false,
+    "selected_parent": null,
+    "extension_authorized": false,
+    "graduation_authorized": false,
+    "sa6_started": false,
+    "next_action": "REJECT_P060_ALIGNMENT_NO_PHASE_B"
+  },
+  "interpretation_limit": "Single training seed and single evaluator seed paired development evidence. The all-cell improvement supports P060 alignment as a contributor, but the failed 1S1D absolute gate prevents parent selection or progression."
+}

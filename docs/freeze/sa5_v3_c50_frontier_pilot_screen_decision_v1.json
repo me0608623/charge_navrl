@@ -1,0 +1,105 @@
+{
+  "schema": "sa5_v3_c50_frontier_pilot_screen_decision/v1",
+  "decided_at": "2026-08-23T21:36:29+08:00",
+  "decision": "HOLD_CURRENT_LINEAGE_PILOT_REJECTED",
+  "evidence": {
+    "summary": "logs/gates/sa5_v3_c50_frontier_pilot_screen/screen_20260823_r1/SUMMARY.json",
+    "summary_sha256": "a3ce028279f1fb1b475174e95a27328a930ed6d1b41ce240e4af3c516cc462ef",
+    "protocol_sha256": "8add84ac9819242cad65f367f89bd4f3895468031d8e73f3b2fad2c097ef32c8",
+    "source_fingerprint_sha256": "8c5f3ec887403e145079d04af0f6e5c94467e569f4d4afd7a26f1f507d16e44e",
+    "source_fingerprint_stable": true,
+    "valid_cells": 15,
+    "invalid_cells": 0,
+    "minimum_cell_episodes": 1004,
+    "systemd_result": "success",
+    "strict_errors": 0
+  },
+  "target_4s2d_p035_mixed": {
+    "anchor_c50": {
+      "n": 1421,
+      "sr": 0.43349753694581283,
+      "cr": 0.5601688951442646,
+      "to": 0.0063335679099225895
+    },
+    "pilot_it25": {
+      "n": 1334,
+      "sr": 0.3583208395802099,
+      "cr": 0.5907046476761619,
+      "to": 0.050974512743628186,
+      "sr_change_vs_anchor": -0.07517669736560295,
+      "cr_change_vs_anchor": 0.03053575253189733,
+      "to_change_vs_anchor": 0.0446409448337056,
+      "pooled_se_z_for_cr_improvement": -1.6215293072997767,
+      "acceptance": false
+    },
+    "pilot_it50": {
+      "n": 1004,
+      "sr": 0.3615537848605578,
+      "cr": 0.5816733067729084,
+      "to": 0.05677290836653386,
+      "sr_change_vs_anchor": -0.07194375208525505,
+      "cr_change_vs_anchor": 0.021504411628643805,
+      "to_change_vs_anchor": 0.05043934045661127,
+      "pooled_se_z_for_cr_improvement": -1.0546641190478663,
+      "acceptance": false
+    }
+  },
+  "retention": {
+    "anchor_c50": {
+      "native_cr": 0.13318284424379231,
+      "narrow_cr": 0.0,
+      "p060_0s1d_cr": 0.05102040816326531,
+      "p060_1s1d_cr": 0.08426395939086294
+    },
+    "pilot_it25": {
+      "native_cr": 0.13475997686524002,
+      "narrow_cr": 0.0,
+      "p060_0s1d_cr": 0.07549019607843137,
+      "p060_1s1d_cr": 0.14627285513361463,
+      "retention_pass": false
+    },
+    "pilot_it50": {
+      "native_cr": 0.12477175897748022,
+      "narrow_cr": 0.0,
+      "p060_0s1d_cr": 0.027921406411582212,
+      "p060_1s1d_cr": 0.07072792978833248,
+      "retention_pass": false,
+      "retention_failure_reason": "native absolute CR remains above 0.10"
+    }
+  },
+  "interpretation": [
+    "The joint two-phase curriculum did not improve the frozen 4S2D mixed target at either checkpoint.",
+    "Phase 2 recovered and improved both P060 low-density cells and preserved narrow, so the result is capability-specific rather than global collapse.",
+    "Native improved slightly at it50 but still failed the absolute CR <= 0.10 gate.",
+    "Training-distribution metrics must not override the frozen-screen result."
+  ],
+  "lineage_status": {
+    "anchor_c50": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "pilot_it25": "REJECTED_DIAGNOSTIC_CHECKPOINT_NOT_PARENT",
+    "pilot_it50": "REJECTED_DIAGNOSTIC_CHECKPOINT_NOT_PARENT",
+    "sa5": "HOLD_NOT_GRADUATED",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "recommended_next_diagnostic": {
+    "name": "FROZEN_8_CELL_4S2D_FAMILY_DECOMPOSITION_ANCHOR_VS_IT50",
+    "training": false,
+    "candidates": [
+      "anchor_c50",
+      "pilot_it50"
+    ],
+    "families": [
+      "lateral",
+      "longitudinal",
+      "random_2d",
+      "mixed"
+    ],
+    "purpose": "Identify whether phase 2 helped any motion family before replacing the failed joint curriculum with a one-axis curriculum.",
+    "follow_up_if_family_specific": "Increase only the failing family's exposure while retaining native, narrow, and P060 replay.",
+    "follow_up_if_all_families_fail": "Restart from anchor c50 and stage dynamic count first (1S1D to 1S2D), then stage static count (1S to 2S to 4S) only after 2D competence; do not change both axes in the same 50-iteration pilot."
+  },
+  "automatic_actions": {
+    "training_started": false,
+    "extension_started": false,
+    "sa6_started": false
+  }
+}

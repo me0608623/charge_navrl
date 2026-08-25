@@ -1,0 +1,58 @@
+{
+  "schema": "sa4_r3_cont25_from_it100/v1",
+  "created_at": "2026-08-17T21:13:06+08:00",
+  "status": "TRAINING_COMPLETE_AWAITING_FIXED_SCREEN",
+  "purpose": "Continue the documented SA4-R3 83D/K8 lineage from conceptual iteration 100 to 125 with the optimizer restored and no recipe change.",
+  "lineage": {
+    "documented_it50_export_source": {
+      "path": "/home/aa/IsaacLab/logs/rnn_car/sa4_r3_validreturn_from_sa3r1_c100_ne1024_s42_p50_r1/checkpoint_6400.pt",
+      "sha256": "fa51b5a312d38b7aa1ee93c3464b087b9b9cb985a7137eefdc8fecf40fed166d"
+    },
+    "it100_parent": {
+      "path": "/home/aa/IsaacLab/logs/rnn_car/sa4_r3_cont50_from_r3c6400_ne1024_s42_p50_r1/checkpoint_6400.pt",
+      "sha256": "aeddf32b3e41d1920bfc839651f18e09d7384a8f6ab3a5ac6de3c11628520d7d",
+      "optimizer_restored": true
+    }
+  },
+  "config": "e2e_sa4_r3_cont25_from_it100",
+  "run_name": "sa4_r3_cont25_from_it100_ne1024_s42_p25_r1",
+  "budget": {
+    "parent_conceptual_iteration": 100,
+    "additional_iterations": 25,
+    "target_conceptual_iteration": 125,
+    "timesteps": 3200,
+    "save_interval": 25,
+    "expected_checkpoint": "checkpoint_3200.pt"
+  },
+  "fixed_contract": {
+    "stage": 4,
+    "num_envs": 1024,
+    "training_seed": 42,
+    "rollout_length": 128,
+    "observation_contract": "83D policy observation with K8 frame stack",
+    "vlp16_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "actuator_delay_range_steps": [0, 2],
+    "corridor_teacher_distill_epochs": 0,
+    "corridor_teacher_goal_denominator_floor_m": 1.0,
+    "auto_launch_sa5": false
+  },
+  "source_fingerprint": {
+    "config": "5e06a7a256e2d270ad4180927b0b8cf0761d2b7c4dcc58ebe4dfbbceffacc947",
+    "trainer": "6ac0e362c0effd9493d3a36237c752e780ec95f356196c28944fe88147b07165",
+    "env_overrides": "82ed5f133f99614de70a212ef186b24122fff6d0cd28d5847e08d3423f74a39c",
+    "lidar_observation": "27f976bdb0a51100f9c749aaf4010a995fadfa3ce2319d4b10b5d2586ae87e7f",
+    "actuator_action": "551baa1dc38d8be37751e530f964a1223876ed3b9ad0f50b7b4788e0bdc11b63"
+  },
+  "training_result": {
+    "completed_at": "2026-08-17T21:28:33+08:00",
+    "exit_status": 0,
+    "local_iterations": 25,
+    "conceptual_iteration": 125,
+    "checkpoint": "/home/aa/IsaacLab/logs/rnn_car/sa4_r3_cont25_from_it100_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "checkpoint_sha256": "57f43d07255971ad607e0bf3234dd7d46984c9c71cc9550e2e9461fbc95ab71d",
+    "optimizer_state_count": 38,
+    "fixed_screen_complete": false,
+    "accepted_parent": false
+  }
+}

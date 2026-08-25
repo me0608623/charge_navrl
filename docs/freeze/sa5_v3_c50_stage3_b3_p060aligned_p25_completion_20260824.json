@@ -1,0 +1,56 @@
+{
+  "schema": "sa5_v3_c50_stage3_arm_completion/v1",
+  "arm": "B3_P060_ALIGNED",
+  "status": "COMPLETE_VALID_DIAGNOSTIC_ARM_NOT_PARENT",
+  "run_name": "sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1",
+  "unit": "sa5-v3-c50-stage3-b3-p060aligned-p25-r1.service",
+  "authorization": "docs/freeze/sa5_v3_c50_stage3_p060_alignment_p25_authorization_20260824.json",
+  "parent": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "45c972f804f1e9b24ade9b8164568cd8ac93f33e4f8b8685ee7347723b1aee30"
+  },
+  "only_behavioral_difference_vs_a3": "0S1D and 1S1D training speed ranges changed from 0.70-0.90 m/s to 0.50-0.70 m/s",
+  "output_checkpoint": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "5645f84625649a6050e862eb17b8e81e2e02225973fd371f29e663785104f2b8",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "rl_optimizer_param_groups": 1
+  },
+  "metrics": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1/supervisor_metrics.jsonl",
+    "sha256": "1e292fa85ab6d45fe5b97ca2bfce79769cdd43d2ce21780a62c88c381c3280fa",
+    "rows": 25,
+    "iterations": "1..25",
+    "final_sr": 0.891089108907215,
+    "final_cr": 0.10478547854742251,
+    "final_to": 0.0,
+    "final_entropy": 4.0707468539476395,
+    "max_kl": 0.007949274987822719,
+    "max_clip_fraction": 0.09637069702148438,
+    "nonfinite_rows": 0,
+    "reconciliation_failures": 0
+  },
+  "console": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1.console.log",
+    "sha256": "d21213b130be4e32128b44c85874729db6b8afa524c2ee8285a0abe030ee7c99",
+    "completion_marker": "Training complete: 3,200 steps in 1084s (18.1min)",
+    "nan_oom_traceback_findings": 0
+  },
+  "launch_audit": {
+    "first_attempt_status": "PRE_SIM_FAILURE_NOT_A_TRAINING_RUN",
+    "first_attempt_reason": "transient unit omitted conda activation",
+    "first_attempt_log": "logs/rnn_car/sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1.launch_attempt1_failed.console.log",
+    "first_attempt_log_sha256": "129ae29c255e54690239abadfa6e5c2be6f8282653dbe3a2e40fe4410faa8834",
+    "valid_invocation_id": "0c943ccd813e42ca8b81b4b4b52931c7"
+  },
+  "decision": {
+    "parent_selected": false,
+    "extension_authorized": false,
+    "graduation_authorized": false,
+    "sa6_started": false,
+    "next_action": "RUN_FROZEN_PAIRED_PHASE_A_SCREEN"
+  },
+  "interpretation_limit": "Single training-seed diagnostic intervention arm. Training-distribution metrics do not establish P060 restoration or causality; use the frozen paired post-training screen."
+}

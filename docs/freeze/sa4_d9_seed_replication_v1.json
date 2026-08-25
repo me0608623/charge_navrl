@@ -1,0 +1,61 @@
+{
+  "all_evaluator_seeds": [
+    515,
+    616,
+    818
+  ],
+  "arms": {
+    "current_full": {
+      "distractor_eligibility": "all_rays"
+    },
+    "valid_return_only": {
+      "distractor_eligibility": "valid_return_only"
+    }
+  },
+  "fixed_cell_except_seed": {
+    "action_override": "none",
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "checkpoint_sha256": "c6dbd94bcbd6cc17ceca3cf8d5abfb4d956c98ed173c0dd890b9fc45959a2197",
+    "deterministic": true,
+    "num_envs": 64,
+    "rollout_steps": 2500,
+    "scenario": "corridor_lateral",
+    "stage": 4,
+    "vlp16_noise_mode": "full"
+  },
+  "interpretation_limits": [
+    "three evaluator seeds are replication evidence, not training-seed replication",
+    "closed-loop arms are same-seed but not per-episode paired counterfactuals",
+    "valid_return_only remains a sensitivity model, not a validated VLP-16 model",
+    "passing authorizes only a short SA4-R3 pilot from the clean SA3 c100 parent"
+  ],
+  "new_evaluator_seeds": [
+    515,
+    616
+  ],
+  "original_seed818_manifest_sha256": "f5c6370715a9a306929f3cd942c97e06fe5188aa6d1299b325902de0fac42127",
+  "parent_d9_protocol_sha256": "e7ad89bc996d9c012515e25746dd6162bf52c13a61a5f407945ae5f2dba41ca4",
+  "pilot_authorization_rule": {
+    "plain_language": "at least two of the three fixed seeds show lower total CR, wall CR increase no greater than 0.5 percentage points, and timeout increase no greater than 0.5 percentage points",
+    "qualifying_seeds_required": 2,
+    "seeds_total": 3
+  },
+  "purpose": "replicate the SA4-D9 current_full versus valid_return_only closed-loop comparison on two evaluator seeds fixed before rollout",
+  "schema": "sa4_d9_seed_replication/v1",
+  "seed_level_rule": {
+    "cr_delta_b_minus_a": "< 0",
+    "timeout_delta_b_minus_a": "<= 0.005",
+    "wall_cr_delta_b_minus_a": "<= 0.005"
+  },
+  "sha256": "c1e1345e972aeeb5432b28819ff116c179f504ebecf9f448d3d867563d849ed1",
+  "validity": [
+    "all four new arm cells complete with at least 1000 episodes",
+    "the frozen seed818 manifest hash and checkpoint hash match",
+    "runtime eligibility banners match the requested arms",
+    "source fingerprints remain stable before, between, and after cells",
+    "corridor and console episode ledgers reconcile",
+    "no NaN, OOM, traceback, action override, training, or SA5 launch"
+  ]
+}

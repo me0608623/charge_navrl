@@ -1,0 +1,110 @@
+{
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_difficulty_frontier_authorization_20260823.json",
+    "sha256": "11b02e2863cddea056e198cf3e28d55f6559ba46b49c91e8f62bf7c56383af87"
+  },
+  "boundary_analysis": {
+    "dynamic_edges": "1D to 2D at fixed static count and motion mode",
+    "gate_crossing": "source CR <=0.10 and destination CR >0.10",
+    "layout_410_isolated": "within a 4S cell layout 405 passes and layout 410 has CR >=0.50",
+    "random_2d_only": "random_2d fails while lateral, longitudinal and mixed all pass at every tested density",
+    "severe_jump": "source CR <0.10 and destination CR >=0.50",
+    "static_edges": "1S to 2S and 2S to 4S at fixed dynamic count and motion mode"
+  },
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "dynamic_speed_range_m_s": [0.25, 0.45],
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_episodes": 1000,
+    "num_envs": 64,
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [[[3, 2], 0.5], [[4, 2], 0.5]],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [0.25, 0.45],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [1.3, 1.5],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "stage": 5,
+    "steps": 2500
+  },
+  "interpretation_limit": "single checkpoint and evaluator seed developmental diagnostic; layout and motion subgroups are descriptive unless separately replicated",
+  "lineage": {
+    "anchor": {
+      "conceptual_iteration": 50,
+      "expected_sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+      "name": "c50",
+      "path": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+      "status": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT"
+    },
+    "c100": "DO_NOT_CONTINUE",
+    "c150": "DO_NOT_CONTINUE",
+    "sa4": "SA4_NOT_GRADUATED",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "matrix": {
+    "cell_count": 24,
+    "cells": [
+      {"dynamic_obstacles": 1, "motion_mode": "lateral", "name": "s1_d1_lateral", "static_obstacles": 1},
+      {"dynamic_obstacles": 1, "motion_mode": "longitudinal", "name": "s1_d1_longitudinal", "static_obstacles": 1},
+      {"dynamic_obstacles": 1, "motion_mode": "random_2d", "name": "s1_d1_random_2d", "static_obstacles": 1},
+      {"dynamic_obstacles": 1, "motion_mode": "mixed", "name": "s1_d1_mixed", "static_obstacles": 1},
+      {"dynamic_obstacles": 2, "motion_mode": "lateral", "name": "s1_d2_lateral", "static_obstacles": 1},
+      {"dynamic_obstacles": 2, "motion_mode": "longitudinal", "name": "s1_d2_longitudinal", "static_obstacles": 1},
+      {"dynamic_obstacles": 2, "motion_mode": "random_2d", "name": "s1_d2_random_2d", "static_obstacles": 1},
+      {"dynamic_obstacles": 2, "motion_mode": "mixed", "name": "s1_d2_mixed", "static_obstacles": 1},
+      {"dynamic_obstacles": 1, "motion_mode": "lateral", "name": "s2_d1_lateral", "static_obstacles": 2},
+      {"dynamic_obstacles": 1, "motion_mode": "longitudinal", "name": "s2_d1_longitudinal", "static_obstacles": 2},
+      {"dynamic_obstacles": 1, "motion_mode": "random_2d", "name": "s2_d1_random_2d", "static_obstacles": 2},
+      {"dynamic_obstacles": 1, "motion_mode": "mixed", "name": "s2_d1_mixed", "static_obstacles": 2},
+      {"dynamic_obstacles": 2, "motion_mode": "lateral", "name": "s2_d2_lateral", "static_obstacles": 2},
+      {"dynamic_obstacles": 2, "motion_mode": "longitudinal", "name": "s2_d2_longitudinal", "static_obstacles": 2},
+      {"dynamic_obstacles": 2, "motion_mode": "random_2d", "name": "s2_d2_random_2d", "static_obstacles": 2},
+      {"dynamic_obstacles": 2, "motion_mode": "mixed", "name": "s2_d2_mixed", "static_obstacles": 2},
+      {"dynamic_obstacles": 1, "motion_mode": "lateral", "name": "s4_d1_lateral", "static_obstacles": 4},
+      {"dynamic_obstacles": 1, "motion_mode": "longitudinal", "name": "s4_d1_longitudinal", "static_obstacles": 4},
+      {"dynamic_obstacles": 1, "motion_mode": "random_2d", "name": "s4_d1_random_2d", "static_obstacles": 4},
+      {"dynamic_obstacles": 1, "motion_mode": "mixed", "name": "s4_d1_mixed", "static_obstacles": 4},
+      {"dynamic_obstacles": 2, "motion_mode": "lateral", "name": "s4_d2_lateral", "static_obstacles": 4},
+      {"dynamic_obstacles": 2, "motion_mode": "longitudinal", "name": "s4_d2_longitudinal", "static_obstacles": 4},
+      {"dynamic_obstacles": 2, "motion_mode": "random_2d", "name": "s4_d2_random_2d", "static_obstacles": 4},
+      {"dynamic_obstacles": 2, "motion_mode": "mixed", "name": "s4_d2_mixed", "static_obstacles": 4}
+    ],
+    "dynamic_obstacle_counts": [1, 2],
+    "motion_modes": ["lateral", "longitudinal", "random_2d", "mixed"],
+    "static_obstacle_counts": [1, 2, 4]
+  },
+  "post_screen": {
+    "allowed_behavioral_changes": ["scene difficulty order", "scene sampling proportions"],
+    "locked_unchanged": ["action", "observation", "reward", "network", "lidar noise", "actuator delay"],
+    "pilot_budget_iterations": 50,
+    "resume_c50_rl_optimizer": true,
+    "screen_auto_launches_pilot": false,
+    "screen_auto_launches_sa6": false
+  },
+  "schema": "sa5_v3_c50_difficulty_frontier_protocol/v1",
+  "sha256": "5c8e49e2685c36f5dd3d58a6953b3e2d8985c6583805c270c222d66368b3fd99",
+  "thresholds": {"cr_max": 0.1, "episodes_min": 1000, "sr_min": 0.9, "to_max": 0.05}
+}

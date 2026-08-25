@@ -1,0 +1,10 @@
+{
+  "schema": "sa5_v3_c50_stage2_retention_screen_freeze/v1",
+  "protocol_sha256": "bb435cf2ed4cf017fbb1ab6fc2c3b98238c348201b8a5a28b7152e2eab553844",
+  "paired_summary_sha256": "d4957498b3e413f7035c5131c625a902c180f1d237b2f2072df94e7137c9ca6f",
+  "cell_count": 8,
+  "starts_training": false,
+  "authorizes_extension": false,
+  "authorizes_graduation": false,
+  "starts_sa6": false
+}

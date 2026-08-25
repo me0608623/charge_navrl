@@ -1,0 +1,54 @@
+{
+  "schema": "sa5_v3_c50_frontier_curriculum_phase2_complete/v1",
+  "completed_at": "2026-08-23T20:27:39+08:00",
+  "status": "COMPLETE_VALID_BOUNDED_TRAINING_NOT_GATE_EVIDENCE",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_frontier_curriculum_phase2_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-frontier-curriculum-phase2-p25-r1.service",
+    "systemd_result": "success",
+    "exit_status": 0,
+    "iterations": 25,
+    "iterations_target": 25,
+    "steps": 3200,
+    "duration_seconds": 1106,
+    "completion_marker": "Training complete: 3,200 steps in 1106s (18.4min)"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_frontier_curriculum_phase1_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "c120ef3c892030019af377f2932b1ddf6c8253071b7c98513c3af7f28cd7cb9f",
+    "optimizer_loaded": true
+  },
+  "output": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_frontier_curriculum_phase2_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "checkpoint_sha256": "16da26108ab8a61e2b7d440d90830df6ad69e91a97e31c56eaab7ecc92396ce3",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "metrics": "logs/rnn_car/sa5_v3_c50_frontier_curriculum_phase2_ne1024_s42_p25_r1/supervisor_metrics.jsonl",
+    "metrics_sha256": "ceb45969875d4a90c11c6adf3ad8f1b2303adc605b1e0b923a4529488fca8edd",
+    "metrics_rows": 25,
+    "console": "logs/rnn_car/sa5_v3_c50_frontier_curriculum_phase2_ne1024_s42_p25_r1.console.log",
+    "console_sha256": "d412a5152ee015cc941b14b3756ac4e54154d9826b5659c4e11d335698cd3659"
+  },
+  "health": {
+    "strict_errors": 0,
+    "reconciliation_failures": 0,
+    "timeout_max": 0.0,
+    "kl_max": 0.007715650485806691,
+    "clip_fraction_max": 0.08769798278808594,
+    "entropy_first": 4.1245036870241165,
+    "entropy_last": 4.267822861671448,
+    "vf_first": 7.548623606562614,
+    "vf_last": 7.169736668467522,
+    "fps_last5_mean": 2973.0728032526213
+  },
+  "training_metrics_warning": "Training-distribution metrics are health evidence only and cannot select anchor, it25, or it50.",
+  "next_action": "RUN_FROZEN_15_CELL_ANCHOR_IT25_IT50_ACCEPTANCE_SCREEN",
+  "auto_extend": false,
+  "sa6_started": false
+}

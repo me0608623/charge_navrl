@@ -1,0 +1,139 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_bounded_continuation_proposal/v1",
+  "status": "PROPOSAL_ONLY_NOT_AUTHORIZED_NOT_RUN",
+  "created_at": "2026-08-24T14:36:41+08:00",
+  "purpose": "Distinguish insufficient B3 optimization from a persistent P060 1S1D static-dynamic interaction ceiling.",
+  "authorization": {
+    "human_authorized": false,
+    "config_created": false,
+    "unit_created": false,
+    "gpu_run_started": false,
+    "phase_b_auto_start": false,
+    "sa6_auto_start": false
+  },
+  "evidence_locks": {
+    "parent_checkpoint": {
+      "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1/checkpoint_3200.pt",
+      "sha256": "5645f84625649a6050e862eb17b8e81e2e02225973fd371f29e663785104f2b8",
+      "conceptual_iteration": 25,
+      "resume_optimizer_required": true,
+      "rl_optimizer_state_entries": 38
+    },
+    "source_config": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_p060aligned_p25.py",
+      "sha256": "2040a9d9e154d447756763d95a6351c68816f941dc42dcee07c3cf4387740498"
+    },
+    "phase_a_summary": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/SUMMARY.json",
+      "sha256": "cf7076561df1c22f288e0958232627dd12ab2774e074db329a8a6284b2aa7b71",
+      "required_status": "COMPLETE_VALID_SINGLE_TRAINING_SEED_PAIRED_PHASE_A",
+      "required_next_action": "REJECT_P060_ALIGNMENT_NO_PHASE_B"
+    },
+    "training_window_analysis": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/TRAINING_WINDOW_ANALYSIS.json",
+      "sha256": "218b95a47857ae247092cdd5f40885b13afe1bee417a72ad37c6ae1d6f9a6b35"
+    },
+    "sampling_intervals": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/EVALUATOR_SAMPLING_INTERVALS.json",
+      "sha256": "5fc89baa7329bbcc56b0261b2a170c81e517648c75cb8f45a1a2ab35d09949e8"
+    },
+    "static_layout_and_lineage_analysis": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/STATIC_LAYOUT_AND_LINEAGE_ANALYSIS.json",
+      "sha256": "10d8547158f4fa23a96d4618b3618bd6a859b48f617806ec70bfb99937a0a1ce"
+    },
+    "mirror_asymmetry_audit": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/CROSS_RUN_MIRROR_ASYMMETRY_AUDIT.json",
+      "sha256": "9a73bfb54c5c177bf96b3d9e41bc91fcb9aa6fd64601e79cc2930f86625411a3"
+    },
+    "static_layout_protocol_audit": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/STATIC_LAYOUT_STRATIFICATION_PROTOCOL_AUDIT.json",
+      "sha256": "0644f1d3e43ba2985874b74b214a27f8652b53dc6ca5a1419aa5ce7d57de94c7"
+    },
+    "collision_attribution_audit": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/COLLISION_ATTRIBUTION_AUDIT.json",
+      "sha256": "67b8708ee46fcb11db4e66e56540a8944f0b88bb51e0b667c531ae66fb31e7f2"
+    },
+    "p060_1s1d_exposure_accounting": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/B3_P060_1S1D_EXPOSURE_ACCOUNTING_AUDIT.json",
+      "sha256": "a5514dbf8d9fb0ec36946b82270277fd4a97f92743b8f022454d3d24f5acc028"
+    }
+  },
+  "required_instrumentation_before_run": {
+    "behavioral_change_allowed": false,
+    "profile_identity": "Freeze the selected density-speed profile and motion family at reset; never infer either from current obstacle speed, episode outcome or duration.",
+    "required_per_profile_metrics": [
+      "reset_count",
+      "reset_share",
+      "active_steps",
+      "active_step_share",
+      "completed_episodes",
+      "completed_episode_share",
+      "SR",
+      "CR",
+      "TO"
+    ],
+    "required_p060_1s1d_strata": [
+      "static_layout_id",
+      "dynamic_start_x_sign",
+      "dynamic_active_target_x_sign",
+      "patrol_phase"
+    ],
+    "reconciliation": [
+      "sum profile reset_count equals corridor reset_count",
+      "sum profile active_steps equals corridor active_steps",
+      "sum profile completed_episodes equals corridor completed episodes"
+    ],
+    "fail_closed": "Any unknown profile, non-finite metric or reconciliation mismatch invalidates the run for decision use."
+  },
+  "proposed_training": {
+    "additional_iterations": 25,
+    "conceptual_start_iteration": 25,
+    "conceptual_end_iteration": 50,
+    "rollout_length": 128,
+    "additional_steps": 3200,
+    "save_interval_iterations": 5,
+    "conceptual_checkpoints": [
+      {"iteration": 30, "future_filename": "checkpoint_640.pt"},
+      {"iteration": 35, "future_filename": "checkpoint_1280.pt"},
+      {"iteration": 40, "future_filename": "checkpoint_1920.pt"},
+      {"iteration": 45, "future_filename": "checkpoint_2560.pt"},
+      {"iteration": 50, "future_filename": "checkpoint_3200.pt"}
+    ],
+    "allowed_behavioral_differences_from_b3": ["checkpoint", "timesteps", "save_interval"],
+    "all_other_fields_must_match": true
+  },
+  "proposed_fixed_screen": {
+    "checkpoints": ["b3_it25_fresh_baseline", "it30", "it35", "it40", "it45", "it50"],
+    "scenarios": ["p060_0s1d", "p060_1s1d", "p080_0s1d", "p080_1s1d"],
+    "cells": 24,
+    "required_diagnostics": [
+      "static_layout_outcomes for layout 100 and 101",
+      "obstacle_collision_rate",
+      "wall_collision_rate",
+      "static and dynamic scheduler contact-event counts with excess-event reconciliation",
+      "dynamic start side, active target direction and patrol phase stratified by static layout",
+      "density-speed profile reset share, active-step share, episodes, SR, CR and TO",
+      "left-right layout gap must be reported and may not be hidden by aggregate CR"
+    ],
+    "fixed_conditions": {
+      "evaluator_seed": 818,
+      "actuator_delay_steps": 1,
+      "num_envs": 64,
+      "steps": 2500,
+      "speed_rate": 0.7,
+      "vlp16_noise_mode": "full",
+      "lidar_distractor_eligibility": "valid_return_only"
+    }
+  },
+  "proposed_decision": {
+    "hard_gate_p060": "both P060 cells require SR >= 0.90, CR <= 0.10, TO <= 0.05",
+    "p080_guardrail": "neither P080 cell may degrade by more than 0.02 in SR, CR, or TO relative to the fresh B3 it25 baseline",
+    "candidate_ranking": ["minimum worst P060 CR", "minimum mean P060 CR", "fewer additional iterations within a 0.005 tie band"],
+    "if_no_checkpoint_passes": "NO_PHASE_B_STOP_ITERATION_STACKING_AND_DESIGN_0S1D_TO_1S1D_DENSITY_CURRICULUM",
+    "if_checkpoint_passes": "CANDIDATE_ONLY_REQUIRES_SEPARATE_PHASE_B_AUTHORIZATION",
+    "parent_selection": false,
+    "graduation": false,
+    "sa6_start": false
+  },
+  "reason_not_run": "The authoritative Phase-A result explicitly sets extension_authorized=false. This file preserves a bounded, falsifiable option without overriding that decision."
+}

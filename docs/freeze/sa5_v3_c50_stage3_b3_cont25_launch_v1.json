@@ -1,0 +1,57 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_cont25_launch/v1",
+  "created_at": "2026-08-24T16:31:30+08:00",
+  "status": "AUTHORIZED_VERIFIED_READY_FOR_LAUNCH",
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_stage3_b3_cont25_authorization_20260824.json",
+    "sha256": "664ecb32476ccffdf6bbd337e27c39f72222ebe2aa35ec43d27065005c052f13"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_stage3_b3_cont25_from_it25_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-stage3-b3-cont25-from-it25-p25-r1.service",
+    "config_module": "e2e_sa5_v3_c50_stage3_b3_cont25_from_it25",
+    "additional_iterations": 25,
+    "conceptual_start_iteration": 25,
+    "conceptual_end_iteration": 50,
+    "checkpoints": {
+      "checkpoint_640.pt": 30,
+      "checkpoint_1280.pt": 35,
+      "checkpoint_1920.pt": 40,
+      "checkpoint_2560.pt": 45,
+      "checkpoint_3200.pt": 50
+    }
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "5645f84625649a6050e862eb17b8e81e2e02225973fd371f29e663785104f2b8",
+    "rl_optimizer_state_entries": 38,
+    "optimizer_resume_required": true
+  },
+  "verification": {
+    "targeted_cpu_tests": "73 passed",
+    "gpu_smoke": {
+      "run_name": "sa5_v3_c50_stage3_b3_cont25_smoke_ne64_s42_p1_r1",
+      "result": "success",
+      "optimizer_loaded": true,
+      "family_reconciliation_ok": true,
+      "profile_family_reconciliation_ok": true,
+      "nonfinite_values": 0,
+      "metrics_sha256": "8f063f2b578235f773e6bff5c17118a602a4ccc730d10f65680be57ae9df10b4",
+      "checkpoint_sha256": "47de5645fc3f310aca19fc87baa9f1c86c4a6d4c71e4e7044f31b70d5bb111af",
+      "console_sha256": "b6d902fd25cc65f0b15f2eca6836f235d91ab3bad695fec9e417989527372dad"
+    }
+  },
+  "source_fingerprint_before": {
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont25_from_it25.py": "3af0b9e6bb9f3683d4b3edbf30365fe2e5a9750e4942ef28500baa1e0c43b952",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont25_smoke.py": "13cbfde0b3318661039dbf0726f21f7e2b818f8e8f4f7227984a34d742124952",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/corridor_family_metrics.py": "76da80bbd5d1b782631f16474ff1b5d0df3b7711cf290ef720ae7e93967db8c3",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/corridor_profile_family_metrics.py": "96c1d7248e5bf88eb10186f9ecfef8aa4c50298bdf321e3ee4e1fb2e7b330eed",
+    "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090"
+  },
+  "automatic_actions": {
+    "phase_b_launch": false,
+    "sa5_graduation": false,
+    "parent_selection": false,
+    "sa6_launch": false
+  }
+}

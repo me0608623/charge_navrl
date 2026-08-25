@@ -1,0 +1,31 @@
+{
+  "base_protocol_sha256": "75586401c90a69db8ade6acbc492176ea41a84e141cbd6758ec57ca49a6cb6ff",
+  "evidence_boundary": "post-Phase-A sample-size addendum; trigger and duration use n only, not SR/CR/TO; repaired cells replace rather than pool with base cells",
+  "phase_scope": "any Phase-A or Phase-B cell below the frozen minimum",
+  "replacement_rule": {
+    "formula": "ceil((base_steps * target_episodes / base_n) / step_quantum) * step_quantum",
+    "from_scratch_same_seed": true,
+    "max_repair_steps": 7500,
+    "minimum": "base_steps + one step_quantum",
+    "pool_base_and_repair": false,
+    "replace_short_cell": true,
+    "step_quantum": 500,
+    "target_episodes": 1200
+  },
+  "schema": "sa5_r2_checkpoint_screen_sample_repair/v1",
+  "sha256": "7857bf334434c3914918edde4c1582371e55e105d7a5e5f4bc9d48a6c1d3e4bf",
+  "trigger": {
+    "condition": "n < 1000",
+    "metric": "completed episodes n",
+    "outcome_metrics_consulted": false
+  },
+  "unchanged": [
+    "checkpoint identity",
+    "scene geometry and obstacle density",
+    "motion family",
+    "evaluator seed",
+    "VLP-16 noise and valid-return-only eligibility",
+    "200 ms actuator delay",
+    "metrics, thresholds, and ranking"
+  ]
+}

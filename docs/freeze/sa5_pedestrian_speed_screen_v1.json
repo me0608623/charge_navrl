@@ -1,0 +1,147 @@
+{
+  "arms": [
+    {
+      "label": "P035",
+      "midpoint_m_s": 0.35,
+      "range_m_s": [
+        0.25,
+        0.45
+      ]
+    },
+    {
+      "label": "P060",
+      "midpoint_m_s": 0.6,
+      "range_m_s": [
+        0.5,
+        0.7
+      ]
+    },
+    {
+      "label": "P080",
+      "midpoint_m_s": 0.8,
+      "range_m_s": [
+        0.7,
+        0.9
+      ]
+    },
+    {
+      "label": "P100",
+      "midpoint_m_s": 1.0,
+      "range_m_s": [
+        0.9,
+        1.1
+      ]
+    }
+  ],
+  "checkpoint": {
+    "conceptual_iteration": 250,
+    "filename": "checkpoint_32000.pt",
+    "name": "c250",
+    "path": "/home/aa/IsaacLab/logs/rnn_car/sa5_r2_sealed_ldmix_from_sa4r3_it125_actd12_ne1024_s42_p300_r1/checkpoint_32000.pt",
+    "sha256": "df14c45d8dd27b0e327f9447a9a613bf62eaa850af542b474aad682dcd937a4a"
+  },
+  "evidence_boundary": "single checkpoint and evaluator seed diagnostic; determines the candidate pedestrian-speed curriculum contract but does not prove learnability, accept a parent, start training, or authorize SA6",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "corridor_density": "4S2D",
+    "corridor_geometry": "sealed 10m interaction zone in 15m arena",
+    "corridor_motion_mode": "lateral",
+    "deployment_speed_scale": 1.0,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "num_envs": 64,
+    "scenario": "corridor_lateral",
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate": 1.0,
+    "speed_rate_obs": "ego",
+    "stage": 5,
+    "steps": 3000
+  },
+  "forbidden": [
+    "training",
+    "reward changes",
+    "geometry changes",
+    "speed_rate changes",
+    "checkpoint changes",
+    "SA6 launch"
+  ],
+  "interpretation_rule": {
+    "feasibility_limited": "CR rises by at least 2 conservative binomial SE and fewer than half retain a dynamic-feasible action within the final 1.0 s",
+    "mixed": "exactly half, or outcome increase is not established",
+    "policy_limited": "CR rises by at least 2 conservative binomial SE and more than half of collision events still have a dynamic-feasible action within the final 1.0 s"
+  },
+  "only_independent_variable": "long_corridor_dynamic_speed_range",
+  "outcomes": {
+    "behavior": [
+      "commanded_stop_fraction",
+      "actual_body_stop_fraction",
+      "actual_stop_lead_p50_s"
+    ],
+    "collision_breakdown": [
+      "obstacle_CR",
+      "wall_CR"
+    ],
+    "dynamic_feasibility": {
+      "forbidden": "joint dynamic-plus-static feasibility is not used for the mechanism classification",
+      "lead_window_s": 1.0,
+      "source": "D5 baseline-only shadow; policy action unchanged",
+      "use": "dynamic-only feasible action count"
+    },
+    "impact_severity": "radial closing speed at dynamic collision, p50/p90; this is the collision-normal component, not full 2D relative speed",
+    "primary": [
+      "SR",
+      "CR",
+      "TO"
+    ]
+  },
+  "purpose": "measure how the frozen c250 policy responds when pedestrian speed approaches or exceeds robot speed, before rebuilding SA3-to-SA4",
+  "schema": "sa5_c250_pedestrian_speed_screen_protocol/v1",
+  "sha256": "c1b3ab6950483e8779296bafb4ff9720fd297c0f04dff7d07723475da2d41339"
+}

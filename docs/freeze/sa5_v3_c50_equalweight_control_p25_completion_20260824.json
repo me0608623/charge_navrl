@@ -1,0 +1,97 @@
+{
+  "schema": "sa5_v3_c50_equalweight_control_p25_completion/v1",
+  "created_at": "2026-08-24T02:24:44+08:00",
+  "status": "COMPLETE_VALID_MATCHED_CONTROL_AWAITING_FIXED_SCREEN",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "control": "MATCHED_DEVELOPMENT_CONTROL_NOT_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "run": {
+    "name": "sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-equalweight-control-p25-r1.service",
+    "systemd_invocation_id": "2d78a517fab74919898bcc472cff2f84",
+    "iterations_completed": 25,
+    "iterations_target": 25,
+    "total_steps": 3200,
+    "duration_seconds": 1127,
+    "process_exit_status": 0,
+    "training_complete_marker": true
+  },
+  "checkpoint": {
+    "path": "logs/rnn_car/sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "d9095e7df21633056ef3f491d460520b99dbd72d9924355821c1e48783b3419a",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "status": "MATCHED_DEVELOPMENT_CONTROL_NOT_PARENT"
+  },
+  "artifacts": {
+    "metrics": "logs/rnn_car/sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1/supervisor_metrics.jsonl",
+    "metrics_sha256": "857dff6fd6a61d5e3eb1872a374946cf2a0fc344dde8718bdd5f0052efd67987",
+    "console": "logs/rnn_car/sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1.console.log",
+    "console_sha256": "0562506473ea9e6ddea93ea81e092e6da3596a29e86e8a9f3212668d1a380a70",
+    "launch_manifest": "docs/freeze/sa5_v3_c50_equalweight_control_p25_launch_v1.json",
+    "launch_manifest_sha256": "815de69fd1801303c6d9dde476d4aeda290654dbdc44f692c699a9b9d996e251"
+  },
+  "health": {
+    "metrics_rows": 25,
+    "iteration_sequence": "1..25",
+    "nonfinite_numeric_values": 0,
+    "corridor_accounting_failures": 0,
+    "strict_error_matches": 0,
+    "max_kl": 0.009198376407994147,
+    "max_clip_fraction": 0.11054420471191406,
+    "entropy_first": 4.037137508392334,
+    "entropy_last": 4.087699353694916,
+    "mean_fps_last_5": 2937.4189577399584,
+    "source_fingerprint_files_ok": 11,
+    "source_fingerprint_files_total": 11,
+    "source_fingerprint_stable": true
+  },
+  "exposure_accounting": {
+    "outer_completed_episode_shares": {
+      "native": 0.7822469660953334,
+      "narrow": 0.11719629675966471,
+      "corridor": 0.10055673714500188
+    },
+    "corridor_completed_episode_counts": {
+      "lateral": 1376,
+      "longitudinal": 1198,
+      "random_2d": 1819,
+      "mixed": 2037
+    },
+    "corridor_completed_episode_shares": {
+      "lateral": 0.21399689,
+      "longitudinal": 0.18631415,
+      "random_2d": 0.28289269,
+      "mixed": 0.31679627
+    },
+    "corridor_active_step_shares": {
+      "lateral": 0.2158785,
+      "longitudinal": 0.17321517,
+      "random_2d": 0.26496758,
+      "mixed": 0.34593876
+    },
+    "interpretation": "The matched control reproduces the original c50 allocation and is clearly distinct from the weighted arm. Training-time performance remains descriptive only."
+  },
+  "last_training_iteration_descriptive_only": {
+    "overall_sr": 0.8888888888854476,
+    "overall_cr": 0.10994967092485503,
+    "overall_to": 0.0,
+    "kl": 0.006127540406737353,
+    "clip_fraction": 0.06601524353027344,
+    "entropy": 4.087699353694916,
+    "fps": 2965.033170741389
+  },
+  "interpretation": {
+    "training_curve_authorizes_attribution": false,
+    "fixed_screen_required": true,
+    "new_screen_cells": 4,
+    "reuse_frozen_anchor_and_weighted_cells": true,
+    "graduation_authorized": false,
+    "extension_authorized": false,
+    "sa6_authorized": false
+  }
+}

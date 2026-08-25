@@ -1,0 +1,95 @@
+{
+  "schema": "sa5_r2_sealed_densitymix_correction/v1",
+  "status": "AUTHORIZED_NOT_STARTED",
+  "run_name": "sa5_r2_sealed_ldmix_from_sa4r3_it125_actd12_ne1024_s42_p300_r1",
+  "purpose": "Correct the Stage-5 corridor topology while retaining low-density corridor behavior needed for deployment.",
+  "authorization_limit": "This protocol authorizes SA5-R2 training and checkpoint creation only; it cannot accept an SA5 parent or launch SA6.",
+  "declared_interventions": [
+    "seal the 10 m corridor interaction zone to the 15 m Stage-5 room boundary with 0.5 m overlap at both ends",
+    "replace the 3S2D/4S2D-only corridor reset distribution with the preregistered low-density mix"
+  ],
+  "attribution_limit": "Any difference from the legacy lineage is jointly attributable to corrected geometry and corridor-density coverage; this run cannot isolate either intervention by itself.",
+  "supersedes_before_training": {
+    "run_name": "sa5_r2_sealed_from_sa4r3_it125_actd12_ne1024_s42_p300_r1",
+    "reason": "The geometry-only candidate was never formally started and did not include the requested low-density corridor coverage.",
+    "preservation": "Its config, smoke evidence and freeze protocol remain as historical design evidence."
+  },
+  "parent": {
+    "checkpoint": "/home/aa/IsaacLab/logs/rnn_car/sa4_r3_cont25_from_it100_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "conceptual_iteration": 125,
+    "sha256": "57f43d07255971ad607e0bf3234dd7d46984c9c71cc9550e2e9461fbc95ab71d",
+    "optimizer_resume": false,
+    "caveat": "The parent has earlier exposure to legacy unsealed corridor replay; this is a warm-start correction, not a from-scratch clean baseline."
+  },
+  "geometry": {
+    "stage": 5,
+    "arena_size_m": 15.0,
+    "room_half_extent_m": 7.5,
+    "interaction_length_m": 10.0,
+    "physical_wall_span_m": 15.0,
+    "boundary_overlap_m": 0.5,
+    "must_report_runtime": [
+      "wall_span_m_mean",
+      "wall_boundary_overlap_m_min",
+      "sealed_to_boundary_pass",
+      "geometry_pass"
+    ]
+  },
+  "training": {
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "iterations_max": 300,
+    "save_interval_iterations": 50,
+    "scene_reset_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "corridor_density_reset_mix": {
+      "0S1D": 0.10,
+      "1S1D": 0.10,
+      "2S1D": 0.15,
+      "3S2D": 0.30,
+      "4S2D": 0.35
+    },
+    "single_dynamic_corridor_share": 0.35,
+    "moderate_or_hard_two_dynamic_share": 0.65,
+    "rationale": "Low-density exposure prevents a policy trained only in crowded corridors from learning unnecessary stop-and-go behavior when only one moving obstacle is present.",
+    "lidar_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "actuator_delay_steps": [1, 2],
+    "actuator_velocity_scale": [1.0, 1.0],
+    "future_occupancy_weight": 0.15,
+    "checkpoints": [
+      [50, "checkpoint_6400.pt"],
+      [100, "checkpoint_12800.pt"],
+      [150, "checkpoint_19200.pt"],
+      [200, "checkpoint_25600.pt"],
+      [250, "checkpoint_32000.pt"],
+      [300, "checkpoint_38400.pt"]
+    ]
+  },
+  "source_sha256": {
+    "densitymix_config": "85e16878bf9af731ed95290e4cb1c3af77117b87858ff262345ab8f7491f2757",
+    "geometry_only_base_config": "2f8ca6ab2d95476e6f00848822b525c2d7e0a3b1ce7698e01326aa4e4b15b827",
+    "trainer": "7e3c24793e92b0afb749a3299807a423335f846cc4e3b02956821c7f21ba7999",
+    "corridor_replay": "954510f4fba331907c8037249d406ae736498244bb62b3c705366dec0b50071c",
+    "corridor_geometry": "f57f4351573af93cd3e42d60554ba9d77956a49ed5614a9df5d2b40b646466a4"
+  },
+  "pre_training_baseline_requirement": {
+    "checkpoint": "the exact frozen SA4-R3 conceptual-it125 parent",
+    "density": "fixed 4S2D stress reference",
+    "geometry": "sealed",
+    "families": ["lateral", "longitudinal", "random_2d", "mixed"],
+    "purpose": "Measure inherited hard-corridor behavior before any SA5-R2 update. This baseline stays fixed even though the training distribution adds low-density cases.",
+    "acceptance_effect": "Diagnostic baseline only; it cannot accept or reject the training lineage by itself."
+  },
+  "post_training_requirements": [
+    "screen every saved checkpoint on fixed sealed 4S2D lateral, longitudinal, random-2d and mixed stress cells",
+    "test low-density sealed 0S1D and 1S1D cells for SR, CR, TO, speed and unnecessary stopping",
+    "verify native and narrow retention for the leading checkpoints",
+    "do not select a parent from training metrics alone"
+  ],
+  "sa6_started": false
+}

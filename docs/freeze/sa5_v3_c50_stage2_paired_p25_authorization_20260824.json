@@ -1,0 +1,88 @@
+{
+  "schema": "sa5_v3_c50_stage2_paired_p25_authorization/v1",
+  "authorized_at": "2026-08-24T03:10:00+08:00",
+  "authorized_by": "user_conditional_8h_autonomy",
+  "decision": "RUN_PAIRED_STAGE2_EQUAL_VS_MILD_030_030_040_P25",
+  "question": "After preserving the equal-control it25 longitudinal gain, does a mild random-2D exposure increase improve random-2D without redistributing capability away from lateral, longitudinal, or mixed?",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "parent": "MATCHED_DEVELOPMENT_ANCHOR_NOT_FORMAL_PARENT",
+    "a2": "EQUALWEIGHT_CONTINUATION_CONTROL_NOT_PARENT",
+    "b2": "MILD_WEIGHT_DEVELOPMENT_CANDIDATE_NOT_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "evidence": {
+    "three_arm_summary": "logs/gates/sa5_v3_c50_equalweight_control_screen/screen_20260824_r1/SUMMARY.json",
+    "three_arm_summary_sha256": "db3cb240e6627d6a481eda1aec76952c2c59d6f39c0af0a408402187175514a6",
+    "required_three_arm_decision": "WEIGHT_SPECIFIC_CAPABILITY_REDISTRIBUTION_OBSERVED_REJECT_CURRENT_WEIGHTS",
+    "allocator_calibration": "logs/gates/sa5_v3_motion_allocator_calibration/calibration_20260824_r1/CALIBRATION.json",
+    "allocator_calibration_sha256": "f32180c16c457993f0553c9e2dcf41d3481aaf7c3fbeebc3f0d6bad6a0529c4e",
+    "required_calibration_status": "COMPLETE_VALID_CPU_CALIBRATION",
+    "parent_completion": "docs/freeze/sa5_v3_c50_equalweight_control_p25_completion_20260824.json",
+    "parent_completion_sha256": "81771f0d7c5d7b10ec90494f8590b4c5a5bf77bcea3ab40a1d1efa1c56807e50"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "d9095e7df21633056ef3f491d460520b99dbd72d9924355821c1e48783b3419a",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "optimizer_policy": "RESUME_SAME_EMBEDDED_PPO_OPTIMIZER_IN_BOTH_ARMS"
+  },
+  "arms": {
+    "a2_equal": {
+      "motion_weights": null,
+      "iterations": 25,
+      "timesteps": 3200
+    },
+    "b2_mild": {
+      "motion_weights": [0.30, 0.30, 0.40],
+      "iterations": 25,
+      "timesteps": 3200
+    }
+  },
+  "identity_contract": {
+    "only_behavioral_difference_between_arms": "long_corridor_dynamic_motion_weights",
+    "fixed": [
+      "parent checkpoint and PPO optimizer",
+      "stage 5 and outer scene shares",
+      "speed-density mix and interaction rules",
+      "reward, action, observation, network and PPO hyperparameters",
+      "speed_rate 0.7 and ego speed observation",
+      "VLP-16 full valid-return-only noise",
+      "actuator delay U{1,2}",
+      "1024 env, seed 42, rollout 128"
+    ]
+  },
+  "post_training_screen": {
+    "fixed_density": "4S2D",
+    "motion_modes": ["lateral", "longitudinal", "random_2d", "mixed"],
+    "seed": 818,
+    "delay_steps": 1,
+    "speed_rate": 0.7,
+    "target": {
+      "motion_mode": "random_2d",
+      "minimum_sr_improvement": 0.02,
+      "minimum_cr_reduction": 0.02,
+      "minimum_absolute_z": 2.0,
+      "maximum_to": 0.05,
+      "maximum_to_degradation": 0.02
+    },
+    "retention": {
+      "motion_modes": ["lateral", "longitudinal", "mixed"],
+      "maximum_sr_degradation": 0.02,
+      "maximum_cr_degradation": 0.02,
+      "maximum_to_degradation": 0.02
+    },
+    "extension_auto_authorized": false,
+    "graduation_auto_authorized": false,
+    "new_parent_auto_authorized": false,
+    "sa6_auto_start": false
+  },
+  "stop_conditions": [
+    "NaN or non-finite PPO metrics",
+    "CUDA OOM or traceback",
+    "corridor family reconciliation failure",
+    "checkpoint or source hash drift"
+  ],
+  "interpretation_limit": "Single training seed paired development experiment. A2 and B2 may estimate a weight-specific effect at this parent, but cannot establish cross-seed generality or graduate SA5."
+}

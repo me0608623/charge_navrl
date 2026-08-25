@@ -1,0 +1,82 @@
+{
+  "schema": "sa5_v3_c500_parent_control_authorization/v1",
+  "created_at": "2026-08-23T02:00:00+08:00",
+  "status": "HUMAN_AUTHORIZED_READY_NOT_RUN",
+  "decision": "RUN_IDENTICAL_C500_PARENT_CONTROL_P50",
+  "lineage_status": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "failed_provisional_parent": "PROVISIONAL_SA5_PARENT_C550",
+    "control_parent": "PROVISIONAL_SA5_CONTROL_PARENT_C500",
+    "meaning": "The c550 pilot failed its preregistered extension rule. Run the c500 parent with the identical SA5 recipe without changing the SA4 graduation verdict."
+  },
+  "trigger": {
+    "summary": "logs/gates/sa5_v3_provisional_pilot_screen/screen_20260822_r1/SUMMARY.json",
+    "summary_sha256": "4cd82cc3912b7ff70a053ca9203594899d5871e3f72fa65cbbecd6065069f744",
+    "required_status": "COMPLETE_VALID_SINGLE_SEED_DEVELOPMENT_SCREEN",
+    "required_extension_authorized": false,
+    "required_next_action": "RUN_IDENTICAL_C500_PARENT_CONTROL_P50"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_25600.pt",
+    "sha256": "e27677349eba8f37e2e6937f7d92400a1550e58d89d4430e556932697e9cb9f4",
+    "conceptual_sa4_iteration": 500,
+    "embedded_iteration": 199,
+    "embedded_total_steps": 25600,
+    "optimizer_resume": true,
+    "optimizer_state_entries": 38
+  },
+  "identical_recipe": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_provisional_from_sa4v3_c550_p50.py",
+    "source_config_sha256": "64e3c5ed66ef1d2f3bb17394b8e3b1ad6e283e83d428a88455fa4089d3c9c520",
+    "allowed_behavioral_differences": [
+      "checkpoint"
+    ],
+    "allowed_metadata_differences": [
+      "name",
+      "description",
+      "tags",
+      "notes"
+    ],
+    "forbidden_differences": [
+      "reward",
+      "action",
+      "observation",
+      "model",
+      "PPO",
+      "sensor",
+      "actuator",
+      "scene geometry",
+      "scene proportions",
+      "training budget"
+    ]
+  },
+  "pilot": {
+    "training_iterations": 50,
+    "rollout_length": 128,
+    "timesteps": 6400,
+    "save_iterations": [
+      25,
+      50
+    ],
+    "num_envs": 1024,
+    "seed": 42,
+    "auto_extend": false,
+    "auto_start_sa6": false
+  },
+  "post_pilot": {
+    "required_candidates": [
+      "parent_c500",
+      "control_it25",
+      "control_it50"
+    ],
+    "required_scenarios": [
+      "sa5_target_4s2d_mixed_p035",
+      "nav_native",
+      "narrow_range",
+      "p060_0s1d_lateral",
+      "p060_1s1d_lateral"
+    ],
+    "on_pass": "authorize bounded extension of the selected c500 lineage to total SA5 iteration 300",
+    "on_fail": "HOLD_SA5_REDESIGN_WITHOUT_REWARD_CHANGE_OR_EXTRA_ITERATIONS"
+  }
+}

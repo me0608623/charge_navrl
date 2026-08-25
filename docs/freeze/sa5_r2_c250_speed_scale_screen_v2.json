@@ -1,0 +1,152 @@
+{
+  "arms": [
+    {
+      "label": "s100",
+      "speed_rate": 1.0,
+      "speed_rate_obs": "ego"
+    },
+    {
+      "label": "s080",
+      "speed_rate": 0.8,
+      "speed_rate_obs": "ego"
+    },
+    {
+      "label": "s070",
+      "speed_rate": 0.7,
+      "speed_rate_obs": "ego"
+    },
+    {
+      "label": "s060",
+      "speed_rate": 0.6,
+      "speed_rate_obs": "ego"
+    }
+  ],
+  "checkpoint": {
+    "conceptual_iteration": 250,
+    "filename": "checkpoint_32000.pt",
+    "name": "c250",
+    "path": "/home/aa/IsaacLab/logs/rnn_car/sa5_r2_sealed_ldmix_from_sa4r3_it125_actd12_ne1024_s42_p300_r1/checkpoint_32000.pt",
+    "sha256": "df14c45d8dd27b0e327f9447a9a613bf62eaa850af542b474aad682dcd937a4a"
+  },
+  "decision": {
+    "checkpoint_status": "relative_best_diagnostic_candidate",
+    "formal_graduation": false,
+    "source_screen": "/home/aa/IsaacLab/logs/gates/sa5_r2_checkpoint_screen/screen_20260819_r1/SUMMARY.json"
+  },
+  "evidence_boundary": "single checkpoint, single evaluator seed, one fixed high-density lateral corridor; diagnostic vehicle speed-rate screen, not SA5 graduation and not authorization to train or start SA6",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "corridor_density": "4S2D",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "motion_family": "lateral",
+    "num_envs": 64,
+    "scenario": "corridor_lateral",
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "stage": 5,
+    "steps": 3000
+  },
+  "only_independent_variable": "vehicle_policy_node.speed_rate",
+  "outcomes": {
+    "behavior": [
+      "mean_abs_commanded_linear_speed_mps",
+      "commanded_stop_fraction",
+      "mean_abs_actual_body_speed_mps",
+      "actual_body_stop_fraction"
+    ],
+    "collision_breakdown": [
+      "obstacle_CR",
+      "wall_CR"
+    ],
+    "primary": [
+      "SR",
+      "CR",
+      "TO"
+    ],
+    "reaction_timing": [
+      "first_near_3m",
+      "first_risk_warning",
+      "first_issued_deceleration",
+      "first_actual_deceleration",
+      "first_actual_stop"
+    ]
+  },
+  "schema": "sa5_r2_c250_speed_scale_screen_protocol/v2",
+  "sha256": "9e195d800db6c892e5407b1d7a9c2e362c7f6b64a639761b5dd8e92a9b58aaa1",
+  "vehicle_speed_rate_contract": {
+    "action_limits_scaled": [
+      "max_linear_velocity",
+      "max_linear_accel",
+      "max_angular_velocity",
+      "max_angular_accel"
+    ],
+    "deployment_speed_scale": 1.0,
+    "installed_copy": {
+      "path": "/home/aa/IsaacLab/rover_rl/install/rover_rl_inference/lib/python3.12/site-packages/rover_rl_inference/policy_node.py",
+      "sha256": "2f95ac341e4444c18b67a83f6c91c74864d9ee91dcc1a1c854dbbf99b57db783"
+    },
+    "lidar_scaled": false,
+    "observation_policy_frame": [
+      "ego_acceleration",
+      "ego_linear_velocity",
+      "ego_angular_velocity",
+      "goal_body_xy",
+      "action_history"
+    ],
+    "observation_scale": "multiply listed policy-frame inputs by 1/rate",
+    "pipeline": "raw observation -> policy-frame 1/rate transform -> policy -> decode with four action limits multiplied by rate -> fixed d1 actuator queue -> simulator",
+    "semantic": "current rover policy-node time dilation",
+    "source": {
+      "path": "/home/aa/IsaacLab/rover_rl/src/rover_rl_inference/rover_rl_inference/policy_node.py",
+      "sha256": "7ba84c14c4041eb80c9585ad5af4b7ee9c656510cee37d6fd89b87e3acbea17f"
+    },
+    "speed_rate_obs": "ego"
+  }
+}

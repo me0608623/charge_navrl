@@ -1,0 +1,198 @@
+{
+  "candidates": [
+    {
+      "conceptual_iteration": 550,
+      "gate_hard_pass": false,
+      "gate_rank": 1,
+      "name": "c550",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_32000.pt",
+      "sha256": "235a79a41b1d83510bbbb314c965a7ef5ba73e898aec121310a92965092c4ba8"
+    },
+    {
+      "conceptual_iteration": 600,
+      "gate_hard_pass": false,
+      "gate_rank": 2,
+      "name": "c600",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_38400.pt",
+      "sha256": "7c849d0b0e33846d228ae7f2914dd8a868b6beb590d65b8e4b528c0e32e820cc"
+    }
+  ],
+  "cells": [
+    {
+      "cell": "c550_nav_native_s070_g4_d1_s818",
+      "checkpoint_name": "c550",
+      "kind": "native",
+      "scenario": "nav_native"
+    },
+    {
+      "cell": "c550_narrow_range_s070_g4_d1_s818",
+      "checkpoint_name": "c550",
+      "kind": "narrow",
+      "scenario": "narrow_range"
+    },
+    {
+      "cell": "c550_p060_0s1d_lateral_s070_g4_d1_s818",
+      "checkpoint_name": "c550",
+      "kind": "corridor",
+      "scenario": "p060_0s1d_lateral"
+    },
+    {
+      "cell": "c550_p060_1s1d_lateral_s070_g4_d1_s818",
+      "checkpoint_name": "c550",
+      "kind": "corridor",
+      "scenario": "p060_1s1d_lateral"
+    },
+    {
+      "cell": "c600_nav_native_s070_g4_d1_s818",
+      "checkpoint_name": "c600",
+      "kind": "native",
+      "scenario": "nav_native"
+    },
+    {
+      "cell": "c600_narrow_range_s070_g4_d1_s818",
+      "checkpoint_name": "c600",
+      "kind": "narrow",
+      "scenario": "narrow_range"
+    },
+    {
+      "cell": "c600_p060_0s1d_lateral_s070_g4_d1_s818",
+      "checkpoint_name": "c600",
+      "kind": "corridor",
+      "scenario": "p060_0s1d_lateral"
+    },
+    {
+      "cell": "c600_p060_1s1d_lateral_s070_g4_d1_s818",
+      "checkpoint_name": "c600",
+      "kind": "corridor",
+      "scenario": "p060_1s1d_lateral"
+    }
+  ],
+  "decision": {
+    "accepted_exposure_parent": null,
+    "auto_launch_exposure_curriculum": false,
+    "auto_launch_sa5": false,
+    "c550_eligibility": "c550 is eligible only for a bounded exposure-curriculum pilot when all four retention cells pass",
+    "candidate_retention_pass": "all four retention cells pass",
+    "recommended_exposure_parent": "first passing candidate in the preregistered Gate order",
+    "sa4_graduation": "remains failed because no candidate passed the source Gate"
+  },
+  "evidence_boundary": "single training seed and single evaluator seed developmental retention screen; a retention pass can support a bounded exposure curriculum parent choice, but cannot convert the failed SA4 Gate into graduation or authorize SA5",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "native_scene": {
+      "dynamic_obstacles": 2,
+      "source": "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/curriculum/phases/e2e_final20_v1.py",
+      "stage_name": "SA4_spatial_plan",
+      "static_obstacles": 8
+    },
+    "num_envs": 64,
+    "p060_motion_mode": "lateral",
+    "p060_speed_range_m_s": [
+      0.5,
+      0.7
+    ],
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "steps": 2500
+  },
+  "forbidden": [
+    "change the promoted candidate order after seeing retention results",
+    "change stage, scene, speed, delay, noise, seed, or thresholds",
+    "summarize a missing, duplicate, invalid, or drifted cell",
+    "claim SA4 graduation from retention",
+    "auto-start exposure training or SA5"
+  ],
+  "gate_source": {
+    "freeze": "docs/freeze/sa4_v3_c300_c600_gate_v1.json",
+    "freeze_sha256": "924b05c15486d844f4610ab0ac2d0dc0f4421c79ca536f2ffddd26785e9157c1",
+    "gate_hard_pass": false,
+    "protocol_sha256": "14cd30ca27a8e986bba183db361c9bc75ff66d81b4ef89023b07dc2a08e2e285",
+    "required_promoted_order": [
+      "c550",
+      "c600"
+    ],
+    "summary": "logs/gates/sa4_v3_c300_c600_gate/screen_20260822_r1/SUMMARY.json",
+    "summary_sha256": "ab0e41e148fd82582b15e9e7c473297d5ec5b8a3a050411801b639e1214e3df5"
+  },
+  "purpose": "evaluate native, narrow, and P060 low-density retention for the c550 and c600 checkpoints promoted by the frozen SA4-v3 Gate",
+  "scenarios": [
+    {
+      "display": "native",
+      "kind": "native",
+      "name": "nav_native"
+    },
+    {
+      "display": "narrow",
+      "kind": "narrow",
+      "name": "narrow_range"
+    },
+    {
+      "density": "0S1D",
+      "display": "P060 0S1D lateral",
+      "dynamic_obstacles": 1,
+      "kind": "corridor",
+      "label": "0S1D_P060",
+      "name": "p060_0s1d_lateral",
+      "pedestrian_speed_label": "P060",
+      "pedestrian_speed_range_m_s": [
+        0.5,
+        0.7
+      ],
+      "scenario": "corridor_low_0s1d",
+      "static_obstacles": 0
+    },
+    {
+      "density": "1S1D",
+      "display": "P060 1S1D lateral",
+      "dynamic_obstacles": 1,
+      "kind": "corridor",
+      "label": "1S1D_P060",
+      "name": "p060_1s1d_lateral",
+      "pedestrian_speed_label": "P060",
+      "pedestrian_speed_range_m_s": [
+        0.5,
+        0.7
+      ],
+      "scenario": "corridor_low_1s1d",
+      "static_obstacles": 1
+    }
+  ],
+  "schema": "sa4_v3_c550_c600_retention_protocol/v1",
+  "sha256": "35ed50df1083c3c99cf809b8a3044abc9c29749e93ffad723c103ecc9e9458a1",
+  "stage": 4,
+  "thresholds": {
+    "narrow_range": {
+      "cr_max": 0.05,
+      "crossing_min": 0.95,
+      "direct_crossing_min": 0.95,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "nav_native": {
+      "cr_max": 0.07,
+      "episodes_min": 1000,
+      "sr_min": 0.92,
+      "to_max": 0.035
+    },
+    "p060_0s1d_lateral": {
+      "cr_max": 0.1,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "p060_1s1d_lateral": {
+      "cr_max": 0.1,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    }
+  }
+}

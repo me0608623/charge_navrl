@@ -1,0 +1,272 @@
+{
+  "candidates": [
+    {
+      "conceptual_iteration": 50,
+      "filename": "checkpoint_6400.pt",
+      "name": "c50",
+      "sha256": "e1b5fb7f3cac946dc74454a648c617edb213a387f258067211e982157a6c18ab"
+    },
+    {
+      "conceptual_iteration": 100,
+      "filename": "checkpoint_12800.pt",
+      "name": "c100",
+      "sha256": "10b3bc4a8ad9527be6e1b5b960803543495c15846d0fd19a32174abd65c65d29"
+    },
+    {
+      "conceptual_iteration": 150,
+      "filename": "checkpoint_19200.pt",
+      "name": "c150",
+      "sha256": "7979676cc8df6392831bf06d24e31ceae60dcf8d7e5e0eda8852cf10f2101ee4"
+    },
+    {
+      "conceptual_iteration": 200,
+      "filename": "checkpoint_25600.pt",
+      "name": "c200",
+      "sha256": "b59c69be15171d53ad44fc7fdbe027b97f1e1958d026e9fa62978672737f4838"
+    },
+    {
+      "conceptual_iteration": 250,
+      "filename": "checkpoint_32000.pt",
+      "name": "c250",
+      "sha256": "0afe1924cfa2b7d82e719432dcd6cde3ea4c662bece29f7a3d519609ca0d0974"
+    },
+    {
+      "conceptual_iteration": 300,
+      "filename": "checkpoint_38400.pt",
+      "name": "c300",
+      "sha256": "ccb95b1667e0f3f9330ffaed62ea8ad728221d270bf9b8a30b6135f421998e73"
+    }
+  ],
+  "cells": [
+    {
+      "cell": "c50_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c50",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c50_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c50",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c50_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c50",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c100_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c100",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c100_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c100",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c100_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c100",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c150_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c150",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c150_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c150",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c150_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c150",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c200_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c200",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c200_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c200",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c200_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c200",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c250_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c250",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c250_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c250",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c250_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c250",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c300_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c300_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c300_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    }
+  ],
+  "evidence_boundary": "single training seed and single evaluator seed developmental checkpoint screen; it ranks candidates for retention but does not authorize continuation, accept an SA5 parent, or launch SA5",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "fixed_cells": [
+      {
+        "density": "0S1D",
+        "dynamic_obstacles": 1,
+        "label": "0S1D_P080",
+        "pedestrian_speed_label": "P080",
+        "pedestrian_speed_range_m_s": [
+          0.7,
+          0.9
+        ],
+        "scenario": "corridor_low_0s1d",
+        "static_obstacles": 0
+      },
+      {
+        "density": "1S1D",
+        "dynamic_obstacles": 1,
+        "label": "1S1D_P080",
+        "pedestrian_speed_label": "P080",
+        "pedestrian_speed_range_m_s": [
+          0.7,
+          0.9
+        ],
+        "scenario": "corridor_low_1s1d",
+        "static_obstacles": 1
+      },
+      {
+        "density": "2S1D",
+        "dynamic_obstacles": 1,
+        "label": "2S1D_P060",
+        "pedestrian_speed_label": "P060",
+        "pedestrian_speed_range_m_s": [
+          0.5,
+          0.7
+        ],
+        "scenario": "corridor_stage4_2s1d",
+        "static_obstacles": 2
+      }
+    ],
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "motion_mode": "lateral",
+    "num_envs": 64,
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "steps": 2500
+  },
+  "forbidden": [
+    "omit any of the six checkpoints or three frozen cells",
+    "change density, speed range, lateral motion, speed_rate, delay, or seed",
+    "continue with partial, duplicate, or invalid cells",
+    "auto-run retention",
+    "auto-start a 50-iteration continuation",
+    "accept an SA5 parent or launch SA5"
+  ],
+  "purpose": "rank all six completed SA4-v3 checkpoints on the three frozen speed_rate=0.7 lateral graduation cells before any continuation",
+  "ranking": {
+    "descriptive_tie_margin": 0.005,
+    "hard_gate": "all three fixed cells must meet SR/CR/TO and n",
+    "primary": "minimize worst CR across the three fixed cells",
+    "promotion": "top two valid checkpoints proceed to retention",
+    "secondary": "minimize mean CR across the three fixed cells",
+    "tertiary": "prefer later checkpoint only after exact score ties"
+  },
+  "retention_after_promotion": [
+    "native",
+    "narrow",
+    "P060 low-density retention"
+  ],
+  "run_name": "sa4_speed_density_v3_from_sa3r1_c300_ne1024_s42_p300_r1",
+  "schema": "sa4_v3_checkpoint_screen_protocol/v1",
+  "sha256": "d2be765424df30a84246186c7f3ad2777dc93e1d04906adbc2c2fa76ef41a8ee",
+  "stage": 4,
+  "thresholds": {
+    "cr_max": 0.1,
+    "episodes_min": 1000,
+    "sr_min": 0.9,
+    "to_max": 0.05
+  }
+}

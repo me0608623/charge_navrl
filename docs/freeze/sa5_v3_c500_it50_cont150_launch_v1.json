@@ -1,0 +1,141 @@
+{
+  "schema": "sa5_v3_c500_it50_cont150_launch/v1",
+  "created_at": "2026-08-23T00:00:00+08:00",
+  "status": "AUTHORIZED_READY_NOT_RUN",
+  "lineage": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "source": "PROVISIONAL_SA5_C500_IT50_CONTINUATION_SOURCE",
+    "authorization": "docs/freeze/sa5_v3_c500_it50_cont150_authorization_20260823.json",
+    "authorization_sha256": "837227255310974afa7fd855c6f81c75119a632b57ece32b032c5a6473781709",
+    "prior_verdict_remains_immutable": true,
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "run": {
+    "run_name": "sa5_v3_c500_it50_cont150_ne1024_s42_p100_r1",
+    "unit": "sa5-v3-c500-it50-cont150-p100-r1.service",
+    "config_module": "e2e_sa5_v3_c500_it50_cont150",
+    "config_path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c500_it50_cont150.py",
+    "config_sha256": "953c6999df16f217e6caf9e9ad3d7f52be300329aa71d196c95c275442eb10be",
+    "trainer_path": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+    "trainer_sha256": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "checkpoint_sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+    "conceptual_iteration": 50,
+    "embedded_iteration": 49,
+    "embedded_total_steps": 6400,
+    "optimizer_policy": "RESUME_EMBEDDED_OPTIMIZER",
+    "required_rl_optimizer_state_entries": 38
+  },
+  "identity_contract": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c500_parent_control_from_sa4v3_p50.py",
+    "source_config_sha256": "ee7990c162da118571910d47d3d73c530b63595c0ef14a404703ab57bc2005f1",
+    "behavioral_differences": [
+      "checkpoint",
+      "timesteps"
+    ],
+    "metadata_differences": [
+      "name",
+      "description",
+      "tags",
+      "notes"
+    ]
+  },
+  "curriculum": {
+    "stage": 5,
+    "scene_reset_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "corridor_profile_shares": [
+      {
+        "density": "0S1D",
+        "speed_m_s": [0.70, 0.90],
+        "share": 0.10
+      },
+      {
+        "density": "1S1D",
+        "speed_m_s": [0.70, 0.90],
+        "share": 0.10
+      },
+      {
+        "density": "2S1D",
+        "speed_m_s": [0.50, 0.70],
+        "share": 0.15
+      },
+      {
+        "density": "3S2D",
+        "speed_m_s": [0.25, 0.45],
+        "share": 0.30
+      },
+      {
+        "density": "4S2D",
+        "speed_m_s": [0.25, 0.45],
+        "share": 0.35
+      }
+    ],
+    "low_density_replay_retained": true
+  },
+  "continuation": {
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "additional_iterations": 100,
+    "conceptual_start_iteration": 50,
+    "conceptual_end_iteration": 150,
+    "timesteps": 12800,
+    "save_interval_iterations": 25,
+    "expected_checkpoints": [
+      {
+        "conceptual_iteration": 75,
+        "filename": "checkpoint_3200.pt"
+      },
+      {
+        "conceptual_iteration": 100,
+        "filename": "checkpoint_6400.pt"
+      },
+      {
+        "conceptual_iteration": 125,
+        "filename": "checkpoint_9600.pt"
+      },
+      {
+        "conceptual_iteration": 150,
+        "filename": "checkpoint_12800.pt"
+      }
+    ],
+    "auto_extend": false,
+    "auto_start_sa6": false
+  },
+  "post_training_screen": {
+    "protocol_path": "docs/freeze/sa5_v3_c500_it50_cont150_screen_v1.json",
+    "protocol_file_sha256": "78bcf406d839a20407d71c4e99b3706908c45fb1beb26bbce2aaf0bb0d6ccf99",
+    "protocol_sha256": "0a9f617916d39c5f004a91a1212c33ca06336a8dcf88a51ffa63bbf6e0a1b7f2",
+    "phase_a_cells": 10,
+    "phase_b_cells": 6,
+    "phase_a_candidates": [
+      "c50",
+      "c75",
+      "c100",
+      "c125",
+      "c150"
+    ],
+    "phase_a_scenarios": [
+      "corridor_mixed",
+      "nav_native"
+    ],
+    "phase_b_scenarios": [
+      "narrow_range",
+      "corridor_low_0s1d",
+      "corridor_low_1s1d"
+    ],
+    "top_two_selection_frozen_before_training": true
+  },
+  "forbidden": [
+    "rewrite the prior c500 screen verdict",
+    "change action, observation, reward, scene mix, LiDAR noise, or actuator delay",
+    "train beyond conceptual it150",
+    "auto-launch SA6"
+  ]
+}

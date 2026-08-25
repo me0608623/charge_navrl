@@ -1,0 +1,96 @@
+{
+  "schema": "sa5_v3_provisional_c550_pilot_launch/v1",
+  "created_at": "2026-08-22T20:00:00+08:00",
+  "status": "AUTHORIZED_READY_NOT_RUN",
+  "lineage": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "sa5_parent": "PROVISIONAL_SA5_PARENT_C550",
+    "authorization": "docs/freeze/sa5_v3_provisional_c550_parent_authorization_20260822.json",
+    "authorization_sha256": "867517dbf279f7d1be7105be8e4496d4cb879c406e796a24d7e18b867dd7fa27"
+  },
+  "run": {
+    "run_name": "sa5_v3_provisional_from_sa4v3_c550_ne1024_s42_p50_r1",
+    "unit": "sa5-v3-provisional-c550-p50-r1.service",
+    "config_module": "e2e_sa5_v3_provisional_from_sa4v3_c550_p50",
+    "config_path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_provisional_from_sa4v3_c550_p50.py",
+    "config_sha256": "64e3c5ed66ef1d2f3bb17394b8e3b1ad6e283e83d428a88455fa4089d3c9c520",
+    "trainer_path": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+    "trainer_sha256": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_32000.pt",
+    "checkpoint_sha256": "235a79a41b1d83510bbbb314c965a7ef5ba73e898aec121310a92965092c4ba8",
+    "conceptual_sa4_iteration": 550,
+    "embedded_iteration": 249,
+    "embedded_total_steps": 32000,
+    "optimizer_policy": "RESUME_EMBEDDED_OPTIMIZER",
+    "optimizer_reason": "Action, observation, reward, model, PPO, sensor, and actuator contracts are unchanged; only Stage-5 scene geometry, scene proportions, lineage metadata, and bounded run budget change."
+  },
+  "source_locks": {
+    "sa4_recipe": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa4_k8_obb_speed_density_v3_from_sa3.py",
+      "sha256": "30dee032487d786393030d7e4c436a10226338fa765ba4d72bef396b8c1764d3"
+    },
+    "stage_curriculum": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/sim2real_stage_curriculum_v2.py",
+      "sha256": "f594920f61361db99b943cb82d51d2763bc4670c244d26a4cc82041f03a3f7da"
+    },
+    "speed_density_curriculum": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/sim2real_speed_density_curriculum_v3.py",
+      "sha256": "ec21941030cc02030c40395b61720711bbe74fc0fdbff8de6a4d9443a1ee9fc6"
+    }
+  },
+  "curriculum": {
+    "stage": 5,
+    "scene_reset_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "corridor_profile_shares": [
+      {"density": "0S1D", "speed_m_s": [0.70, 0.90], "share": 0.10},
+      {"density": "1S1D", "speed_m_s": [0.70, 0.90], "share": 0.10},
+      {"density": "2S1D", "speed_m_s": [0.50, 0.70], "share": 0.15},
+      {"density": "3S2D", "speed_m_s": [0.25, 0.45], "share": 0.30},
+      {"density": "4S2D", "speed_m_s": [0.25, 0.45], "share": 0.35}
+    ],
+    "low_density_replay_retained": true,
+    "p100_included": false
+  },
+  "pilot": {
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "iterations": 50,
+    "timesteps": 6400,
+    "save_interval_iterations": 25,
+    "expected_checkpoints": [
+      {"iteration": 25, "filename": "checkpoint_3200.pt"},
+      {"iteration": 50, "filename": "checkpoint_6400.pt"}
+    ],
+    "auto_extend": false,
+    "auto_start_sa6": false
+  },
+  "post_pilot_screen": {
+    "protocol_path": "docs/freeze/sa5_v3_provisional_pilot_screen_v1.json",
+    "protocol_file_sha256": "58fe36cbda50eeacf1953d6423fc5ea2671ac134f758d4b49cb275622eadb7ef",
+    "protocol_sha256": "6600acf058ceb894c9b3cb284efe82471f78f5a0c786443b1beceb30b64994d5",
+    "cells": 15,
+    "candidates": ["parent_c550", "pilot_it25", "pilot_it50"],
+    "scenarios": [
+      "sa5_target_4s2d_mixed_p035",
+      "nav_native",
+      "narrow_range",
+      "p060_0s1d_lateral",
+      "p060_1s1d_lateral"
+    ],
+    "on_pass": "extend selected eligible c550 lineage to total SA5 iteration 300",
+    "on_fail": "run identical 50-iteration SA5 pilot from c500"
+  },
+  "forbidden": [
+    "rewrite SA4 graduation as pass",
+    "extend before the frozen 15-cell screen",
+    "change reward, action, observation, model, PPO, sensor, or actuator contract in the c550 pilot",
+    "launch SA6"
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "schema": "sa5_v3_c50_difficulty_frontier_authorization/v1",
+  "authorized_at": "2026-08-23T17:02:44+08:00",
+  "decision": "HUMAN_AUTHORIZED_DIFFICULTY_FRONTIER_SCREEN_THEN_BOUNDED_CURRICULUM_PILOT",
+  "prior_result": {
+    "path": "logs/gates/sa5_v3_c500_it50_cont150_screen/screen_20260823_r1/SUMMARY.json",
+    "sha256": "d4f201156ef347b1d406a52ee5e395341f312bf3cb01e5ebc33253719a3958e7",
+    "next_action": "HOLD_SA5_AFTER_BOUNDED_CONTINUATION_NO_EXTRA_ITERATIONS"
+  },
+  "lineage": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "c50_status": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "c100_status": "DO_NOT_CONTINUE",
+    "c150_status": "DO_NOT_CONTINUE",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "anchor": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+    "conceptual_iteration": 50,
+    "optimizer_required_for_future_pilot": true
+  },
+  "screen": {
+    "training_allowed": false,
+    "checkpoint_count": 1,
+    "static_obstacle_counts": [1, 2, 4],
+    "dynamic_obstacle_counts": [1, 2],
+    "motion_modes": ["lateral", "longitudinal", "random_2d", "mixed"],
+    "cell_count": 24,
+    "fixed": {
+      "stage": 5,
+      "seed": 818,
+      "speed_rate": 0.7,
+      "actuator_delay_steps": 1,
+      "lidar_noise_mode": "full",
+      "lidar_distractor_eligibility": "valid_return_only",
+      "dynamic_speed_range_m_s": [0.25, 0.45]
+    }
+  },
+  "decision_rules": {
+    "second_dynamic_obstacle": "compare 1D_to_2D at fixed static count and motion mode",
+    "static_density": "compare 1S_to_2S and 2S_to_4S at fixed dynamic count and motion mode",
+    "random_2d": "treat as mode-specific only when random_2d fails while all other modes pass at the same densities",
+    "layout_410": "audit layout before training when failure is isolated to layout 410",
+    "success_rule": "CR reduction is not improvement unless SR also rises; TO must remain <=0.05"
+  },
+  "post_screen": {
+    "pilot_budget_iterations": 50,
+    "pilot_parent": "c50 diagnostic anchor",
+    "resume_rl_optimizer": true,
+    "only_allowed_behavioral_changes": [
+      "scene difficulty order",
+      "scene sampling proportions"
+    ],
+    "locked_unchanged": [
+      "action",
+      "observation",
+      "reward",
+      "network",
+      "lidar noise",
+      "actuator delay"
+    ],
+    "retention": {
+      "target_sr_must_increase": true,
+      "timeout_max": 0.05,
+      "native_max_degradation": 0.02,
+      "native_graduation_cr_max": 0.10,
+      "narrow_must_pass": true,
+      "p060_0s1d_must_pass": true,
+      "p060_1s1d_must_pass": true
+    },
+    "auto_launch_training": false,
+    "auto_launch_sa6": false
+  }
+}

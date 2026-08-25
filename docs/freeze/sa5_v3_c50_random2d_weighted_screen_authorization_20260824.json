@@ -1,0 +1,73 @@
+{
+  "schema": "sa5_v3_c50_random2d_weighted_screen_authorization/v1",
+  "created_at": "2026-08-24T00:58:00+08:00",
+  "status": "AUTHORIZED_EVALUATION_ONLY",
+  "question": "Does the bounded random-2D exposure pilot improve the fixed 4S2D random-2D task without degrading lateral, longitudinal, or mixed retention?",
+  "lineage": {
+    "anchor": "SA5-v3 c50 UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "candidate": "weighted it25 UNSCREENED_DEVELOPMENT_CANDIDATE_NOT_PARENT",
+    "sa5": "HOLD_NOT_GRADUATED",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "evidence": {
+    "d5_analysis": {
+      "path": "logs/gates/sa5_v3_c50_random2d_feasibility_shadow/audit_20260824_r1/ANALYSIS.json",
+      "sha256": "016ae0731b2bdb6fe3c0cbdf60c7b383a2dd18ee14d85a3131f2948a341b647f",
+      "decision": "SHORT_HORIZON_ACTION_OPPORTUNITY_OBSERVED"
+    },
+    "pilot_completion": {
+      "path": "docs/freeze/sa5_v3_c50_random2d_weighted_p25_completion_20260824.json",
+      "sha256": "b580363d653c1c560d52a3ab89a567f95ff6cade0fd777005f834426dfbd7ee7"
+    }
+  },
+  "matrix": {
+    "checkpoints": [
+      "anchor_c50",
+      "weighted_it25"
+    ],
+    "fixed_density": "4S2D",
+    "motion_modes": [
+      "lateral",
+      "longitudinal",
+      "random_2d",
+      "mixed"
+    ],
+    "cell_count": 8,
+    "seed": 818,
+    "num_envs": 64,
+    "steps_per_cell": 2500,
+    "minimum_episodes_per_cell": 1000,
+    "actuator_delay_steps": 1,
+    "speed_rate": 0.7,
+    "lidar_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only"
+  },
+  "acceptance": {
+    "target_motion_mode": "random_2d",
+    "minimum_target_sr_improvement_pp": 5.0,
+    "minimum_target_cr_reduction_pp": 5.0,
+    "minimum_absolute_z": 2.0,
+    "target_to_max": 0.05,
+    "target_to_degradation_max_pp": 2.0,
+    "retention_motion_modes": [
+      "lateral",
+      "longitudinal",
+      "mixed"
+    ],
+    "retention_sr_degradation_max_pp": 2.0,
+    "retention_cr_degradation_max_pp": 2.0,
+    "retention_to_degradation_max_pp": 2.0,
+    "collision_to_timeout_conversion_is_not_improvement": true,
+    "training_behavior_metrics_are_descriptive_not_acceptance_evidence": true
+  },
+  "on_pass": "RUN_NATIVE_NARROW_AND_P060_RETENTION_BEFORE_ANY_EXTENSION",
+  "on_target_failure": "REJECT_WEIGHT_ONLY_HYPOTHESIS_DO_NOT_EXTEND",
+  "on_retention_failure": "REJECT_WEIGHTED_CANDIDATE_DUE_TO_DIRECTION_RETENTION",
+  "forbidden": [
+    "modify any existing frozen protocol or result",
+    "accept or reject from training-iteration metrics",
+    "treat either checkpoint as a graduated SA5 parent",
+    "extend training before this screen completes",
+    "launch SA6"
+  ]
+}

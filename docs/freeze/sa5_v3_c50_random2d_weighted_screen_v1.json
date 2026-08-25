@@ -1,0 +1,168 @@
+{
+  "acceptance": {
+    "minimum_absolute_z": 2.0,
+    "minimum_target_cr_reduction": 0.05,
+    "minimum_target_sr_improvement": 0.05,
+    "required_behavior_metrics": [
+      "stop_command_fraction",
+      "linear_speed_abs_mean_mps",
+      "reverse_command_fraction"
+    ],
+    "retention_cr_degradation_max": 0.02,
+    "retention_motion_modes": [
+      "lateral",
+      "longitudinal",
+      "mixed"
+    ],
+    "retention_sr_degradation_max": 0.02,
+    "retention_to_degradation_max": 0.02,
+    "target_motion_mode": "random_2d",
+    "target_to_degradation_max": 0.02,
+    "target_to_max": 0.05
+  },
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_random2d_weighted_screen_authorization_20260824.json",
+    "sha256": "bca66d805048218c2fed6dbee3adf88ec8393a1eb013e6636f8e807604b9e073"
+  },
+  "decision_rules": {
+    "on_pass": "RUN_NATIVE_NARROW_AND_P060_RETENTION_BEFORE_ANY_EXTENSION",
+    "on_retention_failure": "REJECT_WEIGHTED_CANDIDATE_DUE_TO_DIRECTION_RETENTION",
+    "on_target_failure": "REJECT_WEIGHT_ONLY_HYPOTHESIS_DO_NOT_EXTEND"
+  },
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "dynamic_speed_range_m_s": [
+      0.25,
+      0.45
+    ],
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_episodes": 1000,
+    "num_envs": 64,
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "stage": 5,
+    "steps": 2500
+  },
+  "interpretation_limit": "single evaluator seed evaluation-only screen; a pass only authorizes native, narrow, and P060 retention evaluation",
+  "lineage": {
+    "anchor": {
+      "conceptual_iteration": 50,
+      "expected_sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+      "name": "anchor_c50",
+      "path": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+      "status": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT"
+    },
+    "candidate": {
+      "conceptual_iteration": 25,
+      "expected_sha256": "cbc8a91a43eb0674dcd33118b3436f73f5d611b33860ebab5f7c83e6048f670f",
+      "name": "weighted_it25",
+      "path": "logs/rnn_car/sa5_v3_c50_random2d_weighted_ne1024_s42_p25_r1/checkpoint_3200.pt",
+      "status": "UNSCREENED_DEVELOPMENT_CANDIDATE_NOT_PARENT"
+    },
+    "sa5": "HOLD_NOT_GRADUATED",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "matrix": {
+    "cell_count": 8,
+    "cells": [
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "lateral",
+        "name": "s4_d2_lateral",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "longitudinal",
+        "name": "s4_d2_longitudinal",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "random_2d",
+        "name": "s4_d2_random_2d",
+        "static_obstacles": 4
+      },
+      {
+        "dynamic_obstacles": 2,
+        "motion_mode": "mixed",
+        "name": "s4_d2_mixed",
+        "static_obstacles": 4
+      }
+    ],
+    "checkpoints": [
+      "anchor_c50",
+      "weighted_it25"
+    ],
+    "dynamic_obstacles": 2,
+    "motion_modes": [
+      "lateral",
+      "longitudinal",
+      "random_2d",
+      "mixed"
+    ],
+    "static_obstacles": 4
+  },
+  "question": "does bounded random-2D exposure improve fixed 4S2D random-2D without degrading lateral, longitudinal, or mixed retention",
+  "schema": "sa5_v3_c50_random2d_weighted_screen_protocol/v1",
+  "screen_authorizes_extension": false,
+  "screen_authorizes_graduation": false,
+  "screen_starts_sa6": false,
+  "screen_starts_training": false,
+  "sha256": "2f577588f4f5174096255981c7d943e72f522198b084a12fee88a11836433bc8",
+  "thresholds": {
+    "cr_max": 0.1,
+    "episodes_min": 1000,
+    "sr_min": 0.9,
+    "to_max": 0.05
+  }
+}

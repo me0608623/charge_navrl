@@ -1,0 +1,74 @@
+{
+  "protocol": "sa5_r2_c250_speed0p7_adapt_pilot_v1",
+  "status": "FROZEN_AND_LAUNCHED",
+  "launched_at": "2026-08-20T16:36:53+08:00",
+  "unit": "sa5-r2-c250-speed0p7-adapt-p50-r1.service",
+  "systemd_invocation_id": "0386bbb6d2274a629e4ccb205afe71c6",
+  "purpose": "Test whether the accepted SA5-R2 c250 policy can learn under the deployed fixed speed_rate=0.7 semantics.",
+  "run_name": "sa5_r2_c250_speed0p7_adapt_ne1024_s42_p50_r1",
+  "parent": {
+    "conceptual_iteration": 250,
+    "checkpoint": "/home/aa/IsaacLab/logs/rnn_car/sa5_r2_sealed_ldmix_from_sa4r3_it125_actd12_ne1024_s42_p300_r1/checkpoint_32000.pt",
+    "sha256": "df14c45d8dd27b0e327f9447a9a613bf62eaa850af542b474aad682dcd937a4a",
+    "resume_optimizer": true
+  },
+  "intervention": {
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "action_limits_scaled": [
+      "max_linear_velocity",
+      "max_linear_accel",
+      "max_angular_vel",
+      "max_angular_accel"
+    ],
+    "observation_channels_scaled_before_normalization": [
+      "ego_0_2",
+      "goal_4_5",
+      "action_history_79_82"
+    ],
+    "lidar_scaled": false,
+    "deployment_speed_scale": 1.0
+  },
+  "fixed": {
+    "stage": 5,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "network": "K8 end-to-end CNN policy inherited unchanged",
+    "noise": "full VLP-16 valid_return_only inherited unchanged",
+    "actuator_delay_steps": [1, 2],
+    "actuator_velocity_scale": [1.0, 1.0],
+    "actuator_motor_lag": 1.0,
+    "reward_scene_and_density_mix": "inherited unchanged from SA5-R2"
+  },
+  "budget": {
+    "iterations": 50,
+    "timesteps": 6400,
+    "save_interval": 25,
+    "checkpoints": [
+      "checkpoint_3200.pt",
+      "checkpoint_6400.pt"
+    ]
+  },
+  "natural_rate_1_control": {
+    "checkpoint": "/home/aa/IsaacLab/logs/rnn_car/sa5_r2_sealed_ldmix_from_sa4r3_it125_actd12_ne1024_s42_p300_r1/checkpoint_38400.pt",
+    "sha256": "97a4ccdf929a0fcab9adff5d80ae7a1c7475067e3049f11571e04fd164a524db",
+    "interpretation": "Same c250 lineage continued for 50 iterations at historical rate=1.0. It is contextual control evidence; no rerun is authorized."
+  },
+  "stopping_and_evidence": {
+    "stop_on": [
+      "NaN or Inf",
+      "OOM or traceback",
+      "optimizer load failure",
+      "vehicle speed-rate runtime contract mismatch"
+    ],
+    "required_post_training_validation": [
+      "lateral",
+      "longitudinal",
+      "native",
+      "narrow"
+    ],
+    "boundary": "Single training seed learnability pilot; it does not itself graduate SA5 or authorize SA6.",
+    "auto_advance_sa6": false
+  }
+}

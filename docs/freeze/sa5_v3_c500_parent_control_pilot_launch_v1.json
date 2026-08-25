@@ -1,0 +1,124 @@
+{
+  "schema": "sa5_v3_c500_parent_control_pilot_launch/v1",
+  "created_at": "2026-08-23T02:00:00+08:00",
+  "status": "AUTHORIZED_READY_NOT_RUN",
+  "lineage": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "failed_provisional_parent": "PROVISIONAL_SA5_PARENT_C550",
+    "control_parent": "PROVISIONAL_SA5_CONTROL_PARENT_C500",
+    "authorization": "docs/freeze/sa5_v3_c500_parent_control_authorization_20260823.json",
+    "authorization_sha256": "87201f68f7c9c082f7cfd2125bf0b4fda9731f7e2b60ad59439b14609560d3be"
+  },
+  "trigger": {
+    "summary": "logs/gates/sa5_v3_provisional_pilot_screen/screen_20260822_r1/SUMMARY.json",
+    "summary_sha256": "4cd82cc3912b7ff70a053ca9203594899d5871e3f72fa65cbbecd6065069f744",
+    "extension_authorized": false,
+    "next_action": "RUN_IDENTICAL_C500_PARENT_CONTROL_P50"
+  },
+  "run": {
+    "run_name": "sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1",
+    "unit": "sa5-v3-c500-parent-control-p50-r1.service",
+    "config_module": "e2e_sa5_v3_c500_parent_control_from_sa4v3_p50",
+    "config_path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c500_parent_control_from_sa4v3_p50.py",
+    "config_sha256": "ee7990c162da118571910d47d3d73c530b63595c0ef14a404703ab57bc2005f1",
+    "trainer_path": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+    "trainer_sha256": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_25600.pt",
+    "checkpoint_sha256": "e27677349eba8f37e2e6937f7d92400a1550e58d89d4430e556932697e9cb9f4",
+    "conceptual_sa4_iteration": 500,
+    "embedded_iteration": 199,
+    "embedded_total_steps": 25600,
+    "optimizer_policy": "RESUME_EMBEDDED_OPTIMIZER"
+  },
+  "identity_contract": {
+    "source_c550_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_provisional_from_sa4v3_c550_p50.py",
+    "source_c550_config_sha256": "64e3c5ed66ef1d2f3bb17394b8e3b1ad6e283e83d428a88455fa4089d3c9c520",
+    "behavioral_differences": [
+      "checkpoint"
+    ],
+    "metadata_differences": [
+      "name",
+      "description",
+      "tags",
+      "notes"
+    ]
+  },
+  "curriculum": {
+    "stage": 5,
+    "scene_reset_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "corridor_profile_shares": [
+      {
+        "density": "0S1D",
+        "speed_m_s": [0.70, 0.90],
+        "share": 0.10
+      },
+      {
+        "density": "1S1D",
+        "speed_m_s": [0.70, 0.90],
+        "share": 0.10
+      },
+      {
+        "density": "2S1D",
+        "speed_m_s": [0.50, 0.70],
+        "share": 0.15
+      },
+      {
+        "density": "3S2D",
+        "speed_m_s": [0.25, 0.45],
+        "share": 0.30
+      },
+      {
+        "density": "4S2D",
+        "speed_m_s": [0.25, 0.45],
+        "share": 0.35
+      }
+    ],
+    "low_density_replay_retained": true,
+    "p100_included": false
+  },
+  "pilot": {
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "iterations": 50,
+    "timesteps": 6400,
+    "save_interval_iterations": 25,
+    "expected_checkpoints": [
+      {
+        "iteration": 25,
+        "filename": "checkpoint_3200.pt"
+      },
+      {
+        "iteration": 50,
+        "filename": "checkpoint_6400.pt"
+      }
+    ],
+    "auto_extend": false,
+    "auto_start_sa6": false
+  },
+  "post_pilot_screen": {
+    "protocol_path": "docs/freeze/sa5_v3_c500_parent_control_screen_v1.json",
+    "protocol_file_sha256": "f5b3bdba16934d711581f91247325b5f7d44f8c38317f2a21bc117a1b2ebad8b",
+    "protocol_sha256": "880406bd0184507c4686a70832afcd873da01a88d24bf1b38c93d99a29dd8b54",
+    "cells": 15,
+    "candidates": [
+      "parent_c500",
+      "control_it25",
+      "control_it50"
+    ],
+    "on_pass": "extend selected eligible c500 lineage to total SA5 iteration 300",
+    "on_fail": "hold SA5 without reward changes or additional iterations"
+  },
+  "forbidden": [
+    "rewrite SA4 graduation as pass",
+    "change any behavioral field other than parent checkpoint",
+    "extend before the frozen 15-cell screen",
+    "launch SA6"
+  ]
+}

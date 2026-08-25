@@ -1,0 +1,15 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_cont25_screen_restart/v1",
+  "status": "AUTHORIZED_PROTOCOL_IDENTICAL_FULL_RERUN_AFTER_SOURCE_DRIFT",
+  "reason": "r1 failed closed after the evaluator source changed during its first cell",
+  "r1_evidence": "logs/gates/sa5_v3_c50_stage3_b3_cont25_screen/screen_20260824_r1/SOURCE_DRIFT_INVALIDATION.json",
+  "r2_output_root": "logs/gates/sa5_v3_c50_stage3_b3_cont25_screen/screen_20260824_r2",
+  "protocol_sha256": "db02b096e1920ab0eb5386c237dabbbc520599c31c38e9ed08ef0d6349e02836",
+  "evaluator_sha256_at_restart": "430ac227711fbb2d6b86125047855c5ba77905cd674f3e9151dfdfb7b835845d",
+  "reuse_completed_cells": false,
+  "cell_count": 24,
+  "starts_training": false,
+  "starts_phase_b": false,
+  "selects_parent": false,
+  "starts_sa6": false
+}

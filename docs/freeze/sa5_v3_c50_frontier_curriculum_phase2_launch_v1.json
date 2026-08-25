@@ -1,0 +1,69 @@
+{
+  "schema": "sa5_v3_c50_frontier_curriculum_phase2_launch/v1",
+  "created_at": "2026-08-23T20:05:00+08:00",
+  "status": "READY_TO_LAUNCH",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "phase_1_result": "docs/freeze/sa5_v3_c50_frontier_curriculum_phase1_complete_v1.json",
+    "phase_1_result_sha256": "13c74e682a5958181d63e23e2261f6747aaf13c29c4f351a22ef554d3e7af651",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_frontier_curriculum_phase2_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-frontier-curriculum-phase2-p25-r1.service",
+    "config_module": "e2e_sa5_v3_c50_frontier_curriculum_phase2_p25",
+    "config_path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_frontier_curriculum_phase2_p25.py",
+    "config_sha256": "5fd82470f4c8a1956ba2256e37f33f77848801790c468d855d2224bb08de60a9",
+    "trainer_path": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+    "trainer_sha256": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_frontier_curriculum_phase1_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "c120ef3c892030019af377f2932b1ddf6c8253071b7c98513c3af7f28cd7cb9f",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "optimizer_policy": "RESUME_EMBEDDED_OPTIMIZER"
+  },
+  "phase": {
+    "conceptual_start_iteration": 25,
+    "conceptual_end_iteration": 50,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "timesteps": 3200,
+    "save_interval_iterations": 25,
+    "expected_checkpoint": "checkpoint_3200.pt",
+    "outer_scene_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "curriculum_order": "retain P080/P060 and P035 1D replay; introduce P035 1S2D -> 2S2D -> 4S2D",
+    "auto_extend": false,
+    "sa6_auto_start": false
+  },
+  "verification": {
+    "new_contract_tests": "25 passed",
+    "related_density_geometry_tests": "74 passed",
+    "test_file_sha256": "d69e670856796ce86b906b1d6759522045b49ee528048e1be6ca3b421781a828",
+    "gpu_smoke_run": "sa5_v3_c50_frontier_curriculum_phase2_smoke_ne64_s42_p1_r1",
+    "gpu_smoke_metrics_sha256": "525cbe00f6d0271f786722871a5c2655f234ef7029b220144797795825b2f3e4",
+    "gpu_smoke_optimizer_loaded": true,
+    "gpu_smoke_contract_banner_match": true,
+    "gpu_smoke_strict_errors": 0,
+    "preflight": {
+      "no_trainer_or_evaluator": true,
+      "gpu_only_desktop_daemon": true,
+      "auto_advance_halted": true,
+      "target_output_absent": true
+    }
+  },
+  "forbidden": [
+    "treat phase 2 training metrics as Gate evidence",
+    "change non-curriculum behavior",
+    "auto-extend beyond conceptual it50",
+    "auto-launch SA6"
+  ]
+}

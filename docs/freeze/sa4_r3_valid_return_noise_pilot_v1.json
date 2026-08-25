@@ -1,0 +1,57 @@
+{
+  "schema": "sa4_r3_valid_return_noise_pilot/v1",
+  "status": "FROZEN_BEFORE_TRAINING",
+  "authorization": {
+    "d9_replication_manifest": "/home/aa/IsaacLab/logs/gates/sa4_d9/noise_closed_loop_ab_replication_s515_s616_r1_20260817/suite_manifest.json",
+    "d9_replication_manifest_sha256": "af8e69316f93402dc08764d96749feac7a556a72b44deb975625de74842ba618",
+    "qualifying_seeds": 3,
+    "seeds_total": 3
+  },
+  "run": {
+    "run_name": "sa4_r3_validreturn_from_sa3r1_c100_ne1024_s42_p50_r1",
+    "experiment_config": "e2e_sa4_r3_valid_return_noise_from_sa3_r1_c100",
+    "stage": 4,
+    "num_envs": 1024,
+    "training_seed": 42,
+    "rollout_length": 128,
+    "iterations": 50,
+    "timesteps": 6400,
+    "save_interval": 25,
+    "checkpoint_steps": [3200, 6400],
+    "auto_extend": false,
+    "auto_launch_sa5": false
+  },
+  "parent": {
+    "path": "/home/aa/IsaacLab/logs/rnn_car/sa3_sim2real_v2_from_sa2r1_c100_ne1024_s42_p300_r1/checkpoint_12800.pt",
+    "sha256": "e7da9aa0771252966f4d3cc7081adcbfdb35d9eaf828432ea8cd2fb50e453f88",
+    "resume_optimizer": false
+  },
+  "sole_behavioral_difference_from_sa4_r2": {
+    "field": "lidar_distractor_eligibility",
+    "sa4_r2": "all_rays",
+    "sa4_r3": "valid_return_only"
+  },
+  "fixed_behavior": {
+    "future_occupancy_weight": 0.15,
+    "lidar_frame_stack": 8,
+    "vlp16_noise_mode": "full",
+    "actuator_delay_range_steps": [0, 2],
+    "corridor_motion_weights": [0.5, 0.5, 0.0]
+  },
+  "source_fingerprint": {
+    "config": "3befa7cbbe9414c56137a554cb0d729e5f55098b02c51ce06a3b9abb71d48ab2",
+    "trainer": "45ee63bb0a1d1c845f7873cd9e08017ac2d1d02505f8e9f964388ffb67e16c11",
+    "env_overrides": "82ed5f133f99614de70a212ef186b24122fff6d0cd28d5847e08d3423f74a39c",
+    "lidar_observation": "27f976bdb0a51100f9c749aaf4010a995fadfa3ce2319d4b10b5d2586ae87e7f"
+  },
+  "post_training_screen": {
+    "checkpoints": ["checkpoint_3200.pt", "checkpoint_6400.pt"],
+    "scenarios": ["corridor_lateral", "corridor_longitudinal", "native"],
+    "lateral_gate": {
+      "sr_min": 0.90,
+      "cr_max": 0.10,
+      "to_max": 0.05
+    },
+    "retention_requirement": "longitudinal and native must not regress before extension or SA5 is considered"
+  }
+}

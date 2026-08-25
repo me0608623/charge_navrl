@@ -1,0 +1,156 @@
+{
+  "acceptance": {
+    "all_absolute_retention_gates_required": true,
+    "native_cr_max": 0.1,
+    "retention_max_cr_increase": 0.02,
+    "retention_max_sr_decrease": 0.02,
+    "retention_max_to_increase": 0.02,
+    "target_absolute_gate_is_descriptive": true,
+    "target_min_cr_improvement": 0.005,
+    "target_min_pooled_se_z": 2.0
+  },
+  "authorization": {
+    "decision": "HUMAN_AUTHORIZED_BOUNDED_CONTINUATION_C500_IT50_TO_IT150",
+    "path": "docs/freeze/sa5_v3_c500_it50_cont150_authorization_20260823.json",
+    "sha256": "837227255310974afa7fd855c6f81c75119a632b57ece32b032c5a6473781709"
+  },
+  "candidates": [
+    {
+      "conceptual_iteration": 50,
+      "expected_sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+      "name": "c50",
+      "path": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt"
+    },
+    {
+      "conceptual_iteration": 75,
+      "expected_sha256": null,
+      "name": "c75",
+      "path": "logs/rnn_car/sa5_v3_c500_it50_cont150_ne1024_s42_p100_r1/checkpoint_3200.pt"
+    },
+    {
+      "conceptual_iteration": 100,
+      "expected_sha256": null,
+      "name": "c100",
+      "path": "logs/rnn_car/sa5_v3_c500_it50_cont150_ne1024_s42_p100_r1/checkpoint_6400.pt"
+    },
+    {
+      "conceptual_iteration": 125,
+      "expected_sha256": null,
+      "name": "c125",
+      "path": "logs/rnn_car/sa5_v3_c500_it50_cont150_ne1024_s42_p100_r1/checkpoint_9600.pt"
+    },
+    {
+      "conceptual_iteration": 150,
+      "expected_sha256": null,
+      "name": "c150",
+      "path": "logs/rnn_car/sa5_v3_c500_it50_cont150_ne1024_s42_p100_r1/checkpoint_12800.pt"
+    }
+  ],
+  "decision": {
+    "on_fail": "hold SA5 after bounded continuation; no extra iterations without new authorization",
+    "on_pass": "accept selected c75-c150 checkpoint as provisional SA5 parent; keep SA6 on hold",
+    "screen_starts_sa6": false,
+    "screen_starts_training": false
+  },
+  "evidence_boundary": "single training seed and single evaluator seed developmental screen; it cannot rewrite SA4 graduation or authorize SA6",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "num_envs": 64,
+    "p060": "0S1D/1S1D P060 lateral",
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "steps_by_scenario": {
+      "corridor_low_0s1d": 2500,
+      "corridor_low_1s1d": 2500,
+      "corridor_mixed": 2500,
+      "narrow_range": 1200,
+      "nav_native": 1200
+    },
+    "target": "4S2D P035 mixed"
+  },
+  "historical_c50_retention_baseline": {
+    "path": "logs/gates/sa5_v3_c500_parent_control_screen/screen_20260823_r1/SUMMARY.json",
+    "sha256": "35417943f31191496b56a24b5d0ba939d3e40ca754ed597d6643ced40f8a79e7"
+  },
+  "lineage": {
+    "sa4": "SA4_NOT_GRADUATED",
+    "sa6": "HOLD_NOT_AUTHORIZED",
+    "source": "PROVISIONAL_SA5_C500_IT50_CONTINUATION_SOURCE"
+  },
+  "phases": {
+    "phase_a": {
+      "cells": 10,
+      "scenarios": [
+        "corridor_mixed",
+        "nav_native"
+      ]
+    },
+    "phase_b": {
+      "cells": 6,
+      "scenarios": [
+        "narrow_range",
+        "corridor_low_0s1d",
+        "corridor_low_1s1d"
+      ],
+      "selection_count": 2
+    }
+  },
+  "ranking": {
+    "formula": "minimize max(target_CR/c50_target_CR, native_CR/0.10), then mean normalized ratio, target CR, native CR, then prefer later conceptual iteration only on an exact tie",
+    "top_k": 2
+  },
+  "run_name": "sa5_v3_c500_it50_cont150_ne1024_s42_p100_r1",
+  "schema": "sa5_v3_c500_it50_cont150_screen_protocol/v1",
+  "sha256": "0a9f617916d39c5f004a91a1212c33ca06336a8dcf88a51ffa63bbf6e0a1b7f2",
+  "stage": 5
+}

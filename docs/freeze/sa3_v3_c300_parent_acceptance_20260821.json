@@ -1,0 +1,63 @@
+{
+  "schema": "sa3_v3_parent_acceptance/v1",
+  "accepted_at": "2026-08-21T22:46:30+08:00",
+  "decision": "ACCEPT_C300_AS_SA4_V3_PARENT",
+  "lineage": "sim2real_speed_density_v3",
+  "curriculum_contract": {
+    "path": "docs/freeze/sim2real_speed_density_curriculum_v3_20260821.json",
+    "sha256": "a2d40f443fb151fca1b0e1f178e5adad600fddb9f90eacd128d6a8b4d363a24a"
+  },
+  "accepted_checkpoint": {
+    "name": "c300",
+    "conceptual_iteration": 300,
+    "path": "logs/rnn_car/sa3_speed_density_v3_from_sa2r1_c100_ne1024_s42_p300_r1/checkpoint_38400.pt",
+    "sha256": "6888d4c4759413ddc81f1e1eb13f6fb02244823ea1977a97705f4ee2e5c79122",
+    "training_seed": 42
+  },
+  "selection_evidence": {
+    "p060_screen": {
+      "summary": "logs/gates/sa3_v3_p060_checkpoint_screen/screen_20260821_r1/SUMMARY.json",
+      "summary_sha256": "2b95ab43c93aa141c796999966865e1eedf924fb98fd6b6c14797dc581f80e23",
+      "protocol_sha256": "b127a7cd704001c01a5a50f9e0ce3e6ef7e6f8c049c8c3b2aacb905ab5095067",
+      "status": "COMPLETE_VALID_SINGLE_SEED_DEVELOPMENT_SCREEN",
+      "rank": 1,
+      "worst_fixed_cell_cr": 0.07731958762886598,
+      "promoted_for_retention": true
+    },
+    "retention_screen": {
+      "summary": "logs/gates/sa3_v3_retention_screen/screen_20260821_r1/SUMMARY.json",
+      "summary_sha256": "82b2b99e7ddf305500ae94f6717eb289a3b77d8dcf551bd1fdcea94ba4fcd79a",
+      "protocol_sha256": "5945e50dc634ddc8138b7cdaaeaacc9470aad650606bcb1a47a43da888008720",
+      "status": "COMPLETE_VALID_SINGLE_SEED_DEVELOPMENT_RETENTION_SCREEN",
+      "source_fingerprint_stable": true,
+      "all_candidates_retention_pass": true,
+      "c300_retention_pass": true,
+      "recommended_parent_candidate": "c300"
+    }
+  },
+  "sa4_config": {
+    "module": "e2e_sa4_k8_obb_speed_density_v3_from_sa3",
+    "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa4_k8_obb_speed_density_v3_from_sa3.py",
+    "initial_stage": 4,
+    "fixed_stage": true,
+    "training_iterations": 300,
+    "rollout_length": 128,
+    "timesteps": 38400,
+    "save_interval_iterations": 50,
+    "resume_optimizer": false,
+    "config_ready": true,
+    "training_started": false
+  },
+  "evidence_boundary": "single training seed and single evaluator seed developmental acceptance; sufficient for the fail-closed engineering lineage decision, not a multi-seed superiority claim",
+  "authorized": [
+    "replace the SA4-v3 pending-parent sentinel with this exact checkpoint",
+    "import and test the locked SA4-v3 config",
+    "perform a separate explicit launch procedure after preflight"
+  ],
+  "not_authorized": [
+    "substitute another checkpoint without a new acceptance record",
+    "resume the SA3 optimizer across the SA3-to-SA4 stage boundary",
+    "claim c300 is universally superior across training or evaluator seeds",
+    "auto-launch SA4 as a side effect of this acceptance record"
+  ]
+}

@@ -1,0 +1,70 @@
+{
+  "schema": "sa5_v3_c50_frontier_curriculum_phase1_launch/v1",
+  "created_at": "2026-08-23T19:45:00+08:00",
+  "status": "READY_TO_LAUNCH",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "anchor": "UNGRADUATED_DIAGNOSTIC_ANCHOR_NOT_FORMAL_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED",
+    "authorization": "docs/freeze/sa5_v3_c50_frontier_curriculum_p50_authorization_20260823.json",
+    "authorization_sha256": "9ddfbf16a0492e4ec1dc528b75b69607cb9b98c53c9b0ab4caa903de6af3ac54"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_frontier_curriculum_phase1_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-frontier-curriculum-phase1-p25-r1.service",
+    "config_module": "e2e_sa5_v3_c50_frontier_curriculum_phase1_p25",
+    "config_path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_frontier_curriculum_phase1_p25.py",
+    "config_sha256": "181bcb01354f352df28cf49a5c146a69d6e0ebd7c704d509eeddaf47e7427bcc",
+    "trainer_path": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+    "trainer_sha256": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "4bc1744bb134688179ad2dfdc858bec245194d205ce61570f94bd2a0d726a99c",
+    "embedded_iteration": 49,
+    "embedded_total_steps": 6400,
+    "rl_optimizer_state_entries": 38,
+    "optimizer_policy": "RESUME_EMBEDDED_OPTIMIZER"
+  },
+  "phase": {
+    "conceptual_start_iteration": 0,
+    "conceptual_end_iteration": 25,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "timesteps": 3200,
+    "save_interval_iterations": 25,
+    "expected_checkpoint": "checkpoint_3200.pt",
+    "outer_scene_shares": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.10
+    },
+    "curriculum_order": "retain low-density speed replay; train P035 1S1D -> 2S1D -> 4S1D; introduce P035 1S2D",
+    "phase_2_auto_start": false,
+    "sa6_auto_start": false
+  },
+  "verification": {
+    "targeted_tests": "88 passed",
+    "test_file_sha256": "0e9b3d100e5302777fa24e2fdfae3985c9dad72f0914d7c261dacae987811666",
+    "gpu_smoke_run": "sa5_v3_c50_frontier_curriculum_phase1_smoke_ne64_s42_p1_r2",
+    "gpu_smoke_metrics_sha256": "7d39399921059f14a98e3174036322f2fec6606e60b3290343ff981e4cfe266a",
+    "gpu_smoke_iterations": 1,
+    "gpu_smoke_optimizer_loaded": true,
+    "gpu_smoke_contract_banner_match": true,
+    "gpu_smoke_strict_errors": 0,
+    "preflight": {
+      "no_trainer_or_evaluator": true,
+      "gpu_only_desktop_daemon": true,
+      "expected_run_empty": true,
+      "auto_advance_halted": true,
+      "target_output_absent": true
+    }
+  },
+  "forbidden": [
+    "treat the anchor as graduated",
+    "change reward, network, action, observation, LiDAR, delay, or speed contract",
+    "continue to phase 2 without validating phase 1 completion and freezing its checkpoint hash",
+    "auto-launch SA6"
+  ]
+}

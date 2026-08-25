@@ -1,0 +1,304 @@
+{
+  "candidates": [
+    {
+      "conceptual_iteration": 300,
+      "name": "c300",
+      "path": "logs/rnn_car/sa4_speed_density_v3_from_sa3r1_c300_ne1024_s42_p300_r1/checkpoint_38400.pt",
+      "sha256": "ccb95b1667e0f3f9330ffaed62ea8ad728221d270bf9b8a30b6135f421998e73"
+    },
+    {
+      "conceptual_iteration": 350,
+      "name": "c350",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_6400.pt",
+      "sha256": "359afe7b5b313f578e7ea80c92ee33615181d7738598c9086b8cc0fce859c65e"
+    },
+    {
+      "conceptual_iteration": 400,
+      "name": "c400",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_12800.pt",
+      "sha256": "cdd6386e9a71940168c57bd2862e98d117b41a5d7724759b88e2d84f6a574ffb"
+    },
+    {
+      "conceptual_iteration": 450,
+      "name": "c450",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_19200.pt",
+      "sha256": "08ac91df310cafc0828a6d683e39ad4d97f3dfe665b202e64048f4a0685bcbca"
+    },
+    {
+      "conceptual_iteration": 500,
+      "name": "c500",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_25600.pt",
+      "sha256": "e27677349eba8f37e2e6937f7d92400a1550e58d89d4430e556932697e9cb9f4"
+    },
+    {
+      "conceptual_iteration": 550,
+      "name": "c550",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_32000.pt",
+      "sha256": "235a79a41b1d83510bbbb314c965a7ef5ba73e898aec121310a92965092c4ba8"
+    },
+    {
+      "conceptual_iteration": 600,
+      "name": "c600",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_38400.pt",
+      "sha256": "7c849d0b0e33846d228ae7f2914dd8a868b6beb590d65b8e4b528c0e32e820cc"
+    }
+  ],
+  "cells": [
+    {
+      "cell": "c300_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c300_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c300_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c300",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c350_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c350",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c350_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c350",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c350_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c350",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c400_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c400",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c400_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c400",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c400_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c400",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c450_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c450",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c450_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c450",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c450_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c450",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c500_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c500",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c500_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c500",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c500_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c500",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c550_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c550",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c550_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c550",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c550_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c550",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    },
+    {
+      "cell": "c600_0s1d_p080_lateral_s070",
+      "checkpoint_name": "c600",
+      "density": "0S1D",
+      "fixed_cell": "0S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_0s1d"
+    },
+    {
+      "cell": "c600_1s1d_p080_lateral_s070",
+      "checkpoint_name": "c600",
+      "density": "1S1D",
+      "fixed_cell": "1S1D_P080",
+      "pedestrian_speed_label": "P080",
+      "scenario": "corridor_low_1s1d"
+    },
+    {
+      "cell": "c600_2s1d_p060_lateral_s070",
+      "checkpoint_name": "c600",
+      "density": "2S1D",
+      "fixed_cell": "2S1D_P060",
+      "pedestrian_speed_label": "P060",
+      "scenario": "corridor_stage4_2s1d"
+    }
+  ],
+  "continuation_authorization": {
+    "path": "docs/freeze/sa4_v3_cont300_from_c300_v1.json",
+    "sha256": "acdc9b1c4f775b28d80c7a376e3cfdfbe190ab60675c2ab4b4aadfea224bfe99"
+  },
+  "evidence_boundary": "single training seed and single evaluator seed developmental Gate comparison; ranking does not itself accept an SA5 parent",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "fixed_cells": [
+      {
+        "density": "0S1D",
+        "dynamic_obstacles": 1,
+        "label": "0S1D_P080",
+        "pedestrian_speed_label": "P080",
+        "pedestrian_speed_range_m_s": [
+          0.7,
+          0.9
+        ],
+        "scenario": "corridor_low_0s1d",
+        "static_obstacles": 0
+      },
+      {
+        "density": "1S1D",
+        "dynamic_obstacles": 1,
+        "label": "1S1D_P080",
+        "pedestrian_speed_label": "P080",
+        "pedestrian_speed_range_m_s": [
+          0.7,
+          0.9
+        ],
+        "scenario": "corridor_low_1s1d",
+        "static_obstacles": 1
+      },
+      {
+        "density": "2S1D",
+        "dynamic_obstacles": 1,
+        "label": "2S1D_P060",
+        "pedestrian_speed_label": "P060",
+        "pedestrian_speed_range_m_s": [
+          0.5,
+          0.7
+        ],
+        "scenario": "corridor_stage4_2s1d",
+        "static_obstacles": 2
+      }
+    ],
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "motion_mode": "lateral",
+    "num_envs": 64,
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "stage": 4,
+    "steps": 2500
+  },
+  "forbidden": [
+    "change any source Gate condition or threshold",
+    "continue after a missing, duplicate, invalid, or drifted cell",
+    "auto-run retention or training",
+    "auto-accept a parent or launch SA5"
+  ],
+  "purpose": "compare conceptual c300-c600 on the unchanged three-cell SA4-v3 lateral Gate after exact optimizer continuation",
+  "ranking": {
+    "descriptive_tie_margin": 0.005,
+    "hard_gate": "all three fixed cells must meet SR/CR/TO and n",
+    "primary": "minimize worst CR across the three fixed cells",
+    "promotion": "top two valid checkpoints proceed to retention",
+    "secondary": "minimize mean CR across the three fixed cells",
+    "tertiary": "prefer later checkpoint only after exact score ties"
+  },
+  "schema": "sa4_v3_c300_c600_gate_protocol/v1",
+  "sha256": "14cd30ca27a8e986bba183db361c9bc75ff66d81b4ef89023b07dc2a08e2e285",
+  "source_gate": {
+    "file_sha256": "9031081d2d84d7ebb855a87f4d225d1742a7a85c44928137f9ab2987fafa41ef",
+    "path": "docs/freeze/sa4_v3_checkpoint_screen_v1.json",
+    "protocol_sha256": "d2be765424df30a84246186c7f3ad2777dc93e1d04906adbc2c2fa76ef41a8ee"
+  },
+  "thresholds": {
+    "cr_max": 0.1,
+    "episodes_min": 1000,
+    "sr_min": 0.9,
+    "to_max": 0.05
+  }
+}
+

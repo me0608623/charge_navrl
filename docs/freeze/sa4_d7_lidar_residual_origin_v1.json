@@ -1,0 +1,102 @@
+{
+  "geometry_spec": {
+    "action_chunk_size": 64,
+    "contact_distance_m": 0.7,
+    "control_dt_s": 0.2,
+    "delay_steps": 1,
+    "dynamic_return_margin_m": 0.15,
+    "dynamic_surface_clearance_m": 0.1,
+    "horizon_s": 2.4,
+    "lidar_body_radius_m": 0.35,
+    "lidar_hole_threshold_m": 0.4,
+    "lidar_max_range_m": 20.0,
+    "max_angular_accel_rad_s2": 3.0,
+    "max_angular_velocity_rad_s": 1.2,
+    "max_linear_accel_mps2": 0.5,
+    "max_linear_velocity_mps": 1.0,
+    "num_action_bins": 19,
+    "release_confirm_steps": 2,
+    "release_distance_m": 3.25,
+    "reverse_velocity_scale": 0.2,
+    "robot_half_length_m": 0.35,
+    "robot_half_width_m": 0.3,
+    "robot_obb_offset_x_m": -0.128,
+    "samples": 12,
+    "static_surface_clearance_m": 0.1,
+    "trigger_confirm_steps": 2,
+    "trigger_distance_m": 3.0,
+    "trigger_ttc_s": 2.0
+  },
+  "interpretation_limits": [
+    "raw_geometry_unmatched does not identify a USD prim by itself",
+    "a residual point in a blocked frame is not necessarily the unique binding point",
+    "privileged source labels inherit D6's 0.20m geometry tolerance",
+    "single checkpoint and evaluator seed are diagnostic evidence only"
+  ],
+  "mechanism_priority": [
+    "distractor_winner",
+    "dynamic_attribution_miss",
+    "bin_center_reconstruction",
+    "range_corruption",
+    "raw_dynamic_unmatched",
+    "raw_geometry_unmatched",
+    "unresolved"
+  ],
+  "mode": "lidar_residual_origin",
+  "schema": "sa4_d7_lidar_residual_origin/v1",
+  "scope": "single-checkpoint baseline-only shadow; no action modification, training, reward change, scene change, or SA5 launch",
+  "sha256": "8ddd026a82f9e74404f38ac1c213a598c4ee3d3490242775d50dbceb9f2b48ee",
+  "source_question": [
+    "did a mixed-pixel distractor ray win the final 5-degree bin",
+    "at which realized stage did the bin most recently become residual",
+    "does the actual winning 1-degree ray match known geometry while the 5-degree center does not",
+    "does actual-angle dynamic attribution disagree with center-angle attribution",
+    "is the original physical ray hit itself absent from the privileged geometry model"
+  ],
+  "source_spec": {
+    "clearances_m": [
+      0.0,
+      0.01,
+      0.02,
+      0.05,
+      0.08,
+      0.1,
+      0.15
+    ],
+    "control_dt_s": 0.2,
+    "horizons_s": [
+      0.4,
+      0.8,
+      1.2,
+      1.6,
+      2.0,
+      2.4
+    ],
+    "near_dynamic_distance_m": 3.0,
+    "source_ambiguity_tolerance_m": 0.05,
+    "source_clearance_m": 0.1,
+    "source_horizon_s": 2.4,
+    "source_match_tolerance_m": 0.2
+  },
+  "trace_order": [
+    "raw",
+    "bias",
+    "sigma",
+    "dropout",
+    "final"
+  ],
+  "trace_rule": "record tensors already realized by wd_like_sweep_72; never draw additional random numbers; select the trace whose normalized 72-bin sweep is bitwise identical to policy obs columns [6:78]",
+  "trace_spec": {
+    "exact_policy_trace_match": true,
+    "expected_distractor_rate": 0.002515,
+    "expected_hole_rate": 0.194859,
+    "expected_num_bins": 72,
+    "expected_num_rays": 5760,
+    "expected_r_max_m": 20.0,
+    "expected_r_robot_m": 0.35,
+    "expected_sigma_m": 0.008672,
+    "require_block_dropout_prob": 0.0,
+    "require_human_dynamic_dropout": false,
+    "require_per_ring_bias": true
+  }
+}

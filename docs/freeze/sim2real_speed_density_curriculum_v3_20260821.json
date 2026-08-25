@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-08-21",
+  "status": "FROZEN_SA3_READY_NOT_RUN_SA4_FAIL_CLOSED",
+  "lineage": "sim2real_speed_density_v3",
+  "evidence": {
+    "phase1_screen": "logs/gates/sa5_pedestrian_speed_screen/screen_20260821_r1",
+    "low_density_cross_screen": "logs/gates/sa5_low_density_speed_ratio/screen_20260821_r1",
+    "low_density_protocol_sha256": "ddc37d497f55cf5eb1a9a845f7ede2a5077b7f0af1f477ad6d3621e9de16f243",
+    "boundary": "single checkpoint and evaluator seed diagnostic; freezes an engineering curriculum but does not prove P100 is unlearnable"
+  },
+  "invariants": {
+    "vehicle_speed_rate_from_sa3": 0.7,
+    "speed_rate_obs": "ego",
+    "vlp16_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "actuator_delay_steps": [1, 2],
+    "actuator_velocity_scale": [1.0, 1.0],
+    "actuator_motor_lag": 1.0,
+    "lidar_frame_stack": 8,
+    "rollout_length": 128,
+    "p100_allowed_in_sa3_or_sa4": false
+  },
+  "profile_schema": "[[static_count,dynamic_count],[pedestrian_speed_min_mps,pedestrian_speed_max_mps],reset_weight]",
+  "stages": {
+    "SA3": {
+      "profiles": [
+        [[0, 1], [0.25, 0.45], 0.15],
+        [[1, 1], [0.25, 0.45], 0.15],
+        [[0, 1], [0.50, 0.70], 0.25],
+        [[1, 1], [0.50, 0.70], 0.25],
+        [[2, 1], [0.25, 0.45], 0.10],
+        [[3, 1], [0.25, 0.45], 0.10]
+      ],
+      "graduation_gate": {
+        "fixed_cells": [
+          "0S1D lateral P060 speed_rate=0.7",
+          "1S1D lateral P060 speed_rate=0.7"
+        ],
+        "per_cell": {"sr_min": 0.9, "cr_max": 0.1, "to_max": 0.05},
+        "retention": ["native", "narrow", "historical P035 corridor"],
+        "checkpoint_selection": "minimize worst fixed-cell CR; do not assume final checkpoint is best"
+      }
+    },
+    "SA4": {
+      "parent": "only an SA3-v3 checkpoint passing the SA3 gate",
+      "profiles": [
+        [[0, 1], [0.50, 0.70], 0.15],
+        [[1, 1], [0.50, 0.70], 0.20],
+        [[0, 1], [0.70, 0.90], 0.10],
+        [[1, 1], [0.70, 0.90], 0.15],
+        [[2, 1], [0.25, 0.45], 0.15],
+        [[2, 1], [0.50, 0.70], 0.10],
+        [[3, 1], [0.25, 0.45], 0.15]
+      ],
+      "graduation_gate": {
+        "fixed_cells": [
+          "0S1D lateral P080 speed_rate=0.7",
+          "1S1D lateral P080 speed_rate=0.7",
+          "2S1D lateral P060 speed_rate=0.7"
+        ],
+        "per_cell": {"sr_min": 0.9, "cr_max": 0.1, "to_max": 0.05},
+        "retention": ["native", "narrow", "P060 low density"],
+        "p100_role": "diagnostic boundary only; not an SA4 graduation condition"
+      }
+    }
+  },
+  "validation": {
+    "cpu_contract_tests": "74 passed",
+    "gpu_smoke": {
+      "run": "logs/rnn_car/sa3_speed_density_v3_smoke_ne64_s42_p1_20260821_r4",
+      "num_envs": 64,
+      "iterations": 1,
+      "status": "PASS",
+      "profile_range_mismatch": 0,
+      "motion_family_reset_share": {
+        "lateral": 0.5,
+        "longitudinal": 0.5,
+        "random_2d": 0.0
+      },
+      "training_complete_marker": true,
+      "note": "Smoke validates wiring and runtime accounting only; its SR/CR are not performance evidence."
+    }
+  },
+  "forbidden": [
+    "independently sample density and pedestrian speed",
+    "place P100 in SA3 or SA4 training",
+    "resume the stopped SA5 speed0p7 adaptation",
+    "launch SA4 before a fixed SA3-v3 checkpoint gate",
+    "claim P100 is unlearnable from the frozen-policy diagnostic"
+  ]
+}

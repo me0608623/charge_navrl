@@ -1,0 +1,109 @@
+{
+  "schema": "sa4_r3_cont50_from_r3_c6400/v1",
+  "status": "FROZEN_BEFORE_TRAINING",
+  "frozen_at": "2026-08-17T16:56:00+08:00",
+  "authorization": {
+    "source": "user instruction in current Codex session",
+    "scope": "continue SA4-R3 c6400 for exactly 50 iterations, preserve recipe, restore optimizer, save conceptual it75/it100, then screen lateral/longitudinal/native",
+    "auto_launch_sa5": false
+  },
+  "run": {
+    "run_name": "sa4_r3_cont50_from_r3c6400_ne1024_s42_p50_r1",
+    "experiment_config": "e2e_sa4_r3_cont50_from_r3_c6400",
+    "stage": 4,
+    "num_envs": 1024,
+    "training_seed": 42,
+    "rollout_length": 128,
+    "additional_iterations": 50,
+    "timesteps": 6400,
+    "save_interval": 25,
+    "new_run_checkpoint_mapping": [
+      {
+        "conceptual_total_iteration": 75,
+        "filename": "checkpoint_3200.pt"
+      },
+      {
+        "conceptual_total_iteration": 100,
+        "filename": "checkpoint_6400.pt"
+      }
+    ]
+  },
+  "parent": {
+    "lineage": "SA4-R3 valid-return-only iteration 50",
+    "path": "/home/aa/IsaacLab/logs/rnn_car/sa4_r3_validreturn_from_sa3r1_c100_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "fa51b5a312d38b7aa1ee93c3464b087b9b9cb985a7137eefdc8fecf40fed166d",
+    "resume_optimizer": true,
+    "required_optimizer_keys": [
+      "charge_opt_rl",
+      "charge_opt_aux"
+    ]
+  },
+  "fixed_behavior": {
+    "lidar_frame_stack": 8,
+    "vlp16_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "actuator_delay_range_steps": [
+      0,
+      2
+    ],
+    "future_occupancy_weight": 0.15,
+    "corridor_motion_weights": [
+      0.5,
+      0.5,
+      0.0
+    ],
+    "recipe_difference_from_sa4_r3": "none"
+  },
+  "pre_extension_fixed_screen": {
+    "source": "logs/gates/sa4_r3_checkpoint_screen/r1_20260817/sa4_r3_checkpoint_screen_summary.json",
+    "iteration_50": {
+      "corridor_lateral": {
+        "sr": 0.8112866817155756,
+        "cr": 0.1887133182844244,
+        "to": 0.0
+      },
+      "corridor_longitudinal": {
+        "sr": 0.7820878494010268,
+        "cr": 0.21734169994295494,
+        "to": 0.0005704506560182544
+      },
+      "nav_native": {
+        "sr": 0.9405940594059405,
+        "cr": 0.0594059405940594,
+        "to": 0.0
+      }
+    }
+  },
+  "post_training_screen": {
+    "checkpoints": [
+      "checkpoint_3200.pt",
+      "checkpoint_6400.pt"
+    ],
+    "conceptual_iterations": [
+      75,
+      100
+    ],
+    "scenarios": [
+      "corridor_lateral",
+      "corridor_longitudinal",
+      "nav_native"
+    ],
+    "fixed_evaluator_seed": 818,
+    "fixed_actuator_delay_steps": 1,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "minimum_episodes_per_cell": 1000,
+    "sa4_corridor_gate": {
+      "sr_min": 0.9,
+      "cr_max": 0.1,
+      "to_max": 0.05
+    },
+    "decision": "no SA5 unless lateral, longitudinal, and native all pass their fixed stage-4 gates"
+  },
+  "source_fingerprint": {
+    "config": "b82837fc5a59e587c9bb01ec14a329e43fee5bd11a5ff739b18fd87cb58932e0",
+    "trainer": "45ee63bb0a1d1c845f7873cd9e08017ac2d1d02505f8e9f964388ffb67e16c11",
+    "env_overrides": "82ed5f133f99614de70a212ef186b24122fff6d0cd28d5847e08d3423f74a39c",
+    "lidar_observation": "27f976bdb0a51100f9c749aaf4010a995fadfa3ce2319d4b10b5d2586ae87e7f",
+    "actuator_action": "551baa1dc38d8be37751e530f964a1223876ed3b9ad0f50b7b4788e0bdc11b63"
+  }
+}

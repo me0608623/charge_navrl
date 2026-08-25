@@ -1,0 +1,63 @@
+{
+  "schema": "sa5_v3_c50_stage3_posthoc_diagnostic_supplement/v1",
+  "status": "COMPLETE_DIAGNOSTIC_SUPPLEMENT_DOES_NOT_OVERRIDE_PHASE_A",
+  "created_at": "2026-08-24T14:50:40+08:00",
+  "authoritative_phase_a": {
+    "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/SUMMARY.json",
+    "sha256": "cf7076561df1c22f288e0958232627dd12ab2774e074db329a8a6284b2aa7b71",
+    "required_status": "COMPLETE_VALID_SINGLE_TRAINING_SEED_PAIRED_PHASE_A",
+    "required_next_action": "REJECT_P060_ALIGNMENT_NO_PHASE_B"
+  },
+  "diagnostic_evidence": {
+    "training_windows": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/TRAINING_WINDOW_ANALYSIS.json",
+      "sha256": "218b95a47857ae247092cdd5f40885b13afe1bee417a72ad37c6ae1d6f9a6b35"
+    },
+    "sampling_intervals": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/EVALUATOR_SAMPLING_INTERVALS.json",
+      "sha256": "5fc89baa7329bbcc56b0261b2a170c81e517648c75cb8f45a1a2ab35d09949e8"
+    },
+    "layout_and_lineage": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/STATIC_LAYOUT_AND_LINEAGE_ANALYSIS.json",
+      "sha256": "10d8547158f4fa23a96d4618b3618bd6a859b48f617806ec70bfb99937a0a1ce"
+    },
+    "cross_run_static_side_gap": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/CROSS_RUN_MIRROR_ASYMMETRY_AUDIT.json",
+      "sha256": "9a73bfb54c5c177bf96b3d9e41bc91fcb9aa6fd64601e79cc2930f86625411a3"
+    },
+    "collision_contact_events": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/COLLISION_ATTRIBUTION_AUDIT.json",
+      "sha256": "67b8708ee46fcb11db4e66e56540a8944f0b88bb51e0b667c531ae66fb31e7f2"
+    },
+    "layout_protocol_semantics": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/STATIC_LAYOUT_STRATIFICATION_PROTOCOL_AUDIT.json",
+      "sha256": "0644f1d3e43ba2985874b74b214a27f8652b53dc6ca5a1419aa5ce7d57de94c7"
+    },
+    "profile_exposure": {
+      "path": "logs/gates/sa5_v3_c50_stage3_phase_a_screen/screen_20260824_r1/B3_P060_1S1D_EXPOSURE_ACCOUNTING_AUDIT.json",
+      "sha256": "a5514dbf8d9fb0ec36946b82270277fd4a97f92743b8f022454d3d24f5acc028"
+    }
+  },
+  "plain_findings": [
+    "Training the deployment speed contract at speed_rate 0.7 is materially different from post-hoc scaling of a speed_rate 1.0 policy.",
+    "Matched P060 pedestrian-speed alignment improves all four fixed cells, so speed distribution mismatch was a contributor.",
+    "B3 P060 0S1D passes at CR 7.09%, while P060 1S1D fails at CR 14.10% with a 95% Wilson interval of 12.65-15.68%.",
+    "The remaining gap is concentrated in the static-left stratum, but the current layout key is not an exact full-scene mirror and cannot yet establish an intrinsic policy left-right bias.",
+    "In B3 P060 1S1D, 272 of 288 non-exclusive scheduler slot-contact events are dynamic-pedestrian events; this is not an episode fraction.",
+    "P060 1S1D is nominally about 1% of all resets, but the failed lateral P060 1S1D gate family is only about 0.3%: approximately 182-183 resets, with profile-family active-step exposure unrecorded."
+  ],
+  "current_problem_statement": "The deployment-speed contract and slow-pedestrian mismatch are partly addressed. The unresolved problem is low-exposure P060 1S1D geometry-pedestrian interaction, with a static-side-stratified gap whose causal left-right meaning remains unverified.",
+  "unchanged_decision": {
+    "sa5_graduated": false,
+    "selected_parent": null,
+    "phase_b_authorized": false,
+    "continuation_authorized": false,
+    "sa6_started": false
+  },
+  "required_before_any_future_continuation": [
+    "profile-level reset, active-step and outcome accounting",
+    "dynamic start-direction and patrol-phase metadata by static layout",
+    "non-exclusive contact-event reconciliation",
+    "intermediate checkpoint fixed screens under the same frozen gate"
+  ]
+}

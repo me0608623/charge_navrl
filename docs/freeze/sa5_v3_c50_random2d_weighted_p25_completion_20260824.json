@@ -1,0 +1,67 @@
+{
+  "schema": "sa5_v3_c50_random2d_weighted_p25_completion/v1",
+  "created_at": "2026-08-24T00:57:16+08:00",
+  "status": "COMPLETE_VALID_BOUNDED_PILOT_NOT_ACCEPTED_NOT_REJECTED",
+  "run": {
+    "name": "sa5_v3_c50_random2d_weighted_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-random2d-weighted-p25-r1.service",
+    "iterations_completed": 25,
+    "iterations_target": 25,
+    "total_steps": 3200,
+    "duration_seconds": 1112,
+    "process_exit_status": 0,
+    "training_complete_marker": true
+  },
+  "checkpoint": {
+    "path": "logs/rnn_car/sa5_v3_c50_random2d_weighted_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "cbc8a91a43eb0674dcd33118b3436f73f5d611b33860ebab5f7c83e6048f670f",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "status": "UNSCREENED_DEVELOPMENT_CANDIDATE_NOT_PARENT"
+  },
+  "artifacts": {
+    "metrics": "logs/rnn_car/sa5_v3_c50_random2d_weighted_ne1024_s42_p25_r1/supervisor_metrics.jsonl",
+    "metrics_sha256": "31f55849cf291364ba92792c5545ebb580dfded6a44fa23459aeba8f33e7b97b",
+    "console": "logs/rnn_car/sa5_v3_c50_random2d_weighted_ne1024_s42_p25_r1.console.log",
+    "console_sha256": "c46df71bafa3dd49a4b1559f94085ab8a408e477ef7bdbeab18aaecc2abe16d6",
+    "launch_manifest": "docs/freeze/sa5_v3_c50_random2d_weighted_p25_launch_v1.json"
+  },
+  "health": {
+    "metrics_rows": 25,
+    "iteration_sequence": "1..25",
+    "nonfinite_numeric_values": 0,
+    "corridor_accounting_failures": 0,
+    "strict_error_matches": 0,
+    "max_kl": 0.008214515584199944,
+    "max_clip_fraction": 0.09537124633789062,
+    "entropy_first": 4.0567024648189545,
+    "entropy_last": 4.132017150521278,
+    "source_fingerprint_files_ok": 10,
+    "source_fingerprint_files_total": 10,
+    "source_fingerprint_stable": true
+  },
+  "last_training_iteration_descriptive_only": {
+    "overall_sr": 0.8790104367959838,
+    "overall_cr": 0.11751063007298991,
+    "overall_to": 0.0,
+    "native_sr": 0.896585848589807,
+    "native_cr": 0.10291934685799109,
+    "narrow_sr": 1.0,
+    "narrow_cr": 0.0,
+    "random_2d_episodes": 176,
+    "random_2d_sr": 0.5852272727272727,
+    "random_2d_cr": 0.38636363636363635,
+    "random_2d_to": 0.028409090909090908,
+    "random_2d_stop_fraction": 0.184066724187518,
+    "random_2d_reverse_fraction": 0.09341386252516537
+  },
+  "interpretation": {
+    "training_curve_authorizes_acceptance": false,
+    "fixed_screen_required": true,
+    "screen_cells": 8,
+    "graduation_authorized": false,
+    "extension_authorized": false,
+    "sa6_authorized": false
+  }
+}

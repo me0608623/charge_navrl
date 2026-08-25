@@ -1,0 +1,22 @@
+{
+  "schema": "sa5_v3_c50_stage3_phase_a_screen_freeze/v1",
+  "frozen_at": "2026-08-24T13:36:00+08:00",
+  "protocol_sha256": "528bb21756e71ca96ebc1c7397724c791c042b7cf822c249a7cdd7d5f8a0641e",
+  "authorization_sha256": "f72e9afcc5e840de52ab8571edb0ddfde943c6bbad60334f41fc174a52ccb1dc",
+  "a3_completion_sha256": "a2ef7fcc380f58b034e9f7a3ae1ba25ee04ab5f192923a07ead7be2cc74100d5",
+  "b3_completion_sha256": "64e9cc164ade5d97b919b6f010387ce14a589237732986e729ae5db0e60fada4",
+  "a3_checkpoint_sha256": "ae6c2495040b8582a5d82ccff3fefea02ff10cc209e7e37cb8230be7d61dde13",
+  "b3_checkpoint_sha256": "5645f84625649a6050e862eb17b8e81e2e02225973fd371f29e663785104f2b8",
+  "source_sha256": {
+    "protocol": "e1eb431dfb455fee6d846790c0afd90bc278bc87f2d109f95817314ced9ab149",
+    "runner": "84b5716a8885e7395f9258ca4ff6436a657f63c6812dcbec40bd317b3b84fe87",
+    "queue": "29e8123478ac93427dab1721100a73ea22d4440ffc6632c88f2e639091c62d00"
+  },
+  "cell_count": 8,
+  "execution": "SEQUENTIAL_FIXED_EVALUATION",
+  "starts_training": false,
+  "selects_parent": false,
+  "authorizes_extension": false,
+  "authorizes_graduation": false,
+  "starts_sa6": false
+}

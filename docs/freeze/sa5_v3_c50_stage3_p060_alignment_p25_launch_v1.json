@@ -1,0 +1,65 @@
+{
+  "schema": "sa5_v3_c50_stage3_p060_alignment_p25_launch/v1",
+  "created_at": "2026-08-24T12:50:00+08:00",
+  "status": "READY_FOR_SEQUENTIAL_LAUNCH",
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_stage3_p060_alignment_p25_authorization_20260824.json",
+    "sha256": "f72e9afcc5e840de52ab8571edb0ddfde943c6bbad60334f41fc174a52ccb1dc"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "45c972f804f1e9b24ade9b8164568cd8ac93f33e4f8b8685ee7347723b1aee30",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38
+  },
+  "arms": {
+    "a3_control": {
+      "run_name": "sa5_v3_c50_stage3_a3_control_ne1024_s42_p25_r1",
+      "unit": "sa5-v3-c50-stage3-a3-control-p25-r1.service",
+      "config_module": "e2e_sa5_v3_c50_stage3_a3_control_p25",
+      "iterations": 25,
+      "timesteps": 3200,
+      "launch_status": "NOT_YET_LAUNCHED"
+    },
+    "b3_p060_aligned": {
+      "run_name": "sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1",
+      "unit": "sa5-v3-c50-stage3-b3-p060aligned-p25-r1.service",
+      "config_module": "e2e_sa5_v3_c50_stage3_b3_p060aligned_p25",
+      "iterations": 25,
+      "timesteps": 3200,
+      "launch_status": "NOT_YET_LAUNCHED"
+    }
+  },
+  "identity_contract": {
+    "execution": "SEQUENTIAL_A3_THEN_B3",
+    "parallel_training_forbidden": true,
+    "only_behavioral_difference": "0S1D and 1S1D speed ranges P080 versus P060"
+  },
+  "verification": {
+    "targeted_tests": "7 passed",
+    "gpu_smoke_run": "sa5_v3_c50_stage3_b3_p060aligned_smoke_ne64_s42_p1_r1",
+    "gpu_smoke_metrics_sha256": "6ff9d0a7b4a7081c465b90c6bf4cb08c05f9c4ab9d61774f258d1754f380be0c",
+    "gpu_smoke_checkpoint_sha256": "fabb1f931054d70e34fd9c3e1fb8611a425178db4c62b152e8823658b9774b39",
+    "gpu_smoke_console_sha256": "4282b978d1c3330d3d439058fbcf02dce60a39e3024644558f9fc532c944716b",
+    "gpu_smoke_optimizer_loaded": true,
+    "gpu_smoke_reconciliation_ok": true,
+    "gpu_smoke_nonfinite_values": 0,
+    "gpu_smoke_runtime_mix": "0S1D@P060 0.10, 1S1D@P060 0.10, 2S1D@P060 0.15, 3S2D@P035 0.30, 4S2D@P035 0.35"
+  },
+  "source_fingerprint_before": {
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_a3_control_p25.py": "0ee9fdaa4a548887d4ee67243806861f8f3e30a1b47d048d590929992f19cdba",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_p060aligned_p25.py": "2040a9d9e154d447756763d95a6351c68816f941dc42dcee07c3cf4387740498",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_p060aligned_smoke.py": "ec4a4ee96bde97476d98bb59c3ced418e196ee7c929fd6416993d844fdc276be",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/test_sa5_v3_c50_stage3_p060_alignment.py": "fa960cc7c75c2261e509a12bdf52172ecc5b02381cbf70b5effcb59fcdd9a62a",
+    "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6",
+    "scripts/reinforcement_learning/skrl/utils/charge_env_overrides.py": "b11b3c1753ee3efd8d072118e79f63a16fb8d2b53a03e0a03d39a4f1a5328d08",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/corridor_density.py": "f6877a92699406809675f4013a86d4be6ba6d9db7cf93564106d19ad8cf91028"
+  },
+  "automatic_actions": {
+    "extension": false,
+    "sa5_graduation": false,
+    "new_parent": false,
+    "sa6_launch": false
+  }
+}

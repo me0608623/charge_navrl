@@ -1,0 +1,10 @@
+{
+  "checkpoint_sha256": {
+    "adapt_it25": "e38e7c504316e9a0b7f6799325bc719966a7b896c00b9e562081eae5fa322f77",
+    "adapt_it50": "812a495902f7c54c638096ba113b1b44266ddcc41431d476e6919302ee136f1c",
+    "baseline_c250": "df14c45d8dd27b0e327f9447a9a613bf62eaa850af542b474aad682dcd937a4a",
+    "control_c300": "97a4ccdf929a0fcab9adff5d80ae7a1c7475067e3049f11571e04fd164a524db"
+  },
+  "protocol_sha256": "48df8c660543afd9aea1bed23b43ea0b3b5668a5c65ccc96f88328af2bf91177",
+  "schema": "sa5_r2_speed0p7_checkpoint_screen_freeze/v1"
+}

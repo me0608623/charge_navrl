@@ -1,0 +1,152 @@
+{
+  "authorization_limit": "the screen starts neither training nor SA6 and never accepts a parent",
+  "candidates": [
+    {
+      "conceptual_iteration": 150,
+      "filename": "checkpoint_19200.pt",
+      "name": "c150",
+      "sha256": "cf66f3e064bccf8b71e1109ce70950669b620737af050ec544edb1d4d000d171"
+    },
+    {
+      "conceptual_iteration": 200,
+      "filename": "checkpoint_25600.pt",
+      "name": "c200",
+      "sha256": "b007a5d3851711d932664e2e27b805ffa11b2ec4c07589ec06be545937b2f551"
+    },
+    {
+      "conceptual_iteration": 250,
+      "filename": "checkpoint_32000.pt",
+      "name": "c250",
+      "sha256": "b00118781a554cec0a922ae9ace81610f4cd279ac24aed58509a2c0ab6be29e3"
+    },
+    {
+      "conceptual_iteration": 300,
+      "filename": "checkpoint_38400.pt",
+      "name": "c300",
+      "sha256": "5cc978df7ce38cbf9412844734377fc089cb389a791165cc747bb81575b53f79"
+    }
+  ],
+  "evidence_boundary": "single training seed and single fixed evaluator seed; this selects checkpoints for further consideration and is not the formal SA5 multi-seed/multi-delay graduation matrix; unsealed r2 results are invalid and cannot be pooled with this protocol",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "corridor_family_modes": {
+      "corridor_lateral": "lateral",
+      "corridor_longitudinal": "longitudinal",
+      "corridor_mixed": "legacy balanced mixed patrol",
+      "corridor_random2d": "random_2d patrol"
+    },
+    "corridor_fixed_density": "4S2D",
+    "corridor_geometry_contract": "10 m interaction zone; physical side walls span the 15 m arena and overlap each north/south boundary wall by 0.5 m",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "num_envs": 64,
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "steps_by_scenario": {
+      "corridor_lateral": 2500,
+      "corridor_longitudinal": 2500,
+      "corridor_mixed": 2500,
+      "corridor_random2d": 2500,
+      "narrow_range": 1200,
+      "nav_native": 1200
+    }
+  },
+  "phase_a": {
+    "cells": 16,
+    "promotion": "best two structurally valid checkpoints",
+    "purpose": "rank four checkpoints on four fixed corridor families",
+    "ranking": {
+      "hard_gate_not_ranking_key": true,
+      "primary": "min max(CR across four corridor families)",
+      "secondary": "min episode-unweighted mean family CR",
+      "tertiary": "prefer later checkpoint only after exact score ties",
+      "tie_band": 0.005,
+      "tie_band_use": "descriptive; Phase B still receives exactly two candidates"
+    },
+    "scenarios": [
+      "corridor_lateral",
+      "corridor_longitudinal",
+      "corridor_random2d",
+      "corridor_mixed"
+    ]
+  },
+  "phase_b": {
+    "cells": 4,
+    "purpose": "native and narrow retention for Phase-A top two only",
+    "scenarios": [
+      "nav_native",
+      "narrow_range"
+    ]
+  },
+  "run_name": "sa5_sim2real_v2_from_sa4r3_it125_hwaiver_actd12_ne1024_s42_p300_r1",
+  "schema": "sa5_checkpoint_screen_protocol/v2",
+  "sha256": "7fc8ce95d829b92fb6502979bbbb824dd4ce643dd0ef0e1278367afaf7413e48",
+  "stage": 5,
+  "thresholds": {
+    "corridor": {
+      "cr_max": 0.1,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "narrow": {
+      "cr_max": 0.05,
+      "crossing_min": 0.95,
+      "direct_crossing_min": 0.95,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "native_stage5": {
+      "cr_max": 0.09,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.04
+    }
+  }
+}

@@ -1,0 +1,162 @@
+{
+  "cells": [
+    {
+      "cell": "0s1d_s100",
+      "dynamic_obstacles": 1,
+      "label": "0S1D",
+      "scenario": "corridor_low_0s1d",
+      "speed_rate": 1.0,
+      "static_obstacles": 0
+    },
+    {
+      "cell": "0s1d_s070",
+      "dynamic_obstacles": 1,
+      "label": "0S1D",
+      "scenario": "corridor_low_0s1d",
+      "speed_rate": 0.7,
+      "static_obstacles": 0
+    },
+    {
+      "cell": "1s1d_s100",
+      "dynamic_obstacles": 1,
+      "label": "1S1D",
+      "scenario": "corridor_low_1s1d",
+      "speed_rate": 1.0,
+      "static_obstacles": 1
+    },
+    {
+      "cell": "1s1d_s070",
+      "dynamic_obstacles": 1,
+      "label": "1S1D",
+      "scenario": "corridor_low_1s1d",
+      "speed_rate": 0.7,
+      "static_obstacles": 1
+    }
+  ],
+  "checkpoint": {
+    "conceptual_iteration": 250,
+    "filename": "checkpoint_32000.pt",
+    "name": "c250",
+    "path": "/home/aa/IsaacLab/logs/rnn_car/sa5_r2_sealed_ldmix_from_sa4r3_it125_actd12_ne1024_s42_p300_r1/checkpoint_32000.pt",
+    "sha256": "df14c45d8dd27b0e327f9447a9a613bf62eaa850af542b474aad682dcd937a4a"
+  },
+  "evidence_boundary": "single checkpoint and evaluator seed diagnostic; may freeze a candidate speed-density curriculum but does not prove learnability, accept a parent, launch training, or authorize SA6",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "motion_mode": "lateral",
+    "num_envs": 64,
+    "pedestrian_speed_label": "P100",
+    "pedestrian_speed_range_m_s": [
+      0.9,
+      1.1
+    ],
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate_obs": "ego",
+    "stage": 5,
+    "steps": 3000
+  },
+  "fixed_variables": [
+    "checkpoint",
+    "P100 pedestrian speed range",
+    "corridor geometry and lateral motion family",
+    "LiDAR noise and valid-return eligibility",
+    "actuator delay and profile",
+    "evaluator seed and rollout budget"
+  ],
+  "forbidden": [
+    "training",
+    "checkpoint changes",
+    "reward changes",
+    "geometry changes",
+    "SA6 launch"
+  ],
+  "independent_variables": [
+    "corridor obstacle density: 0S1D versus 1S1D",
+    "vehicle policy speed_rate: 1.0 versus 0.7"
+  ],
+  "interpretation_rule": {
+    "curriculum_boundary": {
+      "P100_0S1D_only": "speed_rate=0.7 passes 0S1D but not 1S1D",
+      "P100_low_density_ready": "speed_rate=0.7 passes SR/CR/TO in both 0S1D and 1S1D",
+      "P100_not_entry_ready": "speed_rate=0.7 fails 0S1D; begin with P060/P080"
+    },
+    "historical_gate": {
+      "cr_max": 0.1,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "speed_rate_effect": "within each density, call a CR change established only when its magnitude is at least 2 conservative independent-binomial SE using n=1000 per arm"
+  },
+  "outcomes": {
+    "behavior": [
+      "commanded_stop_fraction",
+      "actual_body_stop_fraction",
+      "first_actual_deceleration",
+      "first_actual_stop"
+    ],
+    "collision_breakdown": [
+      "obstacle_CR",
+      "wall_CR"
+    ],
+    "dynamic_feasibility": "D5 dynamic-only action feasibility within final 1.0 s; model-bounded and not physical inevitability",
+    "impact_severity": "positive radial closing component at dynamic collision p50/p90; not full 2D relative speed",
+    "primary": [
+      "SR",
+      "CR",
+      "TO"
+    ]
+  },
+  "purpose": "measure the P100 pedestrian-speed boundary at low corridor density under simulation and deployment-representative robot speed rates",
+  "schema": "sa5_low_density_speed_ratio_screen_protocol/v1",
+  "sha256": "ddc37d497f55cf5eb1a9a845f7ede2a5077b7f0af1f477ad6d3621e9de16f243"
+}

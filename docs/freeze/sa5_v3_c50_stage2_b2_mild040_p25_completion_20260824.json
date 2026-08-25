@@ -1,0 +1,88 @@
+{
+  "schema": "sa5_v3_c50_stage2_b2_mild040_p25_completion/v1",
+  "created_at": "2026-08-24T11:18:56+08:00",
+  "run_completed_at": "2026-08-24T03:53:09+08:00",
+  "status": "COMPLETE_VALID_PAIRED_B2_AWAITING_FIXED_SCREEN",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "parent": "MATCHED_DEVELOPMENT_ANCHOR_NOT_FORMAL_PARENT",
+    "b2": "MILD_WEIGHT_DEVELOPMENT_CANDIDATE_NOT_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_stage2_paired_p25_authorization_20260824.json",
+    "sha256": "ae5bc7b00311a61a9c461f2441a6bd32002de23b03e48396cd3a86180d180950"
+  },
+  "launch_manifest": {
+    "path": "docs/freeze/sa5_v3_c50_stage2_paired_p25_launch_v1.json",
+    "sha256": "a7cf1ce0a676b611c6a677a4e62f513a4315e59b34390fa2c650a3cd0e8ceb35"
+  },
+  "paired_a2_completion": {
+    "path": "docs/freeze/sa5_v3_c50_stage2_a2_equal_p25_completion_20260824.json",
+    "sha256": "72d5d1e7f9a4cc6f47dc6d2284a28de8d18478e85b5aca5ee36f30acd0d6c5f6"
+  },
+  "run": {
+    "name": "sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1",
+    "unit": "sa5-v3-c50-stage2-mild040-p25-r1.service",
+    "systemd_invocation_id": "9eb06ade1b4e4dd8b14ccce2655e3efc",
+    "iterations_completed": 25,
+    "iterations_target": 25,
+    "total_steps": 3200,
+    "duration_seconds": 1101,
+    "process_exit_status": 0,
+    "training_complete_marker": true
+  },
+  "checkpoint": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "45c972f804f1e9b24ade9b8164568cd8ac93f33e4f8b8685ee7347723b1aee30",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "status": "MILD_WEIGHT_DEVELOPMENT_CANDIDATE_NOT_PARENT"
+  },
+  "artifacts": {
+    "metrics": "logs/rnn_car/sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1/supervisor_metrics.jsonl",
+    "metrics_sha256": "6a8e42b9a3e82035b88d7669ffb0c0e530710f3e1dfc2aaea9308278f0435695",
+    "console": "logs/rnn_car/sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1.console.log",
+    "console_sha256": "67a413ed039b64df898977c37f19add56beae487f676661890ef80e45be7207d"
+  },
+  "health": {
+    "metrics_rows": 25,
+    "iteration_sequence": "1..25",
+    "nonfinite_numeric_values": 0,
+    "corridor_accounting_failures": 0,
+    "strict_error_matches": 0,
+    "max_kl": 0.00762222036962612,
+    "max_clip_fraction": 0.08498382568359375,
+    "entropy_first": 3.9695506021380424,
+    "entropy_last": 4.129025638103485,
+    "source_fingerprint_stable": true
+  },
+  "exposure_accounting": {
+    "corridor_active_step_shares": {
+      "lateral": 0.15817436,
+      "longitudinal": 0.14759829,
+      "random_2d": 0.34473504,
+      "mixed": 0.34949231
+    },
+    "corridor_reset_shares": {
+      "lateral": 0.17162225,
+      "longitudinal": 0.155446,
+      "random_2d": 0.35110153,
+      "mixed": 0.32183023
+    },
+    "corridor_completed_episode_shares": {
+      "lateral": 0.17252345,
+      "longitudinal": 0.15630466,
+      "random_2d": 0.3509302,
+      "mixed": 0.32024169
+    }
+  },
+  "interpretation": {
+    "training_curve_authorizes_selection": false,
+    "fixed_four_mode_screen_required": true,
+    "extension_authorized": false,
+    "graduation_authorized": false,
+    "sa6_authorized": false
+  }
+}

@@ -1,0 +1,169 @@
+{
+  "candidates": [
+    {
+      "conceptual_iteration": 0,
+      "expected_sha256": "e27677349eba8f37e2e6937f7d92400a1550e58d89d4430e556932697e9cb9f4",
+      "name": "parent_c500",
+      "path": "logs/rnn_car/sa4_v3_cont300_from_c300_ne1024_s42_p300_r1/checkpoint_25600.pt"
+    },
+    {
+      "conceptual_iteration": 25,
+      "expected_sha256": null,
+      "name": "control_it25",
+      "path": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_3200.pt"
+    },
+    {
+      "conceptual_iteration": 50,
+      "expected_sha256": null,
+      "name": "control_it50",
+      "path": "logs/rnn_car/sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1/checkpoint_6400.pt"
+    }
+  ],
+  "decision": {
+    "on_fail": "hold SA5; do not change reward or add iterations without a new authorization",
+    "on_pass": "authorize extension of selected c500 lineage to total it300",
+    "screen_starts_sa6": false,
+    "screen_starts_training": false
+  },
+  "evidence_boundary": "single training seed and single evaluator seed developmental fallback screen; it controls bounded continuation but cannot rewrite SA4 graduation or authorize SA6",
+  "extension_rule": {
+    "retention_absolute_gates_required": true,
+    "retention_max_cr_increase": 0.02,
+    "retention_max_sr_decrease": 0.02,
+    "retention_max_to_increase": 0.02,
+    "selection": "eligible candidate with lowest target CR, then lowest mean retention CR, then later iteration",
+    "target_absolute_gate_is_descriptive": true,
+    "target_min_cr_improvement": 0.005,
+    "target_min_pooled_se_z": 2.0
+  },
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "deployment_speed_scale": 1.0,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "num_envs": 64,
+    "p060_speed_range_m_s": [
+      0.5,
+      0.7
+    ],
+    "scene": {
+      "arena_size_m": 15.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.2,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.25,
+        0.45
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 15.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.5,
+      "narrow_width_range_m": [
+        1.3,
+        1.5
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.5,
+      "stage": 5
+    },
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "steps_by_scenario": {
+      "corridor_low_0s1d": 2500,
+      "corridor_low_1s1d": 2500,
+      "corridor_mixed": 2500,
+      "narrow_range": 1200,
+      "nav_native": 1200
+    },
+    "target_speed_range_m_s": [
+      0.25,
+      0.45
+    ]
+  },
+  "lineage": {
+    "control_parent": "PROVISIONAL_SA5_CONTROL_PARENT_C500",
+    "failed_provisional_parent": "PROVISIONAL_SA5_PARENT_C550",
+    "sa4": "SA4_NOT_GRADUATED"
+  },
+  "run_name": "sa5_v3_c500_parent_control_from_sa4v3_ne1024_s42_p50_r1",
+  "scenarios": {
+    "retention": [
+      "nav_native",
+      "narrow_range",
+      "corridor_low_0s1d P060 lateral",
+      "corridor_low_1s1d P060 lateral"
+    ],
+    "sa5_target": {
+      "density": "4S2D",
+      "motion_mode": "mixed",
+      "name": "corridor_mixed",
+      "speed_range_m_s": [
+        0.25,
+        0.45
+      ]
+    }
+  },
+  "schema": "sa5_v3_c500_parent_control_screen_protocol/v1",
+  "sha256": "880406bd0184507c4686a70832afcd873da01a88d24bf1b38c93d99a29dd8b54",
+  "stage": 5,
+  "thresholds": {
+    "narrow": {
+      "cr_max": 0.05,
+      "crossing_min": 0.95,
+      "direct_crossing_min": 0.95,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "native": {
+      "cr_max": 0.1,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "p060": {
+      "cr_max": 0.1,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "target_descriptive_absolute": {
+      "cr_max": 0.1,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    }
+  },
+  "trigger": {
+    "next_action": "RUN_IDENTICAL_C500_PARENT_CONTROL_P50",
+    "summary": "logs/gates/sa5_v3_provisional_pilot_screen/screen_20260822_r1/SUMMARY.json",
+    "summary_sha256": "4cd82cc3912b7ff70a053ca9203594899d5871e3f72fa65cbbecd6065069f744"
+  }
+}

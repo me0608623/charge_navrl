@@ -1,0 +1,27 @@
+{
+  "authorized_at": "2026-08-24T00:07:33+08:00",
+  "authorized_by": "user",
+  "schema": "sa5_v3_c50_random2d_feasibility_authorization/v1",
+  "goal": "開始持續 8 小時自主實驗：先確認 4S2D random_2d 在凍結短視窗幾何模型下是否曾存在可行動作，再依事前分支決定是否從 c50 建立 bounded pilot",
+  "maximum_wall_clock_hours": 8,
+  "initial_action": {
+    "checkpoint": "c50 ungraduated diagnostic anchor",
+    "scenario": "4S2D random_2d patrol",
+    "mode": "evaluation-only D5 feasibility shadow",
+    "training": false
+  },
+  "conditional_authorization": {
+    "opportunity_observed": "可從 c50 建立只增加 random_2d 曝光、且一次只提高一個難度軸的 bounded 25-iteration pilot；固定驗收後才可續下一個 bounded pilot",
+    "mostly_no_candidate_under_frozen_model": "不可提高 4S2D 曝光；改做低密度 random_2d 可行性邊界或課程拆軸診斷",
+    "indeterminate": "補充診斷，不得直接訓練"
+  },
+  "invariants": [
+    "c50 is the only allowed training restart anchor; rejected it25/it50 checkpoints are diagnostic-only",
+    "action, observation, reward, network, LiDAR noise semantics, actuator delay and speed_rate remain unchanged",
+    "SA6 is not authorized",
+    "no result or prior evidence may be overwritten or deleted",
+    "every rollout or training segment must freeze checkpoint and source fingerprints before launch",
+    "NaN, OOM, traceback, source drift, ledger mismatch or missing output stops the active branch fail-closed"
+  ],
+  "interpretation_limit": "D5 enumerates constant-action candidates under a frozen 2.4 s geometry model over event-aligned 5 s traces. It does not prove episode-level solvability or physical inevitability."
+}

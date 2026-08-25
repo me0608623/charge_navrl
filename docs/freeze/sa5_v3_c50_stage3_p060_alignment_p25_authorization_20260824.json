@@ -1,0 +1,85 @@
+{
+  "schema": "sa5_v3_c50_stage3_p060_alignment_p25_authorization/v1",
+  "authorized_at": "2026-08-24T12:46:00+08:00",
+  "authorized_by": "user_conditional_8h_autonomy",
+  "decision": "RUN_PAIRED_STAGE3_CONTROL_VS_P060_ALIGNED_P25",
+  "question": "Does aligning only the 0S1D and 1S1D training speed ranges with the fixed P060 retention protocol restore low-density capability without erasing the B2 high-density gains?",
+  "evidence": {
+    "retention_summary": "logs/gates/sa5_v3_c50_stage2_retention_screen/screen_20260824_r1/SUMMARY.json",
+    "retention_summary_sha256": "33abc01a64fad68ea62e7d6ef1d0a31f712d7d14244c0567ed10da97181fa3ba",
+    "anchor_aware_analysis": "logs/gates/sa5_v3_c50_stage2_retention_screen/screen_20260824_r1/ANCHOR_AWARE_ANALYSIS.json",
+    "required_analysis_status": "COMPLETE_VALID_OFFLINE_THREE_GENERATION_ANALYSIS"
+  },
+  "parent": {
+    "status": "REJECTED_B2_DIAGNOSTIC_ANCHOR_NOT_PARENT",
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "45c972f804f1e9b24ade9b8164568cd8ac93f33e4f8b8685ee7347723b1aee30",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "optimizer_policy": "RESUME_SAME_EMBEDDED_PPO_OPTIMIZER_IN_BOTH_ARMS"
+  },
+  "arms": {
+    "a3_control": {
+      "iterations": 25,
+      "timesteps": 3200,
+      "speed_density_mix": "unchanged_from_B2"
+    },
+    "b3_p060_aligned": {
+      "iterations": 25,
+      "timesteps": 3200,
+      "only_behavioral_difference": "replace the 0S1D and 1S1D 0.7-0.9 m/s ranges with 0.5-0.7 m/s; retain every profile weight and all other profiles"
+    }
+  },
+  "control_mix": [
+    [[0, 1], [0.7, 0.9], 0.10],
+    [[1, 1], [0.7, 0.9], 0.10],
+    [[2, 1], [0.5, 0.7], 0.15],
+    [[3, 2], [0.25, 0.45], 0.30],
+    [[4, 2], [0.25, 0.45], 0.35]
+  ],
+  "intervention_mix": [
+    [[0, 1], [0.5, 0.7], 0.10],
+    [[1, 1], [0.5, 0.7], 0.10],
+    [[2, 1], [0.5, 0.7], 0.15],
+    [[3, 2], [0.25, 0.45], 0.30],
+    [[4, 2], [0.25, 0.45], 0.35]
+  ],
+  "identity_contract": {
+    "fixed": [
+      "parent checkpoint and PPO optimizer",
+      "stage 5, outer native/narrow/corridor shares, and profile probabilities",
+      "30/30/40 corridor motion-family allocation",
+      "reward, action, observation, network, PPO and rollout",
+      "speed_rate 0.7 and ego speed observation",
+      "full VLP-16 valid-return-only noise",
+      "actuator delay U{1,2}",
+      "1024 env and seed 42"
+    ]
+  },
+  "post_training_screen": {
+    "phase_a": ["P060 0S1D", "P060 1S1D", "P080 0S1D", "P080 1S1D"],
+    "phase_a_rule": "B3 must pass both P060 absolute gates, reduce worst P060 CR by at least 2 percentage points versus A3, and not degrade either P080 cell by more than 2 percentage points",
+    "phase_b_if_phase_a_passes": ["4S2D lateral", "4S2D longitudinal", "4S2D random_2d", "4S2D mixed", "native", "narrow"],
+    "phase_b_rule": "B3 must not degrade SR, CR, or TO by more than 2 percentage points versus A3 in any cell",
+    "seed": 818,
+    "delay_steps": 1,
+    "speed_rate": 0.7,
+    "extension_auto_authorized": false,
+    "graduation_auto_authorized": false,
+    "new_parent_auto_authorized": false,
+    "sa6_auto_start": false
+  },
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "a3": "DIAGNOSTIC_CONTROL_NOT_PARENT",
+    "b3": "DIAGNOSTIC_INTERVENTION_NOT_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "stop_conditions": [
+    "NaN or non-finite PPO metrics",
+    "CUDA OOM or traceback",
+    "corridor-family reconciliation failure",
+    "checkpoint or source hash drift"
+  ],
+  "interpretation_limit": "Single training seed paired development experiment; no outcome can graduate SA5, create a parent, authorize extension, or start SA6 without a separate decision."
+}

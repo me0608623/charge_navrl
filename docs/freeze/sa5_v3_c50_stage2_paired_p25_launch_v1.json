@@ -1,0 +1,74 @@
+{
+  "schema": "sa5_v3_c50_stage2_paired_p25_launch/v1",
+  "created_at": "2026-08-24T03:10:35+08:00",
+  "status": "READY_FOR_SEQUENTIAL_LAUNCH",
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "parent": "MATCHED_DEVELOPMENT_ANCHOR_NOT_FORMAL_PARENT",
+    "a2": "EQUALWEIGHT_CONTINUATION_CONTROL_NOT_PARENT",
+    "b2": "MILD_WEIGHT_DEVELOPMENT_CANDIDATE_NOT_PARENT",
+    "sa6": "HOLD_NOT_AUTHORIZED"
+  },
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_stage2_paired_p25_authorization_20260824.json",
+    "sha256": "ae5bc7b00311a61a9c461f2441a6bd32002de23b03e48396cd3a86180d180950"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_equalweight_control_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "d9095e7df21633056ef3f491d460520b99dbd72d9924355821c1e48783b3419a",
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "rl_optimizer_state_entries": 38,
+    "optimizer_policy": "RESUME_SAME_EMBEDDED_PPO_OPTIMIZER_IN_BOTH_ARMS"
+  },
+  "arms": {
+    "a2_equal": {
+      "run_name": "sa5_v3_c50_stage2_equal_ne1024_s42_p25_r1",
+      "unit": "sa5-v3-c50-stage2-equal-p25-r1.service",
+      "config_module": "e2e_sa5_v3_c50_stage2_equal_p25",
+      "motion_weights": null,
+      "iterations": 25,
+      "timesteps": 3200,
+      "launch_status": "NOT_YET_LAUNCHED"
+    },
+    "b2_mild": {
+      "run_name": "sa5_v3_c50_stage2_mild040_ne1024_s42_p25_r1",
+      "unit": "sa5-v3-c50-stage2-mild040-p25-r1.service",
+      "config_module": "e2e_sa5_v3_c50_stage2_mild040_p25",
+      "motion_weights": [0.3, 0.3, 0.4],
+      "iterations": 25,
+      "timesteps": 3200,
+      "launch_status": "NOT_YET_LAUNCHED"
+    }
+  },
+  "identity_contract": {
+    "only_behavioral_difference_between_arms": "long_corridor_dynamic_motion_weights",
+    "execution": "SEQUENTIAL_A2_THEN_B2",
+    "parallel_training_forbidden": true
+  },
+  "verification": {
+    "targeted_and_related_tests": "37 passed",
+    "gpu_smoke_run": "sa5_v3_c50_stage2_mild040_smoke_ne64_s42_p1_r1",
+    "gpu_smoke_metrics_sha256": "3c63535a5d0ae9ede23870b776a198cd1d6cc6960cad6e6fcc1de74f0b210d2e",
+    "gpu_smoke_checkpoint_sha256": "5ee60169e28089f597485908630ef4ccc95332260b86bc3f242f5e960f6d85d1",
+    "gpu_smoke_console_sha256": "75a0ac0426c94423cbf86df34187b0ab686d8aec448989d0f0fd437be29242c4",
+    "gpu_smoke_optimizer_loaded": true,
+    "gpu_smoke_runtime_motion_weights": [0.3, 0.3, 0.4],
+    "gpu_smoke_reconciliation_ok": true,
+    "gpu_smoke_nonfinite_values": 0
+  },
+  "source_fingerprint_before": {
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage2_equal_p25.py": "de6b1b229542f3f27c52a32cbb72a50480f7f4d922e227065d17d676e8a587c2",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage2_mild040_p25.py": "0e4b648c6b80426f746e0eb852ba38991bb4c3b01c37303047413bcb24ee16a7",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/test_sa5_v3_c50_stage2_paired.py": "2112602893d7c6fb0da3ef4e8ce0b53944498ecea1c51af534ac90f436aa1f15",
+    "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py": "cf470f9e63b9d7c40c33b9f0bd146a6c9725c288764795ad586eeea8fd3822a6",
+    "scripts/reinforcement_learning/skrl/utils/charge_env_overrides.py": "b11b3c1753ee3efd8d072118e79f63a16fb8d2b53a03e0a03d39a4f1a5328d08",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/corridor_density.py": "f6877a92699406809675f4013a86d4be6ba6d9db7cf93564106d19ad8cf91028"
+  },
+  "automatic_actions": {
+    "extension": false,
+    "sa5_graduation": false,
+    "new_parent": false,
+    "sa6_launch": false
+  }
+}

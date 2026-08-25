@@ -1,0 +1,48 @@
+{
+  "authorization_limit": "the screen selects evidence only; it starts no additional training or SA5",
+  "candidate_rule": "lateral, longitudinal, and nav_native must each pass their stage-4 absolute SR/CR/TO thresholds with at least 1000 episodes",
+  "checkpoints": [
+    {
+      "filename": "checkpoint_3200.pt",
+      "iteration": 75,
+      "name": "sa4_r3_it75"
+    },
+    {
+      "filename": "checkpoint_6400.pt",
+      "iteration": 100,
+      "name": "sa4_r3_it100"
+    }
+  ],
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "evaluator_seed": 818,
+    "geometry_stage": 4,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "num_envs": 64,
+    "steps_by_scenario": {
+      "corridor_lateral": 2500,
+      "corridor_longitudinal": 4000,
+      "nav_native": 1200
+    }
+  },
+  "purpose": "screen conceptual SA4-R3 it75 and it100 after an exact optimizer continuation on lateral, longitudinal, and native stage-4 capabilities",
+  "schema": "sa4_r3_cont50_checkpoint_screen/v1",
+  "selection_rule": {
+    "primary": "minimum max(lateral CR, longitudinal CR)",
+    "secondary": "minimum mean(lateral CR, longitudinal CR)",
+    "tie_margin": 0.005,
+    "within_tie": "prefer it100"
+  },
+  "sha256": "9ec8876c4d3e5362f02d608efd99320dd673bfbd912298e6aa31e0b402477a14",
+  "threshold_source": "sa3_sa8_acceptance_contract.py",
+  "validity": [
+    "all six cells produce cell JSON",
+    "checkpoint and source fingerprints remain stable",
+    "runtime eligibility marker is valid_return_only for policy and critic",
+    "fixed d1 actuator and stage-4 geometry markers match",
+    "console and exact episode ledgers reconcile",
+    "no NaN, OOM, traceback, action override, training, or SA5 launch"
+  ]
+}

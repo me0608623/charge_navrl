@@ -1,0 +1,10 @@
+{
+  "schema": "sa5_v3_c50_stage2_paired_screen_freeze/v1",
+  "protocol_sha256": "dd69a1bfc909fec28b085a6e87d1bfa90d8c54ef3c6b3ddb1fda0849898d59d9",
+  "authorization_sha256": "ae5bc7b00311a61a9c461f2441a6bd32002de23b03e48396cd3a86180d180950",
+  "a2_completion_sha256": "72d5d1e7f9a4cc6f47dc6d2284a28de8d18478e85b5aca5ee36f30acd0d6c5f6",
+  "b2_completion_sha256": "452926026b680709b91df22cd14938c2dc2be9cc5541b6dae27820d4d4fc45d7",
+  "cell_count": 8,
+  "screen_starts_training": false,
+  "screen_starts_sa6": false
+}

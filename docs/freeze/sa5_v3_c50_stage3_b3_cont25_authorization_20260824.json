@@ -1,0 +1,109 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_cont25_authorization/v1",
+  "authorized_at": "2026-08-24T16:25:51+08:00",
+  "authorized_by": "user_explicit_instruction",
+  "decision": "HUMAN_AUTHORIZED_B3_EXACT_CONTINUATION_IT25_TO_IT50",
+  "question": "Does additional exposure under the unchanged B3 contract continue to improve P060 1S1D capability?",
+  "supersedes_proposal_status_only": {
+    "path": "docs/freeze/sa5_v3_c50_stage3_b3_bounded_continuation_proposal_20260824.json",
+    "sha256": "7806aaef04857dbf26a6765a474fefc241b5be7027c5b585361bab065925a823",
+    "note": "The proposal remains immutable evidence; this record supplies the later human authorization."
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_p060aligned_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "5645f84625649a6050e862eb17b8e81e2e02225973fd371f29e663785104f2b8",
+    "conceptual_iteration": 25,
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "optimizer_resume": true,
+    "rl_optimizer_state_entries": 38
+  },
+  "identity_contract": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_p060aligned_p25.py",
+    "source_config_sha256": "2040a9d9e154d447756763d95a6351c68816f941dc42dcee07c3cf4387740498",
+    "allowed_behavioral_differences": [
+      "checkpoint",
+      "timesteps",
+      "save_interval"
+    ],
+    "fixed": [
+      "reward and reward weights",
+      "network and observation contract",
+      "speed_rate 0.7 with ego observation semantics",
+      "full VLP-16 valid-return-only noise",
+      "actuator delay U{1,2}",
+      "stage and scene proportions including the exact speed-density mix",
+      "PPO hyperparameters, rollout length, environment count and seed"
+    ]
+  },
+  "monitoring_contract": {
+    "behavioral_change_allowed": false,
+    "trainer_sha256": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090",
+    "corridor_family_metrics_sha256": "76da80bbd5d1b782631f16474ff1b5d0df3b7711cf290ef720ae7e93967db8c3",
+    "corridor_profile_family_metrics_sha256": "96c1d7248e5bf88eb10186f9ecfef8aa4c50298bdf321e3ee4e1fb2e7b330eed",
+    "required": [
+      "P060 0S1D and P060 1S1D reset count and reset share",
+      "P060 0S1D and P060 1S1D active steps and active-step share",
+      "P060 0S1D and P060 1S1D completed episodes, SR, CR and TO",
+      "profile metrics split by lateral, longitudinal, random_2d and mixed",
+      "profile totals reconcile exactly with corridor-family totals"
+    ],
+    "fail_closed": true
+  },
+  "continuation": {
+    "additional_training_iterations": 25,
+    "conceptual_start_iteration": 25,
+    "conceptual_end_iteration": 50,
+    "rollout_length": 128,
+    "additional_timesteps": 3200,
+    "save_interval_iterations": 5,
+    "conceptual_checkpoints": [
+      [30, "checkpoint_640.pt"],
+      [35, "checkpoint_1280.pt"],
+      [40, "checkpoint_1920.pt"],
+      [45, "checkpoint_2560.pt"],
+      [50, "checkpoint_3200.pt"]
+    ]
+  },
+  "fixed_screen": {
+    "cell_count": 24,
+    "checkpoints": [
+      "b3_it25_fresh_baseline",
+      "it30",
+      "it35",
+      "it40",
+      "it45",
+      "it50"
+    ],
+    "scenarios": [
+      "p060_0s1d",
+      "p060_1s1d",
+      "p080_0s1d",
+      "p080_1s1d"
+    ],
+    "seed": 818,
+    "actuator_delay_steps": 1,
+    "speed_rate": 0.7,
+    "lidar_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only"
+  },
+  "decision_contract": {
+    "p060_hard_gate": "both cells require SR >= 0.90, CR <= 0.10 and TO <= 0.05",
+    "p080_guardrail": "neither P080 cell may degrade by more than 0.02 in SR, CR or TO relative to the fresh B3 it25 baseline",
+    "if_none_pass": "STOP_ITERATION_STACKING_AND_DESIGN_0S1D_TO_1S1D_DENSITY_CURRICULUM",
+    "if_pass": "SA5_CANDIDATE_ONLY_REQUIRES_SEPARATE_NATIVE_NARROW_AND_PHASE_B_AUTHORIZATION"
+  },
+  "lineage": {
+    "sa5": "HOLD_NOT_GRADUATED",
+    "result_ceiling": "CANDIDATE_ONLY",
+    "phase_b_auto_start": false,
+    "sa6": "HOLD_NOT_AUTHORIZED",
+    "sa6_auto_start": false
+  },
+  "stop_conditions": [
+    "NaN or non-finite PPO metrics",
+    "CUDA OOM or traceback",
+    "profile-family reconciliation failure",
+    "checkpoint, config, trainer or instrumentation hash drift"
+  ]
+}

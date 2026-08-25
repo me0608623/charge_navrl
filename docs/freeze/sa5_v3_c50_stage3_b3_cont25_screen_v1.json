@@ -1,0 +1,35 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_cont25_screen_freeze/v1",
+  "created_at": "2026-08-24T17:00:00+08:00",
+  "protocol_sha256": "db02b096e1920ab0eb5386c237dabbbc520599c31c38e9ed08ef0d6349e02836",
+  "authorization_sha256": "664ecb32476ccffdf6bbd337e27c39f72222ebe2aa35ec43d27065005c052f13",
+  "checkpoint_lock_sha256": "38b4e308249485355b3a0abe4f0ce770a9be4437c6edd9387fa77ec3794ab4c1",
+  "cell_count": 24,
+  "matrix": {
+    "checkpoints": [
+      "b3_it25_baseline",
+      "it30",
+      "it35",
+      "it40",
+      "it45",
+      "it50"
+    ],
+    "scenarios": [
+      "p060_0s1d",
+      "p060_1s1d",
+      "p080_0s1d",
+      "p080_1s1d"
+    ],
+    "seed": 818,
+    "actuator_delay_steps": 1,
+    "speed_rate": 0.7,
+    "lidar_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only"
+  },
+  "decision_ceiling": "SA5_CANDIDATE_ONLY",
+  "starts_training": false,
+  "starts_phase_b": false,
+  "selects_parent": false,
+  "graduates_sa5": false,
+  "starts_sa6": false
+}
