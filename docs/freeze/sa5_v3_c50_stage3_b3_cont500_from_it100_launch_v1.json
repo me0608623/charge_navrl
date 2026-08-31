@@ -1,0 +1,126 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_cont500_from_it100_launch/v1",
+  "created_at": "2026-08-25T20:36:08+08:00",
+  "status": "LAUNCHED_HEALTHY_FIRST_METRIC_OBSERVED",
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_stage3_b3_cont500_from_it100_authorization_20260825.json",
+    "sha256": "865b9f5d367a51914643c64c34e0e1a37c9a1b197708dc966a885113d5252589"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1",
+    "unit": "sa5-v3-c50-stage3-b3-cont500-from-it100-p500-r1.service",
+    "systemd_invocation_id": "6da10195d7c94ef184d97811e0d5940f",
+    "config_module": "e2e_sa5_v3_c50_stage3_b3_cont500_from_it100",
+    "additional_iterations": 500,
+    "conceptual_start_iteration": 100,
+    "conceptual_end_iteration": 600,
+    "checkpoints": {
+      "checkpoint_6400.pt": 150,
+      "checkpoint_12800.pt": 200,
+      "checkpoint_19200.pt": 250,
+      "checkpoint_25600.pt": 300,
+      "checkpoint_32000.pt": 350,
+      "checkpoint_38400.pt": 400,
+      "checkpoint_44800.pt": 450,
+      "checkpoint_51200.pt": 500,
+      "checkpoint_57600.pt": 550,
+      "checkpoint_64000.pt": 600
+    }
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont50_from_it50_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "c163f70e17412ed1a8954e5896587e09b0047ae599e30649f0daa54e77a15244",
+    "conceptual_iteration": 100,
+    "checkpoint_total_steps": 6400,
+    "checkpoint_iteration_zero_based": 49,
+    "rl_optimizer_state_entries": 38,
+    "optimizer_resume_required": true,
+    "optimizer_resume_observed": true
+  },
+  "verification": {
+    "targeted_cpu_tests": "12 passed",
+    "config_import": "passed",
+    "syntax_and_json": "passed",
+    "gpu_smoke": {
+      "run_name": "sa5_v3_c50_stage3_b3_cont500_from_it100_smoke_ne64_s42_p1_r1",
+      "result": "success",
+      "optimizer_loaded": true,
+      "family_reconciliation_ok": true,
+      "profile_family_reconciliation_ok": true,
+      "strict_error_scan_count": 0,
+      "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_smoke_ne64_s42_p1_r1/checkpoint_128.pt",
+      "checkpoint_sha256": "a29376e70f681c945b5bf7be65bd13e29eea5a5888598deb19300e143b23f235",
+      "metrics_sha256": "3ab88968f247e16b4518870b4e2b51394a412f7d4df6f91194439686b77cac55"
+    },
+    "first_training_metric": {
+      "iteration": 1,
+      "iterations_target": 500,
+      "total_steps": 128,
+      "sr": 0.6429897864408404,
+      "cr": 0.0682451253478726,
+      "timeout": 0.0,
+      "entropy": 4.149477198719978,
+      "kl": 0.005933805251743252,
+      "clip_fraction": 0.06762886047363281,
+      "vf": 5.9190289080142975,
+      "fps": 532.1648071122819,
+      "family_reconciliation_ok": true,
+      "profile_family_reconciliation_ok": true,
+      "strict_error_scan_count": 0,
+      "interpretation": "Health evidence only; the first rollout is not a capability verdict."
+    },
+    "supervisor": {
+      "expected_run_matches": true,
+      "auto_advance": "HALTED_ALERT",
+      "sa6_auto_start": false
+    }
+  },
+  "preserved_smoke_attempt": {
+    "console": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_smoke_attempt1_missing_run_name.console.log",
+    "generated_run_directory": "logs/rnn_car/marl_0825_2023",
+    "result": "success",
+    "reason_for_repeat": "The first smoke omitted --run_name. Behavior was valid, but the generated directory could not be used as supervisor launch evidence."
+  },
+  "gpu_sharing_at_first_metric": {
+    "memory_used_mib": 27304,
+    "memory_total_mib": 32607,
+    "utilization_percent": 96,
+    "temperature_c": 56,
+    "processes": [
+      {
+        "pid": 35374,
+        "owner": "aa",
+        "role": "teacher rollout in .claude/worktrees/retreat",
+        "memory_mib": 3747
+      },
+      {
+        "pid": 48273,
+        "owner": "aa",
+        "role": "this SA5 continuation",
+        "memory_mib": 7469
+      },
+      {
+        "pid": 51963,
+        "owner": "laksh",
+        "role": "train_relational_finetune.py",
+        "memory_mib": 15984
+      }
+    ],
+    "impact": "First-iteration FPS is contention-limited and must not be used as the standalone throughput baseline."
+  },
+  "source_fingerprint": {
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont500_from_it100.py": "cfb5c2cd7827696def1ff93f463a7f8defa6cff2644e918b24c2a90c86cee022",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont500_from_it100_smoke.py": "329e0a68c199724a020f9c8252e72953a86ac7b3c3c309d36a8b8da6a54e5d05",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/test_sa5_v3_c50_stage3_b3_cont500_config.py": "974549fb3f71da9b20de16046e1045823262113bb3596d0ac79a8ead06578d62",
+    "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/corridor_family_metrics.py": "76da80bbd5d1b782631f16474ff1b5d0df3b7711cf290ef720ae7e93967db8c3",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/corridor_profile_family_metrics.py": "96c1d7248e5bf88eb10186f9ecfef8aa4c50298bdf321e3ee4e1fb2e7b330eed",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay.py": "9e6e1f6f922daede1c58343f93e12b279ff3798f55449287ca13eb99094c0067",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay_geometry.py": "f57f4351573af93cd3e42d60554ba9d77956a49ed5614a9df5d2b40b646466a4"
+  },
+  "automatic_actions": {
+    "fixed_screen_auto_start": false,
+    "sa5_graduation": false,
+    "sa6_launch": false
+  }
+}

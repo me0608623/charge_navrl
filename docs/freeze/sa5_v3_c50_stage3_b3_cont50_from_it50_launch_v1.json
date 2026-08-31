@@ -1,0 +1,90 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_cont50_from_it50_launch/v1",
+  "created_at": "2026-08-25T17:22:18+08:00",
+  "status": "LAUNCHED_HEALTHY_FIRST_METRIC_OBSERVED",
+  "authorization": {
+    "path": "docs/freeze/sa5_v3_c50_stage3_b3_cont50_from_it50_authorization_20260825.json",
+    "sha256": "3a0cdc42ea36ccc07674101ab1c0323ece9033651e17d3af079b9a21221c7140"
+  },
+  "run": {
+    "run_name": "sa5_v3_c50_stage3_b3_cont50_from_it50_ne1024_s42_p50_r1",
+    "unit": "sa5-v3-c50-stage3-b3-cont50-from-it50-p50-r1.service",
+    "systemd_invocation_id": "dd6ed72c73c143049feedf7ffcbe9ff8",
+    "config_module": "e2e_sa5_v3_c50_stage3_b3_cont50_from_it50",
+    "additional_iterations": 50,
+    "conceptual_start_iteration": 50,
+    "conceptual_end_iteration": 100,
+    "checkpoints": {
+      "checkpoint_1280.pt": 60,
+      "checkpoint_2560.pt": 70,
+      "checkpoint_3840.pt": 80,
+      "checkpoint_5120.pt": 90,
+      "checkpoint_6400.pt": 100
+    }
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont25_from_it25_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "2cf4b6beddb74cb13ad474b684e4d5ce1b3887ff0052aba343809b2b64fffff6",
+    "conceptual_iteration": 50,
+    "rl_optimizer_state_entries": 38,
+    "optimizer_resume_required": true,
+    "optimizer_resume_observed": true
+  },
+  "verification": {
+    "targeted_cpu_tests": "12 passed",
+    "config_import": "passed",
+    "gpu_smoke": {
+      "run_name": "sa5_v3_c50_stage3_b3_cont50_from_it50_smoke_ne64_s42_p1_r1",
+      "result": "success",
+      "optimizer_loaded": true,
+      "family_reconciliation_ok": true,
+      "profile_family_reconciliation_ok": true,
+      "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont50_from_it50_smoke_ne64_s42_p1_r1/checkpoint_128.pt",
+      "checkpoint_sha256": "d9bc372b4dfb7e965af4f5855a2ecbb2e1a4d458421a322d8bc4144bc8f52abc",
+      "metrics_sha256": "7aa33b7848b7a02124fc4c735c404950ebadc5e78dc9dd65bbae0a83da5d42be"
+    },
+    "first_training_metric": {
+      "iteration": 1,
+      "iterations_target": 50,
+      "total_steps": 128,
+      "sr": 0.6360153256674521,
+      "cr": 0.06896551724104902,
+      "timeout": 0.0,
+      "entropy": 4.061756044626236,
+      "kl": 0.007412084430939103,
+      "clip_fraction": 0.08796501159667969,
+      "vf": 5.660562381148338,
+      "fps": 1088.5117355659193,
+      "family_reconciliation_ok": true,
+      "profile_family_reconciliation_ok": true,
+      "interpretation": "Health evidence only; the first rollout is not a capability verdict."
+    },
+    "supervisor": {
+      "expected_run_matches": true,
+      "health": "no recent NaN/OOM/traceback",
+      "auto_advance": "HALTED_ALERT"
+    }
+  },
+  "preserved_failed_launch": {
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont50_from_it50_ne1024_s42_p50_r1.launch_attempt1_missing_conda.console.log",
+    "entered_training": false,
+    "created_run_directory": false,
+    "reason": "The first transient systemd unit did not inherit CONDA_PREFIX. The user manager environment was imported before the successful invocation."
+  },
+  "source_fingerprint": {
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont50_from_it50.py": "79a6ec38ea4f296d2b50fc131b11db33742eda16ce083ed524b8bf5e2f223f41",
+    "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont50_from_it50_smoke.py": "359f1b21a06b3693e762766cb020fb29f163126a40fb60118e81da56c4b7f844",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/test_sa5_v3_c50_stage3_b3_cont50_config.py": "4ef95782316091f1892c06c745ba1e94da7b3d61fac060d35912ca1b993b3c02",
+    "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/corridor_family_metrics.py": "76da80bbd5d1b782631f16474ff1b5d0df3b7711cf290ef720ae7e93967db8c3",
+    "scripts/reinforcement_learning/skrl/rnn_car_wdclean/corridor_profile_family_metrics.py": "96c1d7248e5bf88eb10186f9ecfef8aa4c50298bdf321e3ee4e1fb2e7b330eed",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay.py": "9e6e1f6f922daede1c58343f93e12b279ff3798f55449287ca13eb99094c0067",
+    "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay_geometry.py": "f57f4351573af93cd3e42d60554ba9d77956a49ed5614a9df5d2b40b646466a4"
+  },
+  "automatic_actions": {
+    "teacher_diagnostics": "HOLD",
+    "phase_b_launch": false,
+    "sa5_graduation": false,
+    "sa6_launch": false
+  }
+}

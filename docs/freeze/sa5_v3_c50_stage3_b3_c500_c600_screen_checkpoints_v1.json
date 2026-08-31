@@ -1,0 +1,36 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_c500_c600_checkpoint_lock/v1",
+  "created_at": "2026-08-26T05:00:00+08:00",
+  "training_run": "sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1",
+  "training_status": "COMPLETE_HEALTHY_500_OF_500",
+  "checkpoints": {
+    "c500": {
+      "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_51200.pt",
+      "conceptual_iteration": 500,
+      "embedded_iteration": 399,
+      "embedded_total_steps": 51200,
+      "sha256": "3a001052d2be7dfa8a0c97db3a54478680f0cd9838d130b0a5005dc734a3f18f"
+    },
+    "c550": {
+      "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_57600.pt",
+      "conceptual_iteration": 550,
+      "embedded_iteration": 449,
+      "embedded_total_steps": 57600,
+      "sha256": "501c79199b9c0a73d556d5ac1c1345cde347675a213197414af1183c5a2be4ed"
+    },
+    "c600": {
+      "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_64000.pt",
+      "conceptual_iteration": 600,
+      "embedded_iteration": 499,
+      "embedded_total_steps": 64000,
+      "sha256": "c1a24684eb787a0865b007a2a712b744f0f74c39f812c62b9b18d4ed893c271a"
+    }
+  },
+  "automatic_actions": {
+    "starts_training": false,
+    "starts_phase_b": false,
+    "selects_parent": false,
+    "graduates_sa5": false,
+    "starts_sa6": false
+  }
+}

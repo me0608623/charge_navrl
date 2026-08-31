@@ -1,0 +1,91 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_cont50_from_it50_authorization/v1",
+  "authorized_at": "2026-08-25T17:10:00+08:00",
+  "authorized_by": "user_explicit_instruction",
+  "decision": "HUMAN_AUTHORIZED_B3_EXACT_CONTINUATION_IT50_TO_IT100",
+  "instruction": "Continue SA5 training and hold the teacher diagnostic branch.",
+  "purpose": "Exploratory bounded continuation under the unchanged B3 training contract.",
+  "evidence_context": {
+    "prior_training_completion": {
+      "path": "docs/freeze/sa5_v3_c50_stage3_b3_cont25_completion_20260824.json",
+      "sha256": "26b0f2e5b627ce78452ed77a4550b3ef51f827dafeab195530c162f776a8b7ff",
+      "status": "COMPLETE_HEALTHY_PENDING_24_CELL_SCREEN"
+    },
+    "fixed_screen_invalidation": {
+      "path": "logs/gates/sa5_v3_c50_stage3_b3_cont25_screen/screen_20260824_r2/SOURCE_DRIFT_INVALIDATION.json",
+      "sha256": "7d3a7434a0f04475191542ef5c5b2bc959bff7b52c1177cde874af1d4458c7bb",
+      "completed_cells": 22,
+      "expected_cells": 24,
+      "formal_verdict": false,
+      "note": "The partial cells are diagnostic only. This authorization does not reinterpret them as a completed checkpoint ranking."
+    }
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont25_from_it25_ne1024_s42_p25_r1/checkpoint_3200.pt",
+    "sha256": "2cf4b6beddb74cb13ad474b684e4d5ce1b3887ff0052aba343809b2b64fffff6",
+    "conceptual_iteration": 50,
+    "embedded_iteration": 24,
+    "embedded_total_steps": 3200,
+    "optimizer_resume": true,
+    "rl_optimizer_state_entries": 38
+  },
+  "identity_contract": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont25_from_it25.py",
+    "source_config_sha256": "3af0b9e6bb9f3683d4b3edbf30365fe2e5a9750e4942ef28500baa1e0c43b952",
+    "allowed_behavioral_differences": [
+      "checkpoint",
+      "timesteps",
+      "save_interval"
+    ],
+    "fixed": [
+      "reward and reward weights",
+      "network and observation contract",
+      "speed_rate 0.7 with ego observation semantics",
+      "full VLP-16 valid-return-only noise",
+      "actuator delay U{1,2}",
+      "stage and exact speed-density scene mix",
+      "PPO hyperparameters, rollout length, environment count and seed"
+    ]
+  },
+  "source_contract": {
+    "trainer_sha256": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090",
+    "corridor_family_metrics_sha256": "76da80bbd5d1b782631f16474ff1b5d0df3b7711cf290ef720ae7e93967db8c3",
+    "corridor_profile_family_metrics_sha256": "96c1d7248e5bf88eb10186f9ecfef8aa4c50298bdf321e3ee4e1fb2e7b330eed",
+    "long_corridor_replay_sha256": "9e6e1f6f922daede1c58343f93e12b279ff3798f55449287ca13eb99094c0067",
+    "long_corridor_geometry_sha256": "f57f4351573af93cd3e42d60554ba9d77956a49ed5614a9df5d2b40b646466a4",
+    "note": "The two corridor hashes match the pre-drift source fingerprint used by B3 and its first 22 screen cells."
+  },
+  "continuation": {
+    "additional_training_iterations": 50,
+    "conceptual_start_iteration": 50,
+    "conceptual_end_iteration": 100,
+    "rollout_length": 128,
+    "additional_timesteps": 6400,
+    "save_interval_iterations": 10,
+    "conceptual_checkpoints": [
+      [60, "checkpoint_1280.pt"],
+      [70, "checkpoint_2560.pt"],
+      [80, "checkpoint_3840.pt"],
+      [90, "checkpoint_5120.pt"],
+      [100, "checkpoint_6400.pt"]
+    ]
+  },
+  "interpretation": {
+    "lineage_status": "SA5_EXPLORATORY_CONTINUATION_NOT_GRADUATED",
+    "result_ceiling": "CHECKPOINT_CANDIDATE_ONLY",
+    "requires_fresh_fixed_screen": true,
+    "partial_prior_screen_may_not_select_parent": true
+  },
+  "automatic_actions": {
+    "teacher_diagnostics": "HOLD",
+    "phase_b_auto_start": false,
+    "sa5_graduation": false,
+    "sa6_auto_start": false
+  },
+  "stop_conditions": [
+    "NaN or non-finite PPO metrics",
+    "CUDA OOM or traceback",
+    "profile-family reconciliation failure",
+    "checkpoint, config, trainer, instrumentation or corridor source hash drift"
+  ]
+}

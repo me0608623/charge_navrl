@@ -1,0 +1,25 @@
+{
+  "schema": "sa5_v3_c50_stage3_b3_c500_c600_screen_authorization/v1",
+  "created_at": "2026-08-26T05:00:00+08:00",
+  "decision": "HUMAN_AUTHORIZED_FIXED_PROTOCOL_C500_C550_C600_COMPARISON",
+  "request": "用固定協議比較 c500/c550/c600",
+  "scope": {
+    "checkpoints": ["c500", "c550", "c600"],
+    "scenarios": [
+      "p060_0s1d",
+      "p060_1s1d",
+      "p080_0s1d",
+      "p080_1s1d"
+    ],
+    "cell_count": 12,
+    "fixed_protocol_source": "sa5_v3_c50_stage3_b3_cont25_screen",
+    "retention_reference": "c500"
+  },
+  "automatic_actions": {
+    "starts_training": false,
+    "starts_phase_b": false,
+    "selects_parent": false,
+    "graduates_sa5": false,
+    "starts_sa6": false
+  }
+}

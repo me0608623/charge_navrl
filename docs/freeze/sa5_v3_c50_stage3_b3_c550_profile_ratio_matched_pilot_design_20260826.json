@@ -1,0 +1,85 @@
+{
+  "schema": "sa5_b3_c550_profile_ratio_matched_pilot_design/v1",
+  "created_date": "2026-08-26",
+  "decision": "ESTABLISH_READY_NOT_RUN",
+  "evidence": {
+    "metrics": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/supervisor_metrics.jsonl",
+    "metrics_sha256": "6d2b5affa84d2bfc847bdf08228933cdec609d4b1ec50754d0f72be9015b5bf7",
+    "fixed_screen": "logs/gates/sa5_v3_c50_stage3_b3_c500_c600_screen/screen_20260826_r1/SUMMARY.json",
+    "fixed_screen_sha256": "fa1e1982733cf2f3996fa9e08a72a2e6d629bb9295090616a1c819337eb4f098",
+    "posthoc_ledger": "logs/gates/sa5_v3_c50_stage3_b3_c500_c600_screen/screen_20260826_r1/POSTHOC_EXPOSURE_LEDGER.json",
+    "posthoc_ledger_sha256": "6b3634d9149bf90b990b6f972a2e843042211a0b180d88b52603476729e9faa4",
+    "finding": "P060 0S1D and 1S1D reset exposure remained approximately 10 percent per profile, explicit labeled P080 profile exposure was zero, and the fixed screen showed a P060/P080 checkpoint tradeoff."
+  },
+  "parent": {
+    "label": "c550",
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_57600.pt",
+    "sha256": "501c79199b9c0a73d556d5ac1c1345cde347675a213197414af1183c5a2be4ed",
+    "resume_rl_optimizer": true,
+    "status": "diagnostic_anchor_not_graduated"
+  },
+  "shared_contract": {
+    "training_iterations": 50,
+    "save_interval_iterations": 25,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "stage": 5,
+    "speed_rate": 0.7,
+    "actuator_delay_range": [1, 2],
+    "lidar_distractor_eligibility": "valid_return_only",
+    "only_allowed_behavioral_difference_between_arms": "long_corridor_speed_density_mix"
+  },
+  "control_mix": [
+    [[0, 1], [0.50, 0.70], 0.10],
+    [[1, 1], [0.50, 0.70], 0.10],
+    [[2, 1], [0.50, 0.70], 0.15],
+    [[3, 2], [0.25, 0.45], 0.30],
+    [[4, 2], [0.25, 0.45], 0.35]
+  ],
+  "intervention_mix": [
+    [[0, 1], [0.50, 0.70], 0.10],
+    [[1, 1], [0.50, 0.70], 0.10],
+    [[0, 1], [0.70, 0.90], 0.05],
+    [[1, 1], [0.70, 0.90], 0.05],
+    [[2, 1], [0.50, 0.70], 0.15],
+    [[3, 2], [0.25, 0.45], 0.25],
+    [[4, 2], [0.25, 0.45], 0.30]
+  ],
+  "interpretation": {
+    "purpose": "causal test of explicit P080 retention replay while preserving all P060 profile weights",
+    "does_not_claim": "historical checkpoint fluctuation was caused by profile ratios or that the proposed dose is optimal",
+    "historical_c600_is_formal_control": false,
+    "fresh_control_required": true
+  },
+  "evaluation_contract": {
+    "primary_comparison_offset": 50,
+    "offset_25_role": "diagnostic_trajectory_only",
+    "phase_a_fixed_scenarios": [
+      "P060_0S1D",
+      "P060_1S1D",
+      "P080_0S1D",
+      "P080_1S1D"
+    ],
+    "development_pass_requires": {
+      "intervention_p060_each": "SR>=0.90, CR<=0.10, TO<=0.05",
+      "intervention_p080_retention_vs_c500_each": "SR/CR/TO degradation<=0.02",
+      "intervention_vs_fresh_control_worst_p080_cr_improvement": ">=0.02",
+      "intervention_vs_fresh_control_p060_cr_degradation_each": "<=0.02",
+      "all_cells_valid_and_source_fingerprint_stable": true
+    },
+    "phase_b_if_phase_a_passes": [
+      "P035_3S2D_retention",
+      "P035_4S2D_retention",
+      "native_retention",
+      "narrow_retention"
+    ],
+    "phase_b_cr_degradation_limit": 0.02,
+    "single_training_seed_is_developmental_evidence_only": true
+  },
+  "automatic_actions": {
+    "gpu_launch_authorized": false,
+    "sa6_start_authorized": false,
+    "auto_advance_authorized": false
+  }
+}
