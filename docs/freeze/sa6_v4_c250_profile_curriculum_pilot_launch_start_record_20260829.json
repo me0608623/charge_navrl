@@ -1,0 +1,60 @@
+{
+  "schema": "sa6_v4_c250_profile_curriculum_pilot_launch_start_record/v1",
+  "recorded_at": "2026-08-29T15:07:00+08:00",
+  "authorization_sha256": "34f19379cb81cdc607628bbf3e13e06e9891cd1bac6d95e1b5e0c314489bf5a3",
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa6_v3_cont300_from_it50_ne1024_s42_p300_r1/checkpoint_25600.pt",
+    "sha256": "4044d6dff443b3d4a2a36dfa067a99acd0e60b167919caa8f9b89cf213de0803",
+    "conceptual_iteration": 250,
+    "optimizer_loaded": true
+  },
+  "execution": {
+    "unit": "sa6-v4-c250-profile-curriculum-pilot-r3.service",
+    "invocation_id": "8e7b49fabd5e4689a11fbbb977e3a6d7",
+    "queue_output": "logs/gates/sa6_v4_c250_profile_curriculum_pilot/launch_20260829_r3",
+    "queue_log": "logs/gates/sa6_v4_c250_profile_curriculum_pilot/launch_20260829_r3.queue.log",
+    "control_smoke": "COMPLETE_VALID",
+    "rung1_smoke": "COMPLETE_VALID",
+    "active_arm": "control",
+    "active_run": "sa6_v4_c250_profile_curriculum_control_ne1024_s42_p50_r1"
+  },
+  "runtime_contract_observed": {
+    "speed_rate": 0.7,
+    "lidar_noise": "full_sigma_bias_dropout_on",
+    "mixed_pixel_eligibility": "valid_return_only",
+    "actuator_delay_steps": [1, 2],
+    "frame_stack": 8,
+    "reward_changed": false,
+    "control_profile_weights": [0.10, 0.10, 0.15, 0.20, 0.30, 0.15]
+  },
+  "first_control_iteration": {
+    "iteration": 1,
+    "target": 50,
+    "sr": 0.5574102174984451,
+    "cr": 0.12291350531045568,
+    "timeout": 0.0,
+    "kl": 0.0033436293476825085,
+    "fps": 1735.570903825035,
+    "corridor_family_reconciliation_ok": true,
+    "corridor_profile_family_reconciliation_ok": true,
+    "is_gate_evidence": false
+  },
+  "prior_attempts": {
+    "r1": "FAIL_CLOSED_BEFORE_GPU_OUTPUT_ROOT_COLLISION",
+    "r2": "FAIL_CLOSED_BEFORE_ISAAC_SIM_MISSING_CONDA_PREFIX"
+  },
+  "external_gpu_load": {
+    "observed_after_preflight": true,
+    "pid": 3419825,
+    "command": "python examples/train_bpa_segmentation.py --config configs/stage0_bpa_segmentation.yaml",
+    "approx_gpu_memory_mib": 4428,
+    "ended_before_control_iteration": 3,
+    "interpretation_limit": "May affect wall-clock fps; do not interpret fps differences as policy effects."
+  },
+  "automatic_actions": {
+    "fixed_gate_started": false,
+    "extend_beyond_50_iterations": false,
+    "teacher_distillation_or_override": false,
+    "sa7_started": false
+  }
+}

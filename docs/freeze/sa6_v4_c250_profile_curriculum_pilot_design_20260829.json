@@ -1,0 +1,123 @@
+{
+  "schema": "sa6_v4_c250_profile_curriculum_pilot_design/v1",
+  "created_date": "2026-08-29",
+  "decision": "ESTABLISH_READY_NOT_RUN",
+  "evidence": {
+    "fixed_screen": "logs/gates/sa6_v3_checkpoint_screen/screen_20260828_r3/SUMMARY.json",
+    "fixed_screen_sha256": "b3dff63c5be2a0ebaf5cbcaa22adbcb973d4268cb747c94b04f079957bbbb58f",
+    "fixed_protocol": "docs/freeze/sa6_v3_checkpoint_screen_v3.json",
+    "fixed_protocol_sha256": "fdf221babb314361f5c862a430d6ad8fce18f119f409406f2851fc7efe8fe803",
+    "screen_status": "COMPLETE_VALID_SINGLE_SEED_SCREEN",
+    "source_fingerprint_stable": true,
+    "finding": "c250 ranked first but failed every Phase-A target gate and failed native, P060 0S1D, and P060 2S1D retention. All candidates had random-2D as their worst fixed family. The old SA5 70 percent random-2D weight-only pilot harmed lateral and mixed retention, so this design does not repeat that intervention."
+  },
+  "parent": {
+    "label": "c250",
+    "checkpoint": "logs/rnn_car/sa6_v3_cont300_from_it50_ne1024_s42_p300_r1/checkpoint_25600.pt",
+    "sha256": "4044d6dff443b3d4a2a36dfa067a99acd0e60b167919caa8f9b89cf213de0803",
+    "conceptual_iteration": 250,
+    "checkpoint_total_steps": 25600,
+    "checkpoint_iteration_zero_based": 199,
+    "rl_optimizer_state_entries": 38,
+    "resume_rl_optimizer": true,
+    "status": "SA6_NOT_GRADUATED_DIAGNOSTIC_ANCHOR"
+  },
+  "shared_contract": {
+    "training_iterations": 50,
+    "save_interval_iterations": 25,
+    "checkpoints": [
+      [25, "checkpoint_3200.pt"],
+      [50, "checkpoint_6400.pt"]
+    ],
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "stage": 6,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "lidar_frame_stack": 8,
+    "vlp16_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "enable_actuator_dr": true,
+    "actuator_delay_range": [1, 2],
+    "motion_mode": "env_stratified",
+    "motion_weights": [0.3, 0.3, 0.4],
+    "random_2d_kinematics": "patrol",
+    "teacher_distillation": false,
+    "action_override": false,
+    "only_allowed_behavioral_difference_between_arms": "long_corridor_speed_density_mix"
+  },
+  "control_mix": [
+    [[0, 1], [0.5, 0.7], 0.10],
+    [[1, 1], [0.5, 0.7], 0.10],
+    [[2, 1], [0.5, 0.7], 0.15],
+    [[3, 2], [0.27, 0.5], 0.20],
+    [[4, 2], [0.27, 0.5], 0.30],
+    [[4, 3], [0.27, 0.5], 0.15]
+  ],
+  "intervention_mix": [
+    [[0, 1], [0.5, 0.7], 0.10],
+    [[1, 1], [0.5, 0.7], 0.10],
+    [[2, 1], [0.5, 0.7], 0.15],
+    [[3, 2], [0.27, 0.5], 0.35],
+    [[4, 2], [0.27, 0.5], 0.25],
+    [[4, 3], [0.27, 0.5], 0.05]
+  ],
+  "intervention_rationale": {
+    "purpose": "Test whether moving high-density exposure toward the nearest learnable SA6 rung improves fixed target performance without sacrificing low-density retention.",
+    "low_density_total_unchanged": 0.35,
+    "high_density_total_unchanged": 0.65,
+    "change": "Move 0.10 from 4S3D and 0.05 from 4S2D to 3S2D while retaining nonzero exposure to every SA6 target profile.",
+    "does_not_change": [
+      "corridor motion-family weights",
+      "reward",
+      "network",
+      "action or observation contract",
+      "LiDAR noise",
+      "actuator DR or delay",
+      "outer native/narrow/corridor scene shares"
+    ],
+    "does_not_claim": "c250 is a graduated SA6 parent or that this profile dose is optimal"
+  },
+  "evaluation_contract": {
+    "primary_offset_iterations": 50,
+    "offset_25_role": "trajectory diagnostic and early-peak detection",
+    "fresh_control_required": true,
+    "historical_c300_role": "descriptive reference only, not the matched control",
+    "phase_a_fixed_cells": [
+      "profile_sa6_3s2d",
+      "profile_sa6_4s2d",
+      "profile_sa6_4s3d",
+      "family_lateral_4s2d",
+      "family_longitudinal_4s2d",
+      "family_random_2d_4s2d",
+      "family_mixed_4s2d"
+    ],
+    "phase_b_retention_cells": [
+      "nav_native",
+      "narrow_range",
+      "retention_p060_0s1d",
+      "retention_p060_1s1d",
+      "retention_p060_2s1d"
+    ],
+    "development_pass_requires": {
+      "intervention_vs_fresh_control_worst_phase_a_failure_rate_improvement_min": 0.02,
+      "intervention_vs_fresh_control_profile_3s2d_failure_rate_improvement_min": 0.02,
+      "intervention_vs_fresh_control_each_4s2d_family_cr_degradation_max": 0.02,
+      "intervention_vs_fresh_control_each_retention_cr_degradation_max": 0.02,
+      "narrow_hard_gate_pass": true,
+      "all_cells_valid_and_source_fingerprint_stable": true
+    },
+    "formal_sa6_graduation": "unchanged r3 hard gates; a development pass does not graduate SA6",
+    "single_training_seed_is_developmental_evidence_only": true
+  },
+  "automatic_actions": {
+    "config_build_authorized": true,
+    "cpu_tests_authorized": true,
+    "gpu_smoke_authorized": false,
+    "training_launch_authorized": false,
+    "auto_extend_authorized": false,
+    "start_sa7_authorized": false,
+    "enable_teacher_distillation_or_override": false
+  }
+}

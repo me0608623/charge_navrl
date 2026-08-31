@@ -1,0 +1,352 @@
+{
+  "authorization_limit": "starts neither training nor SA7 and never accepts a parent",
+  "candidates": [
+    {
+      "conceptual_iteration": 50,
+      "filename": "checkpoint_6400.pt",
+      "name": "c50",
+      "run_name": "sa6_v3_from_sa5_c600_ne1024_s42_p50_r1",
+      "sha256": "096a953132a4ec9a4208aa331448e83189ede6b35f40d77d5552d4e94909d65b"
+    },
+    {
+      "conceptual_iteration": 100,
+      "filename": "checkpoint_6400.pt",
+      "name": "c100",
+      "run_name": "sa6_v3_cont300_from_it50_ne1024_s42_p300_r1",
+      "sha256": "67c7e1131198740aad06261fe7fab86de1b2f4fc65146854200baaa2914986b2"
+    },
+    {
+      "conceptual_iteration": 150,
+      "filename": "checkpoint_12800.pt",
+      "name": "c150",
+      "run_name": "sa6_v3_cont300_from_it50_ne1024_s42_p300_r1",
+      "sha256": "4caab19a74a887fab81e6af0ed2d442cb7b1b97cf18509fb9fecaec8713570d8"
+    },
+    {
+      "conceptual_iteration": 200,
+      "filename": "checkpoint_19200.pt",
+      "name": "c200",
+      "run_name": "sa6_v3_cont300_from_it50_ne1024_s42_p300_r1",
+      "sha256": "6e027122e212dda79522f48afc4cd13204cd6d1b641a2ec682d07afcc01009dc"
+    },
+    {
+      "conceptual_iteration": 250,
+      "filename": "checkpoint_25600.pt",
+      "name": "c250",
+      "run_name": "sa6_v3_cont300_from_it50_ne1024_s42_p300_r1",
+      "sha256": "4044d6dff443b3d4a2a36dfa067a99acd0e60b167919caa8f9b89cf213de0803"
+    },
+    {
+      "conceptual_iteration": 300,
+      "filename": "checkpoint_32000.pt",
+      "name": "c300",
+      "run_name": "sa6_v3_cont300_from_it50_ne1024_s42_p300_r1",
+      "sha256": "f20c262442bb948ce2c259945ad9fb69d3bb2ded918d45af7df205f5fe624711"
+    },
+    {
+      "conceptual_iteration": 350,
+      "filename": "checkpoint_38400.pt",
+      "name": "c350",
+      "run_name": "sa6_v3_cont300_from_it50_ne1024_s42_p300_r1",
+      "sha256": "f8667eb91ba6f437bb455825c396c1ff0be74dc788f9ff390bcb8ae23624ed64"
+    }
+  ],
+  "evidence_boundary": "single training seed and fixed evaluator seed developmental screen; it ranks checkpoints but accepts no parent and is not a formal multi-seed/multi-delay SA6 graduation matrix",
+  "fixed_evaluation": {
+    "actuator_delay_ms": 200,
+    "actuator_delay_steps": 1,
+    "actuator_profile": "sa1_delay_only",
+    "corridor_installation": {
+      "family_cells": "legacy fixed-count 4S2D pure-family gate path",
+      "profile_cells": "single-entry production count-mix with env_stratified motion",
+      "reason": "pure lateral supports at most two dynamic obstacles, so 4S3D cannot be crossed with every pure family"
+    },
+    "count_mix_runtime_audit": {
+      "authoritative_density_check": "actual static_obstacles_per_env and dynamic_obstacles_per_env",
+      "legacy_fixed_slot_limit": 2,
+      "limitation": "legacy obstacle_mix_pass, movement_pass, motion_mode_pass, and penetration_expected_slot_frames use the fixed two-slot CLI count. Exact production-profile cells therefore validate the installed scheduler counts and active-slot accounting directly, while reporting rather than gating the production path's dynamic-static penetration audit. Pure-family 4S2D cells retain the strict zero-penetration gate",
+      "production_dynamic_slot_capacity": 5
+    },
+    "deployment_speed_scale": 1.0,
+    "lidar_distractor_eligibility": "valid_return_only",
+    "lidar_noise_mode": "full",
+    "minimum_completed_episodes": 1000,
+    "num_envs": 64,
+    "scene": {
+      "arena_size_m": 14.0,
+      "corridor_boundary_wall_width_m": 1.0,
+      "corridor_density_mix": [
+        [
+          [
+            3,
+            2
+          ],
+          0.3
+        ],
+        [
+          [
+            4,
+            2
+          ],
+          0.5
+        ],
+        [
+          [
+            4,
+            3
+          ],
+          0.2
+        ]
+      ],
+      "corridor_dynamic_obstacles": 2,
+      "corridor_expected_boundary_overlap_m": 0.5,
+      "corridor_free_width_m": 4.0,
+      "corridor_length_m": 10.0,
+      "corridor_motion_mode": "env_stratified",
+      "corridor_motion_weights": null,
+      "corridor_sealed_to_boundary": true,
+      "corridor_speed_range_m_s": [
+        0.27,
+        0.5
+      ],
+      "corridor_static_obstacles": 4,
+      "corridor_wall_span_m": 14.0,
+      "narrow_exact_width_m": null,
+      "narrow_exact_width_ratio": 0.0,
+      "narrow_segment_length_m": 7.0,
+      "narrow_width_range_m": [
+        1.2,
+        1.4
+      ],
+      "narrow_yaw_limit_deg": 4.0,
+      "random_2d_kinematics": "patrol",
+      "room_half_extent_m": 7.0,
+      "stage": 6
+    },
+    "seed": 818,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "stage": 6,
+    "steps": 2500
+  },
+  "lineage": {
+    "continuation_run": "sa6_v3_cont300_from_it50_ne1024_s42_p300_r1",
+    "pilot_run": "sa6_v3_from_sa5_c600_ne1024_s42_p50_r1"
+  },
+  "phase_a": {
+    "cells": 49,
+    "family_cells": [
+      "family_lateral_4s2d",
+      "family_longitudinal_4s2d",
+      "family_random_2d_4s2d",
+      "family_mixed_4s2d"
+    ],
+    "family_reference_profile": "sa6_4s2d",
+    "fixed_cells": [
+      {
+        "cell_kind": "sa6_target_profile",
+        "density": "3S2D",
+        "dynamic_obstacles": 2,
+        "installation": "single-entry production count-mix",
+        "label": "profile_sa6_3s2d",
+        "motion_mode": "env_stratified",
+        "source_profile": "sa6_3s2d",
+        "speed_range_m_s": [
+          0.27,
+          0.5
+        ],
+        "static_obstacles": 3,
+        "training_index": 3,
+        "training_weight": 0.2
+      },
+      {
+        "cell_kind": "sa6_target_profile",
+        "density": "4S2D",
+        "dynamic_obstacles": 2,
+        "installation": "single-entry production count-mix",
+        "label": "profile_sa6_4s2d",
+        "motion_mode": "env_stratified",
+        "source_profile": "sa6_4s2d",
+        "speed_range_m_s": [
+          0.27,
+          0.5
+        ],
+        "static_obstacles": 4,
+        "training_index": 4,
+        "training_weight": 0.3
+      },
+      {
+        "cell_kind": "sa6_target_profile",
+        "density": "4S3D",
+        "dynamic_obstacles": 3,
+        "installation": "single-entry production count-mix",
+        "label": "profile_sa6_4s3d",
+        "motion_mode": "env_stratified",
+        "source_profile": "sa6_4s3d",
+        "speed_range_m_s": [
+          0.27,
+          0.5
+        ],
+        "static_obstacles": 4,
+        "training_index": 5,
+        "training_weight": 0.15
+      },
+      {
+        "cell_kind": "corridor_family_regression",
+        "density": "4S2D",
+        "dynamic_obstacles": 2,
+        "installation": "legacy fixed-count 4S2D gate path",
+        "label": "family_lateral_4s2d",
+        "motion_mode": "lateral",
+        "source_profile": "sa6_4s2d",
+        "speed_range_m_s": [
+          0.27,
+          0.5
+        ],
+        "static_obstacles": 4,
+        "training_index": 4,
+        "training_weight": 0.3
+      },
+      {
+        "cell_kind": "corridor_family_regression",
+        "density": "4S2D",
+        "dynamic_obstacles": 2,
+        "installation": "legacy fixed-count 4S2D gate path",
+        "label": "family_longitudinal_4s2d",
+        "motion_mode": "longitudinal",
+        "source_profile": "sa6_4s2d",
+        "speed_range_m_s": [
+          0.27,
+          0.5
+        ],
+        "static_obstacles": 4,
+        "training_index": 4,
+        "training_weight": 0.3
+      },
+      {
+        "cell_kind": "corridor_family_regression",
+        "density": "4S2D",
+        "dynamic_obstacles": 2,
+        "installation": "legacy fixed-count 4S2D gate path",
+        "label": "family_random_2d_4s2d",
+        "motion_mode": "random_2d",
+        "source_profile": "sa6_4s2d",
+        "speed_range_m_s": [
+          0.27,
+          0.5
+        ],
+        "static_obstacles": 4,
+        "training_index": 4,
+        "training_weight": 0.3
+      },
+      {
+        "cell_kind": "corridor_family_regression",
+        "density": "4S2D",
+        "dynamic_obstacles": 2,
+        "installation": "legacy fixed-count 4S2D gate path",
+        "label": "family_mixed_4s2d",
+        "motion_mode": "mixed",
+        "source_profile": "sa6_4s2d",
+        "speed_range_m_s": [
+          0.27,
+          0.5
+        ],
+        "static_obstacles": 4,
+        "training_index": 4,
+        "training_weight": 0.3
+      }
+    ],
+    "profile_cells": [
+      "profile_sa6_3s2d",
+      "profile_sa6_4s2d",
+      "profile_sa6_4s3d"
+    ],
+    "promotion": "exactly two structurally valid candidates",
+    "ranking": {
+      "descriptive_tie_margin": 0.005,
+      "eligibility_partition": "all seven hard-gate passes rank before failures",
+      "last_tiebreak": "prefer later checkpoint only after exact score ties",
+      "primary": "minimum worst (1-SR) across seven Phase-A cells",
+      "secondary": "minimum worst CR across seven Phase-A cells",
+      "tertiary": "minimum mean (1-SR), then minimum mean CR"
+    }
+  },
+  "phase_b": {
+    "cells": 10,
+    "low_density_motion_family": "lateral",
+    "low_density_profiles": [
+      {
+        "density": "0S1D",
+        "dynamic_obstacles": 1,
+        "label": "p060_0s1d",
+        "speed_range_m_s": [
+          0.5,
+          0.7
+        ],
+        "static_obstacles": 0,
+        "training_index": 0,
+        "training_weight": 0.1
+      },
+      {
+        "density": "1S1D",
+        "dynamic_obstacles": 1,
+        "label": "p060_1s1d",
+        "speed_range_m_s": [
+          0.5,
+          0.7
+        ],
+        "static_obstacles": 1,
+        "training_index": 1,
+        "training_weight": 0.1
+      },
+      {
+        "density": "2S1D",
+        "dynamic_obstacles": 1,
+        "label": "p060_2s1d",
+        "speed_range_m_s": [
+          0.5,
+          0.7
+        ],
+        "static_obstacles": 2,
+        "training_index": 2,
+        "training_weight": 0.15
+      }
+    ],
+    "scenarios": [
+      "nav_native",
+      "narrow_range",
+      "retention_p060_0s1d",
+      "retention_p060_1s1d",
+      "retention_p060_2s1d"
+    ]
+  },
+  "purpose": "compare parent c50 and continuation c100-c350 under one fixed SA6 evaluator, then run retention only for the Phase-A top two",
+  "schema": "sa6_v3_checkpoint_screen_protocol/v1",
+  "sha256": "9e949ba1c1f115d9683bc1ea5d62e11d55b11a349d5243c62816ad8d0ca778e2",
+  "thresholds": {
+    "corridor": {
+      "cr_max": 0.1,
+      "crossing_min": null,
+      "direct_crossing_min": null,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "narrow": {
+      "cr_max": 0.05,
+      "crossing_min": 0.95,
+      "direct_crossing_min": 0.95,
+      "episodes_min": 1000,
+      "sr_min": 0.9,
+      "to_max": 0.05
+    },
+    "native_stage6": {
+      "cr_max": 0.11,
+      "crossing_min": null,
+      "direct_crossing_min": null,
+      "episodes_min": 1000,
+      "sr_min": 0.88,
+      "to_max": 0.045
+    }
+  }
+}

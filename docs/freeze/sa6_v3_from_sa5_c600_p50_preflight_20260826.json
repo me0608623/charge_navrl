@@ -1,0 +1,97 @@
+{
+  "schema": "sa6_v3_c600_pilot_preflight/v1",
+  "checked_at": "2026-08-26T17:13:14+08:00",
+  "status": "CONFIG_CONFIRMED_GPU_SMOKE_PENDING_SHARED_GPU",
+  "launch_performed": false,
+  "identity": {
+    "run_name": "sa6_v3_from_sa5_c600_ne1024_s42_p50_r1",
+    "config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa6_v3_from_sa5_c600_p50.py",
+    "config_sha256": "c0130ec73d1465dcbb2505eee25de1d85007b958acba4c863e23c703669ab09c",
+    "smoke_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa6_v3_from_sa5_c600_p50_smoke.py",
+    "smoke_config_sha256": "b2e8843a1998e0ced32936dbc152508e5b88579310aa991d6aff2346036bd413"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_64000.pt",
+    "sha256": "c1a24684eb787a0865b007a2a712b744f0f74c39f812c62b9b18d4ed893c271a",
+    "total_steps": 64000,
+    "iteration_zero_based": 499,
+    "rl_optimizer_state_entries": 38,
+    "resume_optimizer": true,
+    "machine_gate_pass": false,
+    "human_waiver_preserved": true
+  },
+  "training": {
+    "stage": 6,
+    "fixed_stage": true,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "iterations": 50,
+    "trainer_timesteps": 6400,
+    "parallel_environment_transitions": 6553600,
+    "save_interval": 25,
+    "checkpoints": [
+      [25, "checkpoint_3200.pt"],
+      [50, "checkpoint_6400.pt"]
+    ]
+  },
+  "contracts": {
+    "scene_reset_share": {
+      "native": 0.78,
+      "narrow": 0.12,
+      "corridor": 0.1
+    },
+    "room_size_m": 7.0,
+    "narrow_width_range_m": [1.2, 1.4],
+    "corridor_free_width_m": 4.0,
+    "low_density_retention_share": 0.35,
+    "sa6_target_share": 0.65,
+    "lidar_frame_stack": 8,
+    "speed_rate": 0.7,
+    "vlp16_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "actuator_dr_enabled": true,
+    "actuator_delay_range_steps": [1, 2],
+    "actuator_velocity_scale": [1.0, 1.0],
+    "actuator_motor_lag": 1.0,
+    "teacher_or_projection_enabled": false
+  },
+  "ppo": {
+    "algorithm": "ppo",
+    "lr": 0.0002,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "epochs": 4,
+    "mini_batches": 8,
+    "clip_eps": 0.2,
+    "target_kl": 0.015,
+    "max_grad_norm": 0.5,
+    "vf_coeff": 0.5
+  },
+  "verification": {
+    "focused_tests_passed": 52,
+    "py_compile": "PASS",
+    "git_diff_check": "PASS",
+    "stale_sa5_hold_tags_removed": true,
+    "registry_load": "PASS",
+    "gpu_smoke": "NOT_RUN_SHARED_GPU_BUSY"
+  },
+  "runtime_snapshot": {
+    "gpu_used_mib": 12564,
+    "gpu_total_mib": 32607,
+    "gpu_util_percent": 95,
+    "gpu_temperature_c": 60,
+    "compute_pid": 931122,
+    "compute_owner": "laksh",
+    "compute_command": "python examples/train_bpa_segmentation.py --config configs/stage0_bpa_segmentation.yaml",
+    "training_unit_present": false,
+    "expected_run": null,
+    "auto_advance": "HALTED"
+  },
+  "remaining_gates_before_launch": [
+    "wait for the shared GPU workload to release",
+    "run the locked 64-env one-iteration GPU smoke",
+    "verify runtime banners and optimizer load",
+    "obtain explicit formal-training launch instruction"
+  ]
+}

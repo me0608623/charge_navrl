@@ -1,0 +1,84 @@
+{
+  "schema": "sa6_v3_cont300_from_it50_authorization/v1",
+  "created_at": "2026-08-27T13:18:10+08:00",
+  "decision": "HUMAN_AUTHORIZED_EXACT_CONTINUATION_IT50_PLUS_300",
+  "request": "繼續訓練300iter在比較",
+  "interpretation": {
+    "additional_training_iterations": 300,
+    "conceptual_start_iteration": 50,
+    "conceptual_end_iteration": 350,
+    "note": "The request is interpreted as 300 additional iterations from the completed SA6 it50 checkpoint, followed by a fixed-protocol comparison."
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa6_v3_from_sa5_c600_ne1024_s42_p50_r1/checkpoint_6400.pt",
+    "sha256": "096a953132a4ec9a4208aa331448e83189ede6b35f40d77d5552d4e94909d65b",
+    "conceptual_iteration": 50,
+    "checkpoint_total_steps": 6400,
+    "checkpoint_iteration_zero_based": 49,
+    "rl_optimizer_state_entries": 38,
+    "resume_ppo_optimizer": true
+  },
+  "identity_contract": {
+    "source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa6_v3_from_sa5_c600_p50.py",
+    "source_config_sha256": "c0130ec73d1465dcbb2505eee25de1d85007b958acba4c863e23c703669ab09c",
+    "completion_record": "docs/freeze/sa6_v3_from_sa5_c600_p50_launch_20260826.json",
+    "completion_record_sha256": "ede96653824189443a96384ca969cd8d18270a1600dfd3ddab10ff6e469ac5b9",
+    "allowed_behavioral_differences": [
+      "checkpoint",
+      "save_interval",
+      "timesteps"
+    ],
+    "unchanged_contract": {
+      "stage": 6,
+      "num_envs": 1024,
+      "seed": 42,
+      "rollout_length": 128,
+      "speed_rate": 0.7,
+      "speed_rate_obs": "ego",
+      "lidar_frame_stack": 8,
+      "vlp16_noise_mode": "full",
+      "lidar_distractor_eligibility": "valid_return_only",
+      "actuator_delay_range": [1, 2],
+      "reward_network_scene_mix_noise_and_delay": "bitwise inherited from the completed SA6 P50 config"
+    }
+  },
+  "continuation": {
+    "additional_training_iterations": 300,
+    "additional_timesteps": 38400,
+    "save_interval_iterations": 50,
+    "conceptual_end_iteration": 350,
+    "conceptual_checkpoints": [
+      [100, "checkpoint_6400.pt"],
+      [150, "checkpoint_12800.pt"],
+      [200, "checkpoint_19200.pt"],
+      [250, "checkpoint_25600.pt"],
+      [300, "checkpoint_32000.pt"],
+      [350, "checkpoint_38400.pt"]
+    ]
+  },
+  "source_contract": {
+    "trainer_sha256": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090",
+    "corridor_family_metrics_sha256": "76da80bbd5d1b782631f16474ff1b5d0df3b7711cf290ef720ae7e93967db8c3",
+    "corridor_profile_family_metrics_sha256": "96c1d7248e5bf88eb10186f9ecfef8aa4c50298bdf321e3ee4e1fb2e7b330eed",
+    "long_corridor_replay_sha256": "9e6e1f6f922daede1c58343f93e12b279ff3798f55449287ca13eb99094c0067",
+    "long_corridor_geometry_sha256": "f57f4351573af93cd3e42d60554ba9d77956a49ed5614a9df5d2b40b646466a4"
+  },
+  "post_training_comparison": {
+    "candidates": ["c50", "c100", "c150", "c200", "c250", "c300", "c350"],
+    "requirements": [
+      "same fixed evaluator protocol for every checkpoint",
+      "compare SA6 target profiles and corridor motion families",
+      "validate native, narrow and SA5 low-density retention for finalists",
+      "do not infer checkpoint quality from training-distribution metrics alone"
+    ]
+  },
+  "automatic_actions": {
+    "config_build_authorized": true,
+    "gpu_smoke_authorized": true,
+    "training_launch_authorized": true,
+    "extend_beyond_conceptual_it350": false,
+    "fixed_screen_auto_start": false,
+    "start_sa7": false,
+    "enable_teacher_distillation_or_override": false
+  }
+}

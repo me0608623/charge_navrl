@@ -1,0 +1,104 @@
+{
+  "schema": "sa6_v4_c250_profile_curriculum_pilot_launch_authorization/v1",
+  "created_at": "2026-08-29T14:53:55+08:00",
+  "decision": "HUMAN_AUTHORIZED_MATCHED_CONTROL_THEN_RUNG1_LAUNCH",
+  "human_request": "啟動",
+  "supersedes_design_launch_hold_only": true,
+  "design": {
+    "path": "docs/freeze/sa6_v4_c250_profile_curriculum_pilot_design_20260829.json",
+    "sha256": "c72061f1efa865838eb0582ff87fe1de0ae74f2b8f5a31546df4d89337aeb548",
+    "decision": "ESTABLISH_READY_NOT_RUN"
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa6_v3_cont300_from_it50_ne1024_s42_p300_r1/checkpoint_25600.pt",
+    "sha256": "4044d6dff443b3d4a2a36dfa067a99acd0e60b167919caa8f9b89cf213de0803",
+    "conceptual_iteration": 250,
+    "resume_rl_optimizer": true,
+    "rl_optimizer_state_entries": 38,
+    "status": "SA6_NOT_GRADUATED_DIAGNOSTIC_ANCHOR"
+  },
+  "source_locks": {
+    "control_config": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa6_v4_c250_profile_curriculum_control_p50.py",
+      "sha256": "00ed9e1b8838402f4afab97877532983d7ce8c5f6b67556968dcd8133d300ad3"
+    },
+    "rung1_config": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa6_v4_c250_profile_curriculum_rung1_p50.py",
+      "sha256": "9758625ebff18d8644f1d8102e43749a56d6f699a32d6e4b1182a89dbcb697f5"
+    },
+    "control_smoke_config": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa6_v4_c250_profile_curriculum_control_p50_smoke.py",
+      "sha256": "191d71b49d93ccdf4d6cea2e1d801274f557d03608dd5295581ae22d31ec76a8"
+    },
+    "rung1_smoke_config": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa6_v4_c250_profile_curriculum_rung1_p50_smoke.py",
+      "sha256": "c67ad1072721384295dd8a1affa709394848875b8062a369c92bbd4f33fedc34"
+    },
+    "contract_test": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_wdclean/test_sa6_v4_c250_profile_curriculum_pilot.py",
+      "sha256": "9a5e1a5fc87d1fdc574999c65108cf3ea28b8b66ac9592c538b1b8f02c0bb52c"
+    },
+    "trainer": {
+      "path": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+      "sha256": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090"
+    },
+    "corridor_profile_family_metrics": {
+      "path": "scripts/reinforcement_learning/skrl/rnn_car_wdclean/corridor_profile_family_metrics.py",
+      "sha256": "96c1d7248e5bf88eb10186f9ecfef8aa4c50298bdf321e3ee4e1fb2e7b330eed"
+    },
+    "long_corridor_replay": {
+      "path": "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay.py",
+      "sha256": "9e6e1f6f922daede1c58343f93e12b279ff3798f55449287ca13eb99094c0067"
+    }
+  },
+  "preflight_observed": {
+    "gpu": "1186/32607 MiB, 1 percent utilization; desktop daemon only",
+    "training_or_evaluation_processes": 0,
+    "expected_run": "empty",
+    "config_contract_tests": "59 passed",
+    "checkpoint_hash_match": true
+  },
+  "execution": {
+    "order": [
+      "control_smoke",
+      "rung1_smoke",
+      "control",
+      "rung1"
+    ],
+    "fail_closed": true,
+    "formal_arms": [
+      {
+        "name": "control",
+        "config_module": "e2e_sa6_v4_c250_profile_curriculum_control_p50",
+        "run_name": "sa6_v4_c250_profile_curriculum_control_ne1024_s42_p50_r1",
+        "iterations": 50,
+        "checkpoints": [[25, "checkpoint_3200.pt"], [50, "checkpoint_6400.pt"]]
+      },
+      {
+        "name": "rung1",
+        "config_module": "e2e_sa6_v4_c250_profile_curriculum_rung1_p50",
+        "run_name": "sa6_v4_c250_profile_curriculum_rung1_ne1024_s42_p50_r1",
+        "iterations": 50,
+        "checkpoints": [[25, "checkpoint_3200.pt"], [50, "checkpoint_6400.pt"]]
+      }
+    ],
+    "supervisor_expected_run_switches_between_arms": true,
+    "strict_error_scan": [
+      "Traceback",
+      "CUDA out of memory",
+      "OOM",
+      "RuntimeError",
+      "word-boundary NaN or Inf"
+    ]
+  },
+  "automatic_actions": {
+    "gpu_smoke_authorized": true,
+    "formal_control_launch_authorized": true,
+    "formal_rung1_launch_authorized": true,
+    "run_arms_sequentially": true,
+    "fixed_gate_auto_start": false,
+    "extend_beyond_50_iterations": false,
+    "start_sa7": false,
+    "enable_teacher_distillation_or_override": false
+  }
+}

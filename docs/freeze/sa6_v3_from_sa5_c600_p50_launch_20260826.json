@@ -1,0 +1,103 @@
+{
+  "schema": "sa6_v3_from_sa5_c600_p50_launch/v1",
+  "created_at": "2026-08-26T17:19:10+08:00",
+  "status": "COMPLETE_HEALTHY_AWAITING_FIXED_CHECKPOINT_SCREEN",
+  "launched_at": "2026-08-26T17:19:52+08:00",
+  "first_metric_at": "2026-08-26T17:24:00+08:00",
+  "training_completed_at": "2026-08-26T18:01:33+08:00",
+  "supervisor_completed_at": "2026-08-26T18:10:01+08:00",
+  "human_request": "直接啟動",
+  "run": {
+    "run_name": "sa6_v3_from_sa5_c600_ne1024_s42_p50_r1",
+    "unit": "sa6-v3-from-sa5-c600-p50-r1.service",
+    "systemd_invocation_id": "fb926ce7fa9c4daf9d6cd88c760018ec",
+    "config_module": "e2e_sa6_v3_from_sa5_c600_p50",
+    "iterations": 50,
+    "num_envs": 1024,
+    "seed": 42,
+    "rollout_length": 128,
+    "save_interval": 25
+  },
+  "parent": {
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_64000.pt",
+    "sha256": "c1a24684eb787a0865b007a2a712b744f0f74c39f812c62b9b18d4ed893c271a",
+    "resume_ppo_optimizer": true
+  },
+  "source_locks": {
+    "config_sha256": "c0130ec73d1465dcbb2505eee25de1d85007b958acba4c863e23c703669ab09c",
+    "trainer_sha256": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090"
+  },
+  "launch_decision": {
+    "standalone_gpu_smoke": "BYPASSED_BY_EXPLICIT_DIRECT_LAUNCH_REQUEST",
+    "first_formal_rollout_is_runtime_validation": true,
+    "shared_gpu_workload_present": true,
+    "shared_gpu_owner": "laksh",
+    "shared_gpu_pid": 931122,
+    "do_not_interfere_with_shared_process": true
+  },
+  "verification": {
+    "unit_state": "inactive/dead after successful completion",
+    "checkpoint_loaded": true,
+    "rl_optimizer_loaded": true,
+    "aux_optimizer_loaded": true,
+    "runtime_contract": {
+      "stage": 6,
+      "vlp16_noise_mode": "full",
+      "lidar_distractor_eligibility": "valid_return_only",
+      "actuator_delay_range_steps": [1, 2],
+      "speed_rate": 0.7,
+      "scene_mix": [0.78, 0.12, 0.10]
+    },
+    "first_metric": {
+      "iteration": 1,
+      "iterations_target": 50,
+      "sr": 0.538868323635437,
+      "cr": 0.11634056054935833,
+      "timeout": 0.0,
+      "entropy": 4.181101024150848,
+      "kl": 0.004036821036493166,
+      "clip_fraction": 0.04137992858886719,
+      "vf": 9.508958667516708,
+      "fps": 2915.9526002821826,
+      "family_reconciliation_ok": true,
+      "strict_error_scan_count": 0,
+      "interpretation": "Runtime health evidence only; the first rollout is not a capability verdict."
+    },
+    "supervisor_expected_run_registered": true,
+    "auto_advance": "HALTED",
+    "completion": {
+      "iterations": 50,
+      "iterations_target": 50,
+      "trainer_steps": 6400,
+      "duration_seconds": 2283,
+      "checkpoint_it25": "checkpoint_3200.pt",
+      "checkpoint_it25_sha256": "636aa81e44425be17009f4243dbd0d7cee125cd4431063ccd38e6f7589bb9024",
+      "checkpoint_it50": "checkpoint_6400.pt",
+      "checkpoint_it50_sha256": "096a953132a4ec9a4208aa331448e83189ede6b35f40d77d5552d4e94909d65b",
+      "metrics_rows": 50,
+      "strict_error_scan_count": 0,
+      "family_reconciliation_failures": 0,
+      "profile_family_reconciliation_failures": 0,
+      "supervisor_transition": "COMPLETE_TO_IDLE"
+    },
+    "training_distribution_boundary": {
+      "native_all_run_cr": 0.16633795038826088,
+      "narrow_all_run_cr": 0.0025458248472505093,
+      "corridor_all_run_cr": 0.38303477344573233,
+      "last10_cr": {
+        "p060_0s1d": 0.08438818565400844,
+        "p060_1s1d": 0.08860759493670886,
+        "p060_2s1d": 0.20170454545454544,
+        "p038_3s2d": 0.3752665245202559,
+        "p038_4s2d": 0.5,
+        "p038_4s3d": 0.7293447293447294
+      },
+      "interpretation": "Training-distribution evidence only. Parent/it25/it50 require a fixed-protocol screen before checkpoint selection or SA6 graduation."
+    }
+  },
+  "automatic_actions": {
+    "extend_beyond_50_iterations": false,
+    "start_sa7": false,
+    "start_post_training_screen": false
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "schema": "sa6_v3_c600_pilot_authorization/v1",
+  "decision": "AUTHORIZE_BUILD_SA6_V3_C600_P50_PILOT_CONFIG",
+  "authorized_at": "2026-08-26T16:57:55+08:00",
+  "request": "建立新的 c600-based SA6 50-iteration pilot",
+  "parent": {
+    "role": "human-accepted SA5 development parent; machine Gate FAIL remains unchanged",
+    "conceptual_iteration": 600,
+    "checkpoint": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_64000.pt",
+    "sha256": "c1a24684eb787a0865b007a2a712b744f0f74c39f812c62b9b18d4ed893c271a",
+    "resume_ppo_optimizer": true,
+    "rl_optimizer_state_entries": 38
+  },
+  "source_contract": {
+    "sa5_source_config": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa5_v3_c50_stage3_b3_cont500_from_it100.py",
+    "sa5_source_config_sha256": "cfb5c2cd7827696def1ff93f463a7f8defa6cff2644e918b24c2a90c86cee022",
+    "stage_curriculum": "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/sim2real_stage_curriculum_v2.py",
+    "stage_curriculum_sha256": "f594920f61361db99b943cb82d51d2763bc4670c244d26a4cc82041f03a3f7da",
+    "trainer": "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py",
+    "trainer_sha256": "4209725a07954631a2490cedfd925633e5adb95aec8373c4a2160516b3349090",
+    "corridor_replay": "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay.py",
+    "corridor_replay_sha256": "9e6e1f6f922daede1c58343f93e12b279ff3798f55449287ca13eb99094c0067",
+    "corridor_geometry": "source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/charge_skrl/mdp/events/long_corridor_replay_geometry.py",
+    "corridor_geometry_sha256": "f57f4351573af93cd3e42d60554ba9d77956a49ed5614a9df5d2b40b646466a4"
+  },
+  "parent_acceptance": {
+    "path": "docs/freeze/sa5_c600_human_acceptance_20260826.json",
+    "sha256": "769e81726c0ac98ec3c3030ac98a6910658384aa7b217178098d221ac44dfd19",
+    "machine_gate_pass": false,
+    "waiver_preserved": true
+  },
+  "retained_behavior_contract": {
+    "lidar_frame_stack": 8,
+    "speed_rate": 0.7,
+    "speed_rate_obs": "ego",
+    "vlp16_noise_mode": "full",
+    "lidar_distractor_eligibility": "valid_return_only",
+    "enable_actuator_dr": true,
+    "actuator_delay_range": [1, 2],
+    "actuator_velocity_scale": [1.0, 1.0],
+    "actuator_motor_lag": 1.0,
+    "reward_profile": "clean_progress",
+    "encoder_profile": "e2e_frame_stack"
+  },
+  "sa6_scene_contract": {
+    "room_size_m": 7.0,
+    "narrow_width_range_m": [1.2, 1.4],
+    "corridor_free_width_m": 4.0,
+    "sa6_target_speed_range_mps": [0.27, 0.5],
+    "speed_density_mix": [
+      [[0, 1], [0.5, 0.7], 0.1],
+      [[1, 1], [0.5, 0.7], 0.1],
+      [[2, 1], [0.5, 0.7], 0.15],
+      [[3, 2], [0.27, 0.5], 0.2],
+      [[4, 2], [0.27, 0.5], 0.3],
+      [[4, 3], [0.27, 0.5], 0.15]
+    ],
+    "low_density_retention_share": 0.35,
+    "sa6_target_share": 0.65
+  },
+  "pilot": {
+    "num_envs": 1024,
+    "training_seed": 42,
+    "rollout_length": 128,
+    "iterations": 50,
+    "timesteps": 6400,
+    "save_interval": 25,
+    "checkpoints": [
+      [25, "checkpoint_3200.pt"],
+      [50, "checkpoint_6400.pt"]
+    ]
+  },
+  "post_training_screen": {
+    "sa6_target": true,
+    "native": true,
+    "narrow": true,
+    "sa5_retention": true,
+    "automatic_extension": false,
+    "sa7_auto_start": false
+  },
+  "automatic_actions": {
+    "config_build_authorized": true,
+    "gpu_smoke_auto_start": false,
+    "training_launch_authorized": false,
+    "training_auto_start": false
+  }
+}
