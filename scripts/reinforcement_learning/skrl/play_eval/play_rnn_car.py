@@ -496,6 +496,24 @@ parser.add_argument(
     help="SA4-D3 時序事件 JSON；啟用 --d3_yield_audit 時必填",
 )
 parser.add_argument(
+    "--policy_step_trace_output",
+    type=str,
+    default="",
+    help=(
+        "policy-only 逐步時序 npz；需搭配 identity D3 baseline，記錄 d1 "
+        "前後命令、車體狀態及行人 waypoint，絕不覆寫 policy action"
+    ),
+)
+parser.add_argument(
+    "--policy_step_trace_include_k8_input",
+    action="store_true",
+    default=False,
+    help=(
+        "在 policy-only trace 額外保存 exact current/K8/policy-head inputs；"
+        "只供離線 observability probe，絕不改動 policy action"
+    ),
+)
+parser.add_argument(
     "--d3_shield_mode",
     choices=(
         "baseline",
@@ -596,6 +614,17 @@ parser.add_argument(
     type=str,
     default="",
     help="保存 policy 179D 輸入與同幀 teacher actions，供 held-out 可學性 probe",
+)
+parser.add_argument(
+    "--corridor_teacher_vacated_trigger",
+    type=str,
+    default="crossing",
+    choices=["crossing", "onset"],
+    help=(
+        "stateful teacher 如何登記行人騰出的側邊："
+        "crossing=等行人越過車體橫向基準線（歷史行為，預設）；"
+        "onset=橫向速度方向持續數步即登記（行人一開始走就登記）"
+    ),
 )
 parser.add_argument(
     "--stateful_teacher_diagnostic_output",
@@ -1086,6 +1115,7 @@ from rnn_car_wdclean.d3_yield_recorder import (
     shield_protocol as d3_shield_protocol,
     validate_audit_motion_scope as validate_d3_audit_motion_scope,
 )
+from rnn_car_wdclean.policy_step_trace import PolicyStepTraceRecorder
 from rnn_car_wdclean.d4_geometry_selector import (
     ARGMIN_MODE as D4_ARGMIN_GEOMETRY_MODE,
     MODE as D4_GEOMETRY_MODE,
@@ -4654,7 +4684,9 @@ def main():
             dt_s=float(_action_term_ref._dt),
         )
         if args_cli.corridor_teacher_controller == "stateful":
-            _stateful_teacher_spec = StatefulTeacherSpec()
+            _stateful_teacher_spec = StatefulTeacherSpec(
+                vacated_trigger=args_cli.corridor_teacher_vacated_trigger,
+            )
             _stateful_teacher_controller = StatefulCorridorTeacher(
                 raw_env.num_envs,
                 device,
@@ -4722,19 +4754,41 @@ def main():
                     "nearest_dyn_slot",
                     "nearest_dyn_bearing_rad",
                     "nearest_dyn_distance_m",
-                    # Candidate funnel: which filter removed the last option.
-                    "n_joint",
-                    "n_obstacle_ok",
-                    "n_wall_ok",
-                    "n_kinematic",
-                    "n_left",
-                    "n_right",
-                    "n_left_no_obstacle",
-                    "n_right_no_obstacle",
-                    "n_left_no_wall",
-                    "n_right_no_wall",
-                    "n_left_no_kinematic",
-                    "n_right_no_kinematic",
+                    # Candidate funnel: raw/final counts and reachable stats.
+                    "n_raw_left",
+                    "n_raw_right",
+                    "n_final_left",
+                    "n_final_right",
+                    "reachable_linear_mps",
+                    "reachable_progress_m",
+                    "reachable_lateral_m",
+                    "launch_threshold_mps",
+                    "progress_threshold_m",
+                    "side_threshold_m",
+                    # Candidate funnel: single-filter leave-one-out, one of
+                    # the seven independent gates dropped at a time.
+                    "n_without_static_obstacle_left",
+                    "n_without_static_obstacle_right",
+                    "n_without_dynamic_obstacle_left",
+                    "n_without_dynamic_obstacle_right",
+                    "n_without_wall_left",
+                    "n_without_wall_right",
+                    "n_without_launch_left",
+                    "n_without_launch_right",
+                    "n_without_progress_left",
+                    "n_without_progress_right",
+                    "n_without_heading_left",
+                    "n_without_heading_right",
+                    "n_without_side_signal_left",
+                    "n_without_side_signal_right",
+                    # Candidate funnel: pairwise relaxation, only meaningful
+                    # where every single leave-one-out above is zero.
+                    "pairwise_recovering_count_left",
+                    "pairwise_recovering_count_right",
+                    "pairwise_best_count_left",
+                    "pairwise_best_count_right",
+                    "pairwise_best_bitmask_left",
+                    "pairwise_best_bitmask_right",
                 )
             }
             print(
@@ -4753,6 +4807,7 @@ def main():
             f"{_corridor_teacher_spec.goal_denominator_floor_m:g}m, "
             f"actuator={'fixed_d1_queue' if _corridor_teacher_uses_d1 else 'd0'}, "
             f"controller={args_cli.corridor_teacher_controller}, "
+            f"vacated_trigger={args_cli.corridor_teacher_vacated_trigger}, "
             "base_reverse=disabled, future_pause_branches=0/5 steps",
             flush=True,
         )
@@ -4979,6 +5034,41 @@ def main():
     _d5_recorder = None
     _d5_protocol = None
     _d5_geometry_spec = None
+
+    _policy_step_trace_enabled = bool(args_cli.policy_step_trace_output)
+    _policy_step_trace_recorder = None
+    if _policy_step_trace_enabled:
+        if not _d3_enabled:
+            raise ValueError(
+                "--policy_step_trace_output requires --d3_yield_audit"
+            )
+        if args_cli.d3_shield_mode != D3ShieldMode.BASELINE.value:
+            raise ValueError(
+                "policy step trace requires the identity D3 baseline"
+            )
+        if _corridor_teacher_enabled:
+            raise ValueError(
+                "policy step trace forbids teacher override and teacher shadow"
+            )
+        if args_cli.policy_step_trace_include_k8_input and not (
+            end_to_end_frame_stack and int(lidar_frame_stack) == 8
+        ):
+            raise ValueError(
+                "K8 observability trace requires the exact K8 E2E lineage"
+            )
+        _policy_step_trace_recorder = PolicyStepTraceRecorder(
+            raw_env.num_envs,
+            int(_corridor_dynamic_obstacles),
+            expected_delay_steps=1,
+            include_policy_inputs=bool(
+                args_cli.policy_step_trace_include_k8_input
+            ),
+        )
+        print(
+            "[POLICY-STEP-TRACE] record-only baseline enabled: "
+            "policy action identity + fixed d1 reconciliation",
+            flush=True,
+        )
     if _d5_enabled:
         if not _d3_enabled:
             raise ValueError(
@@ -5329,6 +5419,8 @@ def main():
                     )
             _d3_context = {
                 "policy_actions": policy_actions.detach().clone(),
+                "robot_position_local": robot_xy_local.detach().clone(),
+                "robot_yaw": yaw.detach().clone(),
                 "body_forward_speed": body_forward.detach().clone(),
                 "robot_velocity_body": torch.stack(
                     [body_forward, body_lateral], dim=1
@@ -5379,6 +5471,8 @@ def main():
                 "dynamic_velocities_body": (
                     obstacle_vel_body.detach().clone()
                 ),
+                "dynamic_positions_local": obstacle_pos.detach().clone(),
+                "dynamic_velocities_local": obstacle_vel.detach().clone(),
                 "dynamic_radii": _d3_dynamic_radii.detach().clone(),
                 "dynamic_valid": active.detach().clone(),
             }
@@ -6445,6 +6539,21 @@ def main():
                 _teacher_radii = torch.cat(
                     [_teacher_radii, _teacher_radii], dim=1
                 )
+                # Diagnostic-only static/dynamic slot classification, aligned
+                # with the moving+paused doubling above (same original slot,
+                # two pause hypotheses). Only built for the stateful
+                # controller, whose funnel decomposition is the sole
+                # consumer; the memoryless path leaves this None and gets an
+                # unmodified corridor_teacher_action_grid() result.
+                _teacher_obstacle_is_dynamic = None
+                if _stateful_teacher_controller is not None:
+                    _teacher_is_dynamic_slot = (
+                        _play_behavior_scheduler.behavior_type == 2
+                    )
+                    _teacher_obstacle_is_dynamic = torch.cat(
+                        [_teacher_is_dynamic_slot, _teacher_is_dynamic_slot],
+                        dim=1,
+                    )
                 _teacher_cfg = _action_term_ref.cfg
                 _teacher_pending_d1_command = None
                 if _corridor_teacher_uses_d1:
@@ -6496,6 +6605,7 @@ def main():
                         _teacher_cfg.max_angular_accel
                     ),
                     pending_d1_command=_teacher_pending_d1_command,
+                    obstacle_dynamic_mask=_teacher_obstacle_is_dynamic,
                     spec=_corridor_teacher_spec,
                 )
                 _teacher_feasible = _teacher_result["any_feasible"]
@@ -6603,22 +6713,47 @@ def main():
                             )
                         )
                         for _diag_key in (
-                            "n_joint",
-                            "n_obstacle_ok",
-                            "n_wall_ok",
-                            "n_kinematic",
-                            "n_left",
-                            "n_right",
-                            "n_left_no_obstacle",
-                            "n_right_no_obstacle",
-                            "n_left_no_wall",
-                            "n_right_no_wall",
-                            "n_left_no_kinematic",
-                            "n_right_no_kinematic",
+                            "n_raw_left",
+                            "n_raw_right",
+                            "n_final_left",
+                            "n_final_right",
+                            "n_without_static_obstacle_left",
+                            "n_without_static_obstacle_right",
+                            "n_without_dynamic_obstacle_left",
+                            "n_without_dynamic_obstacle_right",
+                            "n_without_wall_left",
+                            "n_without_wall_right",
+                            "n_without_launch_left",
+                            "n_without_launch_right",
+                            "n_without_progress_left",
+                            "n_without_progress_right",
+                            "n_without_heading_left",
+                            "n_without_heading_right",
+                            "n_without_side_signal_left",
+                            "n_without_side_signal_right",
+                            "pairwise_recovering_count_left",
+                            "pairwise_recovering_count_right",
+                            "pairwise_best_count_left",
+                            "pairwise_best_count_right",
+                            "pairwise_best_bitmask_left",
+                            "pairwise_best_bitmask_right",
                         ):
                             _stateful_teacher_diag[_diag_key].append(
                                 _stateful_result[_diag_key].detach().to(
                                     device="cpu", dtype=torch.int16
+                                )
+                            )
+                        for _diag_key in (
+                            "reachable_linear_mps",
+                            "reachable_progress_m",
+                            "reachable_lateral_m",
+                            "launch_threshold_mps",
+                            "progress_threshold_m",
+                            "side_threshold_m",
+                        ):
+                            _stateful_teacher_diag[_diag_key].append(
+                                _stateful_result[_diag_key].detach().to(
+                                    device="cpu", dtype=torch.float32
                                 )
                             )
                         # Bearing of the closest live pedestrian in the body
@@ -7497,6 +7632,89 @@ def main():
                 != _d3_step_context["policy_actions"].round().long()
             ).any(dim=1)
             actions = _d3_effective_actions
+        _policy_step_trace_context = None
+        if _policy_step_trace_enabled:
+            if _d3_step_context is None:
+                raise RuntimeError("policy step trace lacks D3 pre-step context")
+            from isaaclab_tasks.manager_based.locomotion.velocity.config.charge_skrl.mdp.events.behavior_scheduler import (  # noqa: E501
+                BEHAVIOR_PATROL as _TRACE_BEHAVIOR_PATROL,
+            )
+
+            _trace_sched = _play_behavior_scheduler
+            _trace_slice = _corridor_dynamic_slice
+            _trace_wp_index = _trace_sched.patrol_wp_index[
+                :, _trace_slice
+            ].clone()
+            _trace_pause = _trace_sched.patrol_pause_remaining[
+                :, _trace_slice
+            ].clone()
+            _trace_num_wp = _trace_sched.patrol_num_waypoints[
+                :, _trace_slice
+            ].clamp(min=1)
+            _trace_target = torch.gather(
+                _trace_sched.patrol_waypoints[:, _trace_slice],
+                2,
+                (_trace_wp_index % _trace_num_wp)
+                .unsqueeze(-1)
+                .unsqueeze(-1)
+                .expand(-1, -1, 1, 2),
+            ).squeeze(2)
+            _policy_step_trace_context = {
+                "episode_step": episode_step.detach().clone(),
+                "policy_actions": _d3_step_context[
+                    "policy_actions"
+                ].detach().clone(),
+                "effective_actions": _d3_step_context[
+                    "effective_actions"
+                ].detach().clone(),
+                "robot_xy_m": _d3_step_context[
+                    "robot_position_local"
+                ].detach().clone(),
+                "robot_yaw_rad": _d3_step_context[
+                    "robot_yaw"
+                ].detach().clone(),
+                "robot_velocity_body_mps": _d3_step_context[
+                    "robot_velocity_body"
+                ].detach().clone(),
+                "dynamic_positions_m": _d3_step_context[
+                    "dynamic_positions_local"
+                ].detach().clone(),
+                "dynamic_velocities_mps": _d3_step_context[
+                    "dynamic_velocities_local"
+                ].detach().clone(),
+                "dynamic_valid": _d3_step_context[
+                    "dynamic_valid"
+                ].detach().clone(),
+                "patrol_waypoint_index": _trace_wp_index,
+                "patrol_pause_remaining": _trace_pause,
+                "patrol_target_m": _trace_target.detach().clone(),
+                "patrol_active": (
+                    _trace_sched.behavior_type[:, _trace_slice]
+                    == _TRACE_BEHAVIOR_PATROL
+                ).detach().clone(),
+            }
+            if args_cli.policy_step_trace_include_k8_input:
+                _trace_lidar_stack = getattr(
+                    charge_features_for_rnn, "_last_lidar_stack", None
+                )
+                if _trace_lidar_stack is None:
+                    raise RuntimeError(
+                        "K8 observability trace lacks the exact LiDAR stack"
+                    )
+                if _trace_lidar_stack.shape[1] != 8 * 72:
+                    raise RuntimeError(
+                        "K8 observability trace expected 576 LiDAR values, got "
+                        f"{_trace_lidar_stack.shape[1]}"
+                    )
+                _policy_step_trace_context.update(
+                    {
+                        "policy_current_input": p_obs.detach().clone(),
+                        "policy_k8_input": torch.cat(
+                            [obs_normed, _trace_lidar_stack[:, 72:]], dim=-1
+                        ).detach().clone(),
+                        "policy_representation": rl_in.detach().clone(),
+                    }
+                )
         next_obs, reward, terminated, truncated, info = env.step(actions.float())
         if _phase_accumulator is not None and _phase_snapshot is not None:
             _slot_mask = getattr(raw_env, "_obs_collision_slot_mask", None)
@@ -7765,6 +7983,19 @@ def main():
                     )
                 )
             _d3_recorder.record_batch(_d3_records)
+            if _policy_step_trace_recorder is not None:
+                if _policy_step_trace_context is None:
+                    raise RuntimeError(
+                        "policy step trace transition lacks pre-step context"
+                    )
+                _policy_step_trace_recorder.record_tensor_batch(
+                    step=int(step),
+                    **_policy_step_trace_context,
+                    pre_delay_command=_d3_pre_delay,
+                    post_delay_command=_d3_post_delay,
+                    done=done,
+                    termination_cause=_transition_cause,
+                )
             if _d5_enabled:
                 _d5_recorder.record_tensor_batch(
                     step=int(step),
@@ -9331,6 +9562,12 @@ def main():
                     for key in ("entered_commit", "entered_pass", "released")
                 },
                 "spec": {
+                    "vacated_trigger": (
+                        _stateful_teacher_spec.vacated_trigger
+                    ),
+                    "vacated_onset_steps": (
+                        _stateful_teacher_spec.vacated_onset_steps
+                    ),
                     "interaction_distance_m": (
                         _stateful_teacher_spec.interaction_distance_m
                     ),
@@ -9559,7 +9796,7 @@ def main():
                 metadata_json=_np_stateful_diag.asarray(
                     json.dumps(
                         {
-                            "schema": "stateful_teacher_step_diagnostic/v2",
+                            "schema": "stateful_teacher_step_diagnostic/v3",
                             "array_layout": "[rollout_step, env]",
                             "nearest_dyn_bearing_rad": (
                                 "bearing of the closest live pedestrian in the "
@@ -9573,16 +9810,28 @@ def main():
                                 "one that caused contact"
                             ),
                             "candidate_funnel": (
-                                "counts out of num_bins^2 candidates. n_*_no_x "
-                                "is a leave-one-out: how many candidates that "
-                                "side would have if only filter x were dropped. "
-                                "All three at zero means no single relaxation "
-                                "recovers the side"
-                            ),
-                            "n_left_no_kinematic": (
-                                "geometrically clear cells on that side that "
-                                "the passage filter discarded, i.e. sideways "
-                                "moves rejected for lacking forward progress"
+                                "v3: seven independent gates behind a passage "
+                                "candidate -- static_obstacle, dynamic_obstacle, "
+                                "wall, launch, progress, heading, side_signal. "
+                                "n_raw_* counts cells classified on that side "
+                                "regardless of feasibility; n_final_* is the "
+                                "actual (unchanged) passage count. Each "
+                                "n_without_<gate>_* is a single-filter leave-"
+                                "one-out: candidates on that side if ONLY that "
+                                "gate were dropped, all six others held. All "
+                                "seven at zero for a side means no single "
+                                "relaxation recovers it -- see the pairwise_* "
+                                "fields, which report the best of the 21 two-"
+                                "gate relaxations (0 if none of those recover "
+                                "it either, i.e. three or more gates bind). "
+                                "pairwise_best_bitmask_* encodes which two "
+                                "gates via 1<<index into "
+                                "(static_obstacle, dynamic_obstacle, wall, "
+                                "launch, progress, heading, side_signal). "
+                                "reachable_*/*_threshold_* are the scene's "
+                                "actual adaptive-threshold inputs, to tell "
+                                "'the action grid cannot get there' apart from "
+                                "'a fixed threshold cut it off'"
                             ),
                             "prediction_error_layout": (
                                 "[rollout_step, env, obstacle_slot]"
@@ -10009,6 +10258,35 @@ def main():
                 },
             },
         )
+        if _policy_step_trace_recorder is not None:
+            _policy_step_trace_report = _policy_step_trace_recorder.write(
+                args_cli.policy_step_trace_output,
+                metadata={
+                    "checkpoint": os.path.abspath(ckpt_path),
+                    "stage": int(args_cli.stage),
+                    "seed": int(args_cli.seed),
+                    "scenario": str(args_cli.long_corridor_motion_mode),
+                    "num_envs": int(raw_env.num_envs),
+                    "num_dynamic_obstacles": int(
+                        _corridor_dynamic_obstacles
+                    ),
+                    "rollout_steps_requested": int(args_cli.steps),
+                    "teacher_replaced_policy_actions": False,
+                },
+            )
+            print(
+                "[POLICY-STEP-TRACE] npz written: "
+                f"{args_cli.policy_step_trace_output} "
+                f"reconciliation="
+                f"{_policy_step_trace_report['self_check']['reconciliation_ok']}",
+                flush=True,
+            )
+            if not _policy_step_trace_report["self_check"][
+                "reconciliation_ok"
+            ]:
+                raise RuntimeError(
+                    "policy step trace failed identity/d1 reconciliation"
+                )
         _d3_self_check = _d3_report["self_check"]
         print(
             f"[SA4-D3-{args_cli.d3_shield_mode.upper()}] "

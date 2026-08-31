@@ -11,7 +11,7 @@ from rnn_car_wdclean.privileged_corridor_teacher import (
 )
 
 
-def _teacher_inputs(num_envs: int = 1):
+def _teacher_inputs(num_envs: int = 1, num_obstacle_slots: int = 1):
     samples = 10
     return {
         "current_velocity": torch.zeros(num_envs),
@@ -20,11 +20,11 @@ def _teacher_inputs(num_envs: int = 1):
         "robot_yaw_rad": torch.zeros(num_envs),
         "goal_xy_m": torch.tensor([[5.0, 0.0]]).repeat(num_envs, 1),
         "obstacle_paths_m": torch.zeros(
-            num_envs, 1, samples, 2
+            num_envs, num_obstacle_slots, samples, 2
         ),
-        "obstacle_radii_m": torch.full((num_envs, 1), 0.3),
+        "obstacle_radii_m": torch.full((num_envs, num_obstacle_slots), 0.3),
         "obstacle_valid": torch.zeros(
-            num_envs, 1, dtype=torch.bool
+            num_envs, num_obstacle_slots, dtype=torch.bool
         ),
         "wall_centers_m": torch.zeros(num_envs, 1, 2),
         "wall_sizes_m": torch.ones(num_envs, 1, 2),
@@ -272,3 +272,99 @@ def test_play_teacher_models_pending_d1_before_env_step():
     env_step = play.index("env.step(actions.float())", override)
 
     assert pending < teacher < passed < override < env_step
+
+
+def test_obstacle_dynamic_mask_splits_static_and_dynamic_collision():
+    """A per-slot dynamic flag must attribute collision to the right group.
+
+    env0 collides only with its static (slot 0) obstacle; env1 collides only
+    with its dynamic (slot 1) obstacle. The aggregate ``obstacle_collision_grid``
+    cannot tell the two apart -- this is exactly what the diagnostic needs.
+    """
+    inputs = _teacher_inputs(num_envs=2, num_obstacle_slots=2)
+    inputs["current_velocity"][:] = 0.8
+    # env0: static (slot 0) blocks the straight-ahead candidate; dynamic
+    # (slot 1) is far away and irrelevant.
+    inputs["obstacle_paths_m"][0, 0, :, 0] = 1.8
+    inputs["obstacle_paths_m"][0, 1, :, 0] = 50.0
+    # env1: dynamic (slot 1) blocks; static (slot 0) is far away.
+    inputs["obstacle_paths_m"][1, 0, :, 0] = 50.0
+    inputs["obstacle_paths_m"][1, 1, :, 0] = 1.8
+    inputs["obstacle_valid"][:] = True
+    obstacle_dynamic_mask = torch.tensor(
+        [[False, True], [False, True]]
+    )
+
+    result = corridor_teacher_action_grid(
+        **inputs, obstacle_dynamic_mask=obstacle_dynamic_mask
+    )
+
+    assert bool(result["static_obstacle_collision_grid"][0, 9, 9])
+    assert not bool(result["dynamic_obstacle_collision_grid"][0, 9, 9])
+    assert not bool(result["static_obstacle_collision_grid"][1, 9, 9])
+    assert bool(result["dynamic_obstacle_collision_grid"][1, 9, 9])
+    # Reconciliation: the split must union back to the aggregate exactly,
+    # everywhere in the grid, not just at the probed cell.
+    union = (
+        result["static_obstacle_collision_grid"]
+        | result["dynamic_obstacle_collision_grid"]
+    )
+    assert torch.equal(union, result["obstacle_collision_grid"])
+
+
+def test_obstacle_dynamic_mask_reconciles_when_both_groups_collide():
+    """Both a static and a dynamic slot colliding at the same cell.
+
+    The union identity must still hold when static and dynamic collisions
+    overlap, not just when they are mutually exclusive.
+    """
+    inputs = _teacher_inputs(num_envs=1, num_obstacle_slots=2)
+    inputs["current_velocity"][:] = 0.8
+    inputs["obstacle_paths_m"][0, 0, :, 0] = 1.8
+    inputs["obstacle_paths_m"][0, 1, :, 0] = 1.8
+    inputs["obstacle_paths_m"][0, 1, :, 1] = 0.05
+    inputs["obstacle_valid"][:] = True
+    obstacle_dynamic_mask = torch.tensor([[False, True]])
+
+    result = corridor_teacher_action_grid(
+        **inputs, obstacle_dynamic_mask=obstacle_dynamic_mask
+    )
+
+    assert bool(result["static_obstacle_collision_grid"][0, 9, 9])
+    assert bool(result["dynamic_obstacle_collision_grid"][0, 9, 9])
+    union = (
+        result["static_obstacle_collision_grid"]
+        | result["dynamic_obstacle_collision_grid"]
+    )
+    assert torch.equal(union, result["obstacle_collision_grid"])
+
+
+def test_obstacle_dynamic_mask_omitted_keeps_existing_keys_and_values_unchanged():
+    inputs = _teacher_inputs(num_envs=1, num_obstacle_slots=2)
+    inputs["current_velocity"][:] = 0.8
+    inputs["obstacle_paths_m"][0, 0, :, 0] = 1.8
+    inputs["obstacle_valid"][:] = True
+
+    baseline = corridor_teacher_action_grid(**inputs)
+    with_mask = corridor_teacher_action_grid(
+        **inputs,
+        obstacle_dynamic_mask=torch.tensor([[False, True]]),
+    )
+
+    assert "static_obstacle_collision_grid" not in baseline
+    assert "dynamic_obstacle_collision_grid" not in baseline
+    assert "static_obstacle_collision_grid" in with_mask
+    for key in baseline:
+        torch.testing.assert_close(
+            with_mask[key], baseline[key], equal_nan=True
+        )
+
+
+def test_obstacle_dynamic_mask_shape_mismatch_raises():
+    inputs = _teacher_inputs(num_envs=1, num_obstacle_slots=2)
+
+    with pytest.raises(ValueError, match="obstacle_dynamic_mask"):
+        corridor_teacher_action_grid(
+            **inputs,
+            obstacle_dynamic_mask=torch.zeros(1, 3, dtype=torch.bool),
+        )

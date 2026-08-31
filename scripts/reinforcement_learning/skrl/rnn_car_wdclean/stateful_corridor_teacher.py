@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import itertools
 import math
 
 import torch
@@ -12,6 +13,21 @@ WAIT = 0
 COMMIT_SIDE = 1
 PASS = 2
 STATE_NAMES = {WAIT: "WAIT", COMMIT_SIDE: "COMMIT_SIDE", PASS: "PASS"}
+
+# The seven independent gates behind a passage candidate on one side:
+# static/dynamic obstacle clearance, wall clearance, and the four kinematic
+# sub-filters (launch speed, forward progress, heading, side signal). Order
+# fixes the bit assignment used by the pairwise-relaxation bitmask below.
+FUNNEL_MASK_NAMES = (
+    "static_obstacle",
+    "dynamic_obstacle",
+    "wall",
+    "launch",
+    "progress",
+    "heading",
+    "side_signal",
+)
+FUNNEL_MASK_BITS = {name: 1 << i for i, name in enumerate(FUNNEL_MASK_NAMES)}
 
 
 @dataclass(frozen=True)
@@ -33,6 +49,15 @@ class StatefulTeacherSpec:
     minimum_side_signal_m: float = 0.01
     crossing_lateral_speed_mps: float = 0.05
     crossing_lateral_span_m: float = 0.10
+    # How a side is registered as vacated.
+    #   "crossing" — the pedestrian must cross the robot's lateral reference
+    #                line. Historical behaviour; keep as the default so frozen
+    #                screens stay reproducible.
+    #   "onset"    — the pedestrian's lateral direction has held for
+    #                ``vacated_onset_steps``. Fires as soon as it walks away
+    #                rather than after it has walked all the way across.
+    vacated_trigger: str = "crossing"
+    vacated_onset_steps: int = 2
 
 
 def _validate_spec(spec: StatefulTeacherSpec, dt_s: float) -> None:
@@ -69,6 +94,13 @@ def _validate_spec(spec: StatefulTeacherSpec, dt_s: float) -> None:
         raise ValueError("minimum side signal must be below side deadband")
     if spec.side_confirm_steps < 1 or spec.release_confirm_steps < 1:
         raise ValueError("FSM confirmation steps must be positive")
+    if spec.vacated_trigger not in ("crossing", "onset"):
+        raise ValueError(
+            "vacated_trigger must be 'crossing' or 'onset', got "
+            f"{spec.vacated_trigger!r}"
+        )
+    if spec.vacated_onset_steps < 1:
+        raise ValueError("vacated onset steps must be positive")
 
 
 def _masked_argmin(
@@ -137,6 +169,8 @@ class StatefulCorridorTeacher:
         )
         self._previous_dynamic_lateral: torch.Tensor | None = None
         self._previous_dynamic_valid: torch.Tensor | None = None
+        self._previous_dynamic_lateral_velocity: torch.Tensor | None = None
+        self._lateral_run: torch.Tensor | None = None
 
     def _reset_rows(
         self,
@@ -189,20 +223,57 @@ class StatefulCorridorTeacher:
         if self._previous_dynamic_lateral is None:
             self._previous_dynamic_lateral = lateral_position.clone()
             self._previous_dynamic_valid = dynamic_valid.clone()
+            self._previous_dynamic_lateral_velocity = lateral_velocity.clone()
+            self._lateral_run = torch.zeros_like(
+                lateral_velocity, dtype=torch.long
+            )
         if self._previous_dynamic_lateral.shape != lateral_position.shape:
             raise ValueError("dynamic slot count changed during FSM rollout")
         self._previous_dynamic_lateral[reset] = lateral_position[reset]
         self._previous_dynamic_valid[reset] = dynamic_valid[reset]
-        crossed = (
-            dynamic_valid
-            & self._previous_dynamic_valid
-            & (lateral_velocity.abs() >= 0.05)
-            & (self._previous_dynamic_lateral.abs() >= 0.02)
-            & (self._previous_dynamic_lateral * lateral_position <= 0.0)
+        self._previous_dynamic_lateral_velocity[reset] = (
+            lateral_velocity[reset]
         )
-        source_side = torch.sign(
-            self._previous_dynamic_lateral
-        ).to(torch.int8)
+        self._lateral_run[reset] = 0
+
+        moving = (
+            lateral_velocity.abs() >= self.spec.crossing_lateral_speed_mps
+        )
+        self._lateral_run = torch.where(
+            moving
+            & (
+                torch.sign(lateral_velocity)
+                == torch.sign(self._previous_dynamic_lateral_velocity)
+            ),
+            self._lateral_run + 1,
+            torch.where(
+                moving,
+                torch.ones_like(self._lateral_run),
+                torch.zeros_like(self._lateral_run),
+            ),
+        )
+
+        if self.spec.vacated_trigger == "onset":
+            # The side a pedestrian is walking AWAY from is free as soon as it
+            # commits to a direction; waiting for it to reach the robot's
+            # lateral line throws away the first half of the gap.
+            crossed = (
+                dynamic_valid
+                & self._previous_dynamic_valid
+                & (self._lateral_run >= self.spec.vacated_onset_steps)
+            )
+            source_side = (-torch.sign(lateral_velocity)).to(torch.int8)
+        else:
+            crossed = (
+                dynamic_valid
+                & self._previous_dynamic_valid
+                & (lateral_velocity.abs() >= 0.05)
+                & (self._previous_dynamic_lateral.abs() >= 0.02)
+                & (self._previous_dynamic_lateral * lateral_position <= 0.0)
+            )
+            source_side = torch.sign(
+                self._previous_dynamic_lateral
+            ).to(torch.int8)
         positive = (crossed & (source_side > 0)).any(dim=1)
         negative = (crossed & (source_side < 0)).any(dim=1)
         unambiguous = positive ^ negative
@@ -216,6 +287,7 @@ class StatefulCorridorTeacher:
         self._recent_vacated_side[positive & negative] = 0
         self._previous_dynamic_lateral[:] = lateral_position
         self._previous_dynamic_valid[:] = dynamic_valid
+        self._previous_dynamic_lateral_velocity[:] = lateral_velocity
 
     def select(
         self,
@@ -282,11 +354,27 @@ class StatefulCorridorTeacher:
         raw_cost = teacher_result["raw_cost_grid"]
         obstacle_collision = teacher_result["obstacle_collision_grid"]
         wall_collision = teacher_result["wall_collision_grid"]
+        if "static_obstacle_collision_grid" not in teacher_result or (
+            "dynamic_obstacle_collision_grid" not in teacher_result
+        ):
+            raise ValueError(
+                "teacher_result must include static_obstacle_collision_grid "
+                "and dynamic_obstacle_collision_grid (diagnostic decomposition "
+                "of obstacle_collision_grid)"
+            )
+        static_obstacle_collision = teacher_result[
+            "static_obstacle_collision_grid"
+        ]
+        dynamic_obstacle_collision = teacher_result[
+            "dynamic_obstacle_collision_grid"
+        ]
         if joint.shape != linear.shape or angular.shape != linear.shape:
             raise ValueError("teacher action grids must share [E,L,A]")
         if (
             obstacle_collision.shape != joint.shape
             or wall_collision.shape != joint.shape
+            or static_obstacle_collision.shape != joint.shape
+            or dynamic_obstacle_collision.shape != joint.shape
         ):
             raise ValueError("collision grids must share [E,L,A] with joint")
         if endpoint.shape != (*joint.shape, 2):
@@ -597,30 +685,86 @@ class StatefulCorridorTeacher:
         used_reverse = used_wait & ~wait_valid & reverse_valid
         emergency_brake = used_wait & ~wait_choice_valid
 
-        # Candidate funnel, for attributing a lost side to one filter. Each
-        # ``*_no_x`` count answers "how many candidates would this side have if
-        # only filter x were dropped", so a zero everywhere means no single
-        # relaxation recovers the side.
+        # Candidate funnel, second layer: decompose obstacle-collision into
+        # static/dynamic and kinematic into launch/progress/heading/side-
+        # signal, so a lost side can be attributed to exactly one of the
+        # seven independent gates. ``passage``/``left``/``right`` above are
+        # untouched -- this block only reads their inputs to build
+        # diagnostic-only counts; it changes no action, state, or threshold.
         def _count(mask: torch.Tensor) -> torch.Tensor:
             return mask.flatten(1).sum(dim=1)
 
-        obstacle_ok = ~obstacle_collision
-        wall_ok = ~wall_collision
-        drop_obstacle = wall_ok & kinematic
-        drop_wall = obstacle_ok & kinematic
+        ok_by_name = {
+            "static_obstacle": ~static_obstacle_collision,
+            "dynamic_obstacle": ~dynamic_obstacle_collision,
+            "wall": ~wall_collision,
+            "launch": linear >= launch_threshold[:, None, None],
+            "progress": forward_progress >= progress_threshold[:, None, None],
+            "heading": heading_allowed,
+            "side_signal": reachable_side_signal[:, None, None].expand_as(joint),
+        }
+
+        def _all_except(exclude: frozenset[str]) -> torch.Tensor:
+            combined = None
+            for name in FUNNEL_MASK_NAMES:
+                if name in exclude:
+                    continue
+                mask = ok_by_name[name]
+                combined = mask if combined is None else (combined & mask)
+            return combined
+
+        without = {}
+        for name in FUNNEL_MASK_NAMES:
+            relaxed = _all_except(frozenset((name,)))
+            without[f"n_without_{name}_left"] = _count(relaxed & side_left)
+            without[f"n_without_{name}_right"] = _count(relaxed & side_right)
+
+        pair_left_counts = []
+        pair_right_counts = []
+        pair_bitmasks = []
+        for a, b in itertools.combinations(FUNNEL_MASK_NAMES, 2):
+            relaxed = _all_except(frozenset((a, b)))
+            pair_left_counts.append(_count(relaxed & side_left))
+            pair_right_counts.append(_count(relaxed & side_right))
+            pair_bitmasks.append(FUNNEL_MASK_BITS[a] | FUNNEL_MASK_BITS[b])
+        pair_left = torch.stack(pair_left_counts, dim=0)
+        pair_right = torch.stack(pair_right_counts, dim=0)
+        pair_bitmask_tensor = torch.tensor(
+            pair_bitmasks, device=self.device, dtype=torch.int32
+        )
+        best_left_count, best_left_idx = pair_left.max(dim=0)
+        best_right_count, best_right_idx = pair_right.max(dim=0)
+        pairwise_recovering_count_left = (pair_left > 0).sum(dim=0)
+        pairwise_recovering_count_right = (pair_right > 0).sum(dim=0)
+        pairwise_best_bitmask_left = torch.where(
+            best_left_count > 0,
+            pair_bitmask_tensor[best_left_idx],
+            torch.zeros_like(pair_bitmask_tensor[best_left_idx]),
+        )
+        pairwise_best_bitmask_right = torch.where(
+            best_right_count > 0,
+            pair_bitmask_tensor[best_right_idx],
+            torch.zeros_like(pair_bitmask_tensor[best_right_idx]),
+        )
+
         funnel = {
-            "n_joint": _count(joint),
-            "n_obstacle_ok": _count(obstacle_ok),
-            "n_wall_ok": _count(wall_ok),
-            "n_kinematic": _count(kinematic),
-            "n_left": _count(left),
-            "n_right": _count(right),
-            "n_left_no_obstacle": _count(drop_obstacle & side_left),
-            "n_right_no_obstacle": _count(drop_obstacle & side_right),
-            "n_left_no_wall": _count(drop_wall & side_left),
-            "n_right_no_wall": _count(drop_wall & side_right),
-            "n_left_no_kinematic": _count(joint & side_left),
-            "n_right_no_kinematic": _count(joint & side_right),
+            "n_raw_left": _count(side_left),
+            "n_raw_right": _count(side_right),
+            "n_final_left": _count(left),
+            "n_final_right": _count(right),
+            "reachable_linear_mps": reachable_linear,
+            "reachable_progress_m": reachable_progress,
+            "reachable_lateral_m": reachable_lateral,
+            "launch_threshold_mps": launch_threshold,
+            "progress_threshold_m": progress_threshold,
+            "side_threshold_m": side_threshold,
+            **without,
+            "pairwise_recovering_count_left": pairwise_recovering_count_left,
+            "pairwise_recovering_count_right": pairwise_recovering_count_right,
+            "pairwise_best_count_left": best_left_count,
+            "pairwise_best_count_right": best_right_count,
+            "pairwise_best_bitmask_left": pairwise_best_bitmask_left,
+            "pairwise_best_bitmask_right": pairwise_best_bitmask_right,
         }
         self._step += 1
         return {
@@ -652,6 +796,8 @@ class StatefulCorridorTeacher:
 
 __all__ = [
     "COMMIT_SIDE",
+    "FUNNEL_MASK_BITS",
+    "FUNNEL_MASK_NAMES",
     "PASS",
     "STATE_NAMES",
     "WAIT",

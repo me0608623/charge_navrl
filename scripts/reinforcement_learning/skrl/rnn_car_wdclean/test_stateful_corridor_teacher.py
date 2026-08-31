@@ -2,9 +2,11 @@ import torch
 
 from rnn_car_wdclean.stateful_corridor_teacher import (
     COMMIT_SIDE,
+    FUNNEL_MASK_BITS,
     PASS,
     WAIT,
     StatefulCorridorTeacher,
+    StatefulTeacherSpec,
 )
 
 
@@ -14,6 +16,8 @@ def _teacher_result(
     obstacle_collision: torch.Tensor | None = None,
     wall_collision: torch.Tensor | None = None,
     endpoint_yaw: torch.Tensor | None = None,
+    static_collision: torch.Tensor | None = None,
+    dynamic_collision: torch.Tensor | None = None,
 ):
     linear_values = torch.tensor([-0.1, 0.0, 0.2])
     angular_values = torch.tensor([-0.5, 0.0, 0.5])
@@ -38,6 +42,20 @@ def _teacher_result(
         )
         wall_collision = zeros if wall_collision is None else wall_collision
         joint = ~obstacle_collision & ~wall_collision
+    if static_collision is None and dynamic_collision is None:
+        # Legacy call style: attribute all obstacle failures to the static
+        # slot group so pre-existing tests keep their exact meaning.
+        static_collision = obstacle_collision
+        dynamic_collision = torch.zeros_like(obstacle_collision)
+    else:
+        static_collision = zeros if static_collision is None else static_collision
+        dynamic_collision = (
+            zeros if dynamic_collision is None else dynamic_collision
+        )
+        # Keep the aggregate mask reconciled with the explicit split, exactly
+        # as the real geometric teacher guarantees by construction.
+        obstacle_collision = static_collision | dynamic_collision
+        joint = ~obstacle_collision & ~wall_collision
     feasible = joint & (linear >= -1e-4)
     any_feasible = feasible.flatten(1).any(dim=1)
     return {
@@ -54,6 +72,70 @@ def _teacher_result(
         "raw_cost_grid": raw_cost,
         "obstacle_collision_grid": obstacle_collision,
         "wall_collision_grid": wall_collision,
+        "static_obstacle_collision_grid": static_collision,
+        "dynamic_obstacle_collision_grid": dynamic_collision,
+    }
+
+
+def _funnel_teacher_result(
+    *,
+    static_collision: bool = False,
+    dynamic_collision: bool = False,
+    wall_collision: bool = False,
+    linear_mps: float = 0.5,
+    forward_progress_m: float = 0.5,
+    heading_deviation_rad: float = 0.0,
+    lateral_offset_m: float = 0.5,
+    anchor_lateral_m: float = -0.5,
+):
+    """A two-cell grid isolating exactly one candidate to inspect.
+
+    Column 0 is a fixed, fully-feasible "right" anchor: it keeps the
+    env-level reachable/threshold statistics at their ordinary (non-
+    degenerate) values regardless of what column 1 does, so column 1's
+    failure can be attributed to exactly one of the seven masks. Column 1 is
+    the "left" cell under test; its seven inputs are given directly so a test
+    can fail exactly one of them and leave the other six passing.
+    """
+    anchor_static = torch.zeros(1, 1, 1, dtype=torch.bool)
+    anchor_dynamic = torch.zeros(1, 1, 1, dtype=torch.bool)
+    anchor_wall = torch.zeros(1, 1, 1, dtype=torch.bool)
+    test_static = torch.tensor([[[static_collision]]])
+    test_dynamic = torch.tensor([[[dynamic_collision]]])
+    test_wall = torch.tensor([[[wall_collision]]])
+
+    static = torch.cat([anchor_static, test_static], dim=2)
+    dynamic = torch.cat([anchor_dynamic, test_dynamic], dim=2)
+    wall = torch.cat([anchor_wall, test_wall], dim=2)
+    obstacle = static | dynamic
+    joint = ~obstacle & ~wall
+
+    linear = torch.tensor([[[0.5, linear_mps]]])
+    angular = torch.zeros(1, 1, 2)
+    endpoint = torch.zeros(1, 1, 2, 2)
+    endpoint[..., 0, 0] = 0.5
+    endpoint[..., 0, 1] = anchor_lateral_m
+    endpoint[..., 1, 0] = forward_progress_m
+    endpoint[..., 1, 1] = lateral_offset_m
+    endpoint_yaw = torch.tensor([[[0.0, heading_deviation_rad]]])
+    raw_cost = torch.zeros(1, 1, 2)
+
+    feasible = joint & (linear >= -1e-4)
+    any_feasible = feasible.flatten(1).any(dim=1)
+    return {
+        "actions": torch.tensor([[0, 0]]),
+        "any_feasible": any_feasible,
+        "joint_feasible_grid": joint,
+        "feasible_grid": feasible,
+        "linear_velocity_grid": linear,
+        "angular_velocity_grid": angular,
+        "endpoint_grid": endpoint,
+        "endpoint_yaw_grid": endpoint_yaw,
+        "raw_cost_grid": raw_cost,
+        "obstacle_collision_grid": obstacle,
+        "wall_collision_grid": wall,
+        "static_obstacle_collision_grid": static,
+        "dynamic_obstacle_collision_grid": dynamic,
     }
 
 
@@ -380,12 +462,12 @@ def test_committed_valid_exposes_no_switch_deadlock():
     assert stuck["used_wait"].tolist() == [True]
 
 
-def test_candidate_funnel_counts_attribute_loss_to_the_obstacle_mask():
-    """The obstacle mask alone removes the last left passage candidate.
+def test_candidate_funnel_counts_attribute_loss_to_the_static_obstacle_mask():
+    """The static-obstacle mask alone removes the last left passage candidate.
 
-    The leave-one-out counts must name the obstacle mask as the binding
-    constraint, so a diagnostic can tell an obstacle-clearance problem apart
-    from a wall-clearance or kinematic-filter problem.
+    The leave-one-out counts must name the static-obstacle mask as the
+    binding constraint, so a diagnostic can tell a static-clearance problem
+    apart from a dynamic-pedestrian, wall, or kinematic-filter problem.
     """
     controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
     obstacle = torch.zeros(1, 3, 3, dtype=torch.bool)
@@ -397,21 +479,19 @@ def test_candidate_funnel_counts_attribute_loss_to_the_obstacle_mask():
         reset=True,
     )
 
-    assert out["n_left"].tolist() == [0]
-    assert out["n_left_no_obstacle"].tolist() == [1]   # relaxing obstacle helps
-    assert out["n_left_no_wall"].tolist() == [0]       # relaxing wall does not
-    assert out["n_right"].tolist() == [1]              # right side untouched
-    assert out["n_obstacle_ok"].tolist() == [8]
-    assert out["n_wall_ok"].tolist() == [9]
-    assert out["n_joint"].tolist() == [8]
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [1]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_final_right"].tolist() == [1]        # right side untouched
 
 
-def test_candidate_funnel_counts_attribute_loss_to_the_kinematic_filter():
+def test_candidate_funnel_counts_attribute_loss_to_the_heading_filter():
     """Heading rejection, not geometry, removes the last left candidate.
 
-    ``n_left_no_kinematic`` counts geometrically clear cells on that side that
-    the passage filter discarded -- the "could have edged sideways but the
-    filter demands forward progress" case.
+    ``n_without_heading_left`` isolates the heading filter alone -- unlike the
+    old kinematic-bundle leave-one-out, it keeps launch/progress/side-signal
+    active, so it must not credit cells that heading was never blocking.
     """
     controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
     angular_values = torch.tensor([-0.5, 0.0, 0.5])
@@ -424,8 +504,284 @@ def test_candidate_funnel_counts_attribute_loss_to_the_kinematic_filter():
         reset=True,
     )
 
-    assert out["n_joint"].tolist() == [9]              # geometry is clear
-    assert out["n_left"].tolist() == [0]
-    assert out["n_left_no_obstacle"].tolist() == [0]   # geometry was never it
-    assert out["n_left_no_wall"].tolist() == [0]
-    assert out["n_left_no_kinematic"].tolist() == [3]  # filter is the binder
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_without_launch_left"].tolist() == [0]
+    assert out["n_without_progress_left"].tolist() == [0]
+    # Only [2, 2] clears launch+progress+side-signal on the left; relaxing
+    # heading alone recovers exactly that one cell, not the whole row.
+    assert out["n_without_heading_left"].tolist() == [1]
+
+
+def test_funnel_reachable_and_threshold_fields_match_the_scene():
+    """The adaptive thresholds/reachable stats must reflect the actual scene.
+
+    This is what lets an analyst tell "the action grid cannot physically get
+    there" apart from "a fixed threshold cut it off".
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+
+    out = _select(controller, _funnel_teacher_result(), reset=True)
+
+    torch.testing.assert_close(out["reachable_linear_mps"], torch.tensor([0.5]))
+    torch.testing.assert_close(out["reachable_progress_m"], torch.tensor([0.5]))
+    torch.testing.assert_close(out["reachable_lateral_m"], torch.tensor([0.5]))
+    torch.testing.assert_close(
+        out["launch_threshold_mps"], torch.tensor([0.15])
+    )
+    torch.testing.assert_close(
+        out["progress_threshold_m"], torch.tensor([0.20])
+    )
+    torch.testing.assert_close(out["side_threshold_m"], torch.tensor([0.15]))
+
+
+def test_funnel_static_obstacle_is_the_unique_binder():
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(static_collision=True),
+        reset=True,
+    )
+
+    assert out["n_raw_left"].tolist() == [1]
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [1]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_without_launch_left"].tolist() == [0]
+    assert out["n_without_progress_left"].tolist() == [0]
+    assert out["n_without_heading_left"].tolist() == [0]
+    assert out["n_without_side_signal_left"].tolist() == [0]
+    assert out["n_final_right"].tolist() == [1]
+
+
+def test_funnel_dynamic_obstacle_is_the_unique_binder():
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(dynamic_collision=True),
+        reset=True,
+    )
+
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [0]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [1]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_without_launch_left"].tolist() == [0]
+    assert out["n_without_progress_left"].tolist() == [0]
+    assert out["n_without_heading_left"].tolist() == [0]
+    assert out["n_without_side_signal_left"].tolist() == [0]
+
+
+def test_funnel_wall_is_the_unique_binder():
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(wall_collision=True),
+        reset=True,
+    )
+
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [0]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [1]
+    assert out["n_without_launch_left"].tolist() == [0]
+    assert out["n_without_progress_left"].tolist() == [0]
+    assert out["n_without_heading_left"].tolist() == [0]
+    assert out["n_without_side_signal_left"].tolist() == [0]
+
+
+def test_funnel_launch_speed_is_the_unique_binder():
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(linear_mps=-0.05),
+        reset=True,
+    )
+
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [0]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_without_launch_left"].tolist() == [1]
+    assert out["n_without_progress_left"].tolist() == [0]
+    assert out["n_without_heading_left"].tolist() == [0]
+    assert out["n_without_side_signal_left"].tolist() == [0]
+
+
+def test_funnel_forward_progress_is_the_unique_binder():
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(forward_progress_m=-0.05),
+        reset=True,
+    )
+
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [0]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_without_launch_left"].tolist() == [0]
+    assert out["n_without_progress_left"].tolist() == [1]
+    assert out["n_without_heading_left"].tolist() == [0]
+    assert out["n_without_side_signal_left"].tolist() == [0]
+
+
+def test_funnel_heading_is_the_unique_binder():
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(heading_deviation_rad=2.0),
+        reset=True,
+    )
+
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [0]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_without_launch_left"].tolist() == [0]
+    assert out["n_without_progress_left"].tolist() == [0]
+    assert out["n_without_heading_left"].tolist() == [1]
+    # The anchor cell keeps reachable stats healthy, so the heading failure
+    # at the test cell must not zero out the env-level side-signal gate.
+    assert out["n_without_side_signal_left"].tolist() == [0]
+
+
+def test_funnel_side_signal_is_the_unique_binder():
+    """Side-signal is env-level: the anchor must also have a tiny offset.
+
+    Otherwise the anchor's own lateral offset would keep the scene's
+    reachable-lateral statistic healthy and this test would never be able to
+    make ``side_signal`` fail on its own.
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(
+            lateral_offset_m=0.005, anchor_lateral_m=-0.005
+        ),
+        reset=True,
+    )
+
+    assert out["n_raw_left"].tolist() == [1]
+    assert out["n_final_left"].tolist() == [0]
+    assert out["n_without_static_obstacle_left"].tolist() == [0]
+    assert out["n_without_dynamic_obstacle_left"].tolist() == [0]
+    assert out["n_without_wall_left"].tolist() == [0]
+    assert out["n_without_launch_left"].tolist() == [0]
+    assert out["n_without_progress_left"].tolist() == [0]
+    assert out["n_without_heading_left"].tolist() == [0]
+    assert out["n_without_side_signal_left"].tolist() == [1]
+
+
+def test_funnel_two_simultaneous_binders_are_not_misattributed_to_one():
+    """Static collision AND a wall both block the same cell.
+
+    No single leave-one-out may claim to be "the" cause; only relaxing both
+    together should recover the candidate. This is the ambiguous/multi-filter
+    case the analyzer must not collapse into a unique binder.
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(static_collision=True, wall_collision=True),
+        reset=True,
+    )
+
+    assert out["n_final_left"].tolist() == [0]
+    for name in (
+        "static_obstacle",
+        "dynamic_obstacle",
+        "wall",
+        "launch",
+        "progress",
+        "heading",
+        "side_signal",
+    ):
+        assert out[f"n_without_{name}_left"].tolist() == [0], name
+
+    expected_bitmask = (
+        FUNNEL_MASK_BITS["static_obstacle"] | FUNNEL_MASK_BITS["wall"]
+    )
+    assert out["pairwise_recovering_count_left"].tolist() == [1]
+    assert out["pairwise_best_count_left"].tolist() == [1]
+    assert out["pairwise_best_bitmask_left"].tolist() == [expected_bitmask]
+
+
+def test_funnel_three_simultaneous_binders_exceed_pairwise_relaxation():
+    """Three independent binders on one cell: even the best pair can't save it.
+
+    This is the "multi-filter/grid-limited" bucket beyond pairwise relaxation.
+    """
+    controller = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = _select(
+        controller,
+        _funnel_teacher_result(
+            static_collision=True,
+            wall_collision=True,
+            heading_deviation_rad=2.0,
+        ),
+        reset=True,
+    )
+
+    assert out["n_final_left"].tolist() == [0]
+    assert out["pairwise_recovering_count_left"].tolist() == [0]
+    assert out["pairwise_best_count_left"].tolist() == [0]
+    assert out["pairwise_best_bitmask_left"].tolist() == [0]
+
+
+def test_onset_trigger_commits_before_the_pedestrian_crosses():
+    """A pedestrian walking away never reaches the robot's lateral line here.
+
+    The crossing trigger therefore never registers a vacated side, and because
+    a crossing threat is active the FSM proposes nothing and stays in WAIT.
+    The onset trigger reads the sustained lateral direction instead, so it
+    commits to the side the pedestrian is leaving without waiting for it to
+    walk all the way across.
+    """
+    walk = [(0.5, -1.0), (0.4, -1.0), (0.3, -1.0)]
+
+    crossing = StatefulCorridorTeacher(1, "cpu", dt_s=0.2)
+    out = None
+    for i, (y, vy) in enumerate(walk):
+        out = _select(crossing, _teacher_result(), reset=(i == 0),
+                      dynamic_y=y, dynamic_vy=vy)
+    assert out["state"].tolist() == [WAIT]
+    assert out["committed_side"].tolist() == [0]
+
+    onset = StatefulCorridorTeacher(
+        1, "cpu", dt_s=0.2,
+        spec=StatefulTeacherSpec(vacated_trigger="onset", vacated_onset_steps=2),
+    )
+    out = None
+    for i, (y, vy) in enumerate(walk):
+        out = _select(onset, _teacher_result(), reset=(i == 0),
+                      dynamic_y=y, dynamic_vy=vy)
+    assert out["state"].tolist() == [COMMIT_SIDE]
+    assert out["committed_side"].tolist() == [1]
+
+
+def test_onset_trigger_picks_the_side_being_vacated_not_the_destination():
+    """Mirror case: a pedestrian on the right walking left vacates the right."""
+    onset = StatefulCorridorTeacher(
+        1, "cpu", dt_s=0.2,
+        spec=StatefulTeacherSpec(vacated_trigger="onset", vacated_onset_steps=2),
+    )
+    out = None
+    for i, y in enumerate((-0.5, -0.4, -0.3)):
+        out = _select(onset, _teacher_result(), reset=(i == 0),
+                      dynamic_y=y, dynamic_vy=1.0)
+    assert out["state"].tolist() == [COMMIT_SIDE]
+    assert out["committed_side"].tolist() == [-1]
+
+
+def test_unknown_vacated_trigger_is_rejected():
+    try:
+        StatefulCorridorTeacher(
+            1, "cpu", dt_s=0.2,
+            spec=StatefulTeacherSpec(vacated_trigger="whenever"),
+        )
+    except ValueError:
+        return
+    raise AssertionError("unknown vacated trigger must raise")

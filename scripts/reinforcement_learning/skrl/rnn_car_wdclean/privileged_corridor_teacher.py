@@ -416,11 +416,29 @@ def corridor_teacher_action_grid(
     max_angular_velocity: float,
     max_angular_accel: float,
     pending_d1_command: torch.Tensor | None = None,
+    obstacle_dynamic_mask: torch.Tensor | None = None,
     spec: CorridorTeacherSpec = CorridorTeacherSpec(),
 ) -> dict[str, torch.Tensor]:
-    """Rank all reachable action pairs by hard safety then local goal cost."""
+    """Rank all reachable action pairs by hard safety then local goal cost.
+
+    ``obstacle_dynamic_mask`` is diagnostic-only: a ``[E,N]`` bool aligned with
+    ``obstacle_valid`` (True = pedestrian/dynamic slot, False = static slot).
+    When given, two additional keys report the obstacle-collision decision
+    restricted to each group. They are a pure decomposition of
+    ``obstacle_collision_grid`` -- their union equals it exactly -- and do not
+    change any existing key, the selected action, or feasibility.
+    """
 
     _validate_teacher_spec(spec)
+    if (
+        obstacle_dynamic_mask is not None
+        and obstacle_dynamic_mask.shape != obstacle_valid.shape
+    ):
+        raise ValueError(
+            "obstacle_dynamic_mask must have shape [E,N] matching "
+            f"obstacle_valid {tuple(obstacle_valid.shape)}, got "
+            f"{tuple(obstacle_dynamic_mask.shape)}"
+        )
     linear, angular = decode_discrete_drive_action_grid(
         current_velocity,
         current_omega,
@@ -463,6 +481,26 @@ def corridor_teacher_action_grid(
     obstacle_collision = (
         min_obstacle_clearance < spec.hard_obstacle_clearance_m
     )
+    static_obstacle_collision = None
+    dynamic_obstacle_collision = None
+    if obstacle_dynamic_mask is not None:
+        is_dynamic = obstacle_dynamic_mask[:, None, None, :, None]
+        static_clearance = torch.where(
+            is_dynamic,
+            torch.full_like(obstacle_clearance, float("inf")),
+            obstacle_clearance,
+        )
+        dynamic_clearance = torch.where(
+            is_dynamic,
+            obstacle_clearance,
+            torch.full_like(obstacle_clearance, float("inf")),
+        )
+        static_obstacle_collision = (
+            static_clearance.amin(dim=(-1, -2)) < spec.hard_obstacle_clearance_m
+        )
+        dynamic_obstacle_collision = (
+            dynamic_clearance.amin(dim=(-1, -2)) < spec.hard_obstacle_clearance_m
+        )
     wall_collision_samples = _obb_wall_collision(
         path,
         yaw,
@@ -526,7 +564,7 @@ def corridor_teacher_action_grid(
         actions,
         torch.full_like(actions, int(num_bins) // 2),
     )
-    return {
+    result = {
         "actions": actions,
         "any_feasible": any_feasible,
         "feasible_fraction": feasible.float().mean(dim=(1, 2)),
@@ -543,3 +581,7 @@ def corridor_teacher_action_grid(
         "wall_collision_grid": wall_collision,
         "obstacle_collision_grid": obstacle_collision,
     }
+    if obstacle_dynamic_mask is not None:
+        result["static_obstacle_collision_grid"] = static_obstacle_collision
+        result["dynamic_obstacle_collision_grid"] = dynamic_obstacle_collision
+    return result

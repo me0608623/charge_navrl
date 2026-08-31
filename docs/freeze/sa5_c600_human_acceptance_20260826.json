@@ -1,0 +1,33 @@
+{
+  "schema": "sa5_checkpoint_human_acceptance/v1",
+  "status": "HUMAN_ACCEPTED_SA5_PARENT_C600_WITH_WAIVER",
+  "accepted_at": "2026-08-26T14:25:00+08:00",
+  "checkpoint": {
+    "conceptual_iteration": 600,
+    "path": "logs/rnn_car/sa5_v3_c50_stage3_b3_cont500_from_it100_ne1024_s42_p500_r1/checkpoint_64000.pt",
+    "sha256": "c1a24684eb787a0865b007a2a712b744f0f74c39f812c62b9b18d4ed893c271a"
+  },
+  "machine_screen": {
+    "path": "logs/gates/sa5_v3_c50_stage3_b3_c500_c600_screen/screen_20260826_r1/SUMMARY.json",
+    "protocol_sha256": "8ec2e612709be9d5ff1d6b605df079259545fe961fff4d7cfc64b589f63df47d",
+    "candidate_pass": false,
+    "parent_selected": false,
+    "machine_verdict_preserved": true
+  },
+  "waiver": {
+    "cell": "P060_0S1D",
+    "p060_0s1d_sr": 0.8798828125,
+    "p060_0s1d_cr": 0.1201171875,
+    "p060_0s1d_to": 0.0,
+    "required_sr_min": 0.9,
+    "required_cr_max": 0.1,
+    "required_to_max": 0.05,
+    "cr_excess_percentage_points": 2.01171875,
+    "interpretation": "explicit engineering acceptance; not a machine Gate PASS"
+  },
+  "accepted_role": "SA5_PARENT_FOR_SUBSEQUENT_DEVELOPMENT",
+  "next_required_action": "RUN_FIXED_POLICY_ONLY_2S2D_WALKING_STATE_SCREEN",
+  "training_authorized_by_this_record": false,
+  "distillation_authorized": false,
+  "sa6_authorized": false
+}
