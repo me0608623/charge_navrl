@@ -54,6 +54,15 @@ parser = argparse.ArgumentParser(description="Train Charge + Obstacle with Modul
 parser.add_argument("--task", type=str, default="Isaac-Navigation-Charge-VLP16-Curriculum-NavRL")
 parser.add_argument("--num_envs", type=int, default=4096)
 parser.add_argument("--seed", type=int, default=1)
+parser.add_argument(
+    "--model_init_seed",
+    type=int,
+    default=None,
+    help=(
+        "Optional model-only RNG seed applied after env construction and "
+        "immediately before network initialization; -1 reuses --seed."
+    ),
+)
 
 # --- Charge 訓練超參 ---
 # --timesteps
@@ -3389,6 +3398,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _apply_lidar_noise_config,
         _apply_lidar_distractor_eligibility_config,
         _apply_actuator_dr_config,
+        _apply_domain_randomization_switch,
         _apply_dr_param_overrides,
     )
     _apply_action_history_normalization(env_cfg, args_cli)
@@ -3402,10 +3412,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # log 連 `[SIM2REAL] Actuator DR` 那行都不會出現。
     # play_rnn_car.py 走 `apply_charge_env_overrides`（內含此項），所以修復前
     # 訓練與評測的致動器行為是不一致的。
-    # 註：`_apply_dr_param_overrides` 在 no_domain_randomization=True 時會提早
-    # return，但那關的是 events 那條 DR；action-term 的致動器 DR 不受影響，
-    # 所以本行必須排在它之前且不共用那個開關。
+    # Event-level physics/force DR and action-term actuator dynamics are
+    # independent factors. Apply actuator wiring first, then the explicit
+    # event switch, then any enabled event-level range overrides.
     _apply_actuator_dr_config(env_cfg, args_cli)
+    _apply_domain_randomization_switch(env_cfg, args_cli)
     _apply_dr_param_overrides(env_cfg, args_cli)
 
     # Match the deployed vehicle's speed-rate semantics. This must run before
@@ -3930,6 +3941,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         return _f
 
     policy_obs_dim = 113 if wd_exact_mode else len(POLICY_OBS_INDICES)
+
+    # Factorial experiments need identical model initialization within each
+    # seed block. Env construction can consume a factor-dependent RNG prefix,
+    # so reseed only when the config explicitly requests this contract.
+    _requested_model_init_seed = getattr(args_cli, "model_init_seed", None)
+    if _requested_model_init_seed is not None:
+        _model_init_seed = (
+            args_cli.seed
+            if int(_requested_model_init_seed) == -1
+            else int(_requested_model_init_seed)
+        )
+        if _model_init_seed < 0:
+            raise ValueError("model_init_seed must be -1, None, or non-negative")
+        torch.manual_seed(_model_init_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(_model_init_seed)
+        print(
+            "[MODEL-INIT-SEED] "
+            f"requested={_requested_model_init_seed} "
+            f"resolved={_model_init_seed} run_seed={args_cli.seed}",
+            flush=True,
+        )
 
     # --- Build Charge models（根據 --charge_encoder_mode 建立對應架構）---
     # ModularRNN 架構（WD 原版 §4.2）：

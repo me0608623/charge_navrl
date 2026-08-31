@@ -71,6 +71,38 @@ def _apply_action_history_normalization(env_cfg, args_cli) -> bool:
     return True
 
 
+def _apply_domain_randomization_switch(env_cfg, args_cli) -> bool:
+    """Disable event-level physics/sensor-marker/force DR when requested.
+
+    Action-term actuator dynamics are deliberately outside this switch. This
+    keeps a delay-only experiment possible while disabling physics and force
+    randomization, and matches the documented ExperimentConfig semantics.
+    """
+    if not getattr(args_cli, "no_domain_randomization", False):
+        return False
+
+    events = getattr(env_cfg, "events", None)
+    dr = getattr(events, "domain_randomization", None) if events is not None else None
+    if dr is None:
+        print("[NO_DR] no domain_randomization event is configured")
+        return False
+    params = getattr(dr, "params", None)
+    if not isinstance(params, dict):
+        raise RuntimeError(
+            "domain_randomization event exists but has no mutable params mapping"
+        )
+
+    params["enable_physics"] = False
+    params["enable_sensor_noise"] = False
+    params["enable_external_force"] = False
+    print(
+        "[NO_DR] domain_randomization event: "
+        "physics/sensor_noise/external_force = False"
+    )
+    print("[NO_DR] reset_base and action-term actuator dynamics remain unchanged")
+    return True
+
+
 def apply_charge_env_overrides(env_cfg, args_cli):
     """Apply CLI-driven reward/action/curriculum overrides to env_cfg."""
     _apply_obb_collision_config(env_cfg, args_cli)
@@ -443,16 +475,7 @@ def apply_charge_env_overrides(env_cfg, args_cli):
             changed = True
 
     # --- no_domain_randomization ---
-    if getattr(args_cli, "no_domain_randomization", False):
-        events = getattr(env_cfg, "events", None)
-        if events is not None:
-            dr = getattr(events, "domain_randomization", None)
-            if dr is not None:
-                dr.params["enable_physics"] = False
-                dr.params["enable_sensor_noise"] = False
-                dr.params["enable_external_force"] = False
-                print("[NO_DR] domain_randomization event: physics/sensor_noise/external_force = False")
-                print("[NO_DR] reset_base 保留原樣（pose/velocity range 不動）")
+    if _apply_domain_randomization_switch(env_cfg, args_cli):
         changed = True
 
     # --- reward_speed_v05 ---

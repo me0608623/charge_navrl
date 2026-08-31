@@ -1,0 +1,131 @@
+{
+  "schema": "paper_ablation_roadmap/v1",
+  "created_at": "2026-08-30T00:00:00+08:00",
+  "status": "DESIGN_ONLY_NO_GPU_AUTHORIZATION",
+  "priority_order": [
+    "P0_unified_gate_metrics",
+    "P1_lidar_x_delay_factorial",
+    "P2_lidar_component_ablation",
+    "P3_domain_randomization_source_ablation",
+    "P4_curriculum_vs_direct_training",
+    "P5_temporal_architecture_ablation"
+  ],
+  "experiments": {
+    "P0_unified_gate_metrics": {
+      "purpose": "Make every formal scenario emit the same outcome, efficiency, clearance, and runtime provenance fields.",
+      "changes_policy_behavior": false,
+      "required_before": [
+        "P1_lidar_x_delay_factorial_formal_gate"
+      ],
+      "required_fields": [
+        "SR",
+        "CR",
+        "TO",
+        "traversal_time_s",
+        "path_efficiency",
+        "minimum_obstacle_clearance_m",
+        "inference_latency_ms",
+        "runtime_factor_markers"
+      ]
+    },
+    "P1_lidar_x_delay_factorial": {
+      "status": "CONFIGS_AND_PROTOCOL_READY_NOT_RUN",
+      "protocol": "docs/freeze/paper_realism_factorial_v1_ready_not_run_20260830.json",
+      "cells": 4,
+      "training_seeds": 3,
+      "total_training_runs": 12,
+      "primary_claims": [
+        "fixed measured LiDAR corruption main effect",
+        "randomized decoded-command delay main effect",
+        "LiDAR-by-delay interaction"
+      ]
+    },
+    "P2_lidar_component_ablation": {
+      "status": "DESIGN_ONLY_AFTER_P1",
+      "available_implementation_modes": [
+        "ideal",
+        "sigma",
+        "bias",
+        "dropout",
+        "full"
+      ],
+      "semantic_warning": "The current dropout mode combines measured holes and mixed-pixel outliers; it does not isolate those two mechanisms.",
+      "minimum_recommended_cells": [
+        "ideal",
+        "sigma",
+        "dropout",
+        "full"
+      ],
+      "stress_curve": "After training comparison, evaluate the same frozen policies under pre-registered corruption strength multipliers.",
+      "prerequisite": "P1 must establish that the aggregate LiDAR factor is measurable before spending GPU time on decomposition."
+    },
+    "P3_domain_randomization_source_ablation": {
+      "status": "BLOCKED_ON_RUNTIME_PROOF_AND_CALIBRATION",
+      "candidate_cells": [
+        "DR0_none",
+        "DR_delay_only",
+        "DR_physics_only",
+        "DR_environment_only",
+        "DR_all_calibrated"
+      ],
+      "blockers": [
+        "Mass, friction, center-of-mass, push, wind, velocity-scale, and motor-lag ranges require measured or defensible priors.",
+        "Every enabled source must emit a runtime sample/accounting marker; config values alone are insufficient.",
+        "Scene randomization must be distinguished from event-level physics and actuator randomization."
+      ],
+      "forbidden_shortcut": "Do not relabel the P1 delay factor as full domain randomization."
+    },
+    "P4_curriculum_vs_direct_training": {
+      "status": "DESIGN_ONLY_AFTER_FINAL_TASK_FREEZE",
+      "arms": [
+        "stagewise_SA1_to_final",
+        "direct_from_scratch_on_final_distribution"
+      ],
+      "optional_arm": "same_parent_with_and_without_final_stage_increment",
+      "required_controls": [
+        "equal total environment steps",
+        "same architecture and optimizer",
+        "same training seed blocks",
+        "same final fixed Gate",
+        "same realism factors"
+      ],
+      "primary_question": "Does stage-wise progression improve retention and final-task learning beyond merely seeing more samples?"
+    },
+    "P5_temporal_architecture_ablation": {
+      "status": "DESIGN_ONLY_AFTER_P1",
+      "arms": [
+        "K1_current_observation",
+        "K4_frame_stack",
+        "K8_frame_stack",
+        "optional_recurrent_model"
+      ],
+      "required_controls": [
+        "same PPO and reward",
+        "same realism and scene distribution",
+        "same training budget and seed blocks",
+        "report parameter count and inference latency"
+      ],
+      "primary_dynamic_metrics": [
+        "dynamic_collision_rate",
+        "minimum_clearance",
+        "angular_command_variation",
+        "crossing-direction probe accuracy"
+      ],
+      "terminology_warning": "The present mainline is K8 CNN PPO, not an active RNN policy."
+    }
+  },
+  "deprioritized": [
+    "PPO hyperparameter sweeps",
+    "gradient clipping thresholds",
+    "value clipping switches",
+    "teacher or distillation ablations",
+    "large hidden-width searches"
+  ],
+  "automatic_actions": {
+    "create_future_configs": false,
+    "gpu_smoke": false,
+    "launch_training": false,
+    "launch_gate": false,
+    "auto_advance": false
+  }
+}

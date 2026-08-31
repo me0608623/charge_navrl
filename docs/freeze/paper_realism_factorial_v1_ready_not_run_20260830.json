@@ -1,0 +1,174 @@
+{
+  "schema": "paper_realism_factorial/v1",
+  "created_at": "2026-08-30T00:00:00+08:00",
+  "status": "READY_NOT_RUN",
+  "decision": "FREEZE_CONFIGS_AND_PROTOCOL_ONLY",
+  "research_question": "What are the separate and joint effects of fixed measurement-calibrated VLP-16 corruption and randomized decoded-command delay under an otherwise identical SA1 training contract?",
+  "terminology": {
+    "sensor_factor": "fixed measurement-calibrated LiDAR corruption, not per-episode sensor-parameter domain randomization",
+    "delay_factor": "randomized actuator command delay U{0,1,2}, with velocity scale and motor lag fixed at identity",
+    "forbidden_claim": "This experiment does not test full physics, full actuator, or full domain randomization."
+  },
+  "factor_levels": {
+    "lidar": {
+      "ideal": {
+        "lidar_no_noise": true,
+        "vlp16_noise_mode": "ideal"
+      },
+      "measured_full": {
+        "lidar_no_noise": false,
+        "vlp16_noise_mode": "full",
+        "distractor_eligibility": "valid_return_only"
+      }
+    },
+    "decoded_command_delay": {
+      "d0": {
+        "enable_actuator_dr": false,
+        "support_steps": [0, 0]
+      },
+      "u012": {
+        "enable_actuator_dr": true,
+        "support_steps": [0, 2]
+      }
+    }
+  },
+  "cells": [
+    {
+      "label": "A",
+      "lidar": "ideal",
+      "delay": "d0",
+      "config": "e2e_sa1_paper_factorial_a_ideal_d0_p600"
+    },
+    {
+      "label": "B",
+      "lidar": "measured_full",
+      "delay": "d0",
+      "config": "e2e_sa1_paper_factorial_b_full_d0_p600"
+    },
+    {
+      "label": "C",
+      "lidar": "ideal",
+      "delay": "u012",
+      "config": "e2e_sa1_paper_factorial_c_ideal_u012_p600"
+    },
+    {
+      "label": "D",
+      "lidar": "measured_full",
+      "delay": "u012",
+      "config": "e2e_sa1_paper_factorial_d_full_u012_p600"
+    }
+  ],
+  "training_contract": {
+    "training_seeds": [42, 43, 44],
+    "seed_is_statistical_unit": true,
+    "runs": 12,
+    "from_scratch": true,
+    "checkpoint": null,
+    "resume_optimizer": false,
+    "model_init_seed": -1,
+    "model_init_seed_semantics": "Resolve to the run seed after environment construction and immediately before network construction.",
+    "num_envs": 1024,
+    "rollout_length": 128,
+    "iterations": 600,
+    "timesteps": 76800,
+    "checkpoint_interval_iterations": 100,
+    "pre_registered_analysis_iterations": [300, 600],
+    "scene_distribution": {
+      "native_reset_share": 0.78,
+      "narrow_reset_share": 0.12,
+      "corridor_reset_share": 0.10
+    },
+    "common_contract": {
+      "algorithm": "PPO",
+      "temporal_observation": "K8 end-to-end LiDAR CNN with issued-action history",
+      "event_level_domain_randomization": false,
+      "actuator_velocity_scale": [1.0, 1.0],
+      "actuator_motor_lag": 1.0,
+      "observation_delay_steps": [0, 0],
+      "speed_rate": 1.0,
+      "teacher_or_action_override": false
+    },
+    "run_order": "Blocked randomization by training seed; randomize A/B/C/D order within each seed before launch.",
+    "estimated_gpu_hours": 84,
+    "estimate_basis": "Historical SA1 required about 7 hours for 600 iterations on this workstation."
+  },
+  "evaluation_contract": {
+    "status": "SPECIFIED_BUT_RUNNER_METRICS_NOT_YET_COMPLETE",
+    "evaluation_seeds": [515, 616, 717],
+    "evaluation_seed_is_not_training_seed": true,
+    "primary_runtime_condition": {
+      "vlp16_noise_mode": "full",
+      "distractor_eligibility": "valid_return_only",
+      "fixed_actuator_delay_steps": 1,
+      "velocity_scale": 1.0,
+      "motor_lag": 1.0
+    },
+    "policy": "deterministic_argmax",
+    "num_envs": 64,
+    "steps_per_cell": 2500,
+    "minimum_completed_episodes_per_cell": 1000,
+    "scenarios": [
+      "nav20_clean",
+      "nav20_native",
+      "narrow_sealed",
+      "corridor_lateral",
+      "corridor_longitudinal",
+      "corridor_random_2d",
+      "corridor_mixed_iid"
+    ],
+    "required_metrics": [
+      "success_rate",
+      "collision_rate",
+      "timeout_rate",
+      "traversal_time_s",
+      "path_efficiency",
+      "minimum_obstacle_clearance_m"
+    ],
+    "blocking_instrumentation_gap": [
+      "The current common fixed-Gate outputs do not yet provide traversal time, path efficiency, and minimum clearance consistently for every scenario.",
+      "No formal evaluation may start until these fields are logging-only, schema-locked, and smoke-tested or the protocol is explicitly superseded before seeing results."
+    ],
+    "no_checkpoint_selection_from_training_metrics": true,
+    "final_checkpoint_for_primary_analysis": "iteration_600",
+    "iteration_300_role": "pre-registered learning-trajectory diagnostic only"
+  },
+  "analysis_contract": {
+    "descriptive_summary": "Per-cell and per-scenario mean, standard deviation, and 95 percent confidence interval across the three training seeds.",
+    "do_not_use_episode_count_as_independent_n": true,
+    "paired_seed_effects": {
+      "lidar_main_effect": "mean_seed((((B-A) + (D-C)) / 2))",
+      "delay_main_effect": "mean_seed((((C-A) + (D-B)) / 2))",
+      "interaction": "mean_seed(((D-C) - (B-A)))"
+    },
+    "rate_direction": "For failure rates, negative effects are improvements; for success rate, positive effects are improvements.",
+    "multiplicity": "SR, CR, and TO by pre-registered scenario are primary; traversal time, path efficiency, and clearance are secondary. Do not search post hoc for the best checkpoint or seed.",
+    "paper_claim_boundary": "The result can support claims about fixed measured LiDAR corruption, randomized command delay, and their interaction at the frozen 600-iteration SA1 budget only."
+  },
+  "historical_evidence_boundary": {
+    "finding": "Before 2026-08-30, the training entrypoint did not apply no_domain_randomization to the event-level DR term although evaluation did.",
+    "consequence": "Historical checkpoints cannot be retroactively asserted to have physics/external-force DR disabled solely from their ExperimentConfig.",
+    "new_protocol_requirement": "Runtime logs must contain the [NO_DR] marker and the intended VLP16 and actuator markers for every formal run."
+  },
+  "source_locks": {
+    "git_head_context_only": "8166f81928c31b769ba9043ccaaf47bc84c6bf4b",
+    "branch_context_only": "wdclean-repro-20260429-pcB",
+    "files": {
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_a_ideal_d0_p600.py": "a07c8d072734eeb10271043e0d75beb298474086d65beba2e6a01b2e48437005",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_b_full_d0_p600.py": "d598fe0c191fa3ae3d3ce69764c459def0533f41f657eb0d0cd07ad1cf372712",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_c_ideal_u012_p600.py": "278459134ff4ad7003a9a745eac5c4e15b1fe0d895cb7bcffeca0b1d3e961108",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_d_full_u012_p600.py": "47ab8e4291703cd8a0dfcd068513db0d9f97556ef5cf99b8ddfe58011034d4f6",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_k8_obb_scene_mix.py": "68a0d02c9fb1fd3f2b91fb6f368440daf31516d5390f2b38d4f4f247b243d3fc",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/experiment_config.py": "b640eaf86942303670829bc8c26f28296b111193c87caebc6157760c5f666515",
+      "scripts/reinforcement_learning/skrl/train/train_rnn_car_wdclip.py": "02dc690fd1a1a87d715ac432669d531fec97576f51c0a03cf8ad7c1d34fced98",
+      "scripts/reinforcement_learning/skrl/utils/charge_env_overrides.py": "ef15aacebb7670671284a246f0df8172142674d20b125dad9fed763a8b4eae02"
+    }
+  },
+  "automatic_actions": {
+    "config_build_authorized": true,
+    "cpu_tests_authorized": true,
+    "gpu_smoke_authorized": false,
+    "training_launch_authorized": false,
+    "fixed_gate_launch_authorized": false,
+    "auto_advance_authorized": false
+  }
+}

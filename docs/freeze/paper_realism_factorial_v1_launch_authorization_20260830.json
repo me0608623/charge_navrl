@@ -1,0 +1,100 @@
+{
+  "schema": "paper_realism_factorial_launch_authorization/v1",
+  "created_at": "2026-08-30T21:00:07+08:00",
+  "status": "AUTHORIZED_WAITING_FOR_EXCLUSIVE_GPU",
+  "decision": "HUMAN_AUTHORIZED_SMOKE_THEN_12_FORMAL_RUNS",
+  "human_instruction": "啟動",
+  "frozen_protocol": "docs/freeze/paper_realism_factorial_v1_ready_not_run_20260830.json",
+  "frozen_protocol_sha256": "e36949071245b271ee010cd06be2e9c1e3a1e2ba5d073bcb908fd4fad0297b6d",
+  "authorization_scope": {
+    "supersedes_only": [
+      "automatic_actions.gpu_smoke_authorized",
+      "automatic_actions.training_launch_authorized"
+    ],
+    "does_not_supersede": [
+      "evaluation_contract.blocking_instrumentation_gap",
+      "automatic_actions.fixed_gate_launch_authorized",
+      "automatic_actions.auto_advance_authorized"
+    ]
+  },
+  "execution": {
+    "fail_closed": true,
+    "wait_for_exclusive_gpu": true,
+    "run_sequentially": true,
+    "smoke_seed": 42,
+    "formal_training_seeds": [42, 43, 44],
+    "blocked_randomization_seed": 20260830,
+    "blocked_randomization_method": "random.Random(20260830).shuffle(['A','B','C','D']) once per training-seed block before observing any result",
+    "formal_order_by_seed": {
+      "42": ["C", "B", "D", "A"],
+      "43": ["B", "D", "C", "A"],
+      "44": ["A", "B", "D", "C"]
+    },
+    "order": [
+      "smoke_A",
+      "smoke_B",
+      "smoke_C",
+      "smoke_D",
+      "formal_s42_C",
+      "formal_s42_B",
+      "formal_s42_D",
+      "formal_s42_A",
+      "formal_s43_B",
+      "formal_s43_D",
+      "formal_s43_C",
+      "formal_s43_A",
+      "formal_s44_A",
+      "formal_s44_B",
+      "formal_s44_D",
+      "formal_s44_C"
+    ],
+    "smoke_contract": {
+      "num_envs": 64,
+      "iterations": 1,
+      "timesteps": 128,
+      "save_interval_iterations": 1,
+      "allowed_behavioral_diffs_from_formal": [
+        "num_envs",
+        "timesteps",
+        "save_interval"
+      ]
+    },
+    "formal_contract": {
+      "num_envs": 1024,
+      "iterations": 600,
+      "timesteps": 76800,
+      "checkpoint_interval_iterations": 100,
+      "runs": 12,
+      "from_scratch": true,
+      "resume_optimizer": false
+    },
+    "stop_conditions": [
+      "any smoke exits nonzero or fails runtime-marker verification",
+      "any source lock changes before an arm",
+      "any output path already exists",
+      "any NaN, Inf, OOM, CUDA error, RuntimeError, or traceback",
+      "any run misses its target iteration or required checkpoint",
+      "another trainer or non-desktop GPU process appears before an arm"
+    ]
+  },
+  "automatic_actions": {
+    "gpu_smoke_authorized": true,
+    "formal_training_authorized": true,
+    "run_sequentially": true,
+    "fixed_gate_launch_authorized": false,
+    "auto_advance_authorized": false
+  },
+  "resource_policy": {
+    "current_blocker_at_authorization": "Another user's GPU process is active.",
+    "behavior": "Wait without reserving expected_run; require two clean GPU samples before the first arm and recheck before every later arm.",
+    "never_kill_or_preempt_other_processes": true
+  },
+  "source_locks": {
+    "files": {
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_a_ideal_d0_p600_smoke.py": "485b7a87df0440abd7457940265c8b7ada734434804a4a7fd8bdfb531134ebff",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_b_full_d0_p600_smoke.py": "9648671b69afc054f3154963f006128f6d3bc263e842dec333c16b471ce4bd56",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_c_ideal_u012_p600_smoke.py": "837174e5bada933ddaa01c76e690cbf85e0a5af6cbb0eb5dd95b051eb9f8386c",
+      "scripts/reinforcement_learning/skrl/rnn_car_modular/configs/e2e_sa1_paper_factorial_d_full_u012_p600_smoke.py": "64f05016c84e0e03bb362a846b3d7cb50ca19490a01f1c87f0a13c89b0334a17"
+    }
+  }
+}

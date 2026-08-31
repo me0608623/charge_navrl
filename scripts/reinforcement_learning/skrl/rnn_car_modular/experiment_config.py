@@ -47,6 +47,10 @@ class ExperimentConfig:
     rollout_length: int = 300
     timesteps: int = 180000
     seed: int = 42
+    # Optional model-only reseed immediately before network construction.
+    # ``-1`` resolves to the run seed. This prevents factor-specific env setup
+    # from changing model initialization by consuming a different RNG prefix.
+    model_init_seed: int | None = None
 
     # RL hyperparams
     lr: float = 2e-4
